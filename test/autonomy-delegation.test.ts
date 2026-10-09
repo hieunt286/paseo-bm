@@ -7,7 +7,6 @@ import { createQuestionDecisionDelivery } from "../plugin/server/decision-delive
 import { clearMaterialiserMemory, materialiseTurn } from "../plugin/server/decision-materialiser";
 import { handleDecisionsAnswer, settledByKind, type OnDecisionsSettled } from "../plugin/server/decision-rpc";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
-import { decisionOpenedEventsOf } from "../plugin/server/event-bus";
 import { createFallbackDecisionDelivery, syncFallbackDecisions, type FallbackAct } from "../plugin/server/fallback-decisions";
 import { registerFallbackRpcs } from "../plugin/server/fallback-rpc";
 import { ROLE_FALLBACK_FILE } from "../plugin/server/fallback-settings";
@@ -20,6 +19,7 @@ import {
   actsOnFinish,
   commandActsOnFinish,
   decideRefusalOf,
+  predictionRefusalOf,
   unverifiedFinishRefusalOf,
   type AutonomyPolicy,
 } from "../plugin/shared/autonomy";
@@ -228,7 +228,8 @@ describe("an Orchestrator decision opening in a delegated class", () => {
     expect(factsOf(asked.text)).toEqual({ decisionId: "o:0b6f-1", replaced: null, class: "reversible-technical" });
     expect(stored("o:0b6f-1")).toMatchObject({ status: "open", answer: null, grant: null });
     // The Orchestrator's own decision is the owner's: nothing asks it to decide it.
-    expect(decisionOpenedEventsOf([stored("o:0b6f-1")], autonomy().read())).toEqual([]);
+    expect(decideRefusalOf(autonomy().read(), stored("o:0b6f-1"))).not.toBeNull();
+    expect(predictionRefusalOf(autonomy().read(), stored("o:0b6f-1"))).not.toBeNull();
     expect(enqueued).toEqual([]);
     expect(sends).toEqual([]);
   });
@@ -273,7 +274,7 @@ describe("a fallback incident opening in a delegated environment class", () => {
     writeIncident();
     syncFallbackDecisions(home, { now: () => NOW, log, settle: { onSettled: onSettledHook(), paseo } });
     expect(stored(FID)).toMatchObject({ status: "open", answer: null });
-    expect(decisionOpenedEventsOf([stored(FID)], autonomy().read())).toEqual([expect.objectContaining({ decisionId: FID, asks: "decision" })]);
+    expect(decideRefusalOf(autonomy().read(), stored(FID))).toBeNull();
     expect(acted).toEqual([]);
   });
 
@@ -337,7 +338,8 @@ describe("a decision opening in a class delegated to the Orchestrator (bm_decide
     writeFileSync(join(home, ROLE_FALLBACK_STATE_FILE), JSON.stringify({ version: 1, incidents: [INCIDENT] }));
     syncFallbackDecisions(home, { now: () => NOW, log, settle: { onSettled: onSettledHook(), paseo } });
     expect(stored(FID)).toMatchObject({ status: "open", answer: null });
-    expect(decisionOpenedEventsOf([stored(FID)], autonomy().read())).toEqual([expect.objectContaining({ decisionId: FID, requestId: REQUEST, askedBy: null, asks: "decision" })]);
+    expect(stored(FID)).toMatchObject({ requestId: REQUEST, askedBy: { agentId: null } });
+    expect(decideRefusalOf(autonomy().read(), stored(FID))).toBeNull();
 
     const result = await decide(FID, "wait", "The limit resets in ten minutes.");
     expect(result.ok, result.text).toBe(true);
@@ -380,7 +382,7 @@ describe("a decision opening in a class delegated to the Orchestrator (bm_decide
     expect(opened).toEqual([{ ids: ["f:fb-000000000d02"], paseo: daemon }]);
     const decision = stored("f:fb-000000000d02");
     expect(decision).toMatchObject({ status: "open", answer: null });
-    expect(decisionOpenedEventsOf([decision], autonomy().read())).toEqual([expect.objectContaining({ asks: "decision" })]);
+    expect(decideRefusalOf(autonomy().read(), decision)).toBeNull();
     expect(sends).toEqual([]);
   });
 

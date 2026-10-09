@@ -13,7 +13,7 @@
 import type { MemoryListOutput, MissionFigure, MissionGetOutput, MissionRow, MissionSignal, MissionSummary, MissionsCreateInput } from "../shared/contracts";
 import { MISSION_CLASSES, DEFAULT_MISSION_LEVEL, type MissionClass, type MissionLevel } from "../shared/autonomy";
 import { MISSION_CHANGE_CODE_PATTERN } from "../shared/mission-change";
-import { ago, localTimeText, shortSpan } from "./format";
+import { ago, clockText, localTimeText, shortSpan } from "./format";
 import type { Badge, Tone } from "./tone";
 import type { ConfirmDialog } from "./ui-types";
 
@@ -56,20 +56,13 @@ export const MISSION_LEVEL_SENTENCES: Readonly<Record<MissionLevel, string>> = {
   4: "The Main goes on to next steps, creates Workers, decides Workers' technical questions, adds repositories, decides questions with effects and lets the governor split the mission.",
 };
 
-export const MISSION_LEVELS_SHOWN: readonly MissionLevel[] = [0, 1, 2, 3, 4];
-
 /** The form's line under the level: "Level 2: the Main goes on to next steps and creates Workers by itself." */
 export function levelSentenceOf(level: MissionLevel): string {
   const sentence = MISSION_LEVEL_SENTENCES[level];
   return `Level ${level}: ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`;
 }
 
-/** Levels 3 and 4 let the Main answer its Workers' questions for the owner: they are confirmed in place. */
-export function levelNeedsConfirmation(level: number): boolean {
-  return level >= 3;
-}
-
-/** The in-place confirmation of level 3 or 4; `code` names the mission (null in the New mission form). */
+/** The in-place confirmation of level 3 or 4 (`levelNeedsConfirmation`, `shared/autonomy.ts`); `code` names the mission (null in the New mission form). */
 export function levelConfirmDialog(level: MissionLevel, code: string | null): ConfirmDialog {
   const answers = level === 4 ? "its Workers' questions, those with effects included, and add repositories" : "its Workers' technical questions";
   return {
@@ -121,7 +114,7 @@ export const MAIN_STATE_CHIPS: Readonly<Record<MissionSummary["main"]["state"], 
 };
 
 /** The governor's families as the page names them. */
-export const FAMILY_LABELS: Readonly<Record<MissionSignal["family"], string>> = {
+const FAMILY_LABELS: Readonly<Record<MissionSignal["family"], string>> = {
   mess: "Mess",
   overengineering: "Overengineering",
   drift: "Drift",
@@ -250,7 +243,7 @@ export function figureSentenceOf(figure: MissionFigure, nameOf: NameOf, threshol
 }
 
 /** The list chip's words of a figure. */
-export function figureShortOf(figure: MissionFigure, nameOf: NameOf): string {
+function figureShortOf(figure: MissionFigure, nameOf: NameOf): string {
   return (FIGURE_WORDS[figure.id] ?? FALLBACK_WORDS).short(figure, nameOf);
 }
 
@@ -282,7 +275,7 @@ function signalTone(signal: MissionSignal): Tone {
 }
 
 /** The list card's governor chip: "Governor: 4 Workers on one area — nudged 12 min ago". */
-export function signalChipOf(signal: MissionSignal, now: Date, nameOf: NameOf): Badge {
+function signalChipOf(signal: MissionSignal, now: Date, nameOf: NameOf): Badge {
   const first = signal.crossed[0];
   const what = first === undefined ? FAMILY_LABELS[signal.family].toLowerCase() : figureShortOf(first, nameOf);
   const action = actionOf(signal, now, "list");
@@ -467,23 +460,15 @@ export const CRITERIA_SHOWN = 4;
 export const JOURNAL_DESKTOP = 5;
 export const JOURNAL_PHONE = 20;
 
-/** "09:41", in the device's time zone; "—" for a time that does not read. */
-export function clockOf(at: string): string {
-  const date = new Date(at);
-  if (Number.isNaN(date.getTime())) return "—";
-  const two = (value: number) => String(value).padStart(2, "0");
-  return `${two(date.getHours())}:${two(date.getMinutes())}`;
-}
-
 const PHASE_TONES: Readonly<Record<MissionRow["phase"], Tone>> = { working: "info", finished: "success", stopped: "muted", blocked: "warning" };
 
 /** "req-…042844Z": the request id's last 7. */
-export function shortRequestOf(requestId: string): string {
+function shortRequestOf(requestId: string): string {
   return requestId.length <= 11 ? requestId : `req-…${requestId.slice(-7)}`;
 }
 
 /** One row of "Workers by repository". */
-export function workerRowOf(row: MissionRow): WorkerRowView {
+function workerRowOf(row: MissionRow): WorkerRowView {
   const questions = row.ownerQuestions.length === 0 ? "" : ` · ${row.ownerQuestions.join(", ")} for you`;
   return {
     requestId: row.requestId,
@@ -502,8 +487,9 @@ export function workerRowOf(row: MissionRow): WorkerRowView {
 export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf = () => null): MissionPageView {
   const { summary, charter } = page;
   const lookup: NameOf = (id) => summary.repos.find((repo) => repo.workspaceId === id)?.name ?? nameOf(id);
-  const level = (MISSION_LEVELS_SHOWN.includes(summary.level as MissionLevel) ? summary.level : DEFAULT_MISSION_LEVEL) as MissionLevel;
-  const delegated = MISSION_CLASSES.filter((name) => summary.delegated.includes(name));
+  // `mission.get` checks the level is 0–4 (`shared/contracts/missions.ts`).
+  const level = summary.level as MissionLevel;
+  const { delegated } = summary;
   const yours = MISSION_CLASSES.filter((name) => !summary.delegated.includes(name));
   const workersBudget = charter.budget?.workers ?? null;
   const rows = page.rows.map(workerRowOf);
@@ -552,7 +538,7 @@ export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf 
       parties: `${contract.provider.name} → ${contract.consumers.map((repo) => repo.name).join(", ") || "—"}`,
       version: `v${contract.version} · ${localTimeText(new Date(contract.updatedAt), now) || "—"}`,
     })),
-    journal: page.journal.map((line) => ({ time: clockOf(line.at), text: line.text })),
+    journal: page.journal.map((line) => ({ time: clockText(new Date(line.at)) || "—", text: line.text })),
     plan: {
       text: page.plan.text.trim() === "" ? "No plan yet." : page.plan.text,
       meta: page.plan.updatedAt === null ? "not written yet · read-only" : `updated ${localTimeText(new Date(page.plan.updatedAt), now) || "—"} by the Main · read-only`,

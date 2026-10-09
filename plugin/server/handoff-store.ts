@@ -1,13 +1,13 @@
 /**
- * The handoffs the Orchestrator asked for (autonomy design §G.6, §G.7; PRD
- * REQ-135; bead `7gxw.11`): one file per handoff, with its brief.
+ * The handoffs the plugin started (autonomy design §G.6, §G.7; missions design
+ * §9.5; PRD REQ-135; bead `7gxw.11`): one file per handoff, with its brief.
  *
  * `<data folder>/handoffs/<id>.json` = `{ version: 1, handoff: <HandoffEntry> }`.
  *
- * - **An entry** is one `bm_handoff` the plugin accepted: the request, the
- *   outgoing Worker and its Manager (who creates the successor), the
- *   intervention it is logged as, the Orchestrator's reason (masked, one
- *   line), the outgoing Worker's note and the brief once built (both masked),
+ * - **An entry** is one handoff the plugin started (`handoff.ts`): the
+ *   request, the outgoing Worker and its Manager (who creates the successor),
+ *   the intervention it is logged as, its reason (the crossing in words,
+ *   masked, one line), the outgoing Worker's note and the brief once built (both masked),
  *   and where its sequence stands (`handoff.ts`): `waiting` for the Worker's
  *   idle moment after a safe point; `noting` once the note was asked for;
  *   `briefed` once the brief is built and the command waits for the Manager's
@@ -197,7 +197,7 @@ export function endedHandoff(entry: HandoffEntry, ending: HandoffEnding, at: str
   return { ...entry, state: entry.commandSentAt === null ? "dropped" : "failed", ending, endedAt: at };
 }
 
-/** The request's pending handoff at `now` (at most one: `bm_handoff` refuses a second), or null. Pure. */
+/** The request's pending handoff at `now` (at most one: none starts while one is pending), or null. Pure. */
 export function pendingHandoffOf(entries: readonly HandoffEntry[], requestId: string, now: Date | number): HandoffEntry | null {
   return entries.find((entry) => entry.requestId === requestId && isPendingHandoffState(entry.state) && staleEndingOf(entry, now) === null) ?? null;
 }

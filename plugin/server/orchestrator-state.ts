@@ -10,7 +10,7 @@
  * Nothing here sends to an agent. The owner talks to the Orchestrator in its
  * chat and decides in the Inbox (autonomy design §A.12): a command reaches a
  * Manager or a Worker only from the Orchestrator's own tools
- * (`bm_send_command`, `bm_direct_worker`: `command-authority.ts`) or as a
+ * (`bm_govern`, `bm_direct_worker`: `command-authority.ts`) or as a
  * decision's prepared action (`orchestrator-decisions.ts`). Nothing here
  * creates, stops or archives an agent, or writes anything.
  *
@@ -33,7 +33,7 @@ import type { Alert, AlertKind } from "../shared/alerts";
 import { MAX_COMMAND_RE_CHARS, commandInputProblems, parseCommandBlock, type CommandInput } from "../shared/orchestrator-command";
 import { listAllAgents } from "./agent-role";
 import { createAlertStore } from "./alert-store";
-import { bmAgentsOf, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { bmAgentsOf, directoryIn, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { TRACES_DIR_NAME, type DataHomeDeps } from "./data-home";
 import type { NoticeAgentSnapshot } from "./notice-queue";
 import {
@@ -222,7 +222,7 @@ export function workspaceLabelOf(workspaceId: string, listed: readonly ListedWor
     name = null;
   }
   if (name !== null && name !== "") return name;
-  const directory = listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
+  const directory = directoryIn(listed, workspaceId);
   return directory === null ? workspaceId : basename(directory);
 }
 

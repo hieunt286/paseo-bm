@@ -185,7 +185,7 @@ export type StallWatcherPaseo = OrchestratorStatePaseo;
 export interface StallWatcherDeps extends DataHomeDeps {
   now?: () => Date;
   /** Where the events go; a bus of its own by default. */
-  bus?: Pick<EventBus, "publish" | "workerTurnEnded">;
+  bus?: Pick<EventBus, "publish">;
   /** Milliseconds between passes; `STALL_PASS_MS` by default. */
   intervalMs?: number;
   /** Milliseconds between Worker passes (design §6B.3), a multiple of `intervalMs`; `WORKER_PASS_MS` by default. */
@@ -476,7 +476,6 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
 
   function workerTurnEnded(agent: { id?: unknown; provider?: unknown } | null | undefined): string[] {
     if (roleOfProvider(agent?.provider) !== "worker" || typeof agent?.id !== "string" || agent.id === "") return [];
-    bus.workerTurnEnded(agent.id);
     const home = homeOf();
     if (home === null) return [];
     try {

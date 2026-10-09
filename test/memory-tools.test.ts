@@ -15,6 +15,7 @@ import { MEMORY_TOOL_LIMITS, toolFacesFor } from "../plugin/shared/bm-tools";
 import { answerDecision } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo } from "./helpers/fake-paseo";
+import { fillMemory } from "./helpers/memory";
 
 /**
  * WP-108 (missions design §2.5, §4, §5, §7): bm_memory for a Main (read, add,
@@ -112,6 +113,18 @@ describe("bm_memory for a Main (§2.5, §4)", () => {
     expect(createMissionStore(home).journal(created.missionId, 5).at(-1)).toMatchObject({ kind: "note", by: "main", ref: added.id, text: `The Main removed memory entry ${added.id} of wks-a: Moved to decimal strings` });
   });
 
+  it("a removal whose journal line cannot be written is still the removal: one log line, never a refusal", async () => {
+    const { json } = setup();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { mission: created, main } = mission();
+    const added = (await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "fact", text: "CI runs on Node 22", source: "ci.yml" }, main))["added"] as Record<string, string>;
+    mkdirSync(join(home, "missions", `${created.missionId}.journal.jsonl`));
+    expect(await json("manager", "bm_memory", { project: "wks-a", op: "remove", id: added.id, why: "Outdated" }, main)).toEqual({ removed: added.id });
+    expect(createMemoryStore(home).active("wks-a")).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`the journal of mission ${created.missionId} could not record a note line`));
+    warn.mockRestore();
+  });
+
   it("refuses a repo outside the charter, a caller that is not a Main, missing op fields and an add past 300", async () => {
     const { call } = setup();
     const { main } = mission();
@@ -125,8 +138,7 @@ describe("bm_memory for a Main (§2.5, §4)", () => {
     expect(missing.text).toContain("input.why: remove needs it");
     expect((await call("manager", "bm_memory", { project: "wks-a", op: "add", kind: "precedent", text: "x", source: "y" }, main)).ok).toBe(false);
 
-    const store = createMemoryStore(home);
-    for (let index = 0; index < MAX_ACTIVE_MEMORY; index++) store.add("wks-b", { kind: "fact", text: `fact ${index}`, source: "test", by: { role: "main", agentId: MAIN, missionId: null } });
+    fillMemory(home, "wks-b", MAX_ACTIVE_MEMORY, () => ({ by: { role: "main", agentId: MAIN, missionId: null } }));
     const full = await call("manager", "bm_memory", { project: "wks-b", op: "add", kind: "fact", text: "one more", source: "test" }, main);
     expect(full).toEqual({ ok: false, text: `${MEMORY_FULL_REASON}\nNothing was stored.` });
   });

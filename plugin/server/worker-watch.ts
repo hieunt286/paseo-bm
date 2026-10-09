@@ -60,7 +60,7 @@
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { TRACES_DIR_NAME, type DataHomeDeps } from "./data-home";
 import { redactText } from "./collector";
-import { listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { directoryIn, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { createAlertStore, type AlertStore } from "./alert-store";
 import { eventScopeOf, type BmEvent, type EventBus } from "./event-bus";
@@ -577,8 +577,7 @@ export async function runWorkerPass(
       } catch {
         meta = null;
       }
-      const workspaceDirectory =
-        (await listedOnce())?.find((entry) => entry.id === workspaceId)?.directory ?? meta?.lastKnownDirectory ?? text(agent.cwd);
+      const workspaceDirectory = directoryIn(await listedOnce(), workspaceId!) ?? meta?.lastKnownDirectory ?? text(agent.cwd);
       const grants = grantsOfWorker(decisions, workspaceId!, trace?.requestId ?? null, workerId, log);
       const denied = deniedHeldOfWorker(decisions, workspaceId!, workerId);
       const held = workerSignalsOf({

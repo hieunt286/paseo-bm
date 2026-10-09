@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearBindingCache, createBindingStore, type ToolCaller } from "../plugin/server/agent-bindings";
@@ -13,12 +13,13 @@ import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { MISSION_NOT_BOUND_MESSAGE, NOT_A_MAIN_MESSAGE, createMissionTools } from "../plugin/server/mission-tools";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
-import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
+import { createOutbox } from "../plugin/server/outbox";
 import { clearProposedMissionStarts, proposedMissionStartOf } from "../plugin/server/proposed-mission-starts";
 import { decisionsListRpc } from "../plugin/shared/contracts";
 import { DECISION_ID_PATTERN, answerDecision } from "../plugin/shared/decisions";
 import { at, msg, turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
+import { fakeCli } from "./helpers/fake-cli";
 
 /**
  * WP-105 (missions design §4, §4.1): bm_mission, bm_mission_start settled at
@@ -59,12 +60,6 @@ function daemon(agents: FakeAgent[] = []) {
       { id: "wks-own", directory: missionsHomeDirOf(home) },
     ],
   });
-}
-
-function fakeCli() {
-  const calls: string[][] = [];
-  const cli: PaseoCliDeps = { find: () => "/bin/paseo", run: async (_file, args) => (calls.push(args), { code: 0, output: "", timedOut: false }) };
-  return { cli, calls };
 }
 
 const caller = (overrides: Partial<ToolCaller> = {}): ToolCaller => ({
@@ -282,6 +277,19 @@ describe("bm_mission_update (§4, §4.1)", () => {
     await handleDecisionsAnswer({ id, optionKey: "keep" }, fake.paseo, { home, now: () => NOW, cli: fakeCli().cli });
     expect(createMissionStore(home).get(mission.missionId)!.charter.goal).toBe("Ship v2");
     expect(createMissionStore(home).journal(mission.missionId).at(-1)).toMatchObject({ kind: "decision", by: "owner", text: `The owner kept the mission as it is (${id}).` });
+  });
+
+  it("a journal line that cannot be written fails nothing: the change stands, the card opens, the owner's answer reaches the Main", async () => {
+    const { json, fake } = await setup();
+    const { mission, who } = missionOf();
+    mkdirSync(join(home, "missions", `${mission.missionId}.journal.jsonl`));
+    expect(await json("bm_mission_update", { plan: "1. API" }, who)).toMatchObject({ applied: ["The Main rewrote the plan."], decisionId: null });
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("1. API");
+    const id = (await json("bm_mission_update", { goal: "Something else" }, who))["decisionId"] as string;
+    expect(id).toMatch(MISSION_DECISION_ID_PATTERN);
+    await handleDecisionsAnswer({ id, optionKey: "keep" }, fake.paseo, { home, now: () => NOW, cli: fakeCli().cli, log: (line) => logs.push(line) });
+    expect(createOutbox(home).list("wks-own")).toEqual([expect.objectContaining({ kind: "message", requestId: id, to: MAIN })]);
+    expect(logs.filter((line) => line.includes(`the journal of mission ${mission.missionId} could not record`))).toHaveLength(3);
   });
 
   it("refuses close while a Worker of the mission runs, at the call and at the owner's tap", async () => {

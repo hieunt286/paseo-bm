@@ -1,8 +1,6 @@
 /**
- * The event bus to the Beads Orchestrator (autonomy design §A.8, REQ-115 b).
- *
- * Replaces earlier builds' one-notice-per-situation wake-ups (autonomy design
- * §A.14) with typed events, delivered in batches.
+ * The event bus to the Beads Orchestrator (autonomy design §A.8, REQ-115 b;
+ * missions design §9.7, §9.1): typed events, delivered in batches.
  *
  * **The governor's wakes** (missions design §9.7, §9.1; REQ-195). Only these
  * wake the Orchestrator (`wakesGovernor`):
@@ -14,112 +12,43 @@
  * | `mission.scope` | an active request, or a live link one asked, of a mission is in a repo outside its charter, the mission's `scope-repo` cell is not delegated and no `m:` card asked to add that repo `governor.windowMinutes` after this run first saw it (`outsideCharterOf`) | the repo joined the charter, `scope-repo` was delegated, a card asked for it, or the mission closed |
  * | `mission.review` | the mission's finished requests (roster) reached a next multiple of 10, or a budget field's figure reached 50 % or 100 % (`reviewMarksOf`), between two of the governor's recomputations in this run — a mark already passed when the run first saw the mission raises nothing | the mission closed |
  * | `mission.split` | its Main, on the owner's yes, suggested that work belongs to a new mission (`bm_split_mission`, `mission-split.ts`); one per mission and code | a mission took the code, or the source mission closed (`openSplitSuggestionsOf`) |
- * | `worker.signal` `danger` | always, in the policy's scope (below) | its alert is cleared |
+ * | `worker.signal` `danger` | always, for a project in the policy's scope (`eventScopeOf`: a class above `owner`, never a plugin home) | its alert is cleared, or the project left the scope |
  *
+ * - **Retired as wakes** (§9.1): every other event type (`request.stalled`,
+ *   `worker.signal` other than `danger`, `writers.observed`, and the types
+ *   no source builds any more). Their sources still build them where other
+ *   code reads them — the stall and writers alerts, the conflict detection —
+ *   but `publish` skips them before it looks for an Orchestrator.
  * - **One wake per mission per 15 minutes** (`MISSION_WAKE_MS`), `danger`
  *   excepted: a mission event within 15 minutes of the last publish that
  *   queued one of that mission's is held in memory, and goes with the first
  *   publish after the window (the governor's pass publishes each minute,
- *   `governed`). Events of one mission published together are one wake.
- * - **Retired as wakes** (§9.1): every other event below. Their sources still
- *   build them where other code reads them — the advice count
- *   (`advice-store.ts`), the stall and writers alerts, the pure builders —
- *   but `publish` skips them, before it looks for an Orchestrator.
- * - **Whether a wake acted** (M-26): an act tool the Orchestrator called with
- *   success in a wake's turn (`WAKE_ACT_TOOLS`, `actsNoted`) marks it; the
- *   wake record gets its event types and, at its end, `acted`.
- *
- * Until the governor, these woke it too:
- *
- * | Event | Source | Settled (dropped before delivery) when |
- * |---|---|---|
- * | `decision.opened` | a new `q:` decision the materialiser opened (`decision-materialiser.ts`) or a new `f:` decision a fallback incident's listener opened (`fallback-rpc.ts`), by the owner's policy per cell (below): a decision asked of the Orchestrator, or a prediction asked of the challenger | the decision may no longer be decided (`decideRefusalOf`), or predicted (`predictionRefusalOf`) |
- * | `request.finished` | a `finished` report recorded in a Manager's turn or in the Worker's own (the collector's `onRecorded`; REQ-183 i) that shows work left, or leaves its request finished-unverified (Phase 3, design §C.3) | — (only its project leaving the scope) |
- * | `request.stalled` | the stall pass raised a `request-stalled` alert (`stall-watcher.ts`) | its alert is cleared |
- * | `worker.signal` | the live watch saw a signal (`worker-watch.ts`) | its alert is cleared (`stuck`, `permission`, `danger`), or the Worker's turn ended (`failing`, `heavy`, `outside`) |
- * | `advice.due` | a project's finished requests since its last advice reached Settings' `advice.everyFinished` (the `finished` reports of recorded Manager and Worker turns, counted in `advice-store.ts`; design §G.4) | advice was turned off (`advice.everyFinished` 0) |
- * | `threshold.crossed` (`compact`) | a recorded Manager's or Worker's turn crossing its compaction threshold (`compactCrossedEventOf`, design §G.7, change-008 C1) while compaction is on for its provider, the agent is below `compact.maxPerAgent` and no compaction of it is pending | compaction was turned off, or the agent compacted (or a compaction of it was requested) |
- * | `threshold.crossed` (`handoff`) | a recorded Worker's turn of an unfinished request whose tokens read since it started, or since its last handoff, reach `handoff.requestTokens` (`handoffCrossedEventOf`, design §G.6, §G.7, change-008 C1) while handoff is on, the request is below `handoff.maxPerRequest` and no handoff of it is pending | handoff was turned off, or the request was handed over (or a handoff of it was requested), or it finished |
- * | `writers.observed` | a recorded turn wrote a file another agent of its workspace wrote in an overlapping turn (`writers-watch.ts`, design §F.1), with its `writers-observed` alert | its alert is cleared (the later of the two requests finished) |
- *
- * - **Only what needs a judgement** (REQ-115 b, A-7): a decision wakes the
- *   Orchestrator only when the owner's policy asks it something of that
- *   decision (below), any class at the project's level (ADR-025); a finished
- *   report wakes it only when it shows work left — ready beads, open review
- *   findings, blockers, or failing checks (`workLeftOf`) — or when its request
- *   is finished-unverified (design §C.3, Phase 3: code changed and not every
- *   check it names was detected), which the event then says. A clean finish
- *   was already proved by the Worker and its Reviewer; checking it again is a
- *   wake with nothing to do (measured 2026-09-29: 3 of 3 wakes of the S1/S7
- *   live check ended with no action).
- *
- * - **The policy's scope** (design §A.8, §B.2; change-007 C1).
- *   `request.finished`, `request.stalled`, `worker.signal` and
- *   `writers.observed` are published
- *   only for a project with a class above `owner` in the owner's policy
- *   (`projectsAboveOwner`), and dropped at delivery when that project fell
- *   back to all-`owner` meanwhile: elsewhere the Orchestrator acts only when
- *   the owner talks to it, and what needs the owner is in the Inbox
- *   (decisions, alerts). `decision.opened` is not scoped by it: it follows
- *   its own per-cell rule (`decisionOpenedEventsOf`); nor is `advice.due`,
- *   which every project with finished requests gets (design §G.4), nor
- *   `threshold.crossed`, whose scope is the owner's Settings (design §G.7).
- * - **`threshold.crossed`, per agent cycle** (design §G.5, §G.7; change-008
- *   C1, C2; bead `7gxw.10`). A recorded Manager's or Worker's turn crossing
- *   its compaction threshold (`compactCrossingOf`) — never a turn with a
- *   compaction, whose figure understates — raises one, keyed by the agent and
- *   its compactions so far, so each compaction starts a new cycle. A judgement
- *   wake: its line names `bm_compact`, and a declined one ends with a note.
- *   Its `handoff` kind (bead `7gxw.11`) is per request cycle: a Worker's turn
- *   whose request crosses `handoff.requestTokens` raises one keyed by the
- *   request and its handoffs so far; its line names `bm_handoff`.
- * - **`advice.due`, per project** (design §G.4, §G.7; PRD REQ-128). Each
- *   `finished` report of a recorded Manager or Worker turn counts its request toward
- *   its project, once per advice (`finishedRequestKeysOf`); when the count
- *   reaches `advice.everyFinished` (Settings → Coordination, default 5), the
- *   count starts again and one `advice.due` is published — a judgement wake:
- *   the Orchestrator reads `bm_findings` and asks the owner, with a prepared
- *   change on an option, about each finding worth acting on. 0 turns it off:
- *   nothing is counted, and a pending one is dropped at delivery.
- * - **`decision.opened`, per cell** (design §B.5, §B.9; change-007 C1). A
- *   decision the Orchestrator did not ask (`q:`, `f:`), still open, of any
- *   class (ADR-025) raises one exactly when:
- *   - its cell is `delegate` (`decideRefusalOf`): it asks for a decision
- *     (`asks: "decision"`), its line names `bm_decide`;
- *   - its cell is `owner` or `shadow` and the project's challenger is on
- *     (`predictionRefusalOf`): it asks for a prediction
- *     (`asks: "prediction"`), its line names `bm_predict`; the owner sees the
- *     prediction as the Orchestrator's proposal.
- *   Nothing else: not with the challenger off, never for the Orchestrator's
- *   own `o:`.
- *   It is published whatever the policy scope — a project whose cells are all
- *   `owner` included, which is every new project. A decision that waits for
- *   `bm_decide` and gets none simply stays open in the Inbox for the owner:
- *   nothing times out into an answer. One event per decision, one dedupe key.
+ *   `governed`); a publish that cannot reach the queue (no data folder, no
+ *   Paseo handle, a failure) keeps what it held. Events of one mission
+ *   published together are one wake.
  * - **One message per idle moment.** Events go through the notice queue's
  *   batch kind (`enqueueBatch`, `BM-EVENTS`): everything pending when the
  *   Orchestrator is idle goes as ONE `BM-EVENTS` message, one short line per
  *   event with the ids to look up; never into a running turn.
  * - **Once per event.** Each event has a dedupe key (`eventKeyOf`); a key
- *   published in this plugin run is not published again. The sources dedupe
- *   across reloads themselves: a decision opens once (the store), an alert is
- *   raised once (the alerts store), a turn is recorded once. Only the
- *   `failing`, `heavy` and `outside` signals may be told once more after a
- *   reload in the middle of the Worker's turn.
+ *   queued or sent in this plugin run is not published again.
  * - **Only to the Orchestrator**, the one the plugin may wake
  *   (`wakeableOrchestrator`: an outdated one, or one without tools, is replaced
  *   first). Without an Orchestrator nothing is queued. Nothing here ever
  *   messages the owner, a Manager, a Worker or a Reviewer.
  * - **Each wake is recorded** (evaluation design §4, A-7): once a `BM-EVENTS`
  *   message went out (the batch's `onSent`), `orchestrator/wakes.json` gets
- *   the Orchestrator's id, the time, the projects and the number of events; at
- *   that Orchestrator's next turn end (the batch's `onTurnEnded`, before the
- *   queue delivers anything else) its oldest open wake gets its end and that
- *   closing turn's tokens (change-007 C6, `closingTurnUsage`). Ids, times and
- *   counts only. A wake whose turn end came after a reload keeps no end. The
- *   events a wake carried stay in memory until that turn end
+ *   the Orchestrator's id, the time, the projects, the number of events and
+ *   their types; at that Orchestrator's next turn end (the batch's
+ *   `onTurnEnded`) its oldest open wake gets its end, that closing turn's
+ *   tokens (change-007 C6, `closingTurnUsage`) and whether it acted (M-26: an
+ *   act tool called with success in its turn, `WAKE_ACT_TOOLS`, `actsNoted`).
+ *   The events a wake carried stay in memory until that turn end
  *   (`wakeEventsOf`), so a command the Orchestrator sends in it is logged as
  *   the intervention on those events (design §G.3, `intervention-store.ts`).
+ * - **The advice count** (design §G.4): each recorded Manager's or Worker's
+ *   turn counts its finished requests toward its project's advice
+ *   (`advice-store.ts`); it wakes nothing.
  *
  * Nothing here throws into the plugin: a failure is one log line.
  */
@@ -129,21 +58,17 @@ import { createAlertStore } from "./alert-store";
 import { currentPolicy } from "./autonomy-store";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { usageOfSnapshot, type CollectorPaseo } from "./collector";
-import { compactCrossingOf, compactionOnFor, handoffCrossingOf, type CoordinationRole, type CoordinationSettings, type ThresholdFigure } from "../shared/coordination";
-import { turnTokensOf } from "../shared/eval-metrics/tokens";
+import type { CoordinationRole, ThresholdFigure } from "../shared/coordination";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticeQueue } from "./notice-queue";
 import { EVENTS_NOTICE_MARKER } from "./notices";
 import { wakeableOrchestrator, type OrchestratorAgentDeps, type OrchestratorAgentPaseo, type OrchestratorAgentSnapshot } from "./orchestrator-agent";
 import { createOrchestratorStore } from "./orchestrator-store";
-import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, predictionRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../shared/autonomy";
-import type { Decision } from "../shared/decisions";
-import { namesFailingChecks } from "../shared/interventions";
+import { projectsAboveOwner, type AutonomyPolicy } from "../shared/autonomy";
+import { familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
 import type { WakeUsage, WorkerSignal } from "../shared/orchestrator";
-import type { ParsedReport, TraceRecord } from "../shared/contracts";
+import type { TraceRecord } from "../shared/contracts";
 import { isPluginHome } from "./plugin-homes";
-import { createMissionRoster, missionManagerOf, requestIndexOf } from "./mission-roster";
-// Types only: governor-figures.ts reaches this module back through review-tools.ts (a load cycle).
-import type { GovernorFamily, GovernorFigure, GovernorFigureId } from "./governor-figures";
+import { createMissionRoster, requestIndexOf } from "./mission-roster";
 import type { GovernorOutcome } from "./governor-store";
 import { createMissionStore, openSplitSuggestionsOf, type Mission } from "./mission-store";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
@@ -162,13 +87,7 @@ export interface DecisionOpenedEvent {
   decisionId: string;
   /** The Worker that asked, when known; null for a fallback incident. */
   askedBy: string | null;
-  /**
-   * What it asks of the Orchestrator (design §B.5, §B.9): `decision` — the
-   * owner's policy delegates its class to the Orchestrator, which decides it
-   * with `bm_decide`; `prediction` — the owner's answer predicted with
-   * `bm_predict`. Every event asks one of them: events live in memory only,
-   * so none of Phase 1's look (no `asks`) is left to read.
-   */
+  /** What it asks of the Orchestrator (design §B.5, §B.9): a decision (`bm_decide`), or a prediction (`bm_predict`). */
   asks: "decision" | "prediction";
 }
 
@@ -415,42 +334,14 @@ export function eventKeyOf(event: BmEvent): string {
   }
 }
 
-/** A crossing's figure in words: `it read 6,100,000 tokens in one turn (threshold 5,700,000)`. */
-function crossingWords(event: Pick<ThresholdCrossedEvent, "figure" | "value" | "threshold">): string {
-  const count = (value: number) => Math.round(value).toLocaleString("en-US");
-  const share = (value: number) => `${Math.round(value * 100)} %`;
-  switch (event.figure) {
-    case "tokensPerTurn":
-      return `it read ${count(event.value)} tokens in one turn (threshold ${count(event.threshold)})`;
-    case "contextShare":
-      return `its context filled ${share(event.value)} of its window (threshold ${share(event.threshold)})`;
-    case "requestTokens":
-      return `its request read ${count(event.value)} tokens (threshold ${count(event.threshold)})`;
-  }
-}
-
-/** One short line per event: what happened, and the ids to look up (design §A.8). */
+/**
+ * One short line per event: what happened, and the ids to look up (design
+ * §A.8). Only the events that wake the Orchestrator (`wakesGovernor`) are
+ * ever sent; a retired one gets its type and project alone.
+ */
 export function eventLineOf(event: BmEvent): string {
   const project = `project ${workspaceOfEvent(event) ?? "none"}`;
   switch (event.type) {
-    case "decision.opened": {
-      const opened = `- decision.opened — ${project}, request ${event.requestId ?? "none"}, decision ${event.decisionId}${
-        event.askedBy === null ? "" : `, asked by Worker ${event.askedBy}`
-      }.`;
-      if (event.asks === "decision") {
-        return `${opened} A decision is asked: the owner's policy delegates its class to you. Read it with bm_decisions and choose the option the owner would, with bm_decide and your reason in one line.`;
-      }
-      return `${opened} A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict, with your reason in one line. The owner sees it as your proposal and decides: answer nothing.`;
-    }
-    case "request.finished": {
-      const finished = `- request.finished — ${project}, request ${event.requestId ?? "not named"}, Manager ${event.managerId}, at ${event.at}`;
-      if (event.unverified !== true) return `${finished}. Check it with bm_request.`;
-      return `${finished}: finished — unverified, its code changed and not every check it names was seen to pass. Check it with bm_request; a commit or release on the owner's policy waits for the owner.`;
-    }
-    case "request.stalled":
-      return `- request.stalled ${event.reason} — ${project}, request ${event.requestKey}${
-        event.managerId === null ? "" : `, Manager ${event.managerId}`
-      }, since ${event.since}. Look with bm_request.`;
     case "worker.signal": {
       const allowance =
         event.interruptUntil === undefined || event.interruptUntil === null
@@ -458,21 +349,8 @@ export function eventLineOf(event: BmEvent): string {
           : ` You may interrupt this Worker until ${event.interruptUntil} (bm_direct_worker with interrupt: true).`;
       return `- worker.signal ${event.signal} — ${project}, Worker ${event.workerId}, request ${event.requestKey ?? "not known"}, since ${event.since}. Look with bm_agent_messages.${allowance}`;
     }
-    case "advice.due":
-      return `- advice.due — ${project}, ${event.finished} requests finished since the last advice. Read its figures with bm_findings; for each finding worth acting on, ask the owner with bm_ask_owner, one option carrying the prepared change. With none worth it, keep a note with bm_note.`;
-    case "threshold.crossed": {
-      const crossed = `- threshold.crossed ${event.kind} — ${project}, ${event.role === "manager" ? "Manager" : "Worker"} ${event.agentId}, request ${event.requestId ?? "none"}, at ${event.at}: ${crossingWords(event)}.`;
-      if (event.kind === "handoff") {
-        return `${crossed} If a handoff to a new Worker is worth it, request it with bm_handoff; the plugin hands it over at that Worker's next safe point. Otherwise keep a note with bm_note.`;
-      }
-      return `${crossed} If a compaction is worth it, request it with bm_compact; the plugin runs it at that agent's next safe point. Otherwise keep a note with bm_note.`;
-    }
-    case "writers.observed": {
-      const [first, second] = event.writers.map((writer) => `${WRITER_ROLE_WORDS[writer.role]} ${writer.agentId} (request ${writer.requestId ?? "not known"})`);
-      return `- writers.observed — ${project}, file ${event.file}: ${first} and ${second} wrote it in overlapping turns, at ${event.at}. Check the file with bm_repo; if one change may have undone the other, tell that request's Manager with bm_send_command. Otherwise keep a note with bm_note.`;
-    }
     case "mission.signal":
-      return `- mission.signal ${event.family} — mission ${event.missionId}, step 3: the Main was nudged and these still hold after the window: ${event.figures.map(figureWords).join("; ")}. Read the mission with bm_missions and send its Main bm_govern with step "replan"; on real risk, ask the owner with bm_ask_owner or stop a Worker with bm_direct_worker.`;
+      return `- mission.signal ${event.family} — mission ${event.missionId}, step 3: the Main was nudged and these still hold after the window: ${event.figures.map(figureText).join("; ")}. Read the mission with bm_missions and send its Main bm_govern with step "replan"; on real risk, ask the owner with bm_ask_owner or stop a Worker with bm_direct_worker.`;
     case "mission.conflict":
       return `- mission.conflict — missions ${event.missions.join(" and ")}, ${project}, area ${event.area}: ${event.evidence}. Read both with bm_missions and give the area one owner with bm_arbitrate.`;
     case "mission.scope":
@@ -485,83 +363,9 @@ export function eventLineOf(event: BmEvent): string {
       return `- mission.split — mission ${event.missionId}: its Main, on the owner's yes, suggests the new mission ${event.code} "${event.name}" (repos ${event.repos.join(", ") || "none"}; ${
         event.requestIds.length === 0 ? "no request" : `requests ${event.requestIds.join(", ")}`
       }): ${event.reason.slice(0, 300).replace(/[.\s]+$/, "")}. Read it with bm_missions (its splitSuggestions) and decide: bm_create_main with its fields, or tell the Main why not with bm_govern.`;
+    default:
+      return `- ${event.type} — ${project}.`;
   }
-}
-
-/** A writer's role in an event line. */
-const WRITER_ROLE_WORDS: Readonly<Record<TraceRecord["role"], string>> = {
-  manager: "Manager",
-  worker: "Worker",
-  reviewer: "Reviewer",
-  orchestrator: "Orchestrator",
-  unknown: "agent",
-};
-
-/**
- * The `threshold.crossed` (`compact`) a recorded turn raises, or null (design
- * §G.7, change-008 C1, C2): a Manager's or a Worker's turn — never one with a
- * compaction, whose context figure understates (the check reads the NEXT turn,
- * spike run note 2026-09-30 §2) — that crosses its threshold
- * (`compactCrossingOf`: tokens read against the role's figure where the
- * provider counts the whole turn, else the context share), while compaction
- * is on for its provider (read from the turn, `turnTokensOf`), the agent is
- * below `compact.maxPerAgent` (`compactions`: its compactions so far) and no
- * compaction of it is `pending`. Pure.
- */
-export function compactCrossedEventOf(
-  record: TraceRecord | null | undefined,
-  settings: Pick<CoordinationSettings, "compact">,
-  agent: { compactions: number; pending: boolean },
-): ThresholdCrossedEvent | null {
-  if (record === null || record === undefined || (record.role !== "manager" && record.role !== "worker")) return null;
-  if (record.evidence.some((evidence) => evidence.kind === "compaction")) return null;
-  const turn = turnTokensOf(record);
-  if (!compactionOnFor(settings, turn.provider === "unknown" ? null : turn.provider)) return null;
-  if (agent.pending || agent.compactions >= settings.compact.maxPerAgent) return null;
-  const crossing = compactCrossingOf(record.role, { coverage: turn.coverage, tokensRead: turn.tokensRead, contextShare: turn.contextShare }, settings);
-  if (crossing === null) return null;
-  return {
-    type: "threshold.crossed",
-    workspaceId: record.workspaceId,
-    requestId: record.requestId,
-    agentId: record.agentId,
-    role: record.role,
-    kind: "compact",
-    ...crossing,
-    at: record.endedAt ?? record.at,
-    cycle: agent.compactions,
-  };
-}
-
-/**
- * The `threshold.crossed` (`handoff`) a recorded turn raises, or null (design
- * §G.6, §G.7, change-008 C1): a Worker's turn of an unfinished request
- * (`finished` false) whose tokens read since it started, or since its last
- * handoff (`tokensRead`, `requestTokensReadOf`), reach `handoff.requestTokens`
- * (`handoffCrossingOf`), while handoff is on, the request is below
- * `handoff.maxPerRequest` (`handoffs`: its handoffs so far) and no handoff of
- * it is `pending`. Pure.
- */
-export function handoffCrossedEventOf(
-  record: TraceRecord | null | undefined,
-  settings: Pick<CoordinationSettings, "handoff">,
-  request: { tokensRead: number | null; handoffs: number; pending: boolean; finished: boolean },
-): ThresholdCrossedEvent | null {
-  if (record === null || record === undefined || record.role !== "worker" || record.requestId === null) return null;
-  if (!settings.handoff.enabled || request.finished || request.pending || request.handoffs >= settings.handoff.maxPerRequest) return null;
-  const crossing = handoffCrossingOf(request.tokensRead, settings);
-  if (crossing === null) return null;
-  return {
-    type: "threshold.crossed",
-    workspaceId: record.workspaceId,
-    requestId: record.requestId,
-    agentId: record.agentId,
-    role: "worker",
-    kind: "handoff",
-    ...crossing,
-    at: record.endedAt ?? record.at,
-    cycle: request.handoffs,
-  };
 }
 
 /**
@@ -594,59 +398,8 @@ export function eventsMessageOf(lines: readonly string[]): string {
 }
 
 /**
- * `decision.opened` for each decision among `decisions` that needs the
- * Orchestrator, by the owner's `policy` per cell (design §B.5, §B.9;
- * change-007 C1), and for nothing else:
- *
- * - one delegated to it (`decideRefusalOf`: not its own, open, its class
- *   `delegate` in its project) asks for a decision;
- * - one the challenger may predict (`predictionRefusalOf`: not its own, open,
- *   any class in an `owner` or `shadow` cell, the project's challenger on)
- *   asks for a prediction, whatever else the project's policy holds.
- *
- * The two never both hold (a `delegate` cell is not predicted). Pure.
- */
-export function decisionOpenedEventsOf(decisions: readonly Decision[], policy: AutonomyPolicy = EMPTY_AUTONOMY_POLICY): DecisionOpenedEvent[] {
-  return decisions.flatMap((decision): DecisionOpenedEvent[] => {
-    const event: Omit<DecisionOpenedEvent, "asks"> = {
-      type: "decision.opened",
-      workspaceId: decision.workspaceId,
-      requestId: decision.requestId,
-      decisionId: decision.id,
-      askedBy: decision.askedBy.agentId,
-    };
-    if (decideRefusalOf(policy, decision) === null) return [{ ...event, asks: "decision" }];
-    if (predictionRefusalOf(policy, decision) === null) return [{ ...event, asks: "prediction" }];
-    return [];
-  });
-}
-
-/**
- * A report field that says nothing is there: empty, or starting with "none",
- * "no", "nothing", "n/a", "0" or a dash ("none. Suggestion: …" is still none).
- */
-function saysNothing(value: string | null): boolean {
-  if (value === null) return true;
-  return /^\s*(?:$|(?:none|no|nothing|n\/a|0)\b|[-—])/i.test(value);
-}
-
-/**
- * Whether a `finished` report shows work left for a coordinator: ready beads,
- * open review findings, blockers, or failing checks (§A.8), read as the
- * intervention check reads them (`namesFailingChecks`). Pure.
- */
-export function workLeftOf(report: TraceRecord["reports"][number]): boolean {
-  return (
-    report.beadsReady.length > 0 ||
-    !saysNothing(report.reviewFindingsOpen) ||
-    !saysNothing(report.blockers) ||
-    (report.buildAndTests !== null && namesFailingChecks(report.buildAndTests))
-  );
-}
-
-/**
- * The turns whose `finished` reports the events read (design §7.17.8 i): a
- * Manager's (a report sent to it by hand), and a Worker's own — what its
+ * The turns whose `finished` reports the advice count reads (design §7.17.8
+ * i): a Manager's (a report sent to it by hand), and a Worker's own — what its
  * `bm_report` stored (with its `recordId`, `outboxBlocksOf`) or the block the
  * plugin relays for an unbound Worker — since the collector skips every
  * `BM-DELIVERY` in the Manager's turn.
@@ -654,53 +407,8 @@ export function workLeftOf(report: TraceRecord["reports"][number]): boolean {
 const readsFinishes = (record: TraceRecord | null | undefined): record is TraceRecord =>
   record !== null && record !== undefined && (record.role === "manager" || record.role === "worker");
 
-/** The Manager a finish is told to: the recording Manager, else the Worker's parent, else the Worker. */
+/** The Manager a finish without a request id is keyed by: the recording Manager, else the Worker's parent, else the Worker. */
 const managerOf = (record: TraceRecord): string => (record.role === "manager" ? record.agentId : (record.parentAgentId ?? record.agentId));
-
-/** Where a request of a mission lives and its current Main (missions design §6); null for a request of no mission. */
-export interface FinishPlace {
-  workspaceId: string;
-  managerId: string | null;
-}
-
-/** The place of a request of a mission in the data folder `home`, or null. Never throws. */
-export function finishPlaceOf(home: string | null, requestId: string): FinishPlace | null {
-  const place = home === null ? null : requestIndexOf(home, requestId);
-  return place === null ? null : { workspaceId: place.workspaceId, managerId: missionManagerOf(home, requestId) };
-}
-
-/**
- * `request.finished` for each `finished` report recorded in a Manager's or a
- * Worker's turn (`readsFinishes`) that shows work left (§A.8) or leaves its request finished-unverified
- * (design §C.3; `isUnverified`, read from the request's records by the caller,
- * `unverifiedFinishesOf`), which the event carries as `unverified: true`.
- * A request of a mission (`placeOf`) is its repo's, told to its current Main
- * (missions design §6), wherever its turn was recorded. Pure.
- */
-export function requestFinishedEventsOf(
-  record: TraceRecord | null | undefined,
-  isUnverified: (report: ParsedReport) => boolean = () => false,
-  placeOf: (requestId: string) => FinishPlace | null = () => null,
-): RequestFinishedEvent[] {
-  if (!readsFinishes(record)) return [];
-  return record.reports.flatMap((report): RequestFinishedEvent[] => {
-    if (report.phase !== "finished") return [];
-    const unverified = isUnverified(report);
-    if (!unverified && !workLeftOf(report)) return [];
-    const requestId = report.requestId ?? record.requestId;
-    const place = requestId === null ? null : placeOf(requestId);
-    return [
-      {
-        type: "request.finished",
-        workspaceId: place?.workspaceId ?? record.workspaceId,
-        requestId,
-        managerId: place?.managerId ?? managerOf(record),
-        at: report.at,
-        ...(unverified ? { unverified: true as const } : {}),
-      },
-    ];
-  });
-}
 
 /**
  * The finished requests of a recorded Manager or Worker turn
@@ -722,12 +430,6 @@ export function finishedRequestKeysOf(record: TraceRecord | null | undefined): {
 // The governor's events (missions design §9.7).
 // ---------------------------------------------------------------------------
 
-/** The figures of one family (`governor-figures.ts` `familyFiguresOf`). Pure. */
-const familyFigures = (figures: readonly GovernorFigure[], family: GovernorFamily): GovernorFigure[] => figures.filter((entry) => entry.family === family);
-
-/** One figure in words, as the nudge words it (`governor-figures.ts` `figureText`): `stalled 1 (threshold ≥ 1; req-…)`. Pure. */
-const figureWords = (entry: GovernorFigure): string => `${entry.id} ${entry.value} (threshold ${entry.op === ">=" ? "≥" : ">"} ${entry.threshold}${entry.detail === null ? "" : `; ${entry.detail}`})`;
-
 /** At most one wake per mission in this long, `danger` excepted (§9.7). */
 export const MISSION_WAKE_MS = 15 * 60_000;
 
@@ -742,7 +444,7 @@ export function missionSignalEventsOf(outcome: Pick<GovernorOutcome, "missionId"
       type: "mission.signal",
       missionId: outcome.missionId,
       family: action.family,
-      figures: familyFigures(outcome.figures, action.family).filter((entry) => entry.crossed),
+      figures: familyFiguresOf(outcome.figures, action.family).filter((entry) => entry.crossed),
       step: 3,
       at: at.toISOString(),
     }));
@@ -757,7 +459,7 @@ export interface ReviewMarks {
 /** The marks of a mission now: `finished` requests and its budget figures (the `budget` family). Pure. */
 export function reviewMarksOf(finished: number, figures: readonly GovernorFigure[]): ReviewMarks {
   const budgets: ReviewMarks["budgets"] = {};
-  for (const entry of familyFigures(figures, "budget")) budgets[entry.id] = entry.value >= 100 ? 2 : entry.value >= 50 ? 1 : 0;
+  for (const entry of familyFiguresOf(figures, "budget")) budgets[entry.id] = entry.value >= 100 ? 2 : entry.value >= 50 ? 1 : 0;
   return { finished: Math.floor(finished / REVIEW_EVERY_FINISHED), budgets };
 }
 
@@ -771,7 +473,7 @@ export function missionReviewEventsOf(missionId: string, before: ReviewMarks | u
   if (before === undefined) return [];
   const events: MissionReviewEvent[] = [];
   if (now.finished > before.finished) events.push({ type: "mission.review", missionId, reason: "finished-10", value: finished, figure: null });
-  for (const entry of familyFigures(figures, "budget")) {
+  for (const entry of familyFiguresOf(figures, "budget")) {
     const mark = now.budgets[entry.id] ?? 0;
     if (mark > (before.budgets[entry.id] ?? 0)) events.push({ type: "mission.review", missionId, reason: mark === 2 ? "budget-100" : "budget-50", value: entry.value, figure: entry.id });
   }
@@ -840,20 +542,19 @@ export const EVENTS_BATCH: NoticeBatch = { name: EVENTS_NOTICE_MARKER, compose: 
 
 /**
  * The owner's policy as the events read it, at each publish and delivery. A
- * policy that cannot be read is the empty policy — no project in the scope, no
- * challenger on: the safe side — with one log line. Never throws.
+ * policy that cannot be read is the empty policy — no project in the scope:
+ * the safe side — with one log line. Never throws.
  */
-export function eventPolicyOf(home: string, log: (message: string) => void = (message) => console.warn(message)): AutonomyPolicy {
+function eventPolicyOf(home: string, log: (message: string) => void = (message) => console.warn(message)): AutonomyPolicy {
   return currentPolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy for the Orchestrator's events: ${reason}`));
 }
 
 /**
- * The projects whose `request.finished`, `request.stalled`, `worker.signal`
- * and `writers.observed` reach the Orchestrator (design §A.8 Scope,
- * change-007 C1; §F.1): those with a
- * class above `owner` in the owner's policy, never a plugin home (missions
- * design §3.1). A policy that cannot be read is the empty scope, the safe
- * side, with one log line. Never throws.
+ * The events' scope (design §A.8 Scope, change-007 C1; §F.1): the projects
+ * with a class above `owner` in the owner's policy, never a plugin home
+ * (missions design §3.1) — those the stall pass and the Worker watch build
+ * their events for, and a `danger` signal's wake needs. A policy that cannot
+ * be read is the empty scope, the safe side, with one log line. Never throws.
  */
 export function eventScopeOf(home: string, log: (message: string) => void = (message) => console.warn(message)): Set<string> {
   return scopeOfPolicy(eventPolicyOf(home, log), home);
@@ -866,14 +567,11 @@ function scopeOfPolicy(policy: AutonomyPolicy, home: string): Set<string> {
 
 /**
  * Whether an event may reach the Orchestrator: a mission event always
- * (missions design §9.7), `decision.opened` keeps its own filter (change-007
- * C1), `advice.due` its cadence (design §G.4) and `threshold.crossed` the
- * owner's Settings (design §G.7); the others need their project in `scope`.
- * Whether it wakes the Orchestrator at all is `wakesGovernor`'s.
+ * (missions design §9.7); any other needs its project in `scope`. Whether it
+ * wakes the Orchestrator at all is `wakesGovernor`'s.
  */
 export function isInEventScope(event: BmEvent, scope: ReadonlySet<string>): boolean {
-  if (isMissionEvent(event)) return true;
-  return event.type === "decision.opened" || event.type === "advice.due" || event.type === "threshold.crossed" || scope.has(event.workspaceId);
+  return isMissionEvent(event) || scope.has(event.workspaceId);
 }
 
 // ---------------------------------------------------------------------------
@@ -909,21 +607,11 @@ export interface EventBus {
    */
   publish(events: readonly BmEvent[], paseo?: unknown, found?: OrchestratorAgentSnapshot | null): Promise<PublishResult>;
   /**
-   * One recorded turn (the collector's `onRecorded`). Its `decision.opened`,
-   * `request.finished`, `advice.due` and `threshold.crossed` are retired as
-   * wakes (missions design §9.1): only its finished requests still count
-   * toward the project's advice (design §G.4, `advice-store.ts`). Never rejects.
+   * One recorded turn (the collector's `onRecorded`): its finished requests
+   * count toward the project's advice (design §G.4, `advice-store.ts`), and
+   * any event a mission's window held is published. Never rejects.
    */
-  turnRecorded(
-    record: TraceRecord | null | undefined,
-    opened: readonly Decision[],
-    paseo?: unknown,
-    isUnverified?: (report: ParsedReport) => boolean,
-  ): Promise<PublishResult>;
-  /** Decisions opened outside a recorded turn: `decision.opened` is retired as a wake (§9.1), so nothing is published. Never rejects. */
-  decisionsOpened(opened: readonly Decision[], paseo?: unknown): Promise<PublishResult>;
-  /** A Worker's turn ended. Nothing to settle since its non-alert signals no longer wake (§9.1); kept for the stall pass that calls it. */
-  workerTurnEnded(workerId: string): void;
+  turnRecorded(record: TraceRecord | null | undefined, paseo?: unknown): Promise<PublishResult>;
   /**
    * The governor's recomputations (`governor-store.ts`; each minute and at
    * each recorded turn of a mission's agents): their `mission.signal`,
@@ -970,7 +658,8 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       if (report.phase !== "finished") return true;
       const requestId = report.requestId ?? record.requestId;
       // Missions design §6: the request's workspace, so a Main's copy in the home and its Worker's in the repo are one finish.
-      const workspaceId = (requestId === null ? null : finishPlaceOf(homeOf(), requestId))?.workspaceId ?? record.workspaceId;
+      const home = requestId === null ? null : homeOf();
+      const workspaceId = (home === null || requestId === null ? null : requestIndexOf(home, requestId))?.workspaceId ?? record.workspaceId;
       const key = JSON.stringify([workspaceId, requestId, { ...report, agentId: null, at: null, recordId: null }]);
       const first = finishes.get(key);
       if (first === undefined) finishes.set(key, record.role);
@@ -1094,7 +783,15 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       }
     };
 
+  /** Puts back the events a publish took from `held` and delivered nothing of: they go with the next publish. */
+  const keepHeld = (events: ReadonlyMap<string, BmEvent>): void => {
+    for (const [key, event] of events) if (!published.has(key) && !inFlight.has(key) && !held.has(key)) held.set(key, event);
+  };
+  /** Keys a publish is queueing now: remembered only once queued or sent, and never queued twice meanwhile. */
+  const inFlight = new Set<string>();
+
   async function publish(events: readonly BmEvent[], paseo?: unknown, found?: OrchestratorAgentSnapshot | null): Promise<PublishResult> {
+    const wasHeld = new Map(held);
     try {
       if (isPaseo(paseo)) lastPaseo = paseo;
       if (events.length === 0 && held.size === 0) return result("none");
@@ -1104,17 +801,23 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       held.clear();
       if (waking.length === 0) return result("none", skipped);
       const home = homeOf();
-      if (home === null) return result("no-data-folder", skipped);
+      if (home === null) {
+        keepHeld(wasHeld);
+        return result("no-data-folder", skipped);
+      }
       const scope = eventScopeOf(home, log);
       const fresh: Array<{ event: BmEvent; key: string }> = [];
       for (const event of waking) {
         const key = eventKeyOf(event);
-        if (published.has(key) || fresh.some((entry) => entry.key === key) || !isInEventScope(event, scope)) skipped.push(key);
+        if (published.has(key) || inFlight.has(key) || fresh.some((entry) => entry.key === key) || !isInEventScope(event, scope)) skipped.push(key);
         else fresh.push({ event, key });
       }
       if (fresh.length === 0) return result("none", skipped);
       const handle = lastPaseo;
-      if (handle === null) return result("no-paseo", skipped);
+      if (handle === null) {
+        keepHeld(wasHeld);
+        return result("no-paseo", skipped);
+      }
       // §9.7: a mission woken within its window waits; the events of one mission that go now go together.
       const at = now().getTime();
       const goingFor = new Set<string>();
@@ -1132,26 +835,39 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       }
       for (const [key, event] of hold) held.set(key, event);
       if (due.length === 0) return result("none", skipped);
-      const orchestrator = await wakeableOrchestrator(handle, { ...deps, log }, found);
-      if (orchestrator === null) return result("no-orchestrator", skipped);
-      const items: BatchItem[] = due.map(({ event, key }) => {
-        remember(key);
-        const workspaceId = workspaceOfEvent(event);
-        if (workspaceId !== null) workspaceOfKey.set(key, workspaceId);
-        eventOfKey.set(key, event);
-        return { key, line: eventLineOf(event), isCurrent: isCurrentOf(event, home) };
-      });
-      const outcomes = await queue.enqueueBatch(orchestrator.id, batch, items, handle as never);
-      const done: PublishResult = { status: "done", published: [], skipped };
-      outcomes.forEach((outcome, index) => {
-        const { event, key } = due[index]!;
-        if (outcome !== "sent" && outcome !== "queued") return void skipped.push(key);
-        done.published.push(key);
-        for (const missionId of missionsOfEvent(event)) missionWokenAt.set(missionId, at);
-      });
-      return done;
+      for (const { key } of due) inFlight.add(key);
+      try {
+        const orchestrator = await wakeableOrchestrator(handle, { ...deps, log }, found);
+        if (orchestrator === null) return result("no-orchestrator", skipped);
+        const items: BatchItem[] = due.map(({ event, key }) => {
+          // Read by the batch's onSent, which may run inside enqueueBatch.
+          const workspaceId = workspaceOfEvent(event);
+          if (workspaceId !== null) workspaceOfKey.set(key, workspaceId);
+          eventOfKey.set(key, event);
+          return { key, line: eventLineOf(event), isCurrent: isCurrentOf(event, home) };
+        });
+        const outcomes = await queue.enqueueBatch(orchestrator.id, batch, items, handle as never);
+        const done: PublishResult = { status: "done", published: [], skipped };
+        due.forEach(({ event, key }, index) => {
+          const outcome = outcomes[index];
+          if (outcome !== "sent" && outcome !== "queued") {
+            // Not queued: published again when a source raises it again.
+            workspaceOfKey.delete(key);
+            eventOfKey.delete(key);
+            skipped.push(key);
+            return;
+          }
+          remember(key);
+          done.published.push(key);
+          for (const missionId of missionsOfEvent(event)) missionWokenAt.set(missionId, at);
+        });
+        return done;
+      } finally {
+        for (const { key } of due) inFlight.delete(key);
+      }
     } catch (error) {
       log(`[paseo-bm] publishing events to the Orchestrator failed: ${errorText(error)}`);
+      keepHeld(wasHeld);
       return result("failed");
     }
   }
@@ -1212,14 +928,10 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       if (isPaseo(paseo)) lastPaseo = paseo;
     },
     publish,
-    turnRecorded(record, _opened, paseo) {
+    turnRecorded(record, paseo) {
       countAdvice(unseenFinishesOf(record));
       return publish([], paseo);
     },
-    decisionsOpened(_opened, paseo) {
-      return publish([], paseo);
-    },
-    workerTurnEnded() {},
     governed(outcomes, paseo) {
       const home = outcomes.length === 0 ? null : homeOf();
       const at = now();

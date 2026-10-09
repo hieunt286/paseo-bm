@@ -25,10 +25,10 @@ import { MEMORY_TOOL_FACES, schemaIssues, type MainRepoAction, type ToolFace } f
 import { TRACES_DIR_NAME } from "./data-home";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { MAX_ACTIVE_MEMORY, createMemoryStore, type MemoryEntry, type MemoryKind } from "./memory-store";
-import { createMissionStore, type Mission } from "./mission-store";
+import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { NOT_A_MAIN_MESSAGE, missionOfMain } from "./mission-tools";
 import { Refusal } from "./orchestrator-tool-context";
-import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
+import { directoryIn, listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { createPrecedentStore } from "./precedent-store";
 import { repoIn, type GitRunner } from "./repo-tool";
 import { readWorkspaceMeta } from "./trace-store";
@@ -48,6 +48,8 @@ export interface MemoryToolDeps {
   git?: GitRunner;
   /** Secrets to mask; the process's own by default. */
   env?: NodeJS.ProcessEnv;
+  /** Where a failure that does not fail the call goes; `console.warn` by default. */
+  log?: (message: string) => void;
 }
 
 /** The memory tools a bound Manager (a Main) and a bound Worker list. */
@@ -111,6 +113,7 @@ const shown = (entry: MemoryEntry): ShownEntry => ({ id: entry.id, kind: entry.k
 export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
   const now = deps.now ?? (() => new Date());
   const env = deps.env ?? process.env;
+  const log = deps.log ?? ((message: string) => console.warn(message));
 
   /** The caller as a Main with its mission, or its refusal. */
   const mainOf = (caller: ToolCaller | null): { main: BoundCaller; mission: Mission } | ServerToolAnswer => {
@@ -153,7 +156,7 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
     const result = store.remove(project, input.id!);
     if (!result.ok) return refused([...result.reasons, "Nothing was changed."].join("\n"));
     if (by.missionId !== null) {
-      createMissionStore(home, { now }).appendJournal(by.missionId, { kind: "note", by: "main", text: `The Main removed memory entry ${input.id} of ${project}: ${input.why}`, ref: input.id! });
+      journalQuietly(createMissionStore(home, { now }), by.missionId, { kind: "note", by: "main", text: `The Main removed memory entry ${input.id} of ${project}: ${input.why}`, ref: input.id! }, log);
     }
     return answered({ removed: input.id });
   };
@@ -196,10 +199,7 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
     const home = deps.home();
     const paseo = deps.paseo();
     const listed = paseo === null || paseo === undefined ? null : await listedWorkspaces(paseo as DashboardPaseo);
-    const directory =
-      listed?.find((entry) => entry.id === input.workspaceId)?.directory ??
-      readWorkspaceMeta({ tracesDir: join(home, TRACES_DIR_NAME) }, input.workspaceId)?.lastKnownDirectory ??
-      null;
+    const directory = directoryIn(listed, input.workspaceId) ?? readWorkspaceMeta({ tracesDir: join(home, TRACES_DIR_NAME) }, input.workspaceId)?.lastKnownDirectory ?? null;
     try {
       return await repoIn(input, directory, env, deps.git === undefined ? {} : { git: deps.git });
     } catch (error) {

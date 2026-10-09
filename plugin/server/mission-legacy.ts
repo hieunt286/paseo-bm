@@ -40,16 +40,15 @@ import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
 import { VERSION_LABEL, ensureManager, ensureRolesFor, findLiveManagers, findMain, setupNoticeFor, type EnsureManagerResult, type ManagerAgentSnapshot } from "./manager";
 import { createMissionRoster } from "./mission-roster";
 import { replaceMain } from "./mission-replace";
-import { MISSION_CODE_PATTERN, createMissionStore, type Mission } from "./mission-store";
-import { handleMissionEnsure, syncMainTitle, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
+import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { handleMissionEnsure, labelsOf, markMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
 import { hasOutdatedInstructions } from "./instructions-label";
-import { setAgentLabels } from "./paseo-cli";
 import { workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { isPluginHome } from "./plugin-homes";
 import { createRequestRegistry } from "./request-registry";
-import { asRecord, nonEmpty } from "./role-choices";
+import { nonEmpty } from "./role-choices";
 import { currentInstructions } from "./role-instructions";
-import { MISSION_CODE_LABEL, MISSION_ID_LABEL } from "./role-title";
+import { MISSION_ID_LABEL } from "./role-title";
 import { dataHome, errorText } from "./rpc-kit";
 
 /** How many of the folder name's letters a legacy code takes. */
@@ -105,33 +104,22 @@ function writeLegacyMission(home: string, workspaceId: string, folder: string | 
   if (existing !== null) return { mission: existing, created: false };
   const store = storeOf(home, deps);
   const name = (folder === null ? workspaceId : basename(folder)).slice(0, 80);
-  const code = legacyCodeOf(name, (candidate) => store.byCode(candidate)?.state === "open");
+  const open = new Set(store.list().flatMap((entry) => (entry.state === "open" ? [entry.code] : [])));
+  const code = legacyCodeOf(name, (candidate) => open.has(candidate));
   const made = store.create({ code, name, goal: "", repos: [workspaceId], createdBy: "legacy", legacyWorkspaceId: workspaceId, mainId });
   if (!made.ok) throw new Error(made.reasons.join("; "));
-  try {
-    store.appendJournal(made.mission.missionId, {
+  journalQuietly(
+    store,
+    made.mission.missionId,
+    {
       kind: "main",
       by: "plugin",
       text: mainId === null ? `One-repo mission of ${name}; its Main is created in the Missions home.` : `One-repo mission of ${name}, made from its Beads Manager ${mainId}.`,
       ...(mainId === null ? {} : { ref: mainId }),
-    });
-  } catch {
-    // The journal is what happened, never state.
-  }
+    },
+    logOf(deps),
+  );
   return { mission: made.mission, created: true };
-}
-
-/** Labels and titles the agent as its mission's Main (§3.2); each refusal costs one log line. Never throws. */
-async function markMain(agentId: string, mission: Pick<Mission, "missionId" | "code" | "name">, home: string, deps: MissionsHomeDeps): Promise<void> {
-  const log = logOf(deps);
-  bindingsOf(home, deps).assignMission(agentId, mission.missionId);
-  const labels = await setAgentLabels(agentId, { [MISSION_ID_LABEL]: mission.missionId, [MISSION_CODE_LABEL]: mission.code }, deps.cli).catch((error: unknown) => ({
-    ok: false as const,
-    reason: errorText(error),
-  }));
-  if (!labels.ok) log(`[paseo-bm] Main ${agentId} of mission ${mission.code} could not be labelled: ${labels.reason}`);
-  const titled = await syncMainTitle({ mainId: agentId, code: mission.code, name: mission.name }, deps.cli);
-  if (!titled.ok) log(`[paseo-bm] Main ${agentId} of mission ${mission.code} could not be titled: ${titled.reason}`);
 }
 
 /** True when the Manager is labelled with a mission (a Main, of an open or a closed mission). */
@@ -165,7 +153,7 @@ export async function migrateWorkspace(
     const folder = await workspaceDirectory(paseo as unknown as DashboardPaseo, workspaceId).catch(() => null);
     const { mission, created } = writeLegacyMission(home, workspaceId, folder, chosen, deps);
     if (!created) return null;
-    await markMain(chosen, mission, home, deps);
+    await markMain(chosen, mission, { bindings: bindingsOf(home, deps), cli: deps.cli, log });
     const roster = createMissionRoster(home, deps.now === undefined ? {} : { now: deps.now });
     for (const request of createRequestRegistry(home, { log }).list(workspaceId)) {
       if (request.managerId !== chosen || request.finishedAt !== null) continue;
@@ -241,16 +229,6 @@ export async function handleManagerEnsure(
   };
 }
 
-/** The agent's labels, from a fresh snapshot; none when it cannot be read. */
-async function labelsOf(paseo: unknown, agentId: string): Promise<Record<string, unknown>> {
-  try {
-    const ref = (paseo as { agents?: { ref?: (id: string) => { refresh?: () => Promise<{ agent?: unknown } | null> } } } | null)?.agents?.ref?.(agentId);
-    return asRecord(asRecord((await ref?.refresh?.())?.agent)?.["labels"]) ?? {};
-  } catch {
-    return {};
-  }
-}
-
 /**
  * A `bm-manager` the owner opened from the composer in a repo workspace (§3.6),
  * at its `agent.created`, after its binding settled: none of the plugin's own
@@ -274,7 +252,7 @@ export async function adoptComposerManager(
     const live = (await findMain(handle, mission.missionId)).length > 0 || (mission.mainId !== null && (await findLiveManagers(handle, workspaceId, { home, log })).some((entry) => entry.id === mission.mainId));
     // The owner opened the wrong door: the outdated-agents pass flags it as an extra Manager.
     if (live) return "extra";
-    await markMain(agent.id, mission, home, deps);
+    await markMain(agent.id, mission, { bindings: bindingsOf(home, deps), cli: deps.cli, log });
     const bindings = deps.bindings?.() ?? undefined;
     const replaced = await replaceMain(mission.missionId, agent.id, mission.mainId === null ? "created" : "replaced", {
       home,

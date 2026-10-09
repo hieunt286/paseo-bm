@@ -17,15 +17,13 @@
  * requests (`recentWorkspacesOf`, `recentTracesOf`, §3.5).
  */
 import type { RuleInput, RuleMessage, RuleReviewGrant } from "../shared/rule-input";
-import type { ParsedReport, TraceRecord, TraceWorkspaceMeta } from "../shared/contracts";
-import { isFinishedUnverified, requestFinishOf, verificationOf, type RequestFinish } from "../shared/evidence";
+import type { TraceRecord, TraceWorkspaceMeta } from "../shared/contracts";
 import { byAt } from "../shared/order";
 import { redactText } from "./collector";
-import { errorText } from "./rpc-kit";
 import { reviewerReplacementsFor } from "./fallback-state";
 import { agentFactsOf, type DashboardPaseo } from "./paseo-directory";
 import { readRecords, readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
-import { handoffSuccessorsOf, reconstructTraces, reviewCallsOf, toolCallsOf, type AgentFacts, type ReconstructedTrace, type RequestReviewFacts } from "./traces";
+import { reconstructTraces, reviewCallsOf, toolCallsOf, type AgentFacts, type ReconstructedTrace, type RequestReviewFacts } from "./traces";
 import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
 import { isLiveLink, type PeerLink } from "./peer-links";
 import { createMissionRoster, requestIndexOf } from "./mission-roster";
@@ -214,11 +212,6 @@ function withMissionsOf(home: string, requests: readonly RegisteredRequest[]): R
   }
 }
 
-/** The workspace a request's records are traced in: its repo for a request of a mission (the request index), else `fallback`. */
-export function requestWorkspaceOf(home: string, requestId: string | null, fallback: string): string {
-  return requestId === null ? fallback : (requestIndexOf(home, requestId)?.workspaceId ?? fallback);
-}
-
 /**
  * The workspace's requests in the request registry (design §16.4) of the data
  * folder the traces are in (`deps.home`, else the trace store's parent). Never
@@ -308,93 +301,6 @@ export function traceOfRequest(traces: readonly ReconstructedTrace[], ref: Reque
   const byId = ref.requestId === null ? undefined : traces.find((trace) => trace.requestId === ref.requestId);
   if (byId !== undefined || ref.agentId === null || ref.agentId === undefined) return byId;
   return traceOfAgent(traces, ref.agentId);
-}
-
-/** The workspace folder the store last saw, for a report's file paths (autonomy design §C.2); null when unknown. */
-function workspaceDirectoryOf(location: TraceStoreLocation, workspaceId: string): string | null {
-  return readWorkspaceMeta(location, workspaceId)?.lastKnownDirectory ?? null;
-}
-
-/**
- * A request's finish now (autonomy design §C.3, §C.6): the request rebuilt
- * from the trace store at the call, its latest report labelled when that is
- * `finished` (`requestFinishOf`). Null when the request is not on record or
- * its latest report is not `finished`. Rejects when the store cannot be read.
- */
-export async function requestFinishNow(deps: RequestTraceDeps, workspaceId: string, ref: RequestRef): Promise<RequestFinish | null> {
-  const { traces, agents } = await workspaceTracesOf(deps, workspaceId);
-  const trace = traceOfRequest(traces, ref);
-  if (trace === undefined) return null;
-  return requestFinishOf({
-    reports: trace.reports,
-    records: trace.records,
-    workspaceDirectory: workspaceDirectoryOf(deps.location, workspaceId),
-    handoffSuccessors: new Set(handoffSuccessorsOf(trace, agents).keys()),
-  });
-}
-
-/**
- * Whether a request stands finished-unverified now, the state a delegate may
- * not act on (autonomy design §C.6, change-008 C4): read from the trace store
- * at the call, so a later report of the request ends it. False with no request
- * and no agent to read. A store that cannot be read counts as unverified —
- * the owner's side: the delegate leaves it to the owner — with one log line.
- * Never rejects.
- */
-export async function isFinishedUnverifiedNow(
-  deps: RequestTraceDeps & { log?: (message: string) => void },
-  workspaceId: string,
-  ref: RequestRef,
-): Promise<boolean> {
-  if (ref.requestId === null && (ref.agentId ?? null) === null) return false;
-  try {
-    return (await requestFinishNow(deps, workspaceId, ref))?.unverified === true;
-  } catch (error) {
-    const what = ref.requestId === null ? `the request of ${ref.agentId}` : `request ${ref.requestId}`;
-    (deps.log ?? ((message: string) => console.warn(message)))(
-      `[paseo-bm] could not read ${what} to check its finish; it is left to the owner: ${errorText(error)}`,
-    );
-    return true;
-  }
-}
-
-/**
- * Which `finished` reports of a recorded Manager or Worker turn leave their request
- * finished-unverified (autonomy design §C.3, §A.8): each labelled against
- * every record of its request — by the report's request id, else the Manager's
- * newest turn — read once the collector has written the turn. The answer is a
- * test for `requestFinishedEventsOf`. For any other turn nothing is read, and
- * nothing is unverified; so too when the store cannot be read (one log line):
- * the events are then as before. Never rejects.
- */
-export async function unverifiedFinishesOf(
-  deps: RequestTraceDeps & { log?: (message: string) => void },
-  record: TraceRecord | null | undefined,
-): Promise<(report: ParsedReport) => boolean> {
-  const none = () => false;
-  if (record === null || record === undefined || (record.role !== "manager" && record.role !== "worker")) return none;
-  const finished = record.reports.filter((report) => report.phase === "finished");
-  if (finished.length === 0) return none;
-  try {
-    // Missions design §6: a Main's turn is traced under the home; each request is read in its repo.
-    const read = new Map<string, Promise<WorkspaceTraces>>();
-    const unverified = new Set<ParsedReport>();
-    for (const report of finished) {
-      const requestId = report.requestId ?? record.requestId;
-      const workspaceId = requestWorkspaceOf(homeOf(deps), requestId, record.workspaceId);
-      if (!read.has(workspaceId)) read.set(workspaceId, workspaceTracesOf(deps, workspaceId));
-      const { traces, agents } = await read.get(workspaceId)!;
-      const workspaceDirectory = workspaceDirectoryOf(deps.location, workspaceId);
-      const trace = (requestId === null ? undefined : traceOfRequest(traces, { requestId })) ?? traceOfManagerTurn(traces, record.agentId);
-      if (trace === undefined) continue;
-      const handoffSuccessors = new Set(handoffSuccessorsOf(trace, agents).keys());
-      if (isFinishedUnverified(verificationOf({ report, records: trace.records, workspaceDirectory, handoffSuccessors }))) unverified.add(report);
-    }
-    return (report) => unverified.has(report);
-  } catch (error) {
-    (deps.log ?? ((message: string) => console.warn(message)))(`[paseo-bm] could not check the finish of ${record.agentId}'s turn: ${errorText(error)}`);
-    return none;
-  }
 }
 
 function messagesOf(records: readonly TraceRecord[], pick: (record: TraceRecord) => TraceRecord["sent"]): RuleMessage[] {

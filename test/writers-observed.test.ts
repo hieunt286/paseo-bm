@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAlertStore } from "../plugin/server/alert-store";
-import { eventKeyOf, eventLineOf } from "../plugin/server/event-bus";
+import { eventKeyOf } from "../plugin/server/event-bus";
 import { appendRecord, clearTraceStoreCache, writeWorkspaceMeta, type TraceStoreLocation } from "../plugin/server/trace-store";
 import { createWritersWatch } from "../plugin/server/writers-watch";
 import { alertKeyOf, MAX_ALERT_DETAIL_CHARS } from "../plugin/shared/alerts";
@@ -339,13 +339,5 @@ describe("the watch on a recorded turn (design §F.1)", () => {
     expect(broken.turnRecorded(wrote(OTHER, 5, 15, ["src/math.js"]), location, DIR)).toEqual([]);
     expect(logs).toEqual([expect.stringContaining("no folder")]);
     expect(watch().turnRecorded(undefined, location)).toEqual([]);
-  });
-
-  it("its event line names the file, both agents with their requests, and what to do", async () => {
-    await record(wrote(WORKER, 0, 10, ["src/math.js"], { requestId: R1 }));
-    const [event] = await record(wrote(OTHER, 5, 15, ["src/math.js"]));
-    expect(eventLineOf(event!)).toBe(
-      `- writers.observed — project ${WORKSPACE_ID}, file src/math.js: Worker ${WORKER} (request ${R1}) and Worker ${OTHER} (request not known) wrote it in overlapping turns, at ${at(15)}. Check the file with bm_repo; if one change may have undone the other, tell that request's Manager with bm_send_command. Otherwise keep a note with bm_note.`,
-    );
   });
 });

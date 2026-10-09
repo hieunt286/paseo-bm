@@ -343,10 +343,9 @@ export function unverifiedFinishText(requestId: string | null, instead: string):
 /**
  * Why the owner's policy may not answer `decision` with `optionKey` now
  * (design §C.6, change-008 C4), or null when it may: while the decision's
- * request stands finished-unverified — `finishedUnverified`, read by the
- * caller from the trace store (`server/request-trace.ts`
- * `isFinishedUnverifiedNow`) — an option that acts on the finish
- * (`actsOnFinish`) is left to the owner: the Orchestrator's `bm_decide`
+ * request stands finished-unverified — `finishedUnverified`, as the caller
+ * read it — an option that acts on the finish (`actsOnFinish`) is left to the
+ * owner: the Orchestrator's `bm_decide`
  * (`decideRefusalOf`). A precedent's answer and the owner's own are not
  * asked. Pure.
  */
@@ -373,7 +372,7 @@ export function unverifiedFinishRefusalOf(decision: Pick<Decision, "id" | "reque
 export function decideRefusalOf(
   policy: AutonomyPolicy,
   decision: Decision,
-  choice?: { optionKey: string; finishedUnverified: boolean; grantCap?: number },
+  choice?: { optionKey: string; finishedUnverified?: boolean; grantCap?: number },
 ): string | null {
   // Autonomy design §B.7: an override is the owner's correction of an answer made for them.
   if (decisionKindOf(decision.id) === "override") return overrideIsTheOwners(decision.id);
@@ -398,7 +397,7 @@ export function decideRefusalOf(
     return `${decisionClass} is not delegated to you in project ${decision.workspaceId}; the owner decides it, so leave it to the owner`;
   }
   if (choice === undefined) return null;
-  return reviewGrantRefusalOf(decision, choice.optionKey, choice.grantCap) ?? unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified);
+  return reviewGrantRefusalOf(decision, choice.optionKey, choice.grantCap) ?? unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified === true);
 }
 
 /**

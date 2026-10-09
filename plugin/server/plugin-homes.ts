@@ -10,7 +10,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { TRACES_DIR_NAME } from "./data-home";
 import { isMissionsHome } from "./missions-home";
 import { orchestratorHomeOf } from "./orchestrator-agent";
-import type { ListedWorkspace } from "./paseo-directory";
+import { directoryIn, type ListedWorkspace } from "./paseo-directory";
 import { dataHome } from "./rpc-kit";
 import { readWorkspaceMeta } from "./trace-store";
 
@@ -39,5 +39,5 @@ export function isPluginHome(workspaceIdOrDirectory: string | null | undefined, 
 
 /** `isPluginHome` of a workspace by its id or the directory a `listedWorkspaces` list gives it. Never throws. */
 export function isPluginHomeIn(workspaceId: string, listed: readonly ListedWorkspace[] | null, home: string | null = dataHome()): boolean {
-  return isPluginHome(workspaceId, home) || isPluginHome(listed?.find((entry) => entry.id === workspaceId)?.directory, home);
+  return isPluginHome(workspaceId, home) || isPluginHome(directoryIn(listed, workspaceId), home);
 }

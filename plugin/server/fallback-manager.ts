@@ -37,7 +37,7 @@ import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { liveWorkersOf, managerHandover } from "./fallback-handover";
 import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, replacementsOf } from "./fallback-state";
-import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff, createManager, type ManagerPaseo } from "./manager";
+import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, MODE_SET_LABEL, REPLACES_LABEL, agentToolsOff, createManager, type ManagerPaseo } from "./manager";
 import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { SETTINGS_NOTICE_MARKER } from "./notices";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
@@ -52,9 +52,6 @@ import { MISSION_CODE_LABEL, MISSION_ID_LABEL, mainTitleOf } from "./role-title"
 import { managerIdNotice } from "./settings-notices";
 import type { TraceStoreLocation } from "./trace-store";
 import { DashboardError, type FallbackIncident } from "../shared/contracts";
-
-const REPLACES_LABEL = "bm.replaces";
-const MODE_SET_LABEL = "bm.modeSet";
 
 export interface ManagerSwitchDeps {
   log?: (message: string) => void;
@@ -106,8 +103,8 @@ async function postureFor(
 function mainMissionOf(home: string, agentId: string): Mission | null {
   try {
     const store = createMissionStore(home);
-    const entry = store.list().find((mission) => mission.state === "open" && mission.mainId === agentId);
-    return entry === undefined ? null : store.get(entry.missionId);
+    const entry = store.openByMain(agentId);
+    return entry === null ? null : store.get(entry.missionId);
   } catch {
     return null;
   }

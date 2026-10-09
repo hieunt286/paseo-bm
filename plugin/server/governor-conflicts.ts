@@ -199,11 +199,14 @@ const sample = (files: ReadonlySet<string>): string => `${files.size} file${file
 /** Two open charters with one repo and one area written in the last 7 days (§9.6). Never throws. */
 export function charterConflictsOf(home: string, now: Date): MissionConflictEvent[] {
   const open = openMissionsOf(home);
+  // Only a mission whose charter shares a repo with another open one can conflict: the others' traces are not read.
+  const sharing = open.filter((mission) => open.some((other) => other !== mission && other.charter.repos.some((repo) => mission.charter.repos.includes(repo))));
+  if (sharing.length < 2) return [];
   const since = now.getTime() - CONFLICT_WINDOW_MS;
-  const areas = new Map(open.map((mission) => [mission.missionId, missionAreasOf(home, mission, since)]));
+  const areas = new Map(sharing.map((mission) => [mission.missionId, missionAreasOf(home, mission, since)]));
   const events: MissionConflictEvent[] = [];
-  open.forEach((a, index) => {
-    for (const b of open.slice(index + 1)) {
+  sharing.forEach((a, index) => {
+    for (const b of sharing.slice(index + 1)) {
       for (const workspaceId of a.charter.repos.filter((repo) => b.charter.repos.includes(repo))) {
         const ofA = areas.get(a.missionId)?.get(workspaceId);
         const ofB = areas.get(b.missionId)?.get(workspaceId);
@@ -239,6 +242,7 @@ export function writerConflictsOf(home: string, events: readonly BmEvent[]): Mis
   const collisions = events.filter((event): event is WritersObservedEvent => event.type === "writers.observed");
   if (collisions.length === 0) return [];
   const open = openMissionsOf(home);
+  if (open.length < 2) return [];
   return collisions.flatMap((event): MissionConflictEvent[] => {
     const [a, b] = event.writers.map((writer) => missionOfWriter(home, open, writer));
     if (a === null || b === null || a === undefined || b === undefined || a.missionId === b.missionId) return [];
@@ -258,6 +262,7 @@ export function writerConflictsOf(home: string, events: readonly BmEvent[]): Mis
 /** Live links from one mission into another's area (§9.6). Never throws. */
 export function linkConflictsOf(home: string): MissionConflictEvent[] {
   const open = openMissionsOf(home);
+  if (open.length < 2) return [];
   const events: MissionConflictEvent[] = [];
   for (const link of createPeerLinkStore(home).list().filter(isLiveLink)) {
     const route = routeOf(link);

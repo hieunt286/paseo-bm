@@ -27,7 +27,7 @@ import { ToolsScreen, useToolsQueries } from "./tools-screen";
 import { InboxScreen, useInbox } from "./inbox";
 import { MISSIONS_QUERY_KEYS, MissionsScreen } from "./missions";
 import { insightsProjects } from "./insights-model";
-import { INBOX_POLL_MS, inboxTab } from "./inbox-model";
+import { inboxTab } from "./inbox-model";
 import { WorkScreen } from "./work";
 import { projectWorkspacesOf } from "./work-model";
 import {
@@ -70,6 +70,8 @@ interface WorkspaceRow {
   screenTitle: string;
 }
 
+/** How long the missions' names on the Inbox's mission cards stay fresh: a name changes seldom. */
+const MISSION_NAMES_STALE_MS = 60_000;
 /** One breath of the pulse: slow enough to read as "alive", not as an alarm. */
 const PULSE_MS = 900;
 /** The floor of the pulse, and the resting opacity of a dot with nothing to say. */
@@ -285,8 +287,8 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
 
   // Every project list leaves the plugin's own homes out (missions design §3.1).
   const projectWorkspaces = useMemo(() => projectWorkspacesOf(workspaces.data, stored.data, stored.isError), [workspaces.data, stored.data, stored.isError]);
-  // Settings and Tools name a project by its own name, as the mockup does (change-014).
-  const projectNames = useMemo(() => (projectWorkspaces ?? []).map((workspace) => ({ id: workspace.id, screenTitle: workspace.label })), [projectWorkspaces]);
+  // Missions, Settings and Tools name a project by its own name, as the mockup does (change-014, missions design §10.1).
+  const projectNames = useMemo(() => (projectWorkspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.label, screenTitle: workspace.label })), [projectWorkspaces]);
   // A project page opened from elsewhere (the Inbox, the Command Center) shows beside the Projects list:
   // each opening is one request to the list, numbered so the same project can be asked for again.
   const requestCount = useRef(0);
@@ -296,7 +298,8 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     [view, project?.id],
   );
   // The missions name the Inbox's mission cards (an `m:` card's workspace is its mission, missions design §4.1).
-  const missions = useQuery({ queryKey: MISSIONS_QUERY_KEYS.list, queryFn: () => listMissions({}), refetchInterval: view === "inbox" ? INBOX_POLL_MS : false });
+  // Names change seldom: read at most once a minute while the Inbox shows; the Missions screen polls the same entry itself.
+  const missions = useQuery({ queryKey: MISSIONS_QUERY_KEYS.list, queryFn: () => listMissions({}), staleTime: MISSION_NAMES_STALE_MS, refetchInterval: view === "inbox" ? MISSION_NAMES_STALE_MS : false });
   // A project's name for the Inbox: open workspaces first, then the history of closed ones, then the missions.
   const projectOf = useMemo(() => {
     const names = new Map<string, string>();
@@ -406,7 +409,7 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   if (view === "missions") {
     // Missions (missions design §10): the projects as Projects lists them, plugin homes left out.
     return framed(
-      <MissionsScreen {...props} projects={(projectWorkspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.label }))} status={status} />,
+      <MissionsScreen {...props} projects={projectNames} status={status} />,
     );
   }
 

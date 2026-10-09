@@ -534,7 +534,7 @@ function answerBudgetByPolicy(context: OpenContext, decision: Decision): Decisio
   const { home, log, workspaceId } = context;
   const grantCap = policyGrantCapAt(home, workspaceId, decision.requestId, log);
   const policy = currentPolicy(home, (why) => log(`[paseo-bm] could not read the autonomy policy; ${decision.id} waits: ${why}`));
-  if (decideRefusalOf(policy, decision, { optionKey: option.key, finishedUnverified: false, grantCap }) !== null) return null;
+  if (decideRefusalOf(policy, decision, { optionKey: option.key, grantCap }) !== null) return null;
   const reason = `Answered as it opened by your policy: ${decisionClassOf(decision)} is delegated in this project, and the grant is within what the policy may still grant this request (${grantCap} calls: the tier's budget, less its earlier grants)`;
   const mutation = context.store.transition(
     decision.id,

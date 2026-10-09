@@ -271,11 +271,6 @@ export const COORDINATION_KEYS: readonly CoordinationKey[] = [
   ...GOVERNOR_SETTINGS.map((name): GovernorKey => `governor.${name}`),
 ];
 
-/** True for a `governor.<name>` key. */
-export function isGovernorKey(key: unknown): key is GovernorKey {
-  return typeof key === "string" && key.startsWith("governor.") && (GOVERNOR_SETTINGS as readonly string[]).includes(key.slice("governor.".length));
-}
-
 /** The setting a `governor.<name>` key names. */
 export function governorSettingOf(key: GovernorKey): GovernorSetting {
   return key.slice("governor.".length) as GovernorSetting;

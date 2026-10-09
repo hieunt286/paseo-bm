@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearBindingCache } from "../plugin/server/agent-bindings";
 import { clearJsonFileCache } from "../plugin/server/data-files";
-import { createDecisionStore } from "../plugin/server/decision-store";
+import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { createGovernorStore } from "../plugin/server/governor-store";
 import { createMemoryStore } from "../plugin/server/memory-store";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
@@ -24,13 +24,16 @@ import {
 } from "../plugin/server/missions-rpc";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
 import { createOutbox } from "../plugin/server/outbox";
-import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
+import { clearLinksCache } from "../plugin/server/links";
+import { clearRequestRegistryCache } from "../plugin/server/request-registry";
+import { clearTraceStoreCache } from "../plugin/server/trace-store";
 import { mainTitleOf } from "../plugin/server/role-title";
 import { memoryListRpc, missionChangeRpc, missionGetRpc, missionsListRpc } from "../plugin/shared/contracts";
 import { answerDecision } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
+import { fakeCli } from "./helpers/fake-cli";
 
 /**
  * WP-302 (missions design §10.2, §10.4): the Missions screen's RPCs over a
@@ -50,20 +53,57 @@ const REQ2 = "req-20261009T091000Z";
 const REQ3 = "req-20261009T092000Z";
 const REQ_C = "req-20261009T093000Z";
 
+/**
+ * Every test runs in the same `root`, emptied after it; the fixture's data
+ * folder is built there once (`beforeAll`) and kept in `template`, and a test
+ * that asks for it gets a fresh copy at the same path, so every absolute path
+ * the stores keep still holds. Every read cache is dropped between tests.
+ */
 let root: string;
 let home: string;
-beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "bm-missions-rpc-"));
-  home = join(root, ".paseo-bm");
+let template: string;
+let built: Awaited<ReturnType<typeof buildFixture>>;
+
+function stubHome(): void {
   vi.stubEnv("HOME", root);
   vi.stubEnv("PASEO_BM_HOME", home);
-});
-afterEach(() => {
-  vi.unstubAllEnvs();
+}
+
+function clearCaches(): void {
   clearJsonFileCache();
   clearBindingCache();
   clearRequestIndexCache();
+  clearRequestRegistryCache();
+  clearDecisionStoreCache();
+  clearTraceStoreCache();
+  clearLinksCache();
+}
+
+function emptyRoot(): void {
   rmSync(root, { recursive: true, force: true });
+  mkdirSync(root);
+}
+
+beforeAll(async () => {
+  root = mkdtempSync(join(tmpdir(), "bm-missions-rpc-"));
+  home = join(root, ".paseo-bm");
+  template = mkdtempSync(join(tmpdir(), "bm-missions-rpc-template-"));
+  stubHome();
+  built = await buildFixture();
+  cpSync(home, template, { recursive: true });
+  vi.unstubAllEnvs();
+  clearCaches();
+  emptyRoot();
+});
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(template, { recursive: true, force: true });
+});
+beforeEach(stubHome);
+afterEach(() => {
+  vi.unstubAllEnvs();
+  clearCaches();
+  emptyRoot();
 });
 
 const manager = (id: string, extra: Partial<FakeAgent> = {}): FakeAgent => ({ id, provider: "bm-manager", workspaceId: "wks-own", labels: { "bm.role": "manager" }, ...extra });
@@ -92,12 +132,6 @@ function daemon() {
   });
 }
 
-function fakeCli() {
-  const calls: string[][] = [];
-  const cli: PaseoCliDeps = { find: () => "/bin/paseo", run: async (_file, args) => (calls.push(args), { code: 0, output: "", timedOut: false }) };
-  return { cli, calls };
-}
-
 function missionAt(minutesAgo: number, init: { code: string; name: string; repos: string[]; mainId: string | null }): Mission {
   const created = createMissionStore(home, { now: () => ago(minutesAgo) }).create({ ...init, goal: `${init.name} goal`, createdBy: "owner" });
   if (!created.ok) throw new Error(created.reasons.join("; "));
@@ -110,8 +144,8 @@ function update(missionId: string, change: (mission: Mission) => Mission): Missi
   return result.mission;
 }
 
-/** WEB (open, two repos, three requests), BILL (open, newer, level 4), OPS and OLD (closed). */
-async function fixture() {
+/** WEB (open, two repos, three requests), BILL (open, newer, level 4), OPS and OLD (closed). Run once, by `beforeAll`. */
+async function buildFixture() {
   const fake = daemon();
   await ensureMissionsHome(fake.paseo, { home });
   let web = missionAt(5 * DAY, { code: "WEB", name: "Website", repos: ["wks-a", "wks-b"], mainId: MAIN });
@@ -183,7 +217,15 @@ async function fixture() {
 
   const store = createMissionStore(home);
   for (let n = 1; n <= 55; n += 1) store.appendJournal(web.missionId, { kind: "note", by: "plugin", text: `line ${n}` });
-  return { fake, web: store.get(web.missionId)!, bill, ops, old };
+  return { web: store.get(web.missionId)!, bill, ops, old };
+}
+
+/** A fresh copy of the fixture's data folder at `home`, and a fresh fake Paseo that has opened the Missions home. */
+async function fixture() {
+  cpSync(template, home, { recursive: true });
+  const fake = daemon();
+  await ensureMissionsHome(fake.paseo, { home });
+  return { fake, ...structuredClone(built) };
 }
 
 const deps = (extra: Record<string, unknown> = {}) => ({ home, now: () => NOW, log: () => {}, ...extra });

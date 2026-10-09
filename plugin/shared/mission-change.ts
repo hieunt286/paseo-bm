@@ -15,9 +15,13 @@ import { z } from "zod";
  * `shared/`: Zod and plain values only.
  */
 
-/** The owner's short code (`server/mission-store.ts` `MISSION_CODE_PATTERN`). */
+/** The owner's short code, unique among open missions (`server/mission-store.ts` `MISSION_CODE_PATTERN`). */
 export const MISSION_CHANGE_CODE_PATTERN = /^[A-Z][A-Z0-9]{1,7}$/;
-const missionIdSchema = z.string().regex(/^mis-[0-9a-f]{10}$/);
+/** A mission id: `mis-` + 10 hex digits (`server/mission-store.ts` `MISSION_ID_PATTERN`). */
+export const MISSION_ID_PATTERN = /^mis-[0-9a-f]{10}$/;
+/** A done criterion's id. */
+export const CRITERION_ID_PATTERN = /^D\d{1,4}$/;
+const missionIdSchema = z.string().regex(MISSION_ID_PATTERN);
 
 const budgetValue = z.number().int().min(0).nullable();
 
@@ -37,7 +41,7 @@ export const missionChangeSchema = z.object({
   removeRepos: z.array(z.string().min(1)).max(20).optional(),
   /** A criterion's new text, or its status `dropped` (or `open` again, from `dropped`). */
   criteria: z
-    .array(z.object({ id: z.string().regex(/^D\d{1,4}$/), text: z.string().min(1).max(500).optional(), status: z.enum(["open", "dropped"]).optional() }))
+    .array(z.object({ id: z.string().regex(CRITERION_ID_PATTERN), text: z.string().min(1).max(500).optional(), status: z.enum(["open", "dropped"]).optional() }))
     .max(20)
     .optional(),
 });

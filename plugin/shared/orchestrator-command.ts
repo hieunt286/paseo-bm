@@ -44,8 +44,9 @@
  * `authority: coordination:handoff`, from the Orchestrator to a Manager,
  * `effects: none`, `approved: none`. Each needs the other, and the builder and
  * the reader refuse any other shape; the send refuses it while handoff is off
- * (`server/command-send.ts`). Only `bm_handoff` writes one: the intents the
- * Orchestrator declares itself are `DECLARED_COMMAND_INTENTS`.
+ * (`server/command-send.ts`). Only the plugin's handoff runner
+ * (`server/handoff.ts`) writes one: the intents the Orchestrator declares
+ * itself are `DECLARED_COMMAND_INTENTS`.
  *
  * A governor command (missions design §9.3, §9.4) is structural the same way:
  * `authority: governor:nudge | governor:replan | governor:arbitrate`, from the
@@ -109,7 +110,7 @@ export type CommandTo = (typeof COMMAND_TO)[number];
 
 /**
  * What the command is for (autonomy design §A.7). `handoff` is the plugin's
- * own (§G.6): only `bm_handoff` sends it, on `coordination:handoff`.
+ * own (§G.6): only its handoff runner sends it, on `coordination:handoff`.
  */
 export const COMMAND_INTENTS = ["answer", "continue", "redirect", "stop", "release", "handoff", "other"] as const;
 export type CommandIntent = (typeof COMMAND_INTENTS)[number];
@@ -119,7 +120,7 @@ export const HANDOFF_INTENT = "handoff" satisfies CommandIntent;
 
 /**
  * The intents a command of the Orchestrator's declares itself —
- * `bm_send_command`, `bm_direct_worker`, a prepared command: every intent but
+ * `bm_govern`, `bm_direct_worker`, a prepared command: every intent but
  * `handoff`. The same list as a prepared command's `intent` (`decisions.ts`).
  */
 export const DECLARED_COMMAND_INTENTS = COMMAND_INTENTS.filter((intent) => intent !== HANDOFF_INTENT) as readonly DeclaredCommandIntent[];
@@ -444,7 +445,7 @@ function handoffShapeProblems(command: {
 }): string[] {
   const onSwitch = command.authority === COORDINATION_HANDOFF_AUTHORITY;
   if (!onSwitch && command.intent !== HANDOFF_INTENT) return [];
-  if (!onSwitch) return [`intent ${HANDOFF_INTENT} goes only on authority ${COORDINATION_HANDOFF_AUTHORITY}: only bm_handoff sends a handoff`];
+  if (!onSwitch) return [`intent ${HANDOFF_INTENT} goes only on authority ${COORDINATION_HANDOFF_AUTHORITY}: only the plugin sends a handoff`];
   const problems: string[] = [];
   if (command.intent !== HANDOFF_INTENT) problems.push(`authority ${COORDINATION_HANDOFF_AUTHORITY} covers only intent ${HANDOFF_INTENT}`);
   if (command.from !== "orchestrator" || command.to !== "manager" || command.copy) problems.push(`a handoff goes from the Orchestrator to a Manager`);

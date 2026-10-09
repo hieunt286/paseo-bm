@@ -47,6 +47,7 @@ import { reviewBudgetOf, type CoordinationSettings, type GovernorSettings, type 
 import { isAnswerable, type Decision } from "../shared/decisions";
 import { isProcessDocumentPath, overReviewCeiling, reviewCeilingOf } from "../shared/orchestrator-rules";
 import { timeOrZero } from "../shared/time";
+import { GOVERNOR_FIGURES, MAX_FIGURE_DETAIL, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
 import { writtenFilesOf } from "../shared/writers-observed";
 import { createAlertStore } from "./alert-store";
 import { TRACES_DIR_NAME } from "./data-home";
@@ -59,53 +60,23 @@ import { createOutbox } from "./outbox";
 import { createPeerLinkStore, isLiveLink } from "./peer-links";
 import { createRequestRegistry } from "./request-registry";
 import { exemptCallsOf, grantedCallsOf } from "./review-tools";
+import { errorText } from "./rpc-kit";
 import { readRecords, readWorkspaceMeta, type TraceStoreLocation } from "./trace-store";
 
-export const GOVERNOR_FAMILIES = ["mess", "overengineering", "drift", "stuck", "budget"] as const;
-export type GovernorFamily = (typeof GOVERNOR_FAMILIES)[number];
-
-/** Every figure and its family, in the order of the design's table. */
-export const GOVERNOR_FIGURES = {
-  writersOnOneFile: "mess",
-  workersInOneRepo: "mess",
-  reAsks: "mess",
-  dropped: "mess",
-  processDocsPerCriterion: "overengineering",
-  beadsPerFinishedRequest: "overengineering",
-  tierRaised: "overengineering",
-  reviewBudgetExhausted: "overengineering",
-  openApprovals: "overengineering",
-  mainTurnsSinceCriterion: "drift",
-  finishedSinceCriterion: "drift",
-  outsideCharter: "drift",
-  stalled: "stuck",
-  unansweredLinks: "stuck",
-  oldCards: "stuck",
-  requestsBudget: "budget",
-  workersBudget: "budget",
-  reviewCallsBudget: "budget",
-  daysBudget: "budget",
-} as const satisfies Record<string, GovernorFamily>;
-export type GovernorFigureId = keyof typeof GOVERNOR_FIGURES;
+// The pure definitions live in `shared/governor-figures.ts`; read here too, as before.
+export {
+  GOVERNOR_FAMILIES,
+  GOVERNOR_FIGURES,
+  MAX_FIGURE_DETAIL,
+  familyFiguresOf,
+  figureText,
+  type GovernorFamily,
+  type GovernorFigure,
+  type GovernorFigureId,
+} from "../shared/governor-figures";
 
 /** The window of the writers and dropped figures (§9.2: file evidence over the last 24 h). */
 export const GOVERNOR_RECENT_MS = 24 * 3_600_000;
-
-/** Longest `detail` a figure keeps. */
-export const MAX_FIGURE_DETAIL = 200;
-
-/** One figure now. */
-export interface GovernorFigure {
-  family: GovernorFamily;
-  id: GovernorFigureId;
-  value: number;
-  threshold: number;
-  /** `>=`: crossed on reaching the threshold; `>`: on passing it. */
-  op: ">=" | ">";
-  crossed: boolean;
-  /** Which file, repo or request it is about, when that helps; else null. */
-  detail: string | null;
-}
 
 /** What the figures read of one request of the mission. */
 export interface GovernorRequestFacts {
@@ -201,7 +172,10 @@ function tierWasRaised(reports: TraceRecord["reports"]): boolean {
   return after.some((report) => TIER_RANK[report.tier] > TIER_RANK[base.tier]);
 }
 
-function messFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): GovernorFigure[] {
+/** The files each record of the snapshot wrote (`writtenFilesOf`), read once per record for every figure. */
+type WrittenFiles = ReadonlyMap<TraceRecord, readonly string[]>;
+
+function messFigures(snapshot: GovernorSnapshot, settings: GovernorSettings, written: WrittenFiles): GovernorFigure[] {
   const now = timeOrZero(snapshot.now);
   const live = new Map(snapshot.liveWorkers.map((worker) => [worker.agentId, worker.workspaceId]));
 
@@ -209,7 +183,7 @@ function messFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): Go
   const writers = new Map<string, Set<string>>();
   for (const record of snapshot.records) {
     if (!live.has(record.agentId) || now - timeOrZero(record.endedAt) > GOVERNOR_RECENT_MS) continue;
-    for (const file of writtenFilesOf(record, snapshot.directories[record.workspaceId] ?? null)) {
+    for (const file of written.get(record) ?? []) {
       const key = `${record.workspaceId}: ${file}`;
       writers.set(key, (writers.get(key) ?? new Set()).add(record.agentId));
     }
@@ -217,7 +191,7 @@ function messFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): Go
   const [file, onOneFile] = largest(new Map([...writers].map(([key, agents]) => [key, agents.size])));
 
   // Workers at work: a finished Worker left idle for its Main to reuse is no sprawl (the 2026-10-09 acceptance run).
-  const busy = new Set(snapshot.requests.filter((request) => request.rosterState !== "finished" && request.rosterState !== "stopped").flatMap((request) => request.workerIds));
+  const busy = new Set(snapshot.requests.filter((request) => request.rosterState === "active").flatMap((request) => request.workerIds));
   const perRepo = new Map<string, number>();
   for (const [agentId, workspaceId] of live) if (busy.has(agentId)) perRepo.set(workspaceId, (perRepo.get(workspaceId) ?? 0) + 1);
   const [repo, inOneRepo] = largest(perRepo);
@@ -243,10 +217,10 @@ function messFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): Go
   ];
 }
 
-function overengineeringFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): GovernorFigure[] {
+function overengineeringFigures(snapshot: GovernorSnapshot, settings: GovernorSettings, written: WrittenFiles): GovernorFigure[] {
   const documents = new Set<string>();
   for (const record of snapshot.records) {
-    for (const file of writtenFilesOf(record, snapshot.directories[record.workspaceId] ?? null)) {
+    for (const file of written.get(record) ?? []) {
       if (isProcessDocumentPath(file)) documents.add(`${record.workspaceId}: ${file}`);
     }
   }
@@ -265,7 +239,8 @@ function overengineeringFigures(snapshot: GovernorSnapshot, settings: GovernorSe
     // The next call would pass the ceiling: the review tools refuse it.
     return overReviewCeiling(request.reviewCalls + 1, request.reviewExempt, ceiling);
   }).length;
-  const approvals = snapshot.decisions.filter((decision) => isAnswerable(decision) && /^[qom]:/.test(decision.id)).length;
+  // The snapshot holds only q:/o: and m: decisions.
+  const approvals = snapshot.decisions.filter(isAnswerable).length;
 
   return [
     figure("processDocsPerCriterion", tenths(documents.size / Math.max(1, criteria)), settings.processDocsPerCriterion, ">"),
@@ -302,13 +277,9 @@ function driftFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): G
 function stuckFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): GovernorFigure[] {
   const now = timeOrZero(snapshot.now);
   const old = snapshot.decisions.filter((decision) => isAnswerable(decision) && now - timeOrZero(decision.askedAt) > settings.cardAgeHours * 3_600_000);
+  const count = (id: GovernorFigureId, subjects: readonly string[]) => figure(id, subjects.length, 1, ">=", subjects.length === 0 ? null : subjects.join(", "));
   const of = (kind: Alert["kind"]) => snapshot.alerts.filter((alert) => alert.kind === kind).map((alert) => alert.subject);
-  const listed = (subjects: readonly string[]) => (subjects.length === 0 ? null : subjects.join(", "));
-  return [
-    figure("stalled", of("request-stalled").length, 1, ">=", listed(of("request-stalled"))),
-    figure("unansweredLinks", of("peer-unanswered").length, 1, ">=", listed(of("peer-unanswered"))),
-    figure("oldCards", old.length, 1, ">=", listed(old.map((decision) => decision.id))),
-  ];
+  return [count("stalled", of("request-stalled")), count("unansweredLinks", of("peer-unanswered")), count("oldCards", old.map((decision) => decision.id))];
 }
 
 function budgetFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): GovernorFigure[] {
@@ -329,24 +300,14 @@ function budgetFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): 
 
 /** Every figure of the mission now, in the order of `GOVERNOR_FIGURES` (the budget ones only for its budget's fields). Pure. */
 export function governorFiguresOf(snapshot: GovernorSnapshot, settings: GovernorSettings): GovernorFigure[] {
+  const written: WrittenFiles = new Map(snapshot.records.map((record) => [record, writtenFilesOf(record, snapshot.directories[record.workspaceId] ?? null)]));
   return [
-    ...messFigures(snapshot, settings),
-    ...overengineeringFigures(snapshot, settings),
+    ...messFigures(snapshot, settings, written),
+    ...overengineeringFigures(snapshot, settings, written),
     ...driftFigures(snapshot, settings),
     ...stuckFigures(snapshot, settings),
     ...budgetFigures(snapshot, settings),
   ];
-}
-
-/** The figures of one family. Pure. */
-export function familyFiguresOf(figures: readonly GovernorFigure[], family: GovernorFamily): GovernorFigure[] {
-  return figures.filter((entry) => entry.family === family);
-}
-
-/** One figure in words: `writersOnOneFile 2 (threshold ≥ 2; repo-a: src/a.ts)`. Pure. */
-export function figureText(entry: Pick<GovernorFigure, "id" | "value" | "threshold" | "op" | "detail">): string {
-  const detail = entry.detail === null ? "" : `; ${entry.detail}`;
-  return `${entry.id} ${entry.value} (threshold ${entry.op === ">=" ? "≥" : ">"} ${entry.threshold}${detail})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +347,7 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
     try {
       return read();
     } catch (error) {
-      log(`[paseo-bm] the governor could not read ${what} of mission ${mission.code}: ${error instanceof Error ? error.message : String(error)}`);
+      log(`[paseo-bm] the governor could not read ${what} of mission ${mission.code}: ${errorText(error)}`);
       return fallback;
     }
   };
@@ -448,7 +409,7 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
 
   const repoOf = new Map(requests.map((request) => [request.requestId, request.workspaceId]));
   const alerts = quietly("the alerts", () => createAlertStore(home).list({ open: true, kinds: ["request-stalled", "peer-unanswered"] }), []).filter(
-    (alert) => repoOf.has(alert.subject) && repoOf.get(alert.subject) === alert.workspaceId,
+    (alert) => repoOf.get(alert.subject) === alert.workspaceId,
   );
   const links = quietly("the links", () => createPeerLinkStore(home).list(), [])
     .filter((link) => isLiveLink(link) && link.from.requestId !== null && requestIds.has(link.from.requestId))

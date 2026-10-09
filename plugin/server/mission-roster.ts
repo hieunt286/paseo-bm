@@ -23,7 +23,9 @@ import { z } from "zod";
 import { redactText } from "./collector";
 import { assertNoSymlink, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
 import { MISSIONS_DIR_NAME, MISSIONS_VERSION, MISSION_ID_PATTERN } from "./mission-store";
+import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { REQUEST_ID_PATTERN, createRequestRegistry } from "./request-registry";
+import { errorText } from "./rpc-kit";
 
 /** The longest topic: the Main's one-line label of a request. */
 export const MAX_ROSTER_TOPIC = 120;
@@ -150,8 +152,22 @@ export function noteRosterReport(home: string, requestId: string, phase: string,
     const state: RosterState = phase === "finished" || phase === "stopped" ? phase : "active";
     createMissionRoster(home).setState(place.missionId, requestId, state);
   } catch (error) {
-    log(`[paseo-bm] could not note the ${phase} report of request ${requestId} in its mission's roster: ${error instanceof Error ? error.message : String(error)}`);
+    log(`[paseo-bm] could not note the ${phase} report of request ${requestId} in its mission's roster: ${errorText(error)}`);
   }
+}
+
+/**
+ * The mission's requests whose Worker still runs (missions design §4): `active`
+ * in the roster, not finished in the registry, with an unarchived Worker
+ * Paseo lists. None without an active request (Paseo is not read then); none
+ * live when Paseo cannot be read.
+ */
+export async function runningRequestsOf(home: string, paseo: unknown, missionId: string): Promise<RosterEntry[]> {
+  const active = createMissionRoster(home).list(missionId).filter((entry) => entry.state === "active");
+  if (active.length === 0) return [];
+  const registry = createRequestRegistry(home);
+  const live = new Set((await bmAgentsOf(paseo as DashboardPaseo, { home })).filter(({ facts }) => facts.role === "worker" && !facts.archived).map(({ facts }) => facts.id));
+  return active.filter((entry) => (registry.get(entry.workspaceId, entry.requestId)?.finishedAt ?? null) === null && entry.workerIds.some((id) => live.has(id)));
 }
 
 export interface MissionRosterDeps {

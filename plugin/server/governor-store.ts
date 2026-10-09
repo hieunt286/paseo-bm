@@ -31,6 +31,9 @@
  *     journal line.
  * - **Journal lines** are kind `governor`, by `governor`, in the mission's
  *   journal (`mission-store.ts`); a nudge's names its command id as `ref`.
+ * - **The write** (`GovernorStore.update`) replaces only the families the file
+ *   still holds as the recomputation read them: a `bm_govern` step written
+ *   while a nudge was being delivered stands.
  *
  * The file rules are every store's (`data-files.ts`): `0700` folder created
  * only by a write, `0600` file replaced atomically, no symlink; a missing or
@@ -47,17 +50,8 @@ import { sendCommand } from "./command-send";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { createJsonFileStore } from "./data-files";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
-import {
-  GOVERNOR_FAMILIES,
-  GOVERNOR_FIGURES,
-  familyFiguresOf,
-  figureText,
-  governorFiguresOf,
-  readGovernorSnapshot,
-  type GovernorFamily,
-  type GovernorFigure,
-  type ListedAgent,
-} from "./governor-figures";
+import { GOVERNOR_FAMILIES, GOVERNOR_FIGURE_IDS, familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure } from "../shared/governor-figures";
+import { governorFiguresOf, readGovernorSnapshot, type ListedAgent } from "./governor-figures";
 import { interventionOfGovern, recordIntervention } from "./intervention-store";
 import { requestIndexOf } from "./mission-roster";
 import { createMissionStore, type Mission } from "./mission-store";
@@ -74,21 +68,16 @@ export const NUDGE_RETRY_MS = 10 * 60_000;
 
 /** What the ladder last did for a family; `replan` and `arbitrate` are the model's `bm_govern` (`command-authority.ts`). */
 export const LADDER_ACTIONS = ["record", "nudge", "nudge-failed", "replan-due", "reset", "replan", "arbitrate"] as const;
-export type LadderActionKind = (typeof LADDER_ACTIONS)[number];
 
-// Lazy: this module and `governor-figures.ts` sit on an import cycle (through `review-tools.ts` and the
-// Orchestrator's tools, `command-authority.ts`), so the figures' constants are read at the first parse, not at load.
-const figureSchema = z.lazy(() =>
-  z.object({
-    family: z.enum(GOVERNOR_FAMILIES),
-    id: z.enum(Object.keys(GOVERNOR_FIGURES) as [keyof typeof GOVERNOR_FIGURES, ...Array<keyof typeof GOVERNOR_FIGURES>]),
-    value: z.number(),
-    threshold: z.number(),
-    op: z.enum([">=", ">"]),
-    crossed: z.boolean(),
-    detail: z.string().nullable(),
-  }),
-);
+const figureSchema = z.object({
+  family: z.enum(GOVERNOR_FAMILIES),
+  id: z.enum(GOVERNOR_FIGURE_IDS),
+  value: z.number(),
+  threshold: z.number(),
+  op: z.enum([">=", ">"]),
+  crossed: z.boolean(),
+  detail: z.string().nullable(),
+});
 
 const familyStateSchema = z.object({
   step: z.number().int().min(0).max(4),
@@ -136,6 +125,13 @@ export interface GovernorStore {
   list(): Record<string, MissionLadder>;
   /** Replaces one mission's ladder. Throws when the file cannot be written. */
   put(missionId: string, ladder: MissionLadder): void;
+  /**
+   * Replaces one mission's ladder with what `change` makes of it as the file
+   * holds it now, read inside the write (no await between): a ladder written
+   * meanwhile is never lost. Returns the ladder written. Throws when the file
+   * cannot be written.
+   */
+  update(missionId: string, change: (current: MissionLadder) => MissionLadder): MissionLadder;
 }
 
 /** The ladder store of the data folder `home`. Creating it touches nothing on disk. */
@@ -162,6 +158,14 @@ export function createGovernorStore(home: string): GovernorStore {
     list,
     put(missionId, ladder) {
       file.update((current) => ({ missions: { ...current.missions, [missionId]: ladder } }));
+    },
+    update(missionId, change) {
+      let next: MissionLadder = {};
+      file.update((current) => {
+        next = change(current.missions[missionId] ?? {});
+        return { missions: { ...current.missions, [missionId]: next } };
+      });
+      return next;
     },
   };
 }
@@ -284,7 +288,7 @@ export function nudgeCommandOf(mission: Pick<Mission, "code" | "charter">, famil
 // The runner.
 // ---------------------------------------------------------------------------
 
-/** The SDK slice the governor uses: the agent list, and the notice queue's refresh and send. */
+/** The SDK slice the governor uses: the agent list (the nudge goes through the notice queue, `GovernorDeps.queue`). */
 export type GovernorPaseo = Pick<OrchestratorStatePaseo, "agents">;
 
 export interface GovernorDeps extends DataHomeDeps {
@@ -381,8 +385,6 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
               targetId: mission.mainId,
               missionId: mission.missionId,
               copyTo: null,
-              grantOf: null,
-              approved: [],
               // Code wrote the text: it declares no effect and asks for none.
               backstop: false,
               loopGuard: "refuse",
@@ -410,7 +412,12 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
     }
     if (JSON.stringify(ladder) !== JSON.stringify(before)) {
       try {
-        store.put(mission.missionId, ladder);
+        // The nudge awaited its delivery: a family `bm_govern` wrote meanwhile keeps that write (§9.4).
+        store.update(mission.missionId, (current) => {
+          const merged: MissionLadder = { ...current };
+          for (const family of GOVERNOR_FAMILIES) if (JSON.stringify(current[family]) === JSON.stringify(before[family])) merged[family] = ladder[family];
+          return merged;
+        });
       } catch (error) {
         log(`[paseo-bm] the governor could not write the ladder of mission ${mission.code}: ${errorText(error)}`);
       }
@@ -438,7 +445,7 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
   const missionOfTurn = (home: string, record: Pick<TraceRecord, "agentId" | "requestId">): string | null => {
     const place = record.requestId === null ? null : requestIndexOf(home, record.requestId);
     if (place !== null) return place.missionId;
-    return createMissionStore(home).list().find((entry) => entry.state === "open" && entry.mainId === record.agentId)?.missionId ?? null;
+    return createMissionStore(home).openByMain(record.agentId)?.missionId ?? null;
   };
 
   return {

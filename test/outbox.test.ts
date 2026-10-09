@@ -13,6 +13,7 @@ import {
   deliverRecord,
   deliveryTextOf,
   dropsCovered,
+  mainTargetOf,
   newestReportRecordOf,
   reportPhaseOf,
   storeAndDeliver,
@@ -28,6 +29,7 @@ import {
   type RegisteredRequest,
 } from "../plugin/server/request-registry";
 import { REDACTED } from "../plugin/server/collector";
+import { createMissionStore } from "../plugin/server/mission-store";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
 import { NO_VERDICT_SENTENCE, OUTBOX_RECORD_ID_PATTERN, isPluginNotice, parseDelivery } from "../plugin/shared/notices";
 import { originOf } from "../plugin/shared/message-origin";
@@ -519,6 +521,22 @@ describe("readers", () => {
     const later = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: block("received") });
     expect(newestReportRecordOf(home, WS, "wrk-1")?.id).toBe(later.id);
     expect(reportPhaseOf("no phase here")).toBeNull();
+  });
+});
+
+describe("records addressed to a Main (missions design §3.4)", () => {
+  it("a record tellMain stored under an m: card or the mission id goes to the mission's current Main", () => {
+    const home = dataFolder();
+    const missions = createMissionStore(home, { now: () => T0, newId: () => "mis-00000000a1" });
+    const created = missions.create({ code: "WEB", name: "Website", goal: "", repos: [WS], createdBy: "owner", mainId: "main-old" });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+    missions.setMain("mis-00000000a1", "main-new", "replaced");
+    expect(mainTargetOf(home, "wks_home", { requestId: "m:mis-00000000a1:3", to: "main-old" })).toEqual({ to: "main-new", hold: true });
+    expect(mainTargetOf(home, "wks_home", { requestId: "mis-00000000a1", to: "main-old" })).toEqual({ to: "main-new", hold: true });
+    // Never a record to an agent that was not the mission's Main, nor one naming no mission.
+    expect(mainTargetOf(home, "wks_home", { requestId: "m:mis-00000000a1:3", to: "wrk-1" })).toBeNull();
+    expect(mainTargetOf(home, "wks_home", { requestId: "m:mis-ffffffffff:1", to: "main-old" })).toBeNull();
+    expect(mainTargetOf(home, "wks_home", { requestId: "m:not-a-mission:1", to: "main-old" })).toBeNull();
   });
 });
 

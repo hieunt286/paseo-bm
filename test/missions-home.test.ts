@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { clearBindingCache, createBindingStore, type AgentBinder, type BindingRequest } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import { clearJsonFileCache } from "../plugin/server/data-files";
-import { findMain, type ManagerAgentProfile } from "../plugin/server/manager";
+import { findMain } from "../plugin/server/manager";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { createMissionStore } from "../plugin/server/mission-store";
 import {
@@ -25,12 +25,12 @@ import {
   syncMainTitle,
   type MissionsPaseo,
 } from "../plugin/server/missions-home";
-import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { registerRoleHook, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { currentInstructions, runtimeFactsText } from "../plugin/server/role-instructions";
 import { createTitleMarker, mainTitleOf, replacedMainTitleOf } from "../plugin/server/role-title";
-import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
+import { fakeCli } from "./helpers/fake-cli";
+import { roleAliases, roleProfiles } from "./helpers/roles";
 
 /**
  * WP-103 (missions design §3.1–§3.3, §3.5): the Missions home, its Mains,
@@ -57,19 +57,6 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const roleAliases = (): Record<string, unknown> => ({
-  "bm-manager": { extends: "codex", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
-  "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
-  "bm-reviewer": { extends: "codex", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
-  "bm-orchestrator": { extends: "codex", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
-});
-const profiles = (): ManagerAgentProfile[] => [
-  { id: "bm-manager", provider: "bm-manager", model: "gpt-5.6-sol" },
-  { id: "bm-worker", provider: "bm-worker", model: "gpt-5.6-sol" },
-  { id: "bm-reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" },
-  { id: "bm-orchestrator", provider: "bm-orchestrator", model: "gpt-5.6-sol" },
-];
-
 function daemon(agents: FakeAgent[] = []) {
   return fakePaseo<MissionsPaseo>({
     agents,
@@ -78,15 +65,9 @@ function daemon(agents: FakeAgent[] = []) {
       { id: "wks-b", directory: "/repo/web" },
       { id: "wks-gone", directory: "/repo/gone", archivedAt: "2026-10-01T00:00:00.000Z" },
     ],
-    config: { providers: roleAliases(), agentProfiles: profiles() },
+    config: { providers: roleAliases(), agentProfiles: roleProfiles() },
     omit: ["providers"],
   });
-}
-
-function fakeCli(code = 0) {
-  const calls: string[][] = [];
-  const cli: PaseoCliDeps = { find: () => "/bin/paseo", run: async (_file, args) => (calls.push(args), { code, output: "", timedOut: false }) };
-  return { cli, calls };
 }
 
 /** A binder that records what it was asked to bind and binds nothing. */
@@ -226,6 +207,16 @@ describe("missions.create (§3.3)", () => {
     await handleMissionsCreate({ name: "Website", code: "WEB" }, fake.paseo, deps);
     await expect(handleMissionsCreate({ name: "Other", code: "WEB" }, fake.paseo, deps)).rejects.toThrow(/^E_MISSION_INVALID: code WEB is taken/);
     expect(fake.creates).toHaveLength(1);
+  });
+
+  it("refuses a taken code before any write: no role set up, no home opened", async () => {
+    createMissionStore(home).create({ code: "WEB", name: "Website", goal: "", repos: [], createdBy: "owner" });
+    const fake = daemon();
+    await expect(handleMissionsCreate({ name: "Other", code: "WEB" }, fake.paseo, { home, readInstructions })).rejects.toThrow(/^E_MISSION_INVALID: code WEB is taken/);
+    expect(fake.api.workspaces.open).not.toHaveBeenCalled();
+    expect(fake.api.config.patch).not.toHaveBeenCalled();
+    expect(existsSync(missionsHomeDirOf(home))).toBe(false);
+    expect(fake.creates).toEqual([]);
   });
 });
 
@@ -373,6 +364,49 @@ describe("a cleared conversation's successor (§3.3)", () => {
       ["agent", "update", "main-old", "--label", "bm.replacedBy=new-1", "--json"],
       ["agent", "update", "main-old", "--name", "🟣 M · WEB Website · replaced", "--json"],
     ]);
+  });
+});
+
+describe("a cleared conversation's successor, both ways (§3.3)", () => {
+  const MISSION = "mis-0123456789";
+  let clock: number;
+  const now = () => new Date(clock);
+
+  async function setup() {
+    clock = Date.parse("2026-10-09T10:00:00.000Z");
+    await ensureMissionsHome(daemon().paseo, { home });
+    createMissionStore(home, { newId: () => MISSION }).create({ code: "WEB", name: "Website", goal: "", repos: [], createdBy: "owner", mainId: "main-old" });
+    const { cli, calls } = fakeCli();
+    const succession = createMainSuccession({ home, now, cli, bindings: () => createBindingStore(home), log: () => {} });
+    const paseoWith = (labels: Record<string, string> = {}) => ({ agents: { ref: () => ({ refresh: async () => ({ agent: { labels } }) }) } });
+    return { succession, calls, paseoWith };
+  }
+  const candidate = (id: string) => ({ id, provider: "bm-manager", workspaceId: "wks-own" });
+
+  it("a successor carrying the mission's labels, reported before the archive, is claimed at the archive, before an unlabelled one", async () => {
+    const { succession, calls, paseoWith } = await setup();
+    expect(await succession.agentCreated(candidate("new-1"), paseoWith())).toBeNull();
+    expect(await succession.agentCreated(candidate("new-2"), paseoWith({ "bm.missionId": MISSION, "bm.version": "0.5.5" }))).toBeNull();
+    clock += 10_000;
+    expect(await succession.mainArchived("main-old")).toBe(MISSION);
+    expect(createMissionStore(home).get(MISSION)!.mainId).toBe("new-2");
+    // Labelled already: only titled, then the old Main marked and retitled.
+    expect(calls[0]).toEqual(["agent", "update", "new-2", "--name", "🟣 M · WEB Website", "--json"]);
+    expect(calls.some((args) => args.includes("new-1"))).toBe(false);
+  });
+
+  it("never claims an agent that is the Main of another open mission, whichever event comes first", async () => {
+    const { succession, calls, paseoWith } = await setup();
+    createMissionStore(home).create({ code: "OPS", name: "Ops", goal: "", repos: [], createdBy: "owner", mainId: "main-ops" });
+    expect(await succession.agentCreated(candidate("main-ops"), paseoWith())).toBeNull();
+    expect(await succession.mainArchived("main-old")).toBeNull();
+    expect(await succession.agentCreated(candidate("main-ops"), paseoWith())).toBeNull();
+    expect(createMissionStore(home).get(MISSION)!.mainId).toBe("main-old");
+    expect(createMissionStore(home).byCode("OPS")!.mainId).toBe("main-ops");
+    expect(calls).toEqual([]);
+    // The mission still awaits a successor: a fresh agent within the window is claimed.
+    clock += 10_000;
+    expect(await succession.agentCreated(candidate("new-1"), paseoWith())).toBe(MISSION);
   });
 });
 

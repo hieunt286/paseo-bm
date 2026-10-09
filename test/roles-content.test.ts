@@ -786,11 +786,14 @@ describe("orchestrator.md — the governor: reads the figures and the charter, a
     keys(O, "mission.review: read against the charter, then govern, ask or note", "`mission.review`", "against its charter", "`bm_govern`", "`bm_ask_owner`", "`bm_note`");
     // §9.1: bm_direct_worker is narrowed to a stop, on a danger signal or the governor's stop step, evidence first.
     keys(O, "reads a danger signal's evidence first", "`danger`", "read its evidence first");
-    keys(O, "stops a Worker only on danger or a governor stop step, after its evidence, unless the owner asked for it", "`bm_direct_worker` only on a `danger` signal or a governor", "stop step", "after reading its evidence", "unless the owner asked for it");
+    keys(O, "stops a Worker only on danger or a governor stop step, after its evidence, unless the owner asked for it", "read its evidence first", "Only a stop goes to a Worker", "`bm_direct_worker` only on a `danger` signal or a governor", "stop step", "unless the owner asked for it");
+    // Review R1: the stop is taught once, in the danger line.
+    expect(O.match(/Only a stop goes to a Worker/gi)).toHaveLength(1);
     const danger = eventLineOf({ type: "worker.signal", workspaceId: "w", workerId: "x", requestKey: "r", signal: "danger", since: "t", interruptUntil: "t2" } as BmEvent);
     expect(danger).toContain("You may interrupt this Worker until t2 (bm_direct_worker with interrupt: true).");
     expect(orchestratorFace("bm_direct_worker").description).toContain("only while a danger signal of that Worker is open or a family of its mission stands at step 4");
-    // §9.6: a split runs on the mission's split level, else it is the owner's card.
+    // §9.6: a split runs on the mission's split level, else it is the owner's card — taught once, in the mission.split line (review R2).
+    expect(O.match(/`split` level delegated/g)).toHaveLength(1);
     keys(O, "splits a mission holding two goals with bm_create_main, by its split level, else the owner's card", "two goals", "`bm_create_main`", "`split` level delegated", "owner's card");
     // §9.6: a Main's suggestion, on the owner's yes: read it, split when truly another goal in a free area, else tell the Main why.
     keys(O, "mission.split: read it, bm_create_main for truly another goal in a free area, else bm_govern the Main with why", "`mission.split`", "`bm_missions`", "truly another goal", "area free", "`bm_create_main`", "its fields", "Main why", "`bm_govern`");
@@ -895,7 +898,10 @@ describe("missions — the Main's file and the Worker's side (missions design §
     // §9.6: work outside the goal is asked as a new mission; on the owner's yes the governor gets it, never the owner a chore.
     keys(M, "new work outside the goal: ask if it is a new mission; on yes bm_split_mission; the governor creates it, not the owner", "outside its goal", "ask the owner", "new mission", "on yes", "`bm_split_mission`", "governor creates it, not the owner");
     expect(M).not.toMatch(/create (it|the mission) (yourself|themselves)|in a new chat/);
-    keys(M, "reads repos with bm_repo and curates memory with bm_memory", "`bm_repo`", "`bm_memory`", "with its source", "remove what no longer holds");
+    keys(M, "reads a file and git with bm_repo", "a file, git (`bm_repo`)");
+    keys(M, "curates the repos' memory with bm_memory", "memory with `bm_memory`", "with its source", "remove what no longer holds");
+    // Review R6: bm_repo is taught once.
+    expect(M.match(/`bm_repo`/g)).toHaveLength(1);
   });
 
   it("gives work to Workers in the right repo, re-using the one on an area, splitting as staffing allows", () => {

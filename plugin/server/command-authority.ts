@@ -30,7 +30,7 @@
  *   request is refused (`refuseStoredAnswers`).
  * - Both pass the backstop (`undeclaredCategoriesOf` over `re:` and the body:
  *   a category of the big-decision gate refuses, autonomy design §B.8). A
- *   refusal sends, records and spends nothing.
+ *   refusal sends and records nothing.
  * - A delivered command that answers an event of its wake or the owner's
  *   word in the chat is logged as a coordination intervention, with its
  *   command id (autonomy design §G.3, `command-send.ts`); a `bm_govern` step
@@ -50,11 +50,12 @@ import { copyRecipientOf, sendCommand, type CommandSendResult } from "./command-
 import { readCoordinationSettings } from "./coordination-rpc";
 import { answerBlockOf } from "./decision-materialiser";
 import { createDecisionStore } from "./decision-store";
-import { GOVERNOR_FAMILIES, GOVERNOR_FIGURES, figureText, governorFiguresOf, readGovernorSnapshot, type GovernorFigureId } from "./governor-figures";
+import { GOVERNOR_FAMILIES, GOVERNOR_FIGURES, figureText, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
+import { governorFiguresOf, readGovernorSnapshot } from "./governor-figures";
 import { createGovernorStore, type MissionLadder } from "./governor-store";
 import { interventionOfGovern, recordIntervention } from "./intervention-store";
 import { readTimelinePages } from "./live-timeline";
-import { createMissionStore } from "./mission-store";
+import { createMissionStore, type Mission } from "./mission-store";
 import { missionsHomeIdOf } from "./missions-home";
 import type { NoticePaseo, NoticeQueue } from "./notice-queue";
 import { isOwnerWord } from "./orchestrator-agent";
@@ -150,11 +151,9 @@ export function notDelegatedRefusalOf(classes: readonly DecisionClass[], refusal
   return `${named} ${classes.length < 2 ? "is" : "are"} not delegated in this project and ${refusal}`;
 }
 
-/** What `stopAuthorityOf` found: on whose authority the command leaves (always `via: chat`). A stop approves no effect and spends no grant. */
+/** What `stopAuthorityOf` found: on whose authority the command leaves (always `via: chat`). A stop approves no effect and spends no grant (ADR-031). */
 interface CommandAuthorityOf {
   authority: CommandAuthority;
-  approved: Effect[];
-  grantOf: string | null;
 }
 
 /**
@@ -192,14 +191,14 @@ function answeredDecisionOf(decisionId: string, workspaceId: string, requestId: 
 async function stopAuthorityOf(input: { workspaceId: string; requestId: string | null; decisionId?: string }, context: ToolContext): Promise<CommandAuthorityOf> {
   if (input.decisionId !== undefined) {
     answeredDecisionOf(input.decisionId, input.workspaceId, input.requestId, context);
-    return { authority: decisionAuthorityOf(input.decisionId), approved: [], grantOf: null };
+    return { authority: decisionAuthorityOf(input.decisionId) };
   }
   // Read at each send, so a cell set back meanwhile refuses the command.
   if (modeOf(currentPolicy(context.home), input.workspaceId, DEFAULT_DECISION_CLASS) === "delegate") {
-    return { authority: policyAuthorityOf(DEFAULT_DECISION_CLASS), approved: [], grantOf: null };
+    return { authority: policyAuthorityOf(DEFAULT_DECISION_CLASS) };
   }
   if (!(await ownerJustSpoke(context))) refuse(notDelegatedRefusalOf([DEFAULT_DECISION_CLASS], DIRECT_REFUSED_MESSAGE));
-  return { authority: "owner", approved: [], grantOf: null };
+  return { authority: "owner" };
 }
 
 /** Why a command's `BM-ANSWERS` line for this stored Worker question is refused (change-004). */
@@ -328,8 +327,6 @@ async function sendOwnCommand(
     targetId: target.targetId,
     ...(target.missionId === undefined ? {} : { missionId: target.missionId }),
     copyTo: target.copyTo,
-    grantOf: granted.grantOf,
-    approved: granted.approved,
     backstop: true,
     ...(target.backstopText === undefined ? {} : { backstopText: target.backstopText }),
     loopGuard: "refuse",
@@ -384,18 +381,34 @@ export function governedLadderOf(ladder: MissionLadder, step: GovernorStep, figu
   return next;
 }
 
+/** A governor command delivered (`governSend`), or the tool's refusal of its input. */
+export type GovernSent =
+  | {
+      ok: true;
+      /** The command's id; `unrecorded` says why the commands store does not hold it, else null. */
+      id: string;
+      outcome: "sent" | "queued";
+      unrecorded: string | null;
+      mission: Mission;
+      /** The figures it named, as sent. */
+      figures: GovernorFigure[];
+    }
+  | { ok: false; text: string };
+
 /**
- * `bm_govern` (missions design §9.4): a `BM-COMMAND` to the mission's
- * current Main — `from: orchestrator`, `authority: governor:<step>`,
+ * A governor command to the mission's current Main (`bm_govern`, and
+ * `bm_arbitrate`'s two): `from: orchestrator`, `authority: governor:<step>`,
  * `effects: none`, `re: Governor: <step>, mission <code>` — its text, then the
- * figures it names (read now, with their thresholds). The send checks the
- * target (the current Main of an open mission), the backstop and the loop
- * guard per mission. Once delivered: a `governor` journal line by
- * `orchestrator`, its command id as `ref`, and the ladder's `lastAction`
- * (`governedLadderOf`); a journal or ladder that cannot be written is one log
- * line, the command stands.
+ * figures it names (read now, with their thresholds; the snapshot is read
+ * only for named figures or a nudge, whose window counts the Main's turns).
+ * The send checks the target (the current Main of an open mission), the
+ * backstop and the loop guard per mission. Once delivered: a `governor`
+ * journal line by `orchestrator`, its command id as `ref`, the ladder's
+ * `lastAction` (`governedLadderOf`, read and written in one update) and the
+ * `govern` intervention; a journal or ladder that cannot be written is one log
+ * line, the command stands. Throws a `Refusal` for a refused send.
  */
-export async function bmGovern(input: GovernInput, context: ToolContext, deps: CommandToolDeps): Promise<ServerToolResult> {
+export async function governSend(input: GovernInput, context: ToolContext, deps: CommandToolDeps): Promise<GovernSent> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const missions = createMissionStore(context.home);
   const mission = missions.get(input.missionId);
@@ -404,9 +417,13 @@ export async function bmGovern(input: GovernInput, context: ToolContext, deps: C
   const unknown = (input.figures ?? []).filter((id) => !known.includes(id));
   if (unknown.length > 0) return fixThese("bm_govern", unknown.map((id) => `input.figures: ${id} is not a figure; the figures are ${known.join(", ")}`));
   const named = [...new Set(input.figures ?? [])] as GovernorFigureId[];
-  const settings = readCoordinationSettings({ home: context.home, log });
-  const snapshot = readGovernorSnapshot(context.home, mission, { now: context.now, agents: await bmAgentsOf(context.paseo), settings, log });
-  const figures = governorFiguresOf(snapshot, settings.governor).filter((entry) => named.includes(entry.id));
+  let snapshot: ReturnType<typeof readGovernorSnapshot> | null = null;
+  let figures: GovernorFigure[] = [];
+  if (named.length > 0 || input.step === "nudge") {
+    const settings = readCoordinationSettings({ home: context.home, log });
+    snapshot = readGovernorSnapshot(context.home, mission, { now: context.now, agents: await bmAgentsOf(context.paseo), settings, log });
+    figures = governorFiguresOf(snapshot, settings.governor).filter((entry) => named.includes(entry.id));
+  }
   const body = [input.text.trim(), ...(figures.length === 0 ? [] : ["", "Figures:", ...figures.map((entry) => `- ${figureText(entry)}`)])].join("\n");
   if (body.length > MAX_COMMAND_BODY_CHARS) {
     return fixThese("bm_govern", [`input.text: with the figures' lines (${body.length - input.text.trim().length} characters) it must be at most ${MAX_COMMAND_BODY_CHARS - (body.length - input.text.trim().length)} characters`]);
@@ -437,7 +454,7 @@ export async function bmGovern(input: GovernInput, context: ToolContext, deps: C
       // The backstop reads the Orchestrator's words, not the mission's code in re: nor the figures' lines.
       backstopText: input.ownWords ?? input.text,
     },
-    { authority: command.authority!, approved: [], grantOf: null },
+    { authority: command.authority! },
     context,
     deps,
   );
@@ -449,10 +466,9 @@ export async function bmGovern(input: GovernInput, context: ToolContext, deps: C
   // The families the step concerns: those whose last action it now is.
   let families: string[] = [];
   try {
-    const ladder = createGovernorStore(context.home);
-    const next = governedLadderOf(ladder.ladder(mission.missionId), input.step, named, { at: context.now.toISOString(), id: sent.id, mainTurns: snapshot.mainTurnEnds.length });
+    const action = { at: context.now.toISOString(), id: sent.id, mainTurns: snapshot?.mainTurnEnds.length ?? 0 };
+    const next = createGovernorStore(context.home).update(mission.missionId, (current) => governedLadderOf(current, input.step, named, action));
     families = GOVERNOR_FAMILIES.filter((family) => next[family]?.lastAction?.id === sent.id);
-    ladder.put(mission.missionId, next);
   } catch (error) {
     log(`[paseo-bm] bm_govern could not write the ladder of mission ${mission.code}: ${errorText(error)}`);
   }
@@ -462,12 +478,20 @@ export async function bmGovern(input: GovernInput, context: ToolContext, deps: C
     interventionOfGovern({ workspaceId, missionId: mission.missionId, mainId: mission.mainId, step: input.step, families, commandId: sent.id }),
     { now: () => context.now, log },
   );
+  return { ok: true, id: sent.id, outcome: sent.outcome, unrecorded: sent.unrecorded, mission, figures };
+}
+
+/** `bm_govern` (missions design §9.4): `governSend`, and what it did in words. */
+export async function bmGovern(input: GovernInput, context: ToolContext, deps: CommandToolDeps): Promise<ServerToolResult> {
+  const sent = await governSend(input, context, deps);
+  if (!sent.ok) return sent;
+  const { mission } = sent;
   const said =
     sent.outcome === "sent"
       ? `Sent to ${mission.mainId}, the Main of mission ${mission.code}, as a BM-COMMAND on governor:${input.step}.`
       : `Queued: the Main of mission ${mission.code} gets it, as a BM-COMMAND on governor:${input.step}, when its current turn ends.`;
   if (sent.unrecorded !== null) return { ok: true, text: unrecordedText(said, sent.unrecorded) };
-  return { ok: true, text: `${said}\n${json({ commandId: sent.id, outcome: sent.outcome, missionId: mission.missionId, mainId: mission.mainId, figures: figures.map(figureText) })}` };
+  return { ok: true, text: `${said}\n${json({ commandId: sent.id, outcome: sent.outcome, missionId: mission.missionId, mainId: mission.mainId, figures: sent.figures.map(figureText) })}` };
 }
 
 export interface DirectInput {
@@ -490,18 +514,13 @@ function stopFamiliesOf(home: string, missionId: string | null): string[] {
   return GOVERNOR_FAMILIES.filter((family) => (ladder[family]?.step ?? 0) >= GOVERNOR_STOP_STEP);
 }
 
-/** True while a family of the mission stands at the governor's stop step (missions design §9.3). Reads only; never throws. */
-export function governorStopOpen(home: string, missionId: string | null): boolean {
-  return stopFamiliesOf(home, missionId).length > 0;
-}
-
 /**
  * `bm_direct_worker` (design §6B.4, ADR-016 decision 2; missions design
  * §9.1): stops a non-archived paseo-bm Worker of the project at once — never
  * a Reviewer — replacing its running turn with a `BM-COMMAND to: worker`,
  * `intent: stop`, no effect. Refused unless `interrupt: true`, and unless a
  * danger signal of that Worker is open (`isDangerOpen`) or a family of its
- * request's mission stands at the governor's stop step (`governorStopOpen`).
+ * request's mission stands at the governor's stop step (`stopFamiliesOf`).
  * Its authority is `stopAuthorityOf`'s; the pipeline checks the block, the
  * backstop and the loop guard. Once the Worker has it, its Main (else its
  * Manager, `copyRecipientOf`) gets the same block with `copy: yes` through
@@ -589,7 +608,7 @@ export async function bmDirectWorker(input: DirectInput, context: ToolContext, d
       managerId: manager?.id ?? null,
       copy: sent.copy,
       authority: granted.authority,
-      approved: granted.approved,
+      approved: [],
     })}`,
   };
 }

@@ -32,7 +32,6 @@
  * carried text is masked with `redactText` (the outbox and the link store
  * mask what they keep). Nothing here throws into the endpoint.
  */
-import { basename } from "node:path";
 import { createBindingStore, liveBindingOf, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { createAlertStore } from "./alert-store";
 import { soleWorkerOfRequest } from "./decision-delivery";
@@ -43,7 +42,7 @@ import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff, createFromProfile, findLiv
 import type { NoticeQueue } from "./notice-queue";
 import { createOutbox, storeAndDeliver, usePeerTargets, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import { unboundManagerAlertOf } from "./outdated-agents";
-import { bmAgentsOf, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { bmAgentsOf, listedWorkspaces, titleIn, type DashboardPaseo } from "./paseo-directory";
 import { isPluginHomeIn } from "./plugin-homes";
 import {
   PEER_RULES,
@@ -61,7 +60,7 @@ import {
 } from "./peer-links";
 import { createRequestRegistry } from "./request-registry";
 import { requestIndexOf, createMissionRoster } from "./mission-roster";
-import { createMissionStore, type Mission } from "./mission-store";
+import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { missionOfMain } from "./mission-tools";
 import { reasonOf } from "./role-choices";
 import { currentInstructions } from "./role-instructions";
@@ -172,11 +171,8 @@ export function peerBriefOf(link: Pick<PeerLink, "linkId" | "from" | "text">, ti
   return [`peer: ${link.linkId} from ${projectOf(title, link.from.workspaceId)}, request ${link.from.requestId}`, "peerAsk:", quoted(link.text), "", ...PEER_RULES];
 }
 
-/** A project's title: the last part of its folder, else its workspace id. */
-export function titleIn(listed: readonly ListedWorkspace[] | null, workspaceId: string): string {
-  const directory = listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
-  return directory === null ? workspaceId : basename(directory);
-}
+/** A project's title (`paseo-directory.ts`), where the delivery texts' callers have always found it. */
+export { titleIn };
 
 // ---------------------------------------------------------------------------
 // Who receives (§7.17.4).
@@ -193,14 +189,23 @@ async function liveAgentsOf(paseo: unknown, home: string): Promise<Awaited<Retur
 const newestManagerOf = async (paseo: unknown, workspaceId: string, home: string): Promise<string | null> =>
   (await findLiveManagers(paseo as ManagerPaseo, workspaceId, { home }))[0]?.id ?? null;
 
-/** The mission `agentId` is or was the Main of (its Main history), else null. Never throws. */
-export function missionOfMainAgent(home: string, agentId: string): Mission | null {
+/** Every agent that is or was a mission's Main (its Main history) → that mission's id, the first mission in the index winning. Never throws. */
+function missionIdsByMain(home: string): Map<string, string> {
   const store = createMissionStore(home);
+  const byMain = new Map<string, string>();
   for (const entry of store.list()) {
     const mission = store.get(entry.missionId);
-    if (mission !== null && (mission.mainId === agentId || mission.mainHistory.some((main) => main.agentId === agentId))) return mission;
+    for (const agentId of mission === null ? [] : [mission.mainId, ...mission.mainHistory.map((main) => main.agentId)]) {
+      if (agentId !== null && !byMain.has(agentId)) byMain.set(agentId, entry.missionId);
+    }
   }
-  return null;
+  return byMain;
+}
+
+/** The mission `agentId` is or was the Main of (its Main history), else null. Never throws. */
+export function missionOfMainAgent(home: string, agentId: string): Mission | null {
+  const missionId = missionIdsByMain(home).get(agentId);
+  return missionId === undefined ? null : createMissionStore(home).get(missionId);
 }
 
 /** The current Main of `missionId` when it is live, else null. Never throws. */
@@ -416,6 +421,9 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     // A Main (missions design §4): the other open missions, and its mission's links of every kind too.
     const mission = caller.role === "manager" ? missionOfMain(home, caller) : null;
     const all = linksOf(home).list();
+    const store = createMissionStore(home);
+    // Read once for every link: the mission each asking Main is or was the Main of.
+    const byMain = mission === null ? new Map<string, string>() : missionIdsByMain(home);
     const views =
       mission === null
         ? linkViewsOf(all, mine)
@@ -423,16 +431,16 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
             .flatMap((link) => {
               const route = routeOf(link);
               if (route === "project") return link.from.workspaceId === mine || link.to.workspaceId === mine ? [linkViewOf(link, mine)] : [];
-              const askedBy = route === "mission" ? (missionOfMainAgent(home, link.from.agentId)?.missionId ?? null) : link.missionId;
+              const askedBy = route === "mission" ? (byMain.get(link.from.agentId) ?? null) : link.missionId;
               if (askedBy !== mission.missionId && link.missionId !== mission.missionId) return [];
               if (route !== "mission") return [linkViewOf(link, mine, route === "worker")];
-              const other = createMissionStore(home).get(askedBy === mission.missionId ? (link.missionId ?? "") : (askedBy ?? ""));
+              const other = store.get(askedBy === mission.missionId ? (link.missionId ?? "") : (askedBy ?? ""));
               return [{ ...linkViewOf(link, mine, askedBy === mission.missionId), mission: other?.code ?? null }];
             })
             .reverse();
     const links = views.filter((view) => only === null || view.project === only).slice(0, PEERS_LINKS_SHOWN);
     if (mission === null) return answered({ projects, links });
-    const missions = createMissionStore(home)
+    const missions = store
       .list()
       .filter((entry) => entry.state === "open" && entry.missionId !== mission.missionId)
       .map((entry) => ({ code: entry.code, name: entry.name, mainId: entry.mainId, repos: entry.repos }));
@@ -713,16 +721,8 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
       if ("ok" in stored) return stored;
       delivery[self.requestId] = stored.delivery;
     }
-    try {
-      createMissionStore(home, { now }).appendJournal(mission.missionId, {
-        kind: "link",
-        by: main.agentId,
-        text: `The Main linked request ${a.requestId} (${a.workspaceId}) with ${b.requestId} (${b.workspaceId}) on ${link.linkId}: ${topic}`,
-        ref: link.linkId,
-      });
-    } catch (error) {
-      log(`[paseo-bm] could not add link ${link.linkId} to the journal of mission ${mission.code}: ${reasonOf(error)}`);
-    }
+    const text = `The Main linked request ${a.requestId} (${a.workspaceId}) with ${b.requestId} (${b.workspaceId}) on ${link.linkId}: ${topic}`;
+    journalQuietly(createMissionStore(home, { now }), mission.missionId, { kind: "link", by: main.agentId, text, ref: link.linkId }, log);
     return answered({ linkId: link.linkId, delivery });
   };
 

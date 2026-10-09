@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { MISSION_CLASSES } from "../autonomy";
 import { agentIdSchema, workspaceIdSchema } from "./persisted";
 
 /**
@@ -68,8 +69,8 @@ export type MissionEnsureOutput = z.infer<typeof missionEnsureRpc.output>;
 export const missionFamilySchema = z.enum(["mess", "overengineering", "drift", "stuck", "budget"]);
 /** What a Main is doing now, from its Paseo status (§10.2). */
 export const mainStateSchema = z.enum(["idle", "working", "stopped", "none"]);
-/** A mission class (`MISSION_CLASSES`, `shared/autonomy.ts`). */
-const missionClassNameSchema = z.enum(["proceed", "staffing", "scope-repo", "answer-technical", "answer-effects", "split"]);
+/** A mission class (`shared/autonomy.ts`). */
+const missionClassNameSchema = z.enum(MISSION_CLASSES);
 
 /** One figure the governor computed (`GovernorFigure`), as read now. */
 export const missionFigureSchema = z.object({

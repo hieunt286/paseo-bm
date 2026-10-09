@@ -27,7 +27,7 @@
  *
  * Nothing here archives, stops or deletes an agent (ADR-005).
  */
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   DashboardError,
@@ -45,16 +45,16 @@ import { readAutonomyPolicy } from "./autonomy-rpc";
 import { createJsonFileStore, ensureDataDir, writeFileAtomically } from "./data-files";
 import { UI_DIR_NAME } from "./data-home";
 import { hasOutdatedInstructions } from "./instructions-label";
-import { VERSION_LABEL, createMain, ensureRolesFor, findMain, setupNoticeFor, type ManagerPaseo } from "./manager";
+import { REPLACES_LABEL, VERSION_LABEL, createMain, ensureRolesFor, findMain, setupNoticeFor, type ManagerPaseo } from "./manager";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { replaceMain, type ReplaceMainDeps } from "./mission-replace";
 import { createMissionRoster } from "./mission-roster";
-import { MISSIONS_DIR_NAME, createMissionStore, type Mission } from "./mission-store";
+import { MISSIONS_DIR_NAME, createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { briefLineOf } from "./notices";
 import { orchestratorHomeOf } from "./orchestrator-agent";
 import { newestReportRecordOf, reportPhaseOf } from "./outbox";
 import { setAgentLabels, setAgentTitle, type PaseoCliDeps } from "./paseo-cli";
-import { listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { directoryIn, listedWorkspaces, titleIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { createRequestRegistry } from "./request-registry";
 import { asRecord, nonEmpty } from "./role-choices";
 import { currentInstructions, type MainFacts } from "./role-instructions";
@@ -206,12 +206,9 @@ export const UNASSIGNED_MAIN_BRIEF = [
  */
 export async function mainBriefOf(paseo: unknown, home: string | null, mission: Mission | null): Promise<string> {
   if (mission === null || home === null) return UNASSIGNED_MAIN_BRIEF;
-  const listed = (await listedWorkspaces(paseo as DashboardPaseo).catch(() => null)) ?? [];
-  const folderOf = (workspaceId: string) => listed.find((entry) => entry.id === workspaceId)?.directory ?? null;
-  const repoName = (workspaceId: string) => {
-    const folder = folderOf(workspaceId);
-    return folder === null ? workspaceId : basename(folder);
-  };
+  const listed = await listedWorkspaces(paseo as DashboardPaseo).catch(() => null);
+  const folderOf = (workspaceId: string) => directoryIn(listed, workspaceId);
+  const repoName = (workspaceId: string) => titleIn(listed, workspaceId);
   const { charter } = mission;
   const lines = [
     `${briefLineOf("manager", null)} mission: ${mission.code}`,
@@ -257,11 +254,38 @@ export async function syncMainTitle(mission: Pick<Mission, "mainId" | "code" | "
   }
 }
 
+/**
+ * Marks `agentId` as the Main of `mission` (§3.2): its binding's mission, the
+ * `bm.missionId` and `bm.missionCode` labels with `extra` (none at all for
+ * null: Paseo carried them over) and the title, through the Paseo CLI. Each
+ * refusal is one log line. Returns whether the binding recorded the mission.
+ * Never throws.
+ */
+export async function markMain(
+  agentId: string,
+  mission: Pick<Mission, "missionId" | "code" | "name">,
+  deps: { bindings: BindingStore | null | undefined; cli?: PaseoCliDeps | undefined; log: (message: string) => void },
+  extra: Record<string, string> | null = {},
+): Promise<boolean> {
+  const bound = deps.bindings?.assignMission(agentId, mission.missionId) ?? false;
+  if (extra !== null) {
+    const labels = await setAgentLabels(agentId, { [MISSION_ID_LABEL]: mission.missionId, [MISSION_CODE_LABEL]: mission.code, ...extra }, deps.cli).catch((error: unknown) => ({
+      ok: false as const,
+      reason: errorText(error),
+    }));
+    if (!labels.ok) deps.log(`[paseo-bm] Main ${agentId} of mission ${mission.code} could not be labelled: ${labels.reason}`);
+  }
+  const titled = await syncMainTitle({ mainId: agentId, code: mission.code, name: mission.name }, deps.cli);
+  if (!titled.ok) deps.log(`[paseo-bm] Main ${agentId} of mission ${mission.code} could not be titled: ${titled.reason}`);
+  return bound;
+}
+
 // ---------------------------------------------------------------------------
 // missions.create and mission.ensure (§3.3, §3.4).
 // ---------------------------------------------------------------------------
 
-function invalid(reasons: readonly string[]): DashboardError {
+/** A mission refusal: `E_MISSION_INVALID` with its reasons. */
+export function missionInvalid(reasons: readonly string[]): DashboardError {
   return new DashboardError("E_MISSION_INVALID", reasons.join("; "));
 }
 
@@ -300,21 +324,22 @@ export async function handleMissionsCreate(input: MissionsCreateInput, paseo: Mi
   const name = (input.name ?? "").trim();
   const code = (input.code ?? "").trim();
   const named = name !== "" || code !== "";
-  if (named && (name === "" || code === "")) throw invalid(["give the mission both a name and a code, or neither"]);
+  if (named && (name === "" || code === "")) throw missionInvalid(["give the mission both a name and a code, or neither"]);
   const repos = [...new Set(input.repos ?? [])];
-  if (!named && (repos.length > 0 || (input.goal ?? "").trim() !== "")) throw invalid(["a mission's repos and goal need its name and code"]);
+  if (!named && (repos.length > 0 || (input.goal ?? "").trim() !== "")) throw missionInvalid(["a mission's repos and goal need its name and code"]);
+  const store = createMissionStore(home, deps.now === undefined ? {} : { now: deps.now });
+  // Every refusal before any write: the roles and the home are set up only for a mission that can be created.
   if (named) {
     const refused = repoRefusals(repos, await listedWorkspaces(paseo as unknown as DashboardPaseo), home);
-    if (refused.length > 0) throw invalid(refused);
+    if (refused.length === 0) refused.push(...store.codeRefusals(code));
+    if (refused.length > 0) throw missionInvalid(refused);
   }
   const ensured = await ensureRolesFor(paseo, deps.log);
   const { workspaceId: homeWorkspaceId } = await ensureMissionsHome(paseo, deps);
   let mission: Mission | null = null;
   if (named) {
-    const created = coded("E_MISSION_WRITE_FAILED", "write the mission", () =>
-      createMissionStore(home, deps.now === undefined ? {} : { now: deps.now }).create({ code, name, goal: input.goal ?? "", repos, createdBy: "owner" }),
-    );
-    if (!created.ok) throw invalid(created.reasons);
+    const created = coded("E_MISSION_WRITE_FAILED", "write the mission", () => store.create({ code, name, goal: input.goal ?? "", repos, createdBy: "owner" }));
+    if (!created.ok) throw missionInvalid(created.reasons);
     mission = created.mission;
   }
   const prompt = await mainBriefOf(paseo, home, mission);
@@ -327,8 +352,8 @@ export async function handleMissionEnsure(input: MissionEnsureInput, paseo: Miss
   const home = requireDataHome(deps, "open a mission");
   const store = createMissionStore(home, deps.now === undefined ? {} : { now: deps.now });
   const mission = store.get(input.missionId);
-  if (mission === null) throw invalid([`unknown mission ${input.missionId}`]);
-  if (mission.state !== "open") throw invalid([`mission ${mission.code} is closed`]);
+  if (mission === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
+  if (mission.state !== "open") throw missionInvalid([`mission ${mission.code} is closed`]);
   const [chosen] = await findMain(paseo, mission.missionId);
   const replace = chosen !== undefined && (input.replace === "owner" || (input.replace === "outdated" && hasOutdatedInstructions(chosen.labels, "manager")));
   const bindings = deps.bindings?.() ?? undefined;
@@ -408,8 +433,8 @@ export interface CreatedMainCandidate {
   workspaceId: string | null;
 }
 
-/** The agent's labels, from a fresh snapshot; none when it cannot be read. */
-async function labelsOf(paseo: unknown, agentId: string): Promise<Record<string, unknown>> {
+/** The agent's labels, from a fresh snapshot; none when it cannot be read. Never throws. */
+export async function labelsOf(paseo: unknown, agentId: string): Promise<Record<string, unknown>> {
   try {
     const ref = (paseo as { agents?: { ref?: (id: string) => { refresh?: () => Promise<{ agent?: unknown } | null> } } } | null)?.agents?.ref?.(agentId);
     return asRecord(asRecord((await ref?.refresh?.())?.agent)?.["labels"]) ?? {};
@@ -424,21 +449,22 @@ async function labelsOf(paseo: unknown, agentId: string): Promise<Record<string,
  * comes second within `SUCCESSOR_WINDOW_MS` claims: the new agent becomes the
  * Main. A candidate has no mission of its own and no `bm.version` (the
  * plugin's own creations name their mission), or the archived Main's mission
- * on its labels (Paseo carried them over). Each mission and each agent is
- * claimed once. Never throws.
+ * on its labels (Paseo carried them over) — preferred over an unlabelled one.
+ * An agent that is the Main of another open mission is never claimed. Each
+ * mission and each agent is claimed once. Never throws.
  */
 export function createMainSuccession(deps: MissionsHomeDeps = {}) {
   const now = deps.now ?? (() => new Date());
   const log = logOf(deps);
   /** missionId → the archived Main and when. */
   const awaiting = new Map<string, { oldId: string; at: number }>();
-  /** New unassigned Managers of the home, and when they were seen. */
-  const unclaimed = new Map<string, number>();
+  /** New Managers of the home not claimed yet: when they were seen, and the mission their labels name (null: none). */
+  const unclaimed = new Map<string, { at: number; missionId: string | null }>();
 
   const fresh = (at: number) => now().getTime() - at <= SUCCESSOR_WINDOW_MS;
   const prune = () => {
     for (const [key, entry] of awaiting) if (!fresh(entry.at)) awaiting.delete(key);
-    for (const [key, at] of unclaimed) if (!fresh(at)) unclaimed.delete(key);
+    for (const [key, entry] of unclaimed) if (!fresh(entry.at)) unclaimed.delete(key);
   };
 
   async function claim(missionId: string, oldId: string, agentId: string, labelled: boolean, paseo?: unknown): Promise<boolean> {
@@ -447,17 +473,9 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
     const store = createMissionStore(home, deps.now === undefined ? {} : { now: deps.now });
     const mission = store.get(missionId);
     if (mission === null || mission.state !== "open") return false;
-    deps.bindings?.()?.assignMission(agentId, missionId);
-    if (!labelled) {
-      const labels = await setAgentLabels(agentId, { [MISSION_ID_LABEL]: missionId, [MISSION_CODE_LABEL]: mission.code, "bm.replaces": oldId }, deps.cli).catch(
-        (error: unknown) => ({ ok: false as const, reason: errorText(error) }),
-      );
-      if (!labels.ok) log(`[paseo-bm] Main ${agentId} of mission ${mission.code} could not be labelled: ${labels.reason}`);
-    }
-    const titled = await syncMainTitle({ mainId: agentId, code: mission.code, name: mission.name }, deps.cli);
-    if (!titled.ok) log(`[paseo-bm] Main ${agentId} of mission ${mission.code} could not be titled: ${titled.reason}`);
-    // §3.4: the one replacement path; a cleared conversation is a replacement.
     const bindings = deps.bindings?.() ?? undefined;
+    await markMain(agentId, mission, { bindings, cli: deps.cli, log }, labelled ? null : { [REPLACES_LABEL]: oldId });
+    // §3.4: the one replacement path; a cleared conversation is a replacement.
     const replaced = await replaceMain(missionId, agentId, "replaced", {
       home,
       replaced: oldId,
@@ -471,11 +489,7 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
       log(`[paseo-bm] could not make ${agentId} the Main of mission ${mission.code}: ${replaced.reasons.join("; ")}`);
       return false;
     }
-    try {
-      store.appendJournal(missionId, { kind: "main", by: "plugin", text: `Main ${oldId} was archived (a cleared conversation); ${agentId} took over.`, ref: agentId });
-    } catch {
-      // The journal is what happened, never state.
-    }
+    journalQuietly(store, missionId, { kind: "main", by: "plugin", text: `Main ${oldId} was archived (a cleared conversation); ${agentId} took over.`, ref: agentId }, log);
     log(`[paseo-bm] ${agentId} succeeds ${oldId} as the Main of mission ${mission.code} (a cleared conversation).`);
     return true;
   }
@@ -487,12 +501,16 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
         prune();
         const home = dataHome(deps);
         if (home === null) return null;
-        const entry = createMissionStore(home).list().find((mission) => mission.state === "open" && mission.mainId === agentId);
-        if (entry === undefined) return null;
-        const waiting = [...unclaimed.keys()].at(-1);
-        if (waiting !== undefined) {
-          unclaimed.delete(waiting);
-          return (await claim(entry.missionId, agentId, waiting, false)) ? entry.missionId : null;
+        const store = createMissionStore(home);
+        const entry = store.openByMain(agentId);
+        if (entry === null) return null;
+        // A candidate seen first: one labelled with this mission, else the newest unlabelled one; never a Main already.
+        const waiting = [...unclaimed].filter(([id, seen]) => id !== agentId && (seen.missionId ?? entry.missionId) === entry.missionId && store.openByMain(id) === null);
+        const chosen = waiting.filter(([, seen]) => seen.missionId !== null).at(-1) ?? waiting.at(-1);
+        if (chosen !== undefined) {
+          const [candidate, seen] = chosen;
+          unclaimed.delete(candidate);
+          return (await claim(entry.missionId, agentId, candidate, seen.missionId !== null)) ? entry.missionId : null;
         }
         awaiting.set(entry.missionId, { oldId: agentId, at: now().getTime() });
         return null;
@@ -505,23 +523,23 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
     async agentCreated(agent: CreatedMainCandidate, paseo: unknown): Promise<string | null> {
       try {
         prune();
-        if (roleOfProvider(agent.provider) !== "manager" || agent.workspaceId === null || !isMissionsHome(agent.workspaceId, dataHome(deps))) return null;
+        const home = dataHome(deps);
+        if (home === null || roleOfProvider(agent.provider) !== "manager" || agent.workspaceId === null || !isMissionsHome(agent.workspaceId, home)) return null;
         const labels = await labelsOf(paseo, agent.id);
         const own = nonEmpty(labels[MISSION_ID_LABEL]);
-        if (own !== null) {
-          const entry = awaiting.get(own);
-          if (entry === undefined) return null;
-          awaiting.delete(own);
-          return (await claim(own, entry.oldId, agent.id, true, paseo)) ? own : null;
-        }
-        if (nonEmpty(labels[VERSION_LABEL]) !== null) return null;
-        const newest = [...awaiting.entries()].sort((a, b) => b[1].at - a[1].at)[0];
-        if (newest === undefined) {
-          unclaimed.set(agent.id, now().getTime());
+        if (own === null && nonEmpty(labels[VERSION_LABEL]) !== null) return null;
+        // The Main of another open mission succeeds no one.
+        const holds = createMissionStore(home).openByMain(agent.id);
+        if (holds !== null && holds.missionId !== own) return null;
+        // The mission its labels name, else the one whose Main was archived last.
+        const missionId = own ?? [...awaiting.entries()].sort((a, b) => b[1].at - a[1].at)[0]?.[0];
+        const entry = missionId === undefined ? undefined : awaiting.get(missionId);
+        if (missionId === undefined || entry === undefined) {
+          unclaimed.set(agent.id, { at: now().getTime(), missionId: own });
           return null;
         }
-        awaiting.delete(newest[0]);
-        return (await claim(newest[0], newest[1].oldId, agent.id, false, paseo)) ? newest[0] : null;
+        awaiting.delete(missionId);
+        return (await claim(missionId, entry.oldId, agent.id, own !== null, paseo)) ? missionId : null;
       } catch (error) {
         log(`[paseo-bm] checking ${agent.id} as a Main's successor failed: ${errorText(error)}`);
         return null;
@@ -529,8 +547,6 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
     },
   };
 }
-
-export type MainSuccession = ReturnType<typeof createMainSuccession>;
 
 /**
  * Registers `missions.create`, `mission.ensure` and the `agent.archived`

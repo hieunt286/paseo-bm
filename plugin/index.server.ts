@@ -150,25 +150,26 @@ export default function contribute(server: PluginServerContext): () => void {
   // delta 20260921 §4.3.2: the read-only data of Roles & models (`roles.settings`, `roles.options`).
   registerRoleSettingsRpcs(server);
   registerChatRpcs(server);
-  // Autonomy design §A.8: the event bus to the Orchestrator. Every event pending
-  // at the Orchestrator's idle moment goes as ONE BM-EVENTS message; an event
-  // whose subject settled, or whose project left the policy's scope (a class
-  // above `owner`, §B.2), before then is dropped. It replaces an Orchestrator
-  // that is outdated or has lost its tools before waking it (design §3.3); the
-  // check is read when it publishes, after the endpoint below has started.
+  // Autonomy design §A.8, missions design §9.7: the event bus to the Orchestrator. Only the governor's
+  // mission events and a danger signal wake it; every event pending at its idle moment goes as ONE
+  // BM-EVENTS message, and one whose subject settled before then is dropped. It replaces an Orchestrator
+  // that is outdated or has lost its tools before waking it (design §3.3); the check is read when it
+  // publishes, after the endpoint below has started.
   const eventBus = createEventBus({ isToolsStale: (agent) => isToolsStale(agent) });
-  // Autonomy design §G.5: the compactions the Orchestrator asks for with bm_compact, kept in the
-  // data folder; each recorded turn of their target sends the /compact at a safe point, or the
-  // BM-STATE brief once the compaction completed, through the notice queue.
+  // Autonomy design §G.5, missions design §9.5: the compactions the plugin starts itself when a turn
+  // crosses its threshold, kept in the data folder; each recorded turn of their target sends the
+  // /compact at a safe point, or the BM-STATE brief once the compaction completed, through the notice queue.
   const compactions = createCompactionRunner();
-  // Autonomy design §G.6: the handoffs the Orchestrator asks for with bm_handoff, kept in the data
-  // folder; each recorded turn takes their next step (the note request at the Worker's safe point,
-  // the brief, the command to its Manager), and `agent.created` completes one when its successor appears.
+  // Autonomy design §G.6, missions design §9.5: the handoffs the plugin starts itself when a request
+  // crosses its threshold, kept in the data folder; each recorded turn takes their next step (the note
+  // request at the Worker's safe point, the brief, the command to its Manager), and `agent.created`
+  // completes one when its successor appears.
   // Design §16.9: for a bound Manager the runner creates the successor itself, bound by the endpoint's binder.
   const handoffs = createHandoffRunner({ binder: () => agentTools.binder });
   // The stall pass (always on: stalled work is an Inbox alert) and the live
   // Worker watch (its stuck, permission and danger alerts for every project)
-  // publish through it, for the projects in the policy's scope only. Neither
+  // publish through it, for the projects in the policy's scope only (a danger
+  // signal wakes the Orchestrator; the rest are retired as wakes). Neither
   // has a Paseo handle of its own: they keep the last one an `orchestrator.*`
   // call, a paseo-bm creation or a recorded turn brought.
   // Autonomy design §D.2 (ADR-019): the action boundary answers every permission request of a Worker or
@@ -206,9 +207,9 @@ export default function contribute(server: PluginServerContext): () => void {
       // Missions design §9.6: bm_create_main binds the new Main to its own tool path.
       missions: missionDeps,
     }), eventBus),
-    // Design §16.6: a bound Worker's bm_questions opens decisions outside a recorded turn; the policy's
-    // decision.opened events go to the Orchestrator as a fallback incident's do.
-    onDecisionsOpened: (opened, paseo) => eventBus.decisionsOpened(opened, paseo),
+    // Design §16.6: a bound Worker's bm_questions opens decisions outside a recorded turn. They wake nothing
+    // (missions design §9.1); the handle goes to the bus with any event a mission's window held.
+    onDecisionsOpened: (_opened, paseo) => eventBus.publish([], paseo),
     // Missions design §4: a Main's bm_answer_worker answers take the delivery the owner's answers take.
     onDecisionsSettled: (decisions, context) => onDecisionsSettled(decisions, context),
     // Missions design §9.6, §9.7: a Main's bm_split_mission wakes the governor as mission.split.
@@ -334,7 +335,7 @@ export default function contribute(server: PluginServerContext): () => void {
         home,
         paseo,
         bindings: agentTools.bindings,
-        onOpened: (opened, handle) => eventBus.decisionsOpened(opened, handle),
+        onOpened: (_opened, handle) => eventBus.publish([], handle),
         onSettled: (decisions, context) => onDecisionsSettled(decisions, context),
       });
       return checkNoVerdict(event, { home, paseo, bindings: agentTools.bindings, classified });
@@ -358,11 +359,10 @@ export default function contribute(server: PluginServerContext): () => void {
   };
   const switchByRole: FallbackAction = (incident, paseo, deps) => switches[incident.role](incident, paseo, deps);
   const fallbackActions: FallbackActions = { switch: switchByRole, wait: fallbackWaiter.wait, resend: createReviewerResend() };
-  // Autonomy design §A.8, §B.9: a new incident's decision the owner's policy asks the Orchestrator
-  // to decide (bm_decide) or predict (bm_predict) is a decision.opened event, as a Worker's question is.
+  // A new incident's decision wakes nothing (missions design §9.1), as a Worker's question does not.
   const removeFallbackRpcs = registerFallbackRpcs(server, fallbackActions, {
     onPaseo: armWaits,
-    onDecisionsOpened: (opened, paseo) => eventBus.decisionsOpened(opened, paseo),
+    onDecisionsOpened: (_opened, paseo) => eventBus.publish([], paseo),
   });
   // Autonomy design §A.6 (ADR-017): decisions.list / get / answer / confirm. An
   // answered decision is delivered by its asker kind: a fallback decision runs
@@ -455,7 +455,8 @@ export default function contribute(server: PluginServerContext): () => void {
     },
   });
   // Autonomy design §F.1: two agents writing one file in overlapping turns — an Inbox alert, cleared once
-  // the later of the two requests finished, and a writers.observed event (in the policy's scope).
+  // the later of the two requests finished, and a writers.observed event (retired as a wake, §9.1; the
+  // conflict detection reads it).
   const writersWatch = createWritersWatch();
   // ADR-024: a turn Paseo cut short to deliver a message is not the owner's stop; the agent is told so
   // (BM-INTERRUPTED) when it then sat idle. An owner's deny is read from agent.permission_resolved.
@@ -492,7 +493,7 @@ export default function contribute(server: PluginServerContext): () => void {
       await handoffs.turnRecorded(event, record, paseo);
       // Missions design §9.1: decisions opened and finished requests wake nothing any more; a finish
       // (the Manager's turn or the Worker's own, design §7.17.8 i) only counts toward advice.
-      await eventBus.turnRecorded(record, [], paseo);
+      await eventBus.turnRecorded(record, paseo);
       if (writersObserved.length > 0) await eventBus.publish(writersObserved, paseo);
       const governed = await governor.turnRecorded(record, paseo as GovernorPaseo);
       // Missions design §9.7: a recomputation at a mission's turn may wake the Orchestrator too.

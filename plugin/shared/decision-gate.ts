@@ -7,7 +7,7 @@
  * does not show an effect the command did not declare, whatever the
  * authority — it takes none as input.
  *
- * Before a command of the Orchestrator leaves (`bm_send_command`,
+ * Before a command of the Orchestrator leaves (`bm_govern`,
  * `bm_direct_worker`), the plugin matches its `re:` line and body — never the
  * header — against fixed categories. A category found whose effects
  * (`GATE_CATEGORY_EFFECTS`) the command does not declare refuses it with

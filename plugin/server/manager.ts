@@ -32,7 +32,9 @@ import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { PARENT_AGENT_LABEL, listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
 import { MISSION_CODE_LABEL, MISSION_ID_LABEL, UNASSIGNED_MAIN_TITLE, mainTitleOf, withRoleMarker, withoutRoleMarker } from "./role-title";
-import { createMissionStore, type Mission } from "./mission-store";
+import { createMissionStore, journalQuietly, type Mission, type MissionResult } from "./mission-store";
+import { REPLACED_BY_LABEL } from "./fallback-detect";
+import { errorText } from "./rpc-kit";
 import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
 import { workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { readIncidents } from "./fallback-state";
@@ -60,8 +62,8 @@ export const VERSION_LABEL = "bm.version";
  */
 export const MODE_SET_LABEL = "bm.modeSet";
 
-/** Label on an agent another agent replaced, with the replacement's id (delta 20260921 §4.4.8, §4.5.2). */
-const REPLACED_BY_LABEL = "bm.replacedBy";
+/** Label on a new agent naming the one it replaces (missions design §3.4 step 1; the fallback switches). */
+export const REPLACES_LABEL = "bm.replaces";
 
 /** Agent profile id registered by the installer (ADR-006, WP-107). */
 export const MANAGER_PROFILE_ID = "bm-manager";
@@ -758,7 +760,7 @@ export async function createMain(spec: MainSpec, deps: EnsureManagerDeps, ensure
   const { mission } = spec;
   const labels: Record<string, string> = {
     ...(mission === null ? {} : { [MISSION_ID_LABEL]: mission.missionId, [MISSION_CODE_LABEL]: mission.code }),
-    ...(spec.replaces ? { "bm.replaces": spec.replaces } : {}),
+    ...(spec.replaces ? { [REPLACES_LABEL]: spec.replaces } : {}),
   };
   const created = await createFromProfile(deps, spec.homeWorkspaceId, ensured, {
     title: mission === null ? withRoleMarker("manager", UNASSIGNED_MAIN_TITLE) : mainTitleOf(mission.code, mission.name),
@@ -768,20 +770,18 @@ export async function createMain(spec: MainSpec, deps: EnsureManagerDeps, ensure
   });
   const home = deps.home !== undefined ? deps.home : dataHomeOf();
   if (mission !== null && home !== null) {
+    const log = deps.log ?? ((message: string) => console.warn(message));
+    const store = createMissionStore(home);
+    let set: MissionResult;
     try {
-      const store = createMissionStore(home);
-      const set = store.setMain(mission.missionId, created.agentId, spec.reason ?? "created");
-      if (!set.ok) throw new Error(set.reasons.join("; "));
-      store.appendJournal(mission.missionId, {
-        kind: "main",
-        by: "plugin",
-        text: spec.replaces ? `Main ${created.agentId} replaces ${spec.replaces} (${spec.reason ?? "replaced"}).` : `Main ${created.agentId} created.`,
-        ref: created.agentId,
-      });
+      set = store.setMain(mission.missionId, created.agentId, spec.reason ?? "created");
     } catch (error) {
-      (deps.log ?? ((message: string) => console.warn(message)))(
-        `[paseo-bm] Main ${created.agentId} of mission ${mission.missionId} was created, but the mission could not record it: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      set = { ok: false, reasons: [errorText(error)] };
+    }
+    if (!set.ok) log(`[paseo-bm] Main ${created.agentId} of mission ${mission.missionId} was created, but the mission could not record it: ${set.reasons.join("; ")}`);
+    else {
+      const text = spec.replaces ? `Main ${created.agentId} replaces ${spec.replaces} (${spec.reason ?? "replaced"}).` : `Main ${created.agentId} created.`;
+      journalQuietly(store, mission.missionId, { kind: "main", by: "plugin", text, ref: created.agentId }, log);
     }
   }
   return created;
@@ -971,7 +971,8 @@ export async function listWorkspaceAgents(
     const main = missionManagerOf(home, requestId);
     if (main !== null && all.some((candidate) => candidate.id === main && !candidate.archivedAt)) mainOf.set(agent.id, main);
   }
-  const mains = all.filter((agent) => !members.has(agent.id) && [...mainOf.values()].includes(agent.id));
+  const mainIds = new Set(mainOf.values());
+  const mains = all.filter((agent) => !members.has(agent.id) && mainIds.has(agent.id));
   for (const main of mains) members.add(main.id);
 
   const agents = [...mains, ...inWorkspace.filter((agent) => members.has(agent.id))]
@@ -986,7 +987,7 @@ export async function listWorkspaceAgents(
         parentId: parent !== undefined && members.has(parent) ? parent : null,
         updatedAt: agent.updatedAt,
         labelled: roleOfAgent(agent)?.labelled ?? false,
-        replacedBy: agent.labels["bm.replacedBy"] ?? deps.replacements?.get(agent.id) ?? null,
+        replacedBy: agent.labels[REPLACED_BY_LABEL] ?? deps.replacements?.get(agent.id) ?? null,
       };
     });
   return { agents };

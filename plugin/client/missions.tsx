@@ -31,20 +31,18 @@ import {
   missionsListRpc,
   type MissionChangeInput,
 } from "../shared/contracts";
-import type { MissionLevel } from "../shared/autonomy";
+import { MISSION_LEVELS, levelNeedsConfirmation, type MissionLevel } from "../shared/autonomy";
 import { errorMessageOf } from "./errors";
 import {
   CRITERIA_SHOWN,
   EMPTY_MISSION_DRAFT,
   JOURNAL_DESKTOP,
   JOURNAL_PHONE,
-  MISSION_LEVELS_SHOWN,
   addableReposOf,
   closeMissionDialog,
   codeAsTyped,
   createInputOf,
   levelConfirmDialog,
-  levelNeedsConfirmation,
   levelSentenceOf,
   memoryViewOf,
   missionDraftErrors,
@@ -81,12 +79,26 @@ function pollWhile(visible: boolean) {
   return { enabled: visible, refetchInterval: visible ? WORK_POLL_MS : (false as const) };
 }
 
+// The artboards' repeated layouts, made once.
+const BUTTON_TEXT: TextStyle = { fontSize: 13 };
+/** A code and a name side by side; it gives way first. */
+const TITLE_ROW: ViewStyle = { flexDirection: "row", alignItems: "center", gap: 10, flexShrink: 1 };
+/** A title at the left, its action or figure at the right. */
+const SPREAD_ROW: ViewStyle = { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 };
+const WRAP_ROW: ViewStyle = { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 };
+/** Name beside Short code. */
+const FIELD_ROW: ViewStyle = { flexDirection: "row", gap: 12 };
+/** A form's Cancel and its primary action, at the right. */
+const FORM_ACTIONS: ViewStyle = { flexDirection: "row", justifyContent: "flex-end", gap: 10 };
+/** `styles.card`, placed for its accent bar and grown to its cell's height in a `Grid`. */
+const CARD_FILL: ViewStyle = { position: "relative", flexGrow: 1 };
+
 // ---------------------------------------------------------------------------
 // Small pieces, as the artboards' CSS draws them.
 // ---------------------------------------------------------------------------
 
 /** The artboards' chip: 12px text on surface2, a 1px border, an optional 7px square in a tone. */
-export function MissionChip({ text, mark, muted = false, onPress, a11y, theme }: { text: string; mark?: Tone | null; muted?: boolean; onPress?: () => void; a11y?: string; theme: Theme }) {
+function MissionChip({ text, mark, muted = false, onPress, a11y, theme }: { text: string; mark?: Tone | null; muted?: boolean; onPress?: () => void; a11y?: string; theme: Theme }) {
   const { colors } = theme;
   const body = (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 2, paddingHorizontal: 8, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS, backgroundColor: colors.surface2 }}>
@@ -97,19 +109,14 @@ export function MissionChip({ text, mark, muted = false, onPress, a11y, theme }:
   return onPress === undefined ? body : <Pressable accessibilityRole="button" accessibilityLabel={a11y ?? text} onPress={onPress}>{body}</Pressable>;
 }
 
-function Label({ children, theme, style }: { children: ReactNode; theme: Theme; style?: TextStyle }) {
-  return <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.6, ...style }}>{children}</Text>;
-}
-
 function Small({ children, tone = "plain", theme, style, mono = false }: { children: ReactNode; tone?: Tone; theme: Theme; style?: TextStyle; mono?: boolean }) {
   return <Text style={{ fontSize: 12, color: toneColor(theme, tone), ...(mono ? { fontFamily: MONO } : {}), ...style }}>{children}</Text>;
 }
 
-/** The artboards' card: surface1, 1px border, radius 2; the accent bar at its left when `bar`. It grows to its cell's height in a `Grid`. */
-function Card({ children, bar = false, compact, theme, style }: { children: ReactNode; bar?: boolean; compact: boolean; theme: Theme; style?: ViewStyle }) {
-  const { colors } = theme;
+/** The artboards' card (`styles.card`); the accent bar at its left when `bar`. It grows to its cell's height in a `Grid`. */
+function Card({ children, bar = false, styles, theme }: { children: ReactNode; bar?: boolean; styles: Styles; theme: Theme }) {
   return (
-    <View style={{ position: "relative", flexGrow: 1, backgroundColor: colors.surface1, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS, padding: compact ? 10 : 14, gap: compact ? 6 : 8, ...style }}>
+    <View style={[styles.card, CARD_FILL]}>
       {bar ? <KindBar tone="info" theme={theme} /> : null}
       {children}
     </View>
@@ -139,11 +146,11 @@ function Grid({ children, gap }: { children: ReactNode[]; gap: number }) {
 }
 
 /** The mission level's five joined cells: the chosen one filled in the accent (the artboards' `.seg`). */
-export function LevelCells({ level, onSelect, disabled = false, theme }: { level: MissionLevel; onSelect: (level: MissionLevel) => void; disabled?: boolean; theme: Theme }) {
+function LevelCells({ level, onSelect, disabled = false, theme }: { level: MissionLevel; onSelect: (level: MissionLevel) => void; disabled?: boolean; theme: Theme }) {
   const { colors } = theme;
   return (
     <View accessibilityRole="radiogroup" style={{ flexDirection: "row", alignSelf: "flex-start", borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS, overflow: "hidden" }}>
-      {MISSION_LEVELS_SHOWN.map((value, index) => {
+      {MISSION_LEVELS.map((value, index) => {
         const on = value === level;
         return (
           <Pressable
@@ -231,12 +238,22 @@ function Parts({ parts, theme }: { parts: readonly Badge[]; theme: Theme }) {
   );
 }
 
+/** A line led by a word in its tone: "The Main decides: …", "Mess: 4 Workers wrote …". */
+function ToneLine({ label, tone, text, theme }: { label: string; tone: Tone; text: string; theme: Theme }) {
+  return (
+    <Text style={{ fontSize: 12, color: theme.colors.foreground }}>
+      <Text style={{ color: toneColor(theme, tone) }}>{label}</Text>
+      {` ${text}`}
+    </Text>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The list (artboards A, C). Hook-free.
 // ---------------------------------------------------------------------------
 
 /** One mission on the list; the whole card opens its page. */
-export function MissionCard({ card, compact, onOpen, theme }: { card: MissionCardView; compact: boolean; onOpen: (missionId: string) => void; theme: Theme }) {
+export function MissionCard({ card, compact, onOpen, styles, theme }: { card: MissionCardView; compact: boolean; onOpen: (missionId: string) => void; styles: Styles; theme: Theme }) {
   const { colors } = theme;
   const code = <Text style={{ fontSize: 14, fontWeight: "700", letterSpacing: 0.5, color: colors.foreground }}>{card.code}</Text>;
   const name = (weight: "600" | "400") => (
@@ -248,7 +265,7 @@ export function MissionCard({ card, compact, onOpen, theme }: { card: MissionCar
   if (!card.open) {
     body = (
       <View style={{ flexDirection: compact ? "column" : "row", justifyContent: "space-between", alignItems: compact ? "flex-start" : "center", gap: compact ? 4 : 10 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexShrink: 1 }}>
+        <View style={TITLE_ROW}>
           {code}
           {name("400")}
         </View>
@@ -272,15 +289,15 @@ export function MissionCard({ card, compact, onOpen, theme }: { card: MissionCar
   } else {
     body = (
       <>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexShrink: 1 }}>
+        <View style={SPREAD_ROW}>
+          <View style={TITLE_ROW}>
             {code}
             {name("600")}
             <MissionChip text={card.main.text} mark={card.main.tone} theme={theme} />
           </View>
           <Small tone="muted" theme={theme}>{card.level}</Small>
         </View>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+        <View style={WRAP_ROW}>
           {card.repos.map((repo) => (
             <MissionChip key={repo} text={repo} theme={theme} />
           ))}
@@ -290,7 +307,7 @@ export function MissionCard({ card, compact, onOpen, theme }: { card: MissionCar
           <Progress share={card.progress} theme={theme} />
           <Small theme={theme} style={{ marginLeft: 12 }}>{card.criteria}</Small>
         </View>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+        <View style={WRAP_ROW}>
           {card.attention.map((badge) => (
             <MissionChip key={badge.text} text={badge.text} mark={badge.tone} theme={theme} />
           ))}
@@ -301,7 +318,7 @@ export function MissionCard({ card, compact, onOpen, theme }: { card: MissionCar
   }
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={`${card.code} ${card.name}. Open the mission`} onPress={() => onOpen(card.missionId)} style={{ opacity: card.open ? 1 : 0.7 }}>
-      <Card bar={card.open} compact={compact} theme={theme}>
+      <Card bar={card.open} styles={styles} theme={theme}>
         {body}
       </Card>
     </Pressable>
@@ -328,11 +345,11 @@ export function MissionList({ list, error, compact, closedShown, onToggleClosed,
   const closed = list?.closed ?? [];
   return (
     <View style={{ gap: compact ? 8 : 12 }}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+      <View style={SPREAD_ROW}>
         <Text accessibilityRole="header" style={{ fontSize: compact ? 18 : 24, fontWeight: "600", color: colors.foreground }}>
           Missions
         </Text>
-        <Button label={compact ? "New" : "New mission"} kind="primary" accessibilityLabel="New mission" onPress={onNew} styles={styles} style={compact ? { paddingVertical: 7, paddingHorizontal: 10 } : undefined} textStyle={{ fontSize: 13 }} />
+        <Button label={compact ? "New" : "New mission"} kind="primary" accessibilityLabel="New mission" onPress={onNew} styles={styles} style={compact ? { paddingVertical: 7, paddingHorizontal: 10 } : undefined} textStyle={BUTTON_TEXT} />
       </View>
       {compact ? null : <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>One Main per goal. A mission spans the repositories it needs; you name it, you close it.</Text>}
       {status}
@@ -341,19 +358,19 @@ export function MissionList({ list, error, compact, closedShown, onToggleClosed,
         error === null ? <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>Loading…</Text> : null
       ) : (
         <>
-          {compact ? null : <Label theme={theme}>{`Open · ${list.open.length}`}</Label>}
+          {compact ? null : <Text style={styles.sectionLabel}>{`Open · ${list.open.length}`}</Text>}
           {list.open.length === 0 ? <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>No open mission. New mission names one and opens its Main.</Text> : null}
           {list.open.map((card) => (
-            <MissionCard key={card.missionId} card={card} compact={compact} onOpen={onOpen} theme={theme} />
+            <MissionCard key={card.missionId} card={card} compact={compact} onOpen={onOpen} styles={styles} theme={theme} />
           ))}
           {closed.length === 0 ? null : compact ? (
             <Pressable accessibilityRole="button" accessibilityLabel={closedShown ? "Hide the closed missions" : "Show the closed missions"} accessibilityState={{ expanded: closedShown }} onPress={onToggleClosed}>
               <Small tone="muted" theme={theme}>{`Closed · ${closed.length}`}</Small>
             </Pressable>
           ) : (
-            <Label theme={theme}>{`Closed · ${closed.length}`}</Label>
+            <Text style={styles.sectionLabel}>{`Closed · ${closed.length}`}</Text>
           )}
-          {compact && !closedShown ? null : closed.map((card) => <MissionCard key={card.missionId} card={card} compact={compact} onOpen={onOpen} theme={theme} />)}
+          {compact && !closedShown ? null : closed.map((card) => <MissionCard key={card.missionId} card={card} compact={compact} onOpen={onOpen} styles={styles} theme={theme} />)}
         </>
       )}
     </View>
@@ -438,11 +455,11 @@ function Criterion({ line, status, theme }: { line: string; status: "open" | "me
 function PageHeader({ page, ui, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "ui" | "compact" | "on" | "styles" | "theme">) {
   const { colors } = theme;
   const busy = ui.busy !== null;
-  const openMain = <Button label={ui.busy === "Opening…" ? "Opening…" : "Open Main"} kind="primary" accessibilityLabel={`Open the Main of ${page.code}`} accessibilityState={{ disabled: busy, busy }} disabled={busy} onPress={on.openMain} styles={styles} textStyle={{ fontSize: 13 }} style={compact ? { flex: 1 } : undefined} />;
-  const rename = <Button label="Rename" kind="secondary" accessibilityLabel={`Rename ${page.code}`} disabled={busy} onPress={() => on.ui({ rename: { name: page.name, code: page.code }, menu: false, confirm: null })} styles={styles} textStyle={{ fontSize: 13 }} />;
-  const close = <Button label="Close mission" kind="danger" accessibilityLabel={`Close mission ${page.code}`} disabled={busy} onPress={() => on.ui({ confirm: { kind: "close" }, menu: false, rename: null })} styles={styles} textStyle={{ fontSize: 13 }} />;
+  const openMain = <Button label={ui.busy === "Opening…" ? "Opening…" : "Open Main"} kind="primary" accessibilityLabel={`Open the Main of ${page.code}`} accessibilityState={{ disabled: busy, busy }} disabled={busy} onPress={on.openMain} styles={styles} textStyle={BUTTON_TEXT} style={compact ? { flex: 1 } : undefined} />;
+  const rename = <Button label="Rename" kind="secondary" accessibilityLabel={`Rename ${page.code}`} disabled={busy} onPress={() => on.ui({ rename: { name: page.name, code: page.code }, menu: false, confirm: null })} styles={styles} textStyle={BUTTON_TEXT} />;
+  const close = <Button label="Close mission" kind="danger" accessibilityLabel={`Close mission ${page.code}`} disabled={busy} onPress={() => on.ui({ confirm: { kind: "close" }, menu: false, rename: null })} styles={styles} textStyle={BUTTON_TEXT} />;
   const title = (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexShrink: 1 }}>
+    <View style={TITLE_ROW}>
       <Text style={{ fontSize: compact ? 18 : 20, fontWeight: "700", letterSpacing: 0.5, color: colors.foreground }}>{page.code}</Text>
       <Text accessibilityRole="header" style={{ fontSize: compact ? 18 : 20, fontWeight: "600", color: colors.foreground, flexShrink: 1 }} numberOfLines={compact ? 2 : 1}>
         {page.name}
@@ -457,7 +474,7 @@ function PageHeader({ page, ui, compact, on, styles, theme }: Pick<MissionPageBo
         {page.open ? (
           <View style={{ flexDirection: "row", gap: 10 }}>
             {openMain}
-            <Button label="⋯" kind="secondary" accessibilityLabel={ui.menu ? "Hide the mission's actions" : "More actions: Rename, Close mission"} accessibilityState={{ expanded: ui.menu }} onPress={() => on.ui({ menu: !ui.menu })} styles={styles} textStyle={{ fontSize: 13 }} />
+            <Button label="⋯" kind="secondary" accessibilityLabel={ui.menu ? "Hide the mission's actions" : "More actions: Rename, Close mission"} accessibilityState={{ expanded: ui.menu }} onPress={() => on.ui({ menu: !ui.menu })} styles={styles} textStyle={BUTTON_TEXT} />
           </View>
         ) : (
           <Small tone="muted" theme={theme}>{page.closedLine}</Small>
@@ -473,7 +490,7 @@ function PageHeader({ page, ui, compact, on, styles, theme }: Pick<MissionPageBo
   }
   return (
     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexShrink: 1 }}>
+      <View style={TITLE_ROW}>
         <BackLink text="Missions ›" a11y="Back to Missions" onPress={on.back} theme={theme} />
         {title}
       </View>
@@ -497,16 +514,16 @@ function PageForms({ page, ui, on, styles, theme }: Pick<MissionPageBodyProps, "
     <>
       {ui.rename === null ? null : (
         <View style={{ gap: 8 }}>
-          <View style={{ flexDirection: "row", gap: 12 }}>
+          <View style={FIELD_ROW}>
             <Field label="Name" value={ui.rename.name} onChange={(name) => on.ui({ rename: { ...ui.rename!, name } })} a11y="Mission name" theme={theme} style={{ flex: 3 }} />
             <Field label="Short code" value={ui.rename.code} onChange={(code) => on.ui({ rename: { ...ui.rename!, code: codeAsTyped(code) } })} a11y="Short code" mono theme={theme} style={{ flex: 1 }} />
           </View>
           {errors.map((line) => (
             <ToneText key={line} tone="danger" styles={styles} theme={theme}>{line}</ToneText>
           ))}
-          <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end" }}>
-            <Button label="Cancel" kind="secondary" onPress={() => on.ui({ rename: null })} styles={styles} textStyle={{ fontSize: 13 }} />
-            <Button label={ui.busy === "Saving…" ? "Saving…" : "Save"} kind="primary" accessibilityLabel="Save the name and code" disabled={errors.length > 0 || ui.busy !== null} onPress={on.saveRename} styles={styles} textStyle={{ fontSize: 13 }} />
+          <View style={FORM_ACTIONS}>
+            <Button label="Cancel" kind="secondary" onPress={() => on.ui({ rename: null })} styles={styles} textStyle={BUTTON_TEXT} />
+            <Button label={ui.busy === "Saving…" ? "Saving…" : "Save"} kind="primary" accessibilityLabel="Save the name and code" disabled={errors.length > 0 || ui.busy !== null} onPress={on.saveRename} styles={styles} textStyle={BUTTON_TEXT} />
           </View>
         </View>
       )}
@@ -530,22 +547,22 @@ function CharterCard({ page, ui, addable, compact, on, styles, theme }: Pick<Mis
         <MissionChip key={repo.workspaceId} text={repo.name} onPress={() => on.memory(repo.workspaceId)} a11y={`${repo.name}. Open its project memory`} theme={theme} />
       ))}
       {compact || !page.open ? null : (
-        <Button label="+ Add" kind="secondary" accessibilityLabel="Add a repository to the mission" accessibilityState={{ expanded: ui.adding }} onPress={() => on.ui({ adding: !ui.adding })} styles={styles} style={{ paddingVertical: 3, paddingHorizontal: 8 }} textStyle={{ fontSize: 13 }} />
+        <Button label="+ Add" kind="secondary" accessibilityLabel="Add a repository to the mission" accessibilityState={{ expanded: ui.adding }} onPress={() => on.ui({ adding: !ui.adding })} styles={styles} style={{ paddingVertical: 3, paddingHorizontal: 8 }} textStyle={BUTTON_TEXT} />
       )}
     </View>
   );
   if (compact) {
     return (
-      <Card compact theme={theme}>
-        <Label theme={theme}>Charter</Label>
+      <Card styles={styles} theme={theme}>
+        <Text style={styles.sectionLabel}>Charter</Text>
         <Small theme={theme}>{charter.goal === "" ? "No goal yet." : charter.goal}</Small>
         {repos}
       </Card>
     );
   }
   return (
-    <Card compact={false} theme={theme}>
-      <Label theme={theme}>{charter.label}</Label>
+    <Card styles={styles} theme={theme}>
+      <Text style={styles.sectionLabel}>{charter.label}</Text>
       <View>
         <Small tone="muted" theme={theme}>Goal</Small>
         <Text style={{ fontSize: 14, color: theme.colors.foreground }}>{charter.goal === "" ? "No goal yet." : charter.goal}</Text>
@@ -594,30 +611,26 @@ function LevelCard({ page, ui, compact, on, styles, theme }: Pick<MissionPageBod
     );
   if (compact) {
     return (
-      <Card compact theme={theme}>
-        <Label theme={theme}>Mission level</Label>
+      <Card styles={styles} theme={theme}>
+        <Text style={styles.sectionLabel}>Mission level</Text>
         {cells}
         <Small tone="muted" theme={theme}>{page.level.sentence}</Small>
         {confirm}
       </Card>
     );
   }
-  const line = (label: string, tone: Tone, text: string, key: string) => (
-    <Text key={key} style={{ fontSize: 12, color: theme.colors.foreground }}>
-      <Text style={{ color: toneColor(theme, tone) }}>{label}</Text>
-      {` ${text}`}
-    </Text>
-  );
   return (
-    <Card compact={false} theme={theme}>
-      <Label theme={theme}>Mission level</Label>
+    <Card styles={styles} theme={theme}>
+      <Text style={styles.sectionLabel}>Mission level</Text>
       {cells}
       {confirm}
-      {line("The Main decides:", "success", page.level.decides, "decides")}
-      {line("Yours:", "muted", page.level.yours, "yours")}
-      <Label theme={theme} style={{ marginTop: 6 }}>Governor</Label>
-      {page.governor.lines.map((entry) => line(entry.label, entry.tone, entry.text, entry.label))}
-      {page.governor.quiet === null ? null : line(page.governor.quiet.label, page.governor.quiet.tone, page.governor.quiet.text, "quiet")}
+      <ToneLine label="The Main decides:" tone="success" text={page.level.decides} theme={theme} />
+      <ToneLine label="Yours:" tone="muted" text={page.level.yours} theme={theme} />
+      <Text style={[styles.sectionLabel, { marginTop: 6 }]}>Governor</Text>
+      {page.governor.lines.map((entry) => (
+        <ToneLine key={entry.label} {...entry} theme={theme} />
+      ))}
+      {page.governor.quiet === null ? null : <ToneLine {...page.governor.quiet} theme={theme} />}
     </Card>
   );
 }
@@ -636,13 +649,13 @@ function WorkerCell({ worker, workerId, openAgent, theme }: { worker: string | n
 }
 
 /** "Workers by repository": one row per roster request (wide), the active ones and "+ N finished" (phone). */
-function WorkersCard({ page, compact, on, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "on" | "theme">) {
+function WorkersCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "on" | "styles" | "theme">) {
   const { colors } = theme;
   if (compact) {
     const active = page.rows.filter((row) => row.active);
     return (
-      <Card compact theme={theme}>
-        <Label theme={theme}>Workers</Label>
+      <Card styles={styles} theme={theme}>
+        <Text style={styles.sectionLabel}>Workers</Text>
         {page.rows.length === 0 ? <Small tone="muted" theme={theme}>No Workers yet.</Small> : null}
         {active.map((row) => (
           <Text key={row.requestId} style={{ fontSize: 12, color: colors.foreground }}>
@@ -656,8 +669,8 @@ function WorkersCard({ page, compact, on, theme }: Pick<MissionPageBodyProps, "p
     );
   }
   return (
-    <Card compact={false} theme={theme}>
-      <Label theme={theme}>Workers by repository</Label>
+    <Card styles={styles} theme={theme}>
+      <Text style={styles.sectionLabel}>Workers by repository</Text>
       {page.rows.length === 0 ? (
         <Small tone="muted" theme={theme}>No Workers yet.</Small>
       ) : (
@@ -688,10 +701,10 @@ function WorkersCard({ page, compact, on, theme }: Pick<MissionPageBodyProps, "p
 
 const CONTRACT_COLUMNS = [1.7, 1.7, 1] as const;
 
-function ContractsCard({ page, compact, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "theme">) {
+function ContractsCard({ page, compact, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "styles" | "theme">) {
   return (
-    <Card compact={compact} theme={theme}>
-      <Label theme={theme}>Contracts between repositories</Label>
+    <Card styles={styles} theme={theme}>
+      <Text style={styles.sectionLabel}>Contracts between repositories</Text>
       {page.contracts.length === 0 ? (
         <Small tone="muted" theme={theme}>No contracts yet.</Small>
       ) : compact ? (
@@ -713,12 +726,12 @@ function ContractsCard({ page, compact, theme }: Pick<MissionPageBodyProps, "pag
   );
 }
 
-function JournalCard({ page, compact, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "theme">) {
+function JournalCard({ page, compact, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "styles" | "theme">) {
   const { colors } = theme;
   const lines = page.journal.slice(0, compact ? JOURNAL_PHONE : JOURNAL_DESKTOP);
   return (
-    <Card compact={compact} theme={theme}>
-      <Label theme={theme}>Journal</Label>
+    <Card styles={styles} theme={theme}>
+      <Text style={styles.sectionLabel}>Journal</Text>
       {lines.length === 0 ? <Small tone="muted" theme={theme}>Nothing recorded yet.</Small> : null}
       <View>
         {lines.map((line, index) => (
@@ -732,11 +745,11 @@ function JournalCard({ page, compact, theme }: Pick<MissionPageBodyProps, "page"
   );
 }
 
-function PlanCard({ page, compact, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "theme">) {
+function PlanCard({ page, styles, theme }: Pick<MissionPageBodyProps, "page" | "styles" | "theme">) {
   return (
-    <Card compact={compact} theme={theme}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
-        <Label theme={theme}>Plan</Label>
+    <Card styles={styles} theme={theme}>
+      <View style={{ ...SPREAD_ROW, flexWrap: "wrap" }}>
+        <Text style={styles.sectionLabel}>Plan</Text>
         <Small tone="muted" theme={theme}>{page.plan.meta}</Small>
       </View>
       <Small theme={theme}>{page.plan.text}</Small>
@@ -746,7 +759,7 @@ function PlanCard({ page, compact, theme }: Pick<MissionPageBodyProps, "page" | 
 
 /** A mission's page: the artboard B on a wide screen, D on a phone (a chip's part shown in place). */
 export function MissionPageBody(props: MissionPageBodyProps) {
-  const { page, ui, compact, on, theme, status } = props;
+  const { page, ui, compact, on, styles, theme, status } = props;
   const gap = compact ? 8 : 12;
   if (compact && ui.part !== null) {
     return (
@@ -768,13 +781,10 @@ export function MissionPageBody(props: MissionPageBodyProps) {
         <PageForms {...props} />
         <Grid gap={10}>{stats}</Grid>
         <CharterCard {...props} />
-        <Card compact theme={theme}>
-          <Label theme={theme}>Governor</Label>
+        <Card styles={styles} theme={theme}>
+          <Text style={styles.sectionLabel}>Governor</Text>
           {page.phoneGovernor.map((entry) => (
-            <Text key={entry.label} style={{ fontSize: 12, color: theme.colors.foreground }}>
-              <Text style={{ color: toneColor(theme, entry.tone) }}>{entry.label}</Text>
-              {` ${entry.text}`}
-            </Text>
+            <ToneLine key={entry.label} {...entry} theme={theme} />
           ))}
         </Card>
         <WorkersCard {...props} />
@@ -815,7 +825,7 @@ export interface NewMissionFormProps {
   /** Shown once the owner pressed Create. */
   errors: readonly string[];
   projects: readonly MissionProject[];
-  /** Level 3 or 4 chosen and waiting for its confirmation. */
+  /** Level 3 or 4 chosen and waiting for its confirmation: Create waits for it too. */
   confirming: MissionLevel | null;
   busy: boolean;
   error: string | null;
@@ -837,7 +847,7 @@ export function NewMissionForm({ draft, errors, projects, confirming, busy, erro
       <Text accessibilityRole="header" style={{ fontSize: compact ? 18 : 20, fontWeight: "600", color: colors.foreground }}>
         New mission
       </Text>
-      <View style={{ flexDirection: "row", gap: 12 }}>
+      <View style={FIELD_ROW}>
         <Field label="Name" value={draft.name} onChange={(name) => onDraft({ ...draft, name })} a11y="Mission name" editable={!busy} theme={theme} style={{ flex: 3 }} />
         <Field label="Short code" value={draft.code} onChange={(code) => onDraft({ ...draft, code: codeAsTyped(code) })} a11y="Short code" mono editable={!busy} theme={theme} style={{ flex: 1 }} />
       </View>
@@ -866,9 +876,9 @@ export function NewMissionForm({ draft, errors, projects, confirming, busy, erro
         <ToneText key={line} tone="danger" styles={styles} theme={theme}>{line}</ToneText>
       ))}
       {error === null ? null : <ToneText tone="danger" styles={styles} theme={theme}>{error}</ToneText>}
-      <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 10 }}>
-        <Button label="Cancel" kind="secondary" disabled={busy} onPress={onCancel} styles={styles} textStyle={{ fontSize: 13 }} />
-        <Button label={busy ? "Creating…" : "Create and open Main"} kind="primary" accessibilityState={{ disabled: busy, busy }} disabled={busy} onPress={onCreate} styles={styles} textStyle={{ fontSize: 13 }} />
+      <View style={FORM_ACTIONS}>
+        <Button label="Cancel" kind="secondary" disabled={busy} onPress={onCancel} styles={styles} textStyle={BUTTON_TEXT} />
+        <Button label={busy ? "Creating…" : "Create and open Main"} kind="primary" accessibilityState={{ disabled: busy || confirming !== null, busy }} disabled={busy || confirming !== null} onPress={onCreate} styles={styles} textStyle={BUTTON_TEXT} />
       </View>
     </View>
   );
@@ -885,7 +895,7 @@ export function MemoryTable({ view, compact, theme }: { view: MemoryView; compac
   const { colors } = theme;
   return (
     <View style={{ gap: compact ? 8 : 12 }}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+      <View style={SPREAD_ROW}>
         <Text accessibilityRole="header" style={{ fontSize: compact ? 18 : 20, fontWeight: "600", color: colors.foreground, flexShrink: 1 }}>
           {view.title}
         </Text>
@@ -954,6 +964,18 @@ type Place =
   | { view: "new" }
   | { view: "memory"; workspaceId: string; repos: ReadonlyArray<{ workspaceId: string; name: string }>; back: { view: "page"; missionId: string; code: string } };
 
+/** The New mission form: the draft, whether Create was pressed, a level 3 or 4 waiting for its confirmation, the call. */
+interface NewForm {
+  draft: MissionDraft;
+  tried: boolean;
+  confirming: MissionLevel | null;
+  creating: boolean;
+  error: string | null;
+}
+
+/** How New mission opens, again after Cancel and after a mission is made. */
+const NEW_FORM_IDLE: NewForm = { draft: EMPTY_MISSION_DRAFT, tried: false, confirming: null, creating: false, error: null };
+
 export interface MissionsScreenProps extends PluginSurfaceProps {
   /** The listed projects (plugin homes left out), for New mission and "+ Add". */
   projects: readonly MissionProject[];
@@ -977,11 +999,7 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
   const [place, setPlace] = useState<Place>({ view: "list" });
   const [closedShown, setClosedShown] = useState(false);
   const [ui, setUi] = useState<PageUi>(PAGE_UI_IDLE);
-  const [draft, setDraft] = useState<MissionDraft>(EMPTY_MISSION_DRAFT);
-  const [tried, setTried] = useState(false);
-  const [confirming, setConfirming] = useState<MissionLevel | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [form, setForm] = useState<NewForm>(NEW_FORM_IDLE);
 
   const list = useQuery({ queryKey: MISSIONS_QUERY_KEYS.list, queryFn: () => listMissions({}), ...pollWhile(place.view === "list") });
   const missionId = place.view === "page" ? place.missionId : "";
@@ -998,12 +1016,12 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
     void queryClient.invalidateQueries({ queryKey: MISSIONS_QUERY_KEYS.page(id) });
   };
   const patch = (change: Partial<PageUi>) => setUi((current) => ({ ...current, ...change }));
-  /** One call of the page: busy while it runs, its failure as one line. */
-  const run = (busy: string, failed: string, call: () => Promise<unknown>, done: Partial<PageUi> = {}) => {
+  /** One call of the page: busy while it runs, then `done` (from its result) and a refresh, or its failure as one line. */
+  const run = <T,>(busy: string, failed: string, call: () => Promise<T>, done: Partial<PageUi> | ((result: T) => Partial<PageUi>) = {}) => {
     patch({ busy, error: null, notice: null });
     call().then(
-      () => {
-        patch({ busy: null, ...done });
+      (result) => {
+        patch({ busy: null, ...(typeof done === "function" ? done(result) : done) });
         refresh(missionId);
       },
       (error: unknown) => patch({ busy: null, error: `${failed}: ${errorMessageOf(error)}` }),
@@ -1019,12 +1037,14 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
 
   let body: ReactNode;
   if (place.view === "new") {
+    const { draft } = form;
     const errors = missionDraftErrors(draft);
     const create = () => {
-      setTried(true);
-      if (errors.length > 0) return;
-      setCreating(true);
-      setCreateError(null);
+      if (errors.length > 0) {
+        setForm({ ...form, tried: true });
+        return;
+      }
+      setForm({ ...form, tried: true, creating: true, error: null });
       void (async () => {
         try {
           const created = await createMission(createInputOf(draft));
@@ -1041,42 +1061,29 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
           }
           void queryClient.invalidateQueries({ queryKey: MISSIONS_QUERY_KEYS.list });
           const notice = opened(created.agentId, draft.code);
-          setCreating(false);
-          setDraft(EMPTY_MISSION_DRAFT);
-          setTried(false);
+          setForm(NEW_FORM_IDLE);
           openPage(id, { error, notice: [notice, ...notices].filter((line) => line !== null).join(" ") || null });
         } catch (failure) {
-          setCreating(false);
-          setCreateError(`Could not create the mission: ${errorMessageOf(failure)}`);
+          setForm((current) => ({ ...current, creating: false, error: `Could not create the mission: ${errorMessageOf(failure)}` }));
         }
       })();
     };
     body = (
       <NewMissionForm
         draft={draft}
-        errors={tried ? errors : []}
+        errors={form.tried ? errors : []}
         projects={projects}
-        confirming={confirming}
-        busy={creating}
-        error={createError}
-        onDraft={setDraft}
-        onLevel={(level) => {
-          if (levelNeedsConfirmation(level) && level !== draft.level) setConfirming(level);
-          else {
-            setConfirming(null);
-            setDraft({ ...draft, level });
-          }
-        }}
-        onConfirmLevel={() => {
-          if (confirming !== null) setDraft({ ...draft, level: confirming });
-          setConfirming(null);
-        }}
-        onCancelLevel={() => setConfirming(null)}
+        confirming={form.confirming}
+        busy={form.creating}
+        error={form.error}
+        onDraft={(next) => setForm({ ...form, draft: next })}
+        onLevel={(level) =>
+          setForm(levelNeedsConfirmation(level) && level !== draft.level ? { ...form, confirming: level } : { ...form, confirming: null, draft: { ...draft, level } })
+        }
+        onConfirmLevel={() => setForm({ ...form, confirming: null, draft: form.confirming === null ? draft : { ...draft, level: form.confirming } })}
+        onCancelLevel={() => setForm({ ...form, confirming: null })}
         onCancel={() => {
-          setDraft(EMPTY_MISSION_DRAFT);
-          setTried(false);
-          setConfirming(null);
-          setCreateError(null);
+          setForm(NEW_FORM_IDLE);
           setPlace({ view: "list" });
         }}
         onCreate={create}
@@ -1122,16 +1129,8 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
           on={{
             back: () => setPlace({ view: "list" }),
             ui: patch,
-            openMain: () => {
-              patch({ busy: "Opening…", error: null, notice: null });
-              ensureMission({ missionId: view.missionId }).then(
-                (result) => {
-                  patch({ busy: null, notice: opened(result.agentId, view.code) ?? result.toolsNotice ?? null });
-                  refresh(view.missionId);
-                },
-                (error: unknown) => patch({ busy: null, error: `Could not open the Main: ${errorMessageOf(error)}` }),
-              );
-            },
+            openMain: () =>
+              run("Opening…", "Could not open the Main", () => ensureMission({ missionId: view.missionId }), (result) => ({ notice: opened(result.agentId, view.code) ?? result.toolsNotice ?? null })),
             saveRename: () => {
               const input = ui.rename === null ? null : renameInputOf(view.missionId, current, ui.rename.name, ui.rename.code);
               if (input === null) patch({ rename: null });
@@ -1163,7 +1162,10 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
         closedShown={closedShown}
         onToggleClosed={() => setClosedShown(!closedShown)}
         onOpen={(id) => openPage(id)}
-        onNew={() => setPlace({ view: "new" })}
+        onNew={() => {
+          setForm(NEW_FORM_IDLE);
+          setPlace({ view: "new" });
+        }}
         status={status}
         styles={styles}
         theme={theme}

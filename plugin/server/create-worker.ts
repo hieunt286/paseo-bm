@@ -43,13 +43,14 @@ import { aliasBases } from "./alias-bases";
 import { TOOL_PROVIDERS } from "./agent-tools";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
-import { bmAgentsOf, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { directoryIn, listedWorkspaces, titleIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { createPeerLinkStore, routeOf, type PeerLink } from "./peer-links";
-import { peerBriefOf, titleIn } from "./peer-tools";
+import { peerBriefOf } from "./peer-tools";
 import { createMemoryStore, type MemoryEntry } from "./memory-store";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
-import { createMissionRoster } from "./mission-roster";
-import { createMissionStore, type Mission } from "./mission-store";
+import { createMissionRoster, runningRequestsOf } from "./mission-roster";
+import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { missionOfMain } from "./mission-tools";
 import { isMissionsHome } from "./missions-home";
 import { createRequestRegistry } from "./request-registry";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
@@ -73,6 +74,9 @@ export const CREATE_WORKER_TOOL = "bm_create_worker";
 /** The caller is not a bound Manager: it creates its Worker by hand. */
 export const NOT_BOUND_MESSAGE =
   "bm_create_worker is only for a Manager paseo-bm created with its own tools, and you are not one: create the Worker with create_agent as your instructions say. Nothing was created.";
+/** The caller's binding names a mission whose Main is another agent now (missions design §3.4). */
+export const REPLACED_MAIN_MESSAGE =
+  "You are no longer the Main of your mission: another Main took it over, so you create no Worker for it. Tell the owner in one line. Nothing was created.";
 /** No Paseo handle has reached the plugin yet (as the Orchestrator's tools say, design §7.4). */
 export const NO_PASEO_MESSAGE = "paseo-bm has no connection to Paseo yet; try again in a moment. Nothing was created.";
 /** The `bm-worker` profile is missing (or Paseo's configuration cannot be read). */
@@ -286,7 +290,7 @@ export async function folderOfAgent(paseo: unknown, agentId: string, workspaceId
   }
   try {
     if (workspaceId === null || typeof (paseo as Partial<DashboardPaseo> | null)?.workspaces?.list !== "function") return null;
-    return (await listedWorkspaces(paseo as DashboardPaseo))?.find((entry) => entry.id === workspaceId)?.directory ?? null;
+    return directoryIn(await listedWorkspaces(paseo as DashboardPaseo), workspaceId);
   } catch {
     return null;
   }
@@ -314,13 +318,6 @@ export const unboundPeerReason = (linkId: string): string =>
 // ---------------------------------------------------------------------------
 // A Main's Workers (missions design §4).
 // ---------------------------------------------------------------------------
-
-/** The caller's mission: its binding's, else the mission whose Main it is (the binding's is a cache, §2.3); null for none. Never throws. */
-export function missionOfCaller(home: string, caller: Pick<ToolCaller, "agentId" | "missionId">): Mission | null {
-  const store = createMissionStore(home);
-  const missionId = caller.missionId ?? store.list().find((entry) => entry.mainId === caller.agentId)?.missionId ?? null;
-  return missionId === null ? null : store.get(missionId);
-}
 
 /** True when `directory` is the data folder or inside it: the Missions and Orchestrator homes are no repos (§3.1). */
 const inDataFolder = (home: string, directory: string): boolean => {
@@ -361,13 +358,7 @@ export function missionRepoOf(
  */
 export async function staffingReasons(home: string, paseo: DashboardPaseo, mission: Mission, workspaceId: string, listed: readonly ListedWorkspace[] | null): Promise<string[]> {
   if (createMissionAutonomyStore(home).isDelegated(mission.missionId, "staffing")) return [];
-  const registry = createRequestRegistry(home);
-  const live = new Set(
-    (await bmAgentsOf(paseo, { home })).filter(({ facts }) => facts.role === "worker" && !facts.archived).map(({ facts }) => facts.id),
-  );
-  const running = createMissionRoster(home)
-    .list(mission.missionId)
-    .filter((entry) => entry.state === "active" && (registry.get(entry.workspaceId, entry.requestId)?.finishedAt ?? null) === null && entry.workerIds.some((id) => live.has(id)));
+  const running = await runningRequestsOf(home, paseo, mission.missionId);
   const reasons: string[] = [];
   const here = running.find((entry) => entry.workspaceId === workspaceId);
   const ask = "staffing is not delegated in this mission, so ask the owner first";
@@ -412,8 +403,9 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     if (issues.length > 0) return fixThese(CREATE_WORKER_TOOL, issues);
     const { request, context, peerLink, project, planStep } = input as unknown as CreateWorkerInput;
     const home = deps.home();
-    // A Main works in its mission's repos; a Manager of no mission in its own folder.
-    const mission = missionOfCaller(home, caller);
+    // A Main works in its mission's repos; a Manager of no mission in its own folder. A replaced Main works for none.
+    const mission = missionOfMain(home, caller);
+    if (mission === null && (caller.missionId ?? null) !== null) return refused(REPLACED_MAIN_MESSAGE);
     if (mission === null && (project !== undefined || planStep !== undefined)) return refused("project and planStep are for the Main of a mission, and you are none: leave them out. Nothing was created.");
     if (mission === null && isMissionsHome(caller.workspaceId, home)) return refused("You have no mission yet: record it with bm_mission_start before you create a Worker. Nothing was created.");
     const paseo = deps.paseo();
@@ -485,13 +477,13 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     }
     if (mission !== null) {
       // The roster is the mission's membership (§2.3); the journal says what happened.
+      const topic = workerTitleOf(request);
       try {
-        const topic = workerTitleOf(request);
         if (createMissionRoster(home).add(mission.missionId, { requestId, workspaceId, topic, workerId }) === null) log(`[paseo-bm] request ${requestId} is held by another mission's roster`);
-        createMissionStore(home).appendJournal(mission.missionId, { kind: "worker", by: managerId, text: `Worker ${workerId} for request ${requestId} in ${workspaceId}: ${topic}`, ref: requestId });
       } catch (error) {
         log(`[paseo-bm] could not add request ${requestId} to mission ${mission.missionId}: ${reasonOf(error)}`);
       }
+      journalQuietly(createMissionStore(home), mission.missionId, { kind: "worker", by: managerId, text: `Worker ${workerId} for request ${requestId} in ${workspaceId}: ${topic}`, ref: requestId }, log);
     }
     if (peerLink === undefined) return { ok: true, text: JSON.stringify({ workerId, requestId }) };
     let taken: string[] = [];

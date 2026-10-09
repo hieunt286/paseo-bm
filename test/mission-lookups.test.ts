@@ -6,7 +6,6 @@ import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/serv
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
 import { workspaceTracesOf } from "../plugin/server/request-trace";
-import { finishPlaceOf, requestFinishedEventsOf } from "../plugin/server/event-bus";
 import { checkReviewBudget, type BudgetOverrun, type BudgetPaseo } from "../plugin/server/review-budget";
 import { createBudgetTold } from "../plugin/server/budget-told";
 import { stateBriefOf } from "../plugin/server/compaction";
@@ -161,24 +160,6 @@ describe("traces of a mission's request in its repo (§6)", () => {
       REPO,
     );
     expect(traces).toEqual([expect.objectContaining({ requestId: REQ, managerAgentId: MAIN, requestText: "Export the contacts", workerIds: [WORKER] })]);
-  });
-});
-
-describe("a finish of a mission's request (§6 event-bus row)", () => {
-  it("is the repo's and its current Main's, whether the Main's turn in the home or the Worker's in the repo held it", () => {
-    const home = missionHome();
-    const place = (requestId: string) => finishPlaceOf(home, requestId);
-    expect(place(REQ)).toEqual({ workspaceId: REPO, managerId: MAIN });
-    expect(place(OTHER)).toBeNull();
-    const finished = report(REQ, "finished", "2026-10-09T10:09:00.000Z");
-    const fromMain = requestFinishedEventsOf(turn({ workspaceId: HOME_WS, agentId: OLD_MAIN, role: "manager", parentAgentId: null, reports: [finished] }), undefined, place);
-    const fromWorker = requestFinishedEventsOf(turn({ reports: [finished] }), undefined, place);
-    expect(fromMain).toEqual([expect.objectContaining({ workspaceId: REPO, requestId: REQ, managerId: MAIN })]);
-    expect(fromWorker).toEqual(fromMain);
-    // No mission: the record's workspace and Manager, as before.
-    expect(requestFinishedEventsOf(turn({ workspaceId: LOCAL, requestId: OTHER, reports: [report(OTHER, "finished", T0)] }), undefined, place)).toEqual([
-      expect.objectContaining({ workspaceId: LOCAL, managerId: OLD_MAIN }),
-    ]);
   });
 });
 

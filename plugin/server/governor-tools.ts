@@ -6,7 +6,7 @@
  *   gives one area of a repo to one of two open missions: it writes the call
  *   to `orchestrator/arbitrations.json` (`governor-conflicts.ts`), adds a
  *   `governor` journal line to both missions and sends both Mains a
- *   `governor:arbitrate` command (`bmGovern`, `command-authority.ts`). With
+ *   `governor:arbitrate` command (`governSend`, `command-authority.ts`). With
  *   `goal` — the losing mission's goal as the call leaves it — it also opens an
  *   `m:` card of that mission whose "apply" option carries the `arbitration`
  *   prepared change: the plugin sets the goal on the owner's tap.
@@ -44,7 +44,7 @@ import {
   type MissionSplit,
   type MissionSplitAction,
 } from "../shared/mission-change";
-import { bmGovern, type CommandToolDeps } from "./command-authority";
+import { governSend, type CommandToolDeps } from "./command-authority";
 import {
   CONFLICT_WINDOW_MS,
   areaCovers,
@@ -214,21 +214,44 @@ export type SplitResult = { ok: true; mission: Mission; mainId: string; moved: s
 /**
  * Runs a split already checked (see the module comment); `by` is who
  * authorised it (`owner` on the card, `orchestrator` on the `split` cell),
- * `ref` the card or the source mission. A Main that cannot be created puts the
- * moved requests back and closes the new mission. Never throws.
+ * `ref` the card or the source mission. Any failure between the new mission's
+ * creation and its Main's (`undo`) puts the moved requests back, closes the
+ * new mission and journals why on the source, each step on its own: the
+ * result keeps the failure that stopped the split. Never throws.
  */
 export async function executeSplit(source: Mission, split: MissionSplit, by: "owner" | "orchestrator", ref: string, deps: SplitDeps): Promise<SplitResult> {
   const { home, log } = deps;
   const store = createMissionStore(home, { now: () => deps.now });
   const roster = createMissionRoster(home, { now: () => deps.now });
+  /** The new mission and the requests moved to it, until its Main exists; then null: the split stands. */
+  let undoable: { mission: Mission; movedIds: string[] } | null = null;
+  const undo = (why: string): void => {
+    if (undoable === null) return;
+    const { mission, movedIds } = undoable;
+    undoable = null;
+    const steps: Array<[string, () => unknown]> = [
+      ["put the moved requests back", () => roster.move(mission.missionId, source.missionId, movedIds)],
+      ["close the new mission", () => store.update(mission.missionId, (current) => ({ ...current, state: "closed", closedAt: deps.now.toISOString() }))],
+      ["journal it", () => store.appendJournal(source.missionId, { kind: "charter", by: "plugin", text: `Split into ${split.code} undone: ${why}`, ref: mission.missionId })],
+    ];
+    for (const [what, step] of steps) {
+      try {
+        step();
+      } catch (error) {
+        log(`[paseo-bm] undoing the split into ${split.code} could not ${what}: ${errorText(error)}`);
+      }
+    }
+  };
   try {
     const listed = await listedWorkspaces(deps.paseo as DashboardPaseo);
     const repos = resolveRepos(split.repos, listed, home, "repos").ids;
     const created = store.create({ code: split.code, name: split.name, goal: split.goal, repos, createdBy: "orchestrator", parentMissionId: source.missionId, splitReason: split.reason });
     if (!created.ok) return { ok: false, reasons: created.reasons };
     const mission = created.mission;
+    undoable = { mission, movedIds: [] };
     const moved = roster.move(source.missionId, mission.missionId, split.requestIds);
     const movedIds = moved.map((entry) => entry.requestId);
+    undoable = { mission, movedIds };
     const listedIds = movedIds.length === 0 ? "no request" : `requests ${movedIds.join(", ")}`;
     store.appendJournal(mission.missionId, { kind: "charter", by, text: `Split from mission ${source.code} with ${listedIds}: ${split.reason}`, ref: source.missionId });
     store.appendJournal(source.missionId, { kind: "charter", by, text: `Split: mission ${split.code} took ${listedIds}: ${split.reason}`, ref: mission.missionId });
@@ -247,11 +270,10 @@ export async function executeSplit(source: Mission, split: MissionSplit, by: "ow
         })
       ).agentId;
     } catch (error) {
-      roster.move(mission.missionId, source.missionId, movedIds);
-      store.update(mission.missionId, (current) => ({ ...current, state: "closed", closedAt: deps.now.toISOString() }));
-      store.appendJournal(source.missionId, { kind: "charter", by: "plugin", text: `Split into ${split.code} undone: its Main could not be created (${errorText(error)})`, ref: mission.missionId });
+      undo(`its Main could not be created (${errorText(error)})`);
       return { ok: false, reasons: [`the new mission's Main could not be created: ${errorText(error)}`] };
     }
+    undoable = null;
     const bindings = deps.missions?.bindings?.() ?? undefined;
     const workers = await reassignRequests(mission.missionId, moved, mainId, {
       home,
@@ -272,6 +294,7 @@ export async function executeSplit(source: Mission, split: MissionSplit, by: "ow
     );
     return { ok: true, mission: store.get(mission.missionId) ?? mission, mainId, moved: movedIds, workers };
   } catch (error) {
+    undo(`it failed before its Main was created (${errorText(error)})`);
     return { ok: false, reasons: [errorText(error)] };
   }
 }
@@ -322,9 +345,6 @@ export async function bmCreateMain(input: CreateMainInput, context: ToolContext,
 // ---------------------------------------------------------------------------
 // bm_arbitrate.
 // ---------------------------------------------------------------------------
-
-/** The command id `bmGovern`'s answer names, or null. */
-const commandIdOf = (text: string): string | null => /"commandId": "([^"]+)"/.exec(text)?.[1] ?? null;
 
 /** `bm_arbitrate` (see the module comment). */
 export async function bmArbitrate(input: ArbitrateInput, context: ToolContext, deps: GovernorToolDeps): Promise<ServerToolResult> {
@@ -402,8 +422,9 @@ export async function bmArbitrate(input: ArbitrateInput, context: ToolContext, d
   ];
   for (const [mission, text] of texts) {
     try {
-      const sent = await bmGovern({ missionId: mission.missionId, step: "arbitrate", text, ownWords: `${input.area}\n${reason}` }, context, deps);
-      const id = sent.ok ? commandIdOf(sent.text) : null;
+      const sent = await governSend({ missionId: mission.missionId, step: "arbitrate", text, ownWords: `${input.area}\n${reason}` }, context, deps);
+      // A command the store could not record is named nowhere, as `bm_govern` names none.
+      const id = sent.ok && sent.unrecorded === null ? sent.id : null;
       if (id !== null) entry.commandIds.push(id);
       told.push(sent.ok ? `the Main of ${mission.code} is told${id === null ? "" : ` (command ${id})`}` : `the Main of ${mission.code} could not be told: ${sent.text}`);
     } catch (error) {

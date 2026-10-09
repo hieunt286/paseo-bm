@@ -40,7 +40,13 @@ describe("launcher.tsx: the Beads Manager surface", () => {
   });
 
   it("routes the Missions section to its screen, with the projects as Projects lists them (missions design §10.1)", () => {
-    expect(launcher).toMatch(/if \(view === "missions"\) \{\s*\/\/[^\n]*\n\s*return framed\(\s*<MissionsScreen \{\.\.\.props\} projects=\{\(projectWorkspaces \?\? \[\]\)\.map/);
+    expect(launcher).toMatch(/if \(view === "missions"\) \{\s*\/\/[^\n]*\n\s*return framed\(\s*<MissionsScreen \{\.\.\.props\} projects=\{projectNames\}/);
+    // One mapping of the listed projects, by their own names, for Missions, Settings and Tools.
+    expect(launcher).toMatch(/const projectNames = useMemo\(\(\) => \(projectWorkspaces \?\? \[\]\)\.map\(\(workspace\) => \(\{ id: workspace\.id, name: workspace\.label, screenTitle: workspace\.label \}\)\), \[projectWorkspaces\]\)/);
+    expect(launcher.match(/\(projectWorkspaces \?\? \[\]\)\.map/g)).toHaveLength(1);
+    // The Inbox names its mission cards from the same missions.list entry, read at most once a minute (no 5 s poll).
+    expect(launcher).toMatch(/queryKey: MISSIONS_QUERY_KEYS\.list, queryFn: \(\) => listMissions\(\{\}\), staleTime: MISSION_NAMES_STALE_MS, refetchInterval: view === "inbox" \? MISSION_NAMES_STALE_MS : false/);
+    expect(launcher).toMatch(/const MISSION_NAMES_STALE_MS = 60_000;/);
     const missions = source("missions.tsx");
     for (const rpc of ["missionsListRpc", "missionGetRpc", "missionChangeRpc", "missionEnsureRpc", "missionsCreateRpc", "autonomySetMissionLevelRpc", "memoryListRpc"]) {
       expect(missions).toMatch(new RegExp(`useRpc\\(${rpc}\\)`));
@@ -48,6 +54,11 @@ describe("launcher.tsx: the Beads Manager surface", () => {
     // The list and the page are read every WORK_POLL_MS while they show (§10.1).
     expect(missions).toMatch(/queryKey: MISSIONS_QUERY_KEYS\.list, queryFn: \(\) => listMissions\(\{\}\), \.\.\.pollWhile\(place\.view === "list"\)/);
     expect(missions).toMatch(/queryKey: MISSIONS_QUERY_KEYS\.page\(missionId\), queryFn: \(\) => getMission\(\{ missionId \}\), \.\.\.pollWhile\(place\.view === "page"\)/);
+    // New mission opens empty every time: New, Cancel and a made mission each reset the one form state (review U1).
+    expect(missions).toMatch(/const NEW_FORM_IDLE: NewForm = \{ draft: EMPTY_MISSION_DRAFT, tried: false, confirming: null, creating: false, error: null \};/);
+    expect(missions).toMatch(/onNew=\{\(\) => \{\s*setForm\(NEW_FORM_IDLE\);\s*setPlace\(\{ view: "new" \}\);/);
+    expect(missions).toMatch(/onCancel=\{\(\) => \{\s*setForm\(NEW_FORM_IDLE\);\s*setPlace\(\{ view: "list" \}\);/);
+    expect(missions).toMatch(/setForm\(NEW_FORM_IDLE\);\s*openPage\(id,/);
     // A project's page shows the same memory view in place (artboard F).
     const work = source("work.tsx");
     expect(work).toMatch(/onMemory: \(\) => setMemoryOpen\(true\)/);

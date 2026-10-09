@@ -7,7 +7,7 @@
  * - **Recorded at the source** (`recordIntervention`), never blocking or
  *   failing the intervention itself — a failure is one log line:
  *   `bm_decide` records an `answer` (`interventionOfDecision`);
- *   `bm_send_command` and `bm_direct_worker` record the command, with its id
+ *   `bm_direct_worker` records the command, with its id
  *   in the commands store (`commandId`, `command-send.ts`), by the event
  *   it answers (`interventionOfCommand`): a command the Orchestrator sends in
  *   the turn of a wake is attributed to that wake's events (the event bus

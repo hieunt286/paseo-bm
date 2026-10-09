@@ -203,6 +203,23 @@ describe("the store and the runner on a data folder", () => {
     expect(logs).toEqual([]);
   });
 
+  it("keeps a family bm_govern wrote while a nudge was being delivered (GovernorStore.update)", async () => {
+    createAlertStore(home).raise({ workspaceId: "repo-a", kind: "request-stalled", subject: REQUEST });
+    await governor().recompute(MISSION_ID, paseo());
+    const replanned: FamilyState = { step: 4, since: T0.toISOString(), figures: [], lastAction: { at: T0.toISOString(), kind: "replan", id: "cmd-gov" }, mainTurnsAt: null };
+    // The nudge's delivery awaits; meanwhile bm_govern records a re-plan of another family.
+    enqueue.mockImplementationOnce(async () => {
+      createGovernorStore(home).update(MISSION_ID, (current) => ({ ...current, mess: replanned }));
+      return "queued";
+    });
+    clock = minutes(1);
+    expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([{ family: "stuck", action: "nudge", commandId: "cmd-1", reason: null }]);
+    const ladder = createGovernorStore(home).ladder(MISSION_ID);
+    expect(ladder.mess).toEqual(replanned);
+    expect(ladder.stuck).toMatchObject({ step: 2, lastAction: { kind: "nudge", id: "cmd-1" } });
+    expect(ladder.drift).toMatchObject({ step: 0 });
+  });
+
   it("reads the owner's governor.* thresholds at each recomputation", async () => {
     const roster = createMissionRoster(home, { env: {} });
     roster.add(MISSION_ID, { requestId: "req-20261009T110000Z", workspaceId: "repo-c", topic: "outside", workerId: "w2" });

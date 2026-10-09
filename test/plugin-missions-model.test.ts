@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryListOutput, MissionGetOutput, MissionSignal, MissionSummary } from "../plugin/shared/contracts";
-import { MISSION_LEVEL_CLASSES } from "../plugin/shared/autonomy";
+import { MISSION_LEVELS, MISSION_LEVEL_CLASSES, levelNeedsConfirmation } from "../plugin/shared/autonomy";
 import { GOVERNOR_FIGURES } from "../plugin/server/governor-figures";
 import {
   EMPTY_MISSION_DRAFT,
@@ -18,7 +18,6 @@ import {
   governorLinesOf,
   levelConfirmDialog,
   levelLineOf,
-  levelNeedsConfirmation,
   levelSentenceOf,
   memorySourceOf,
   memoryViewOf,
@@ -385,7 +384,7 @@ describe("New mission and Rename (artboard E; §10.2)", () => {
   });
 
   it("confirms levels 3 and 4 in place, Cancel first, and Close mission likewise", () => {
-    expect([0, 1, 2, 3, 4].map(levelNeedsConfirmation)).toEqual([false, false, false, true, true]);
+    expect(MISSION_LEVELS.map((level) => levelNeedsConfirmation(level))).toEqual([false, false, false, true, true]);
     const dialog = levelConfirmDialog(3, "AIX");
     expect(dialog).toMatchObject({ title: "Set AIX to level 3?", confirmLabel: "Set level 3", cancelLabel: "Cancel", defaultAction: "cancel" });
     expect(levelConfirmDialog(4, null).title).toBe("Use level 4?");
@@ -428,7 +427,7 @@ describe("a project's memory (artboard F; §10.2)", () => {
 describe("the hook-free pieces of the Missions screen (renderTree)", () => {
   it("draws an open list card with the accent bar, its chips and its progress, and opens the mission when pressed", () => {
     const onOpen = vi.fn();
-    const nodes = renderTree(MissionCard({ card: missionCardOf(AIX, NOW), compact: false, onOpen, theme }));
+    const nodes = renderTree(MissionCard({ card: missionCardOf(AIX, NOW), compact: false, onOpen, styles, theme }));
     const shown = texts(nodes);
     for (const text of ["AIX", "AI Assistant ↔ xOne", "Main idle", "level 2 · proceed, staffing", "xspace-ai-assistant", "ai-assistant", "3 live Workers · 7 requests", "Done criteria 5 of 11", "2 questions for you", "Governor: 4 Workers on one area — nudged 12 min ago"]) {
       expect(shown, text).toContain(text);
@@ -443,11 +442,11 @@ describe("the hook-free pieces of the Missions screen (renderTree)", () => {
   });
 
   it("dims a closed card without the bar, and draws the phone card's lines", () => {
-    const closed = renderTree(MissionCard({ card: missionCardOf(PRD1, NOW), compact: false, onOpen: noop, theme }));
+    const closed = renderTree(MissionCard({ card: missionCardOf(PRD1, NOW), compact: false, onOpen: noop, styles, theme }));
     expect(flat((closed[0] as RNode).props["style"])).toMatchObject({ opacity: 0.7 });
     expect(allNodes(closed).some((node) => flat(node.props["style"])["width"] === 3)).toBe(false);
     expect(texts(closed)).toContain("closed 2026-10-08 · xspace-ai-assistant");
-    const phone = texts(renderTree(MissionCard({ card: missionCardOf(AIX, NOW), compact: true, onOpen: noop, theme })));
+    const phone = texts(renderTree(MissionCard({ card: missionCardOf(AIX, NOW), compact: true, onOpen: noop, styles, theme })));
     expect(phone).toContain("2 repositories · 3 live Workers · Main idle");
     expect(phone).toContain("Done 5 of 11 · 2 questions · 1 signal");
   });
@@ -591,6 +590,11 @@ describe("the hook-free pieces of the Missions screen (renderTree)", () => {
     expect(onCreate).toHaveBeenCalled();
     const confirming = texts(renderTree(NewMissionForm({ ...props, confirming: 3, errors: ["Repositories: choose at least one."] })));
     expect(confirming).toEqual(expect.arrayContaining(["Use level 3?", "Set level 3", "Repositories: choose at least one."]));
+    // Review U1: Create waits while a level 3 or 4 waits for its confirmation.
+    const create = (form: Record<string, unknown>) => pressables(renderTree(NewMissionForm({ ...props, ...form }))).find((node) => textOf(node) === "Create and open Main")!;
+    expect(create({ confirming: 3 }).props["disabled"]).toBe(true);
+    expect(create({ confirming: 3 }).props["accessibilityState"]).toMatchObject({ disabled: true });
+    expect(create({}).props["disabled"]).toBe(false);
     expect(texts(renderTree(NewMissionForm({ ...props, busy: true })))).toContain("Creating…");
   });
 

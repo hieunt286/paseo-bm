@@ -49,8 +49,6 @@ describe("sendCommand: the stored copy (base design §9)", () => {
       },
       targetId: "agent-manager",
       copyTo: null,
-      grantOf: null,
-      approved: [],
       backstop: false,
       loopGuard: "count",
       intervention: null,
@@ -81,8 +79,6 @@ describe("sendCommand: the stored copy (base design §9)", () => {
       command: { from: "orchestrator", via: "tab", to: "manager", requestId: null, re: "check the daemon", body: "Use daemon-pass-77 only to check.", intent: "other" },
       targetId: "agent-manager",
       copyTo: null,
-      grantOf: null,
-      approved: [],
       backstop: false,
       loopGuard: "count",
       intervention: null,
@@ -127,7 +123,7 @@ describe("commandRefusalOf: the send's checks, read without sending (design §16
     expect(check({ loopGuard: "count" })).toBe(HANDOFF_OFF_MESSAGE);
     // The same reason sendCommand gives, and nothing leaves.
     const enqueue = vi.fn(async () => "sent" as const);
-    const sent = await sendCommand({ home, now: NOW, paseo: fakePaseo().paseo as never, workspaceId: "ws-1", command: handoff, targetId: "m", copyTo: null, grantOf: null, approved: [], backstop: false, loopGuard: "count", intervention: null, queue: { enqueue } });
+    const sent = await sendCommand({ home, now: NOW, paseo: fakePaseo().paseo as never, workspaceId: "ws-1", command: handoff, targetId: "m", copyTo: null, backstop: false, loopGuard: "count", intervention: null, queue: { enqueue } });
     expect(sent).toEqual({ ok: false, stage: "check", reason: HANDOFF_OFF_MESSAGE });
     expect(enqueue).not.toHaveBeenCalled();
     expect(createOrchestratorStore(home).listCommands()).toHaveLength(COMMAND_LIMIT_PER_REQUEST);
@@ -171,7 +167,7 @@ describe("a governor command (missions design §9.4): only to the mission's curr
     const enqueue = vi.fn(async () => "sent" as const);
     let n = 0;
     const send = (missionId: string, targetId: string) =>
-      sendCommand({ home, now: NOW, paseo: fakePaseo().paseo as never, workspaceId: "home-ws", command: nudge, targetId, missionId, copyTo: null, grantOf: null, approved: [], backstop: false, loopGuard: "refuse", intervention: null, queue: { enqueue }, store: { newId: () => `cmd-${++n}`, now: () => NOW }, redactEnv: {} });
+      sendCommand({ home, now: NOW, paseo: fakePaseo().paseo as never, workspaceId: "home-ws", command: nudge, targetId, missionId, copyTo: null, backstop: false, loopGuard: "refuse", intervention: null, queue: { enqueue }, store: { newId: () => `cmd-${++n}`, now: () => NOW }, redactEnv: {} });
     for (let i = 0; i < COMMAND_LIMIT_PER_REQUEST; i += 1) expect((await send("mis-0000000001", "main-1")).ok).toBe(true);
     expect(await send("mis-0000000001", "main-1")).toEqual({ ok: false, stage: "check", reason: MISSION_COMMAND_LIMIT_MESSAGE });
     expect((await send("mis-0000000002", "main-2")).ok).toBe(true);

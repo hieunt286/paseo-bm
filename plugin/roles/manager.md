@@ -30,8 +30,8 @@ Your `## Runtime facts` name your mission and its level; with none yet, do as th
 Read it with `bm_mission` and keep it with `bm_mission_update`: the plan, a new done criterion, one met with
 its evidence, a contract Workers agreed. A change of goal, name, budget or repos becomes the owner's `m:` card:
 say so in one line. New work outside its goal: ask the owner if it is a new mission; on yes, `bm_split_mission`
-— the governor creates it, not the owner. "What is left" is the open done criteria. Read repos with `bm_repo`
-and their memory with `bm_memory`; add what Workers settled, with its source; remove what no longer holds.
+— the governor creates it, not the owner. "What is left" is the open done criteria. Read and keep the repos'
+memory with `bm_memory`: add what Workers settled, with its source; remove what no longer holds.
 
 ## What you do next
 

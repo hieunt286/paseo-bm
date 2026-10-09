@@ -8,17 +8,17 @@ import { createCompactionStore } from "../plugin/server/compaction-store";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { createHandoffRunner, mainHandoffLineOf } from "../plugin/server/handoff";
-import type { ManagerAgentProfile } from "../plugin/server/manager";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
 import type { MissionsPaseo } from "../plugin/server/missions-home";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { createRequestRegistry } from "../plugin/server/request-registry";
-import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import type { TraceRecord, Usage } from "../plugin/shared/contracts";
 import { turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
+import { fakeCli } from "./helpers/fake-cli";
+import { roleAliases, roleProfiles } from "./helpers/roles";
 
 /**
  * Missions design §9.5 (WP-205): a Main whose context crosses the owner's
@@ -55,15 +55,6 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const roleAliases = (): Record<string, unknown> => ({
-  "bm-manager": { extends: "claude", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
-  "bm-worker": { extends: "claude", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
-});
-const profiles = (): ManagerAgentProfile[] => [
-  { id: "bm-manager", provider: "bm-manager", model: "claude-opus-5" },
-  { id: "bm-worker", provider: "bm-worker", model: "claude-opus-5" },
-];
-
 function daemon() {
   const agents: FakeAgent[] = [
     { id: MAIN, workspaceId: "wks-own", provider: "bm-manager", status: "idle", createdAt: iso(T0), labels: { "bm.role": "manager", "bm.missionId": MISSION }, archivedAt: null },
@@ -72,15 +63,9 @@ function daemon() {
   return fakePaseo<MissionsPaseo>({
     agents,
     workspaces: [{ id: REPO, directory: "/repo/api" }],
-    config: { providers: roleAliases(), agentProfiles: profiles() },
+    config: { providers: roleAliases("claude", ["manager", "worker"]), agentProfiles: roleProfiles("claude-opus-5", ["manager", "worker"]) },
     omit: ["providers"],
   });
-}
-
-function fakeCli() {
-  const calls: string[][] = [];
-  const cli: PaseoCliDeps = { find: () => "/bin/paseo", run: async (_file, args) => (calls.push(args), { code: 0, output: "", timedOut: false }) };
-  return { cli, calls };
 }
 
 /** The mission with its Main and one open request of its Worker in the repo. */

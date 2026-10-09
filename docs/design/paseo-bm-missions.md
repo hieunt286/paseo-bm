@@ -512,10 +512,10 @@ Built by beads `bm-missions-9qc3.1`–`.17` and `.27`; acceptance: [operations r
   - Cards: "From mission <CODE> <name>", "Your Main linked you with another Worker".
 - **§6 lookups.**
   - The materialiser's `inRepoOf`; proposed answers carry their repo; `bm_answers` reads the repo's decisions; `bm_tell_worker` stores in the repo outbox.
-  - Traces, request trace, stall watcher (skips plugin homes), event-bus `finishPlaceOf`, review budget, compaction `missionRequestLines`, collector `mainReposOf`, and the parent readers through the registry.
+  - Traces, request trace, stall watcher (skips plugin homes), review budget, compaction `missionRequestLines`, collector `mainReposOf`, and the parent readers through the registry.
   - `listWorkspaceAgents` shows the Main as a Worker's parent; Orchestrator targeting through `repoMainsOf`, `belongsToProject`, `commandManagerIdOf`, `copyRecipientOf` (with `home`); `bm_projects` lists a repo's Mains.
 - **§8 autonomy.**
-  - `shared/autonomy.ts` `MISSION_CLASSES`, `mainAnswerRuleOf`, `missionQuestionRefusalOf`; `bm_decide` and `bm_predict` refuse mission requests; the event bus no longer opens `decision.opened` for them.
+  - `shared/autonomy.ts` `MISSION_CLASSES`, `mainAnswerRuleOf`; the event bus no longer opens `decision.opened` for mission requests. Since Phase 2, `bm_decide` and `bm_predict` refuse every `q:` question (`questionIsTheMainsText`, `orchestrator-decide-tools.ts`).
   - RPCs `autonomy.set-mission-level`, `autonomy.set-mission-cell`; `autonomy.policy` carries `missions`.
   - `ownerOnly` stored, guarded by `ownerFactOf` / `OWNER_FACT_PHRASES` (EN, VI, NFC, curly apostrophes), refused on every non-owner path.
 - **ADR-030.** The entries are built with `minifyIdentifiers` and `keepNames`: 1,596,602 of 2,000,000 bytes at the end of Phase 1.
@@ -536,7 +536,7 @@ Built by beads `bm-missions-9qc3.18`–`.24` and `.28`; acceptance: [operations 
   
   `mainTurnsSinceCriterion` counts no turns while every done criterion is met or dropped and no request is open: the Main only answers the owner. `workersInOneRepo` counts the live Workers whose request is still open on the roster: a finished Worker left idle for its Main to reuse is no sprawl. Written files are `file` evidence and the files a shell command writes (an output redirection or `tee`, `shellWrittenPathsOf` in `shared/writers-observed.ts`), which the conflicts and the writers alert read too. Both came from the acceptance run.
 
-  The thresholds are `GOVERNOR_BOUNDS` in `shared/coordination.ts`, set as `governor.<name>` through `coordination.set`. Defaults: writersPerFile 2, workersPerRepo 3, reAsks 2, dropped 1, processDocsPerCriterion 3, beadsPerRequest 15, tierRaised 2, reviewExhausted 2, openApprovals 8, mainTurnsSinceCriterion 40, finishedSinceCriterion 6, outsideCharter 1, cardAgeHours 24, budgetPercent 100, windowMinutes 30, windowTurns 5. `dropped` counts nothing yet.
+  The thresholds are `GOVERNOR_BOUNDS` in `shared/coordination.ts`, set as `governor.<name>` through `coordination.set`. Defaults: writersPerFile 2, workersPerRepo 3, reAsks 2, dropped 1, processDocsPerCriterion 3, beadsPerRequest 15, tierRaised 2, reviewExhausted 2, openApprovals 8, mainTurnsSinceCriterion 40, finishedSinceCriterion 6, outsideCharter 1, cardAgeHours 24, budgetPercent 100, windowMinutes 30, windowTurns 5. `dropped` counts the mission's dropped outbox records of the last 24 hours.
 - **§9.3 the ladder.** `governor-store.ts` keeps `orchestrator/governor.json`, one ladder per mission and family; `ladderStepOf` moves a crossed family 0 → 1 (a `governor` journal line), 1 → 2 (a nudge at the next recomputation), and 2 → 3 (`replan-due`) once both `windowMinutes` and `windowTurns` have passed; a family back under its threshold resets to 0. Steps 1 and 2 run in code: `nudgeCommandOf` is a `BM-COMMAND` with authority `governor:nudge`, no effect, sent to the current Main through `sendCommand` (backstop off, loop guard on); a failed nudge is retried after 10 minutes (`NUDGE_RETRY_MS`). `createGovernor` recomputes at the stall watcher's pass and at each recorded turn.
   - Every step 2–4 writes an intervention entry: kind `govern` with its `step`, trigger `governor`, expected outcome `figures-clear` (every family the step concerns back at step 0 within 30 minutes). A stop that only the stop step allowed is `kind: stop`, `trigger: governor`. An escalation through `bm_ask_owner` is not a `govern` entry.
 - **§9.4 commands.** `bm_govern { missionId, step: nudge | replan | arbitrate, text ≤ 4000, figures? ≤ 20 }` (`command-authority.ts`): `from: orchestrator`, `to: manager`, `requestId` null, `re: Governor: <step>, mission <code>`, no effect, authority `governor:<step>`, then a `Figures:` block of the named figures read now. It goes only to the current Main of an open mission (`governorTargetRefusalOf`); the loop guard counts per mission (12 in 24 hours, `MISSION_COMMAND_LIMIT_MESSAGE`). The backstop reads the Orchestrator's own words only (`CommandSend.backstopText`): a mission the owner named "Billing" does not read as cost. A replan at step 3 moves the families to `GOVERNOR_STOP_STEP` 4.
@@ -603,6 +603,41 @@ Built by beads `bm-missions-9qc3.26.1`–`.26.4`; visual check and acceptance: [
   - New mission needs at least one repository.
 - **Size:** the entries are 1,699,456 of 2,000,000 bytes after Phase 3.
 
+## 19. As built — the review of 2026-10-10
+
+Four read-only reviews of Phases 1–3, then fixes and simplifications (beads `bm-pwjc`, `bm-1eah`, `bm-rn4q`, `bm-129y`). Stored formats are unchanged. Where this section and §16–§18 differ, this one describes the code.
+
+- **Fixed in the mission core (§16):**
+  - A Manager whose binding names a mission it no longer leads is refused by `bm_create_worker` (`REPLACED_MAIN_MESSAGE`).
+  - A journal line that follows a state write goes through `journalQuietly` (`mission-store.ts`): when it cannot be written it is one log line, and the caller still tells the Main, retitles it, opens the card or answers truly.
+  - The successor claim (§3.3) keeps a successor labelled with the mission even when it appears before the old Main is archived, prefers it to an unlabelled one, and never claims an agent that is already the Main of another open mission.
+  - `missions.create` refuses a bad or taken code before it sets up roles or opens the home.
+  - `byCode` returns the mission closed last.
+  - The outbox resolves a record whose `requestId` is an `m:` card or a mission id to the mission's current Main.
+- **Fixed in the governor (§17):**
+  - The ladder is written through `GovernorStore.update`: the code climb replaces only families unchanged since it read them, so a `bm_govern` step written during a nudge stands.
+  - Held mission events survive a publish that fails or has no data folder or Paseo handle. A key is remembered only once its event is queued or sent, and a key being queued is never queued twice.
+  - A split that fails after its mission is written and before its Main exists is undone: the requests go back, the new mission is closed, and the source journal says so.
+- **Removed:**
+  - The builders and lines of the retired wakes (`decision.opened`, `request.finished`, `advice.due`, `threshold.crossed`). Their event types and keys stay for the watches, and a retired event reads `- <type> — project <id>.`.
+  - The unverified-finish helpers of `request-trace.ts`.
+  - The bus's `decisionsOpened` and `workerTurnEnded`; `turnRecorded(record, paseo)` remains.
+  - The grant machinery of `command-send.ts`: no command spends a grant (ADR-031).
+  - The orphaned exports.
+- **Simplified:**
+  - `MissionStore.openByMain`, `codeTakenBy`, `codeRefusals` and a tail-reading `journal(missionId, limit, kind?)`.
+  - One `markMain`, `repointWorkers`, `runningRequestsOf`, `titleIn` and `directoryIn` in `paseo-directory.ts`, and the shared id and code patterns in `shared/mission-change.ts`.
+  - The pure figure definitions in `shared/governor-figures.ts` (no import cycle).
+  - `governSend` for `bm_govern` and `bm_arbitrate`, which reads the snapshot only for named figures or a nudge.
+  - Written files computed once per record.
+  - Conflicts read only missions that share a repository.
+- **Client (§18):**
+  - The New mission form is one state, reset on New, Cancel and success, and Create waits for a level confirmation.
+  - The Inbox reads mission names every 60 s (`MISSION_NAMES_STALE_MS`) instead of every 5 s.
+  - `clockText` lives in `format.ts`.
+  - The screen's internal pieces (`MissionChip`, `LevelCells`, …) are file-private.
+- **Role files:** the Orchestrator's stop and split rules are each said once; the Worker reports to "your Main"; the Main names `bm_repo` once.
+
 ## 14. Revision History
 
 | Date | Author | Change |
@@ -613,3 +648,4 @@ Built by beads `bm-missions-9qc3.26.1`–`.26.4`; visual check and acceptance: [
 | 2026-10-09 | Claude (owner's delegation) | Phase 2 built (beads bm-missions-9qc3.18–.24, .28) and accepted on an isolated daemon (M-26: 0 of 4 wakes without action): §17 as built; ADR-031 (an `o:` answer grants nothing); the backstop reads the Orchestrator's own words; from the run: shell writes count as written, sprawl counts Workers at work, drift pauses when every criterion is settled, a Main suggests a split with `bm_split_mission` |
 | 2026-10-10 | Claude (owner's delegation) | The owner approved the Missions screen mockup: §10 written in detail (placement, element sources, words, RPCs `missions.list`, `mission.get`, `mission.change`, `memory.list`, tests and the visual check); the phone keeps Tools as a fifth tab |
 | 2026-10-10 | Claude (owner's delegation) | Phase 3 built (beads bm-missions-9qc3.26.1–.26.4) and checked against the artboards in the preview harness: §18 as built; `memory.list` shows the owner's precedents; the Inbox names mission cards by their mission and their Main |
+| 2026-10-10 | Claude (owner's request to review and simplify) | §19: four reviews of Phases 1–3; 13 defects fixed (mission core 6, governor 3, client 1, docs 2, the replaced Main's Worker creation among them); retired-wake builders and the grant machinery removed; lookups and helpers shared; §16–§18 claims corrected |

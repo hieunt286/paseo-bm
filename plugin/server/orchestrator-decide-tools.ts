@@ -532,7 +532,7 @@ async function recordInterventionOf(of: Decision, context: ToolContext, deps: De
 export async function bmDecide(input: DecideInput, context: ToolContext, deps: DecideToolDeps): Promise<ServerToolResult> {
   // An incident's options allow no effect (`fallback-decisions.ts`): none acts on a request's finish or grants review calls.
   const { decision: answered, store } = transitionUnderPolicy(input, context, {
-    refusalOf: notAQuestion((policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey, finishedUnverified: false })),
+    refusalOf: notAQuestion((policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey })),
     idsFrom: "bm_decisions gave",
     what: "the answer to",
     change: (current, { reason, at }) =>

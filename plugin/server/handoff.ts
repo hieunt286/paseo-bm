@@ -140,7 +140,7 @@ import { createMissionRoster, missionManagerOf } from "./mission-roster";
 import { createMissionStore } from "./mission-store";
 import { handOverMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
 import { createRequestRegistry } from "./request-registry";
-import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
+import { directoryIn, listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { PEER_RULES } from "./peer-links";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import type { OrchestratorStoreDeps } from "./orchestrator-store";
@@ -424,7 +424,7 @@ async function folderOf(paseo: unknown, workerId: string, location: TraceStoreLo
     const cwd = nonEmpty(asRecord((await ref?.refresh?.())?.agent)?.["cwd"]);
     if (cwd !== null) return cwd;
     const listed = typeof (paseo as Partial<DashboardPaseo> | null)?.workspaces?.list === "function" ? await listedWorkspaces(paseo as DashboardPaseo) : null;
-    const directory = listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
+    const directory = directoryIn(listed, workspaceId);
     if (directory !== null) return directory;
   } catch {
     // The trace store's folder, then.
@@ -779,12 +779,10 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
       command: handoffCommandOf(entry, entry.brief),
       targetId: entry.managerId,
       copyTo: null,
-      grantOf: null,
-      approved: [],
       // The body is the plugin's brief of the records, declaring and approving nothing: there is nothing to backstop.
       backstop: false,
       loopGuard: "refuse",
-      // Logged once, as the handoff, by bm_handoff.
+      // Logged once, as the handoff, when it started (`turnRecorded`).
       intervention: null,
       queue,
       ...(deps.store === undefined ? {} : { store: deps.store }),
@@ -866,8 +864,6 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
       command: handoffInfoCommandOf(entry, successorId),
       targetId: entry.managerId,
       copyTo: null,
-      grantOf: null,
-      approved: [],
       loopGuard: "count",
       intervention: null,
       queue,
@@ -1028,8 +1024,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     const crossing = settings.handoff.enabled ? contextCrossingOf(record, settings) : null;
     if (crossing === null) return;
     const missions = createMissionStore(home);
-    const listed = missions.list().find((candidate) => candidate.state === "open" && candidate.mainId === record.agentId);
-    const mission = listed === undefined ? null : missions.get(listed.missionId);
+    const listed = missions.openByMain(record.agentId);
+    const mission = listed === null ? null : missions.get(listed.missionId);
     if (mission === null) return;
     const compactions = createCompactionStore(home, { now }).list();
     if (pendingCompactionOf(compactions, record.agentId, now()) !== null) return;

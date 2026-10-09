@@ -10,6 +10,7 @@ import {
   MISSIONS_DIR_NAME,
   MISSION_ID_PATTERN,
   createMissionStore,
+  journalQuietly,
   newMissionId,
   type NewMission,
 } from "../plugin/server/mission-store";
@@ -117,6 +118,25 @@ describe("missions (§2.1)", () => {
     expect(missions.update(first.missionId, (current) => ({ ...current, state: "open", closedAt: null })).ok).toBe(false);
   });
 
+  it("byCode: with no open mission holding the code, the one closed last, whatever the index order", () => {
+    const home = dataFolder();
+    const missions = store(home);
+    const close = (missionId: string, at: string) => missions.update(missionId, (current) => ({ ...current, state: "closed", closedAt: at }));
+    const first = created(missions.create(mission()));
+    close(first.missionId, "2026-10-09T12:00:00.000Z");
+    const second = created(missions.create(mission({ name: "Payments 2" })));
+    close(second.missionId, "2026-10-09T11:00:00.000Z");
+    expect(missions.byCode("PAY")?.missionId).toBe(first.missionId);
+    expect(missions.codeTakenBy("PAY")).toBeNull();
+    expect(missions.codeRefusals("PAY")).toEqual([]);
+    const third = created(missions.create(mission({ name: "Payments 3" })));
+    expect(missions.byCode("PAY")?.missionId).toBe(third.missionId);
+    expect(missions.codeTakenBy("PAY")?.missionId).toBe(third.missionId);
+    expect(missions.codeTakenBy("PAY", third.missionId)).toBeNull();
+    expect(missions.codeRefusals("PAY")).toEqual([`code PAY is taken by the open mission Payments 3 (${third.missionId})`]);
+    expect(missions.codeRefusals("pay")).toEqual(['code "pay" is not 2 to 8 capital letters or digits starting with a letter']);
+  });
+
   it("refuses an unknown mission, a changed id and an invalid mission; null changes nothing", () => {
     const home = dataFolder();
     const missions = store(home);
@@ -211,6 +231,23 @@ describe("the journal (§2.2)", () => {
     expect(missions.journal(made.missionId, 1)).toEqual([lines[1]]);
     expect(missions.journal(made.missionId, 0)).toEqual([]);
     expect(statSync(join(home, MISSIONS_DIR_NAME, `${made.missionId}.journal.jsonl`)).mode & 0o777).toBe(0o600);
+  });
+
+  it("reads the newest lines of one kind; journalQuietly turns a line that cannot be written into one log line", () => {
+    const home = dataFolder();
+    const missions = store(home);
+    const made = created(missions.create(mission()));
+    for (const [n, kind] of (["note", "plan", "note", "charter", "note"] as const).entries()) missions.appendJournal(made.missionId, { kind, by: "main-1", text: `line ${n} mentions plan` });
+    expect(missions.journal(made.missionId, 2, "note").map((line) => line.text)).toEqual(["line 2 mentions plan", "line 4 mentions plan"]);
+    expect(missions.journal(made.missionId, 10, "plan").map((line) => line.text)).toEqual(["line 1 mentions plan"]);
+    expect(missions.journal(made.missionId, 10, "split-suggested")).toEqual([]);
+
+    const logs: string[] = [];
+    expect(journalQuietly(missions, made.missionId, { kind: "note", by: "main-1", text: "kept" }, (line) => logs.push(line))?.text).toBe("kept");
+    const other = created(missions.create(mission({ code: "OPS" })));
+    mkdirSync(join(home, MISSIONS_DIR_NAME, `${other.missionId}.journal.jsonl`));
+    expect(journalQuietly(missions, other.missionId, { kind: "note", by: "main-1", text: "lost" }, (line) => logs.push(line))).toBeNull();
+    expect(logs).toEqual([expect.stringMatching(new RegExp(`^\\[paseo-bm\\] the journal of mission ${other.missionId} could not record a note line: `))]);
   });
 
   it("skips a line that does not parse and keeps the newest MAX_JOURNAL_LINES", () => {

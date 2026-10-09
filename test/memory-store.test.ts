@@ -18,6 +18,7 @@ import {
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { CLEANUP_DELETES } from "../plugin/server/setup-machine";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
+import { fillMemory } from "./helpers/memory";
 
 /** Project memory (missions design §2.5). Temporary data folders only. */
 
@@ -93,7 +94,7 @@ describe("project memory (§2.5)", () => {
     const memory = store(home);
     const firstAuto = added(memory.add(WS, entry({ kind: "decision", by: plugin, text: "auto 0" })));
     added(memory.add(WS, entry({ kind: "decision", by: plugin, text: "auto 1" })));
-    for (let n = 2; n < MAX_ACTIVE_MEMORY; n += 1) added(memory.add(WS, entry({ text: `fact ${n}` })));
+    fillMemory(home, WS, MAX_ACTIVE_MEMORY - 2, (n) => ({ ...entry({ text: `fact ${n + 2}` }), at: T0.toISOString() }));
     expect(memory.active(WS)).toHaveLength(MAX_ACTIVE_MEMORY);
     expect(memory.add(WS, entry({ text: "one more" }))).toEqual({ ok: false, reasons: [MEMORY_FULL_REASON] });
     expect(MEMORY_FULL_REASON).toContain("curate the memory first (bm_memory remove)");

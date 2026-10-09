@@ -6,16 +6,15 @@ import { clearBindingCache, createBindingStore, type BindingStore } from "../plu
 import { createAlertStore } from "../plugin/server/alert-store";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
-import type { ManagerAgentProfile } from "../plugin/server/manager";
 import { adoptComposerManager, createLegacyMigration, handleManagerEnsure, legacyCodeOf, migrateWorkspace } from "../plugin/server/mission-legacy";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { ensureMissionsHome, type MissionsPaseo } from "../plugin/server/missions-home";
 import { EXTRA_MANAGER_DETAIL, detectOutdatedAgents, openMissionsOf } from "../plugin/server/outdated-agents";
-import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
-import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
+import { fakeCli } from "./helpers/fake-cli";
+import { roleAliases, roleProfiles } from "./helpers/roles";
 
 /**
  * WP-114 (missions design §3.6, REQ-192): per-workspace Managers become
@@ -47,14 +46,6 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const roleAliases = (): Record<string, unknown> => ({
-  "bm-manager": { extends: "codex", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
-  "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
-  "bm-reviewer": { extends: "codex", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
-  "bm-orchestrator": { extends: "codex", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
-});
-const profiles = (): ManagerAgentProfile[] => ["bm-manager", "bm-worker", "bm-reviewer", "bm-orchestrator"].map((id) => ({ id, provider: id, model: "gpt-5.6-sol" }));
-
 function daemon(agents: FakeAgent[] = []) {
   return fakePaseo<MissionsPaseo>({
     agents,
@@ -62,15 +53,9 @@ function daemon(agents: FakeAgent[] = []) {
       { id: REPO, directory: "/repo/api" },
       { id: "wks-b", directory: "/repo/web" },
     ],
-    config: { providers: roleAliases(), agentProfiles: profiles() },
+    config: { providers: roleAliases(), agentProfiles: roleProfiles() },
     omit: ["providers"],
   });
-}
-
-function fakeCli() {
-  const calls: string[][] = [];
-  const cli: PaseoCliDeps = { find: () => "/bin/paseo", run: async (_file, args) => (calls.push(args), { code: 0, output: "", timedOut: false }) };
-  return { cli, calls };
 }
 
 const manager = (id: string, createdAt: string, labels: Record<string, string> = {}, extra: Partial<FakeAgent> = {}): FakeAgent => ({

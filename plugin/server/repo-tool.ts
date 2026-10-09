@@ -15,7 +15,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { cutText } from "./request-render";
 import { redactText } from "./collector";
-import { listedWorkspaces } from "./paseo-directory";
+import { directoryIn, listedWorkspaces } from "./paseo-directory";
 import { refuse, requireProject, type ServerToolResult, type ToolContext } from "./orchestrator-tool-context";
 import { firstLine } from "./request-trace";
 import { readWorkspaceMeta } from "./trace-store";
@@ -128,8 +128,7 @@ function gitFailure(error: unknown, command: string, env: NodeJS.ProcessEnv): st
 export async function bmRepo(input: RepoInput, context: ToolContext, deps: RepoToolDeps): Promise<ServerToolResult> {
   await requireProject(input.workspaceId, context);
   const listed = await listedWorkspaces(context.paseo);
-  const directory =
-    listed?.find((entry) => entry.id === input.workspaceId)?.directory ?? readWorkspaceMeta(context.location, input.workspaceId)?.lastKnownDirectory ?? null;
+  const directory = directoryIn(listed, input.workspaceId) ?? readWorkspaceMeta(context.location, input.workspaceId)?.lastKnownDirectory ?? null;
   return repoIn(input, directory, context.env, deps);
 }
 

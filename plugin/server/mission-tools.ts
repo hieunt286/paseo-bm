@@ -50,18 +50,17 @@ import { createDecisionStore } from "./decision-store";
 import { decisionSummaryOf, type ServerToolAnswer, type ServerTools } from "./decision-tools";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionDecisionStore, missionOfDecisionId } from "./mission-decisions";
-import { createMissionRoster, requestIndexOf } from "./mission-roster";
-import { createMissionStore, type Mission, type MissionContract } from "./mission-store";
-import { isMissionsHome, missionsHomeIdOf, syncMainTitle } from "./missions-home";
+import { createMissionRoster, requestIndexOf, runningRequestsOf } from "./mission-roster";
+import { createMissionStore, journalQuietly, type Mission, type MissionContract } from "./mission-store";
+import { isMissionsHome, markMain, missionsHomeIdOf, syncMainTitle } from "./missions-home";
 import type { NoticePaseo } from "./notice-queue";
 import { newestReportRecordOf, reportPhaseOf, storeAndDeliver } from "./outbox";
-import { setAgentLabel, setAgentLabels, type PaseoCliDeps } from "./paseo-cli";
-import { bmAgentsOf, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { setAgentLabel, type PaseoCliDeps } from "./paseo-cli";
+import { directoryIn, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { isPluginHomeIn } from "./plugin-homes";
 import { proposeMissionStart, takeProposedMissionStart } from "./proposed-mission-starts";
-import { createRequestRegistry } from "./request-registry";
 import { cutText } from "./request-render";
-import { MISSION_CODE_LABEL, MISSION_ID_LABEL } from "./role-title";
+import { MISSION_CODE_LABEL } from "./role-title";
 import { errorText } from "./rpc-kit";
 import { actingTools, answered, boundAs, fixThese, refused, withoutNulls, type BoundCaller } from "./tool-kit";
 
@@ -80,15 +79,18 @@ const NO_PASEO = "paseo-bm has no connection to Paseo yet; try again in a moment
 
 const faceOf = (name: string): ToolFace => MISSION_TOOL_FACES.find((face) => face.name === name)!;
 
-/** The mission whose current Main `caller` is: its binding's, else the one naming it (§2.3: the binding's is a cache). Never throws. */
+/**
+ * The mission whose current Main `caller` is: its binding's, else the open
+ * one naming it, else a closed one naming it (§2.3: the binding's is a cache).
+ * Null for an agent that is no mission's current Main (a replaced one). Never throws.
+ */
 export function missionOfMain(home: string, caller: Pick<ToolCaller, "agentId" | "missionId">): Mission | null {
   if (caller.agentId === null) return null;
   try {
     const store = createMissionStore(home);
     const bound = caller.missionId == null ? null : store.get(caller.missionId);
     if (bound !== null && bound.mainId === caller.agentId) return bound;
-    const named = store.list().filter((entry) => entry.mainId === caller.agentId);
-    const entry = named.find((candidate) => candidate.state === "open") ?? named[0];
+    const entry = store.openByMain(caller.agentId) ?? store.list().find((candidate) => candidate.mainId === caller.agentId);
     return entry === undefined ? null : store.get(entry.missionId);
   } catch {
     return null;
@@ -122,21 +124,9 @@ function idOf(repo: string, listed: readonly ListedWorkspace[] | null): string {
   return entry?.id ?? repo;
 }
 
-/** The mission's requests whose Worker still runs: `active` in the roster, not finished in the registry, a live Worker. */
-async function runningRequestsOf(home: string, paseo: unknown, mission: Mission): Promise<string[]> {
-  const active = createMissionRoster(home).list(mission.missionId).filter((entry) => entry.state === "active");
-  if (active.length === 0) return [];
-  const registry = createRequestRegistry(home);
-  const live = new Set((await bmAgentsOf(paseo as DashboardPaseo, { home })).filter(({ facts }) => facts.role === "worker" && !facts.archived).map(({ facts }) => facts.id));
-  return active
-    .filter((entry) => (registry.get(entry.workspaceId, entry.requestId)?.finishedAt ?? null) === null && entry.workerIds.some((id) => live.has(id)))
-    .map((entry) => entry.requestId);
-}
-
-const codeTakenBy = (home: string, code: string, missionId: string | null) =>
-  createMissionStore(home)
-    .list()
-    .find((entry) => entry.state === "open" && entry.code === code && entry.missionId !== missionId);
+/** The ids of the mission's requests whose Worker still runs (`runningRequestsOf`). */
+const runningIdsOf = async (home: string, paseo: unknown, mission: Mission): Promise<string[]> =>
+  (await runningRequestsOf(home, paseo, mission.missionId)).map((entry) => entry.requestId);
 
 // ---------------------------------------------------------------------------
 // Applying changes (pure).
@@ -278,13 +268,13 @@ export async function missionChangeRefusalsOf(missionId: string, change: Mission
     if (mission === null) return [`mission ${missionId} no longer exists`];
     const applied = applyMissionChange(mission, change, new Date(0).toISOString());
     const reasons = "reasons" in applied ? [...applied.reasons] : [];
-    const taken = change.code === undefined ? undefined : codeTakenBy(home, change.code, mission.missionId);
-    if (taken !== undefined) reasons.push(`code ${change.code} is taken by the open mission ${taken.name}`);
+    const taken = change.code === undefined ? null : createMissionStore(home).codeTakenBy(change.code, mission.missionId);
+    if (taken !== null) reasons.push(`code ${change.code} is taken by the open mission ${taken.name}`);
     const adding = change.addRepos ?? [];
     if (adding.length > 0 || change.close === true) {
       if (paseo === null || paseo === undefined) return [...reasons, "paseo-bm has no connection to Paseo yet; try again in a moment"];
       if (adding.length > 0) reasons.push(...resolveRepos(adding, await listedWorkspaces(paseo as DashboardPaseo), home, "repo").reasons);
-      const running = change.close === true ? await runningRequestsOf(home, paseo, mission) : [];
+      const running = change.close === true ? await runningIdsOf(home, paseo, mission) : [];
       if (running.length > 0) reasons.push(`a Worker of mission ${mission.code} still runs (${running.join(", ")}); it can be closed once they finish`);
     }
     return reasons;
@@ -342,7 +332,7 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
     const action = answer.by === "owner" ? chosenMissionChange(decision, answer.optionKey) : null;
     if (action === null) {
       const how = answer.optionKey === null ? `answered in words: ${answer.words ?? ""}` : "kept the mission as it is";
-      store.appendJournal(missionId, { kind: "decision", by: "owner", text: `The owner ${how} (${decision.id}).`, ref: decision.id });
+      journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `The owner ${how} (${decision.id}).`, ref: decision.id }, deps.log);
       await tellMain(missionId, decision.id, `The owner ${how} on your card ${decision.id}.`, deps);
       return;
     }
@@ -350,12 +340,12 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
     const result = store.update(missionId, (mission) => applyMissionChange(mission, action.change, at));
     if (!result.ok) {
       deps.log(`[paseo-bm] the owner chose to apply ${decision.id}, but it could not be applied: ${result.reasons.join("; ")}`);
-      store.appendJournal(missionId, { kind: "decision", by: "plugin", text: `${decision.id} could not be applied: ${result.reasons.join("; ")}`, ref: decision.id });
+      journalQuietly(store, missionId, { kind: "decision", by: "plugin", text: `${decision.id} could not be applied: ${result.reasons.join("; ")}`, ref: decision.id }, deps.log);
       await tellMain(missionId, decision.id, `The owner chose to apply your card ${decision.id}, but it could not be applied: ${result.reasons.join("; ")}.`, deps);
       return;
     }
     const lines = missionChangeLinesOf(action.change).join("; ");
-    store.appendJournal(missionId, { kind: "charter", by: "owner", text: `The owner applied ${decision.id}: ${lines}.`, ref: decision.id });
+    journalQuietly(store, missionId, { kind: "charter", by: "owner", text: `The owner applied ${decision.id}: ${lines}.`, ref: decision.id }, deps.log);
     await tellMain(missionId, decision.id, `The owner applied your card ${decision.id}: ${lines}.`, deps);
     await syncMainAfterChange(result.mission, action.change, deps);
   } catch (error) {
@@ -408,8 +398,8 @@ export async function settleMissionStart(mainId: string, turnStartedAt: string |
   }
   try {
     const store = createMissionStore(deps.home, deps.now === undefined ? {} : { now: deps.now });
-    const own = store.list().find((entry) => entry.mainId === mainId);
-    if (own !== undefined) {
+    const own = missionOfMain(deps.home, { agentId: mainId, missionId: null });
+    if (own !== null) {
       log(`[paseo-bm] the mission ${proposal.code} Main ${mainId} proposed was not recorded: it is the Main of mission ${own.code} already.`);
       return null;
     }
@@ -419,20 +409,10 @@ export async function settleMissionStart(mainId: string, turnStartedAt: string |
       return null;
     }
     const mission = created.mission;
-    store.appendJournal(mission.missionId, {
-      kind: "charter",
-      by: "owner",
-      text: `Mission ${mission.code} "${mission.name}" started with Main ${mainId}; repos ${mission.charter.repos.join(", ")}.`,
-      ref: mainId,
-    });
-    if (!createBindingStore(deps.home, { log }).assignMission(mainId, mission.missionId)) log(`[paseo-bm] the binding of Main ${mainId} could not record mission ${mission.code}.`);
-    const labels = await setAgentLabels(mainId, { [MISSION_ID_LABEL]: mission.missionId, [MISSION_CODE_LABEL]: mission.code }, deps.cli).catch((error: unknown) => ({
-      ok: false as const,
-      reason: errorText(error),
-    }));
-    if (!labels.ok) log(`[paseo-bm] Main ${mainId} of mission ${mission.code} could not be labelled: ${labels.reason}`);
-    const titled = await syncMainTitle(mission, deps.cli);
-    if (!titled.ok) log(`[paseo-bm] Main ${mainId} of mission ${mission.code} could not be titled: ${titled.reason}`);
+    const text = `Mission ${mission.code} "${mission.name}" started with Main ${mainId}; repos ${mission.charter.repos.join(", ")}.`;
+    journalQuietly(store, mission.missionId, { kind: "charter", by: "owner", text, ref: mainId }, log);
+    const bound = await markMain(mainId, mission, { bindings: createBindingStore(deps.home, { log }), cli: deps.cli, log });
+    if (!bound) log(`[paseo-bm] the binding of Main ${mainId} could not record mission ${mission.code}.`);
     return mission.missionId;
   } catch (error) {
     log(`[paseo-bm] recording the mission ${proposal.code} Main ${mainId} proposed failed: ${errorText(error)}`);
@@ -505,7 +485,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     const home = deps.home();
     const paseo = deps.paseo();
     const listed = paseo === null || paseo === undefined ? null : await listedWorkspaces(paseo as DashboardPaseo).catch(() => null);
-    const folderOf = (workspaceId: string) => listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
+    const folderOf = (workspaceId: string) => directoryIn(listed, workspaceId);
     const decisions = createDecisionStore(home, { log });
     const summary = (decision: Decision) => decisionSummaryOf(decision, process.env, { grant: false });
     const requests = createMissionRoster(home)
@@ -554,8 +534,8 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     const paseo = deps.paseo();
     if (paseo === null || paseo === undefined) return refused(NO_PASEO);
     const reasons: string[] = [];
-    const taken = codeTakenBy(home, input.code, null);
-    if (taken !== undefined) reasons.push(`input.code: ${input.code} is taken by the open mission ${taken.name}; ask the owner for another`);
+    const taken = createMissionStore(home).codeTakenBy(input.code);
+    if (taken !== null) reasons.push(`input.code: ${input.code} is taken by the open mission ${taken.name}; ask the owner for another`);
     const repos = resolveRepos(input.repos, await listedWorkspaces(paseo as DashboardPaseo), home, "input.repos");
     reasons.push(...repos.reasons);
     if (reasons.length > 0) return fixThese("bm_mission_start", reasons);
@@ -587,8 +567,8 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
 
     if (input.name !== undefined && input.name.trim() !== mission.name) card.name = input.name.trim();
     if (input.code !== undefined && input.code !== mission.code) {
-      const taken = codeTakenBy(home, input.code, mission.missionId);
-      if (taken !== undefined) reasons.push(`input.code: ${input.code} is taken by the open mission ${taken.name}`);
+      const taken = createMissionStore(home).codeTakenBy(input.code, mission.missionId);
+      if (taken !== null) reasons.push(`input.code: ${input.code} is taken by the open mission ${taken.name}`);
       card.code = input.code;
     }
     if (input.goal !== undefined && input.goal.trim() !== charter.goal) card.goal = input.goal.trim();
@@ -623,7 +603,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       if (removed.some((id) => charter.repos.includes(id))) card.removeRepos = [...new Set(removed.filter((id) => charter.repos.includes(id)))];
     }
     if (input.close === true) {
-      const running = await runningRequestsOf(home, paseo, mission);
+      const running = await runningIdsOf(home, paseo, mission);
       if (running.length > 0) reasons.push(`input.close: a Worker of mission ${mission.code} still runs (${running.join(", ")}); close the mission once they finish`);
       card.close = true;
     }
@@ -679,7 +659,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       if (!written.ok) return fixThese("bm_mission_update", written.reasons);
       const journal = (kind: "plan" | "criterion" | "contract" | "charter", text: string) => {
         applied.push(text);
-        store.appendJournal(mission.missionId, { kind, by: "main", text, ref: main.agentId });
+        journalQuietly(store, mission.missionId, { kind, by: "main", text, ref: main.agentId }, log);
       };
       if (free.plan !== undefined) journal("plan", "The Main rewrote the plan.");
       const newIds = written.mission.charter.doneCriteria.slice(charter.doneCriteria.length).map((criterion) => criterion.id);
@@ -695,7 +675,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       const decisions = createMissionDecisionStore(home);
       const opened = decisions.open(missionCardOf(mission, card, { id: decisions.nextId(mission.missionId), mainId: main.agentId, at }));
       decisionId = opened.decision.id;
-      store.appendJournal(mission.missionId, { kind: "decision", by: "main", text: `The Main asked the owner to ${missionChangeLinesOf(card).join("; ")} (${decisionId}).`, ref: decisionId });
+      journalQuietly(store, mission.missionId, { kind: "decision", by: "main", text: `The Main asked the owner to ${missionChangeLinesOf(card).join("; ")} (${decisionId}).`, ref: decisionId }, log);
     }
     return answered({
       applied,
@@ -786,11 +766,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     }
     if (results.length > 0) {
       const text = results.map((result) => `${result.state === "answered" ? "answered" : "recommended an option for"} ${result.qn}`).join(", ");
-      try {
-        createMissionStore(home, { now }).appendJournal(mission.missionId, { kind: "decision", by: "main", text: `The Main ${text} of request ${input.requestId}.`, ref: input.requestId });
-      } catch (error) {
-        log(`[paseo-bm] could not add the journal line of Main ${main.agentId}'s answers: ${errorText(error)}`);
-      }
+      journalQuietly(createMissionStore(home, { now }), mission.missionId, { kind: "decision", by: "main", text: `The Main ${text} of request ${input.requestId}.`, ref: input.requestId }, log);
     }
     if (answeredNow.length > 0 && deps.onSettled !== undefined) {
       try {

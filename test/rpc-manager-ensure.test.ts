@@ -25,6 +25,7 @@ import { fakePaseo } from "./helpers/fake-paseo";
 import { createBindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import { createMissionStore } from "../plugin/server/mission-store";
+import { roleAliases, roleProfiles } from "./helpers/roles";
 
 const MANAGER_HASH = currentInstructionsHash("manager");
 
@@ -89,20 +90,8 @@ interface FakeOptions {
   otherProfiles?: ManagerAgentProfile[];
 }
 
-/** The four aliases of a machine that has been set up (0.4.0, design §6.1; orchestrator design §3.1). */
-const roleAliases = (): Record<string, unknown> => ({
-  "bm-manager": { extends: "codex", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
-  "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
-  "bm-reviewer": { extends: "codex", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
-  "bm-orchestrator": { extends: "codex", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
-});
-
-/** The three profiles besides the Manager's; every test's config carries them. */
-const otherRoleProfiles = (): ManagerAgentProfile[] => [
-  { id: "bm-worker", provider: "bm-worker", model: "gpt-5.6-sol" },
-  { id: "bm-reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" },
-  { id: "bm-orchestrator", provider: "bm-orchestrator", model: "gpt-5.6-sol" },
-];
+/** The Worker, Reviewer and Orchestrator profiles besides the Manager's; every test's config carries them. */
+const otherRoleProfiles = (): ManagerAgentProfile[] => roleProfiles(undefined, ["worker", "reviewer", "orchestrator"]);
 
 function agent(overrides: Partial<ManagerAgentSnapshot> & { id: string }): ManagerAgentSnapshot {
   return {

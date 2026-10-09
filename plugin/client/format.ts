@@ -65,15 +65,21 @@ export function ago(at: string | null, now: Date): string {
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
+/** The clock of `at` in the device's time zone: `09:41`. "" for a time that does not read. */
+export function clockText(at: Date): string {
+  if (Number.isNaN(at.getTime())) return "";
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${two(at.getHours())}:${two(at.getMinutes())}`;
+}
+
 /**
  * The one date style, in the device's time zone: `15:40` today, `tomorrow 15:40`,
  * `yesterday 15:40`, else `Thu 24 Sep 15:40` — with the year when it is not this
  * year's (`Thu 24 Sep 2025 15:40`). "" for a time that does not read.
  */
 export function localTimeText(at: Date, now: Date): string {
-  if (Number.isNaN(at.getTime())) return "";
-  const two = (value: number) => String(value).padStart(2, "0");
-  const time = `${two(at.getHours())}:${two(at.getMinutes())}`;
+  const time = clockText(at);
+  if (time === "") return "";
   const dayOf = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
   // Rounded: a day with a clock change is 23 or 25 hours long.
   const days = Math.round((dayOf(at) - dayOf(now)) / 86_400_000);

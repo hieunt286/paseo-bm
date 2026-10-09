@@ -518,8 +518,6 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
       command: handoffCommandOf(entry, `${HANDOFF_BRIEF_MARKER} ${entry.id}\nrequestId: ${REQUEST}`),
       targetId: MANAGER,
       copyTo: null,
-      grantOf: null,
-      approved: [],
       backstop: false,
       loopGuard: "refuse",
       intervention: null,

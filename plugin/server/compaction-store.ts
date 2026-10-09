@@ -6,10 +6,10 @@
  * `{ version: 1, entries: [<CompactionEntry>, …], sent: [<SendLogEntry>, …] }`,
  * oldest first.
  *
- * - **An entry** is one `bm_compact` the plugin accepted: its target (a
- *   Manager or a Worker of a project), the provider that decides the command's
- *   form, the intervention it is logged as, the Orchestrator's reason (masked,
- *   one line) and where its sequence stands (`compaction.ts`): `waiting` for
+ * - **An entry** is one compaction the plugin started (`compaction.ts`): its
+ *   target (a Manager or a Worker of a project), the provider that decides the
+ *   command's form, the intervention it is logged as, its reason (the
+ *   crossing in words, masked, one line) and where its sequence stands (`compaction.ts`): `waiting` for
  *   the target's idle moment after a safe point, `compacting` once the
  *   `/compact` went out, then `done` (the `BM-STATE` brief handed to the notice
  *   queue), or ended without one: `failed` (no completed `compaction` item
@@ -193,7 +193,7 @@ export function endedEntry(entry: CompactionEntry, ending: CompactionEnding, at:
   return { ...entry, state: entry.sentAt === null ? "dropped" : "failed", ending, endedAt: at };
 }
 
-/** The agent's pending compaction at `now` (at most one: `bm_compact` refuses a second), or null. Pure. */
+/** The agent's pending compaction at `now` (at most one: none starts while one is pending), or null. Pure. */
 export function pendingCompactionOf(entries: readonly CompactionEntry[], agentId: string, now: Date | number): CompactionEntry | null {
   return entries.find((entry) => entry.agentId === agentId && isPendingState(entry.state) && staleEndingOf(entry, now) === null) ?? null;
 }

@@ -16,7 +16,7 @@
  */
 import { z } from "zod";
 import { coordinationChangeSchema, type ReviewBudget } from "./coordination";
-import { MISSION_ACTION_KINDS, arbitrationActionSchema, missionChangeActionSchema, missionSplitActionSchema } from "./mission-change";
+import { arbitrationActionSchema, isMissionActionKind, missionChangeActionSchema, missionSplitActionSchema } from "./mission-change";
 import type { Tier } from "./contracts";
 
 // ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ export function isPreparedChange(action: PreparedAction | undefined): action is 
  */
 export function carriesPreparedChange(decision: Pick<Decision, "options">): boolean {
   // A mission change, a split and an arbitration (missions design §4.1, §9.6) are the owner's alone too.
-  return decision.options.some((option) => isPreparedChange(option.action) || (MISSION_ACTION_KINDS as readonly string[]).includes(option.action?.kind ?? ""));
+  return decision.options.some((option) => isPreparedChange(option.action) || isMissionActionKind(option.action?.kind));
 }
 
 /** Why a decision that carries a prepared change is only the owner's, for every refusal of another answerer. */

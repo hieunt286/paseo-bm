@@ -120,7 +120,7 @@ describe("Autopilot, its Allow… and its stop exemption (autonomy design §B.8)
   });
 
   it("is named by no event message, first prompt, home README, role file, or event source", () => {
-    const line = eventLineOf({ type: "request.finished", workspaceId: WORKSPACE_ID, requestId: "req-1", managerId: MANAGER, at: NOW.toISOString() });
+    const line = eventLineOf({ type: "worker.signal", workspaceId: WORKSPACE_ID, workerId: "agent-worker", requestKey: "req-1", signal: "danger", turnStart: NOW.toISOString(), alertKey: "danger:x", since: NOW.toISOString(), interruptUntil: null });
     expect(eventsMessageOf([line, "- x"])).not.toMatch(/autopilot/i);
     expect(ORCHESTRATOR_FIRST_PROMPT).not.toMatch(/autopilot/i);
     expect(ORCHESTRATOR_HOME_README).not.toMatch(/autopilot/i);

@@ -61,8 +61,9 @@ import { PRECEDENT_SCOPE_ALL } from "../shared/precedents";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionDecisionStore } from "./mission-decisions";
 import { createMissionRoster, type RosterEntry } from "./mission-roster";
-import { MISSION_CODE_PATTERN, createMissionStore, type Mission } from "./mission-store";
+import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { applyMissionChange, missionChangeRefusalsOf, syncMainAfterChange, tellMain } from "./mission-tools";
+import { missionInvalid } from "./missions-home";
 import { workspaceLabelOf } from "./orchestrator-state";
 import { newestReportRecordOf, reportPhaseOf } from "./outbox";
 import type { PaseoCliDeps } from "./paseo-cli";
@@ -96,10 +97,6 @@ export type MissionsRpcDeps = RpcHomeDeps & {
   /** The `paseo` CLI that retitles and relabels a Main after `mission.change`; the real one by default. */
   cli?: PaseoCliDeps;
 };
-
-function invalid(reasons: readonly string[]): DashboardError {
-  return new DashboardError("E_MISSION_INVALID", reasons.join("; "));
-}
 
 /** `run`, with any failure that is not a coded error coded as a read that failed. */
 async function guarded<T>(what: string, run: () => Promise<T>): Promise<T> {
@@ -335,7 +332,7 @@ export async function handleMissionGet(input: { missionId: string }, paseo: unkn
   return guarded("read the mission", async () => {
     const store = createMissionStore(home);
     const mission = store.get(input.missionId);
-    if (mission === null) throw invalid([`unknown mission ${input.missionId}`]);
+    if (mission === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
     const context = await readContextOf(paseo, home, deps);
     const view = missionViewOf(context, mission);
     const { charter } = mission;
@@ -380,8 +377,8 @@ export async function handleMissionChange(input: MissionChangeInput, paseo: unkn
   const log = logOf(deps);
   const store = createMissionStore(home, { now: () => now });
   const mission = coded(READ_FAILED, "read the mission", () => store.get(input.missionId));
-  if (mission === null) throw invalid([`unknown mission ${input.missionId}`]);
-  if (mission.state !== "open") throw invalid([`mission ${mission.code} is closed`]);
+  if (mission === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
+  if (mission.state !== "open") throw missionInvalid([`mission ${mission.code} is closed`]);
   const reasons: string[] = [];
   const change: MissionChange = {};
   if (input.name !== undefined) {
@@ -399,17 +396,13 @@ export async function handleMissionChange(input: MissionChangeInput, paseo: unkn
   if (input.close === true) change.close = true;
   if (reasons.length === 0 && isEmptyMissionChange(change)) reasons.push("nothing to change");
   if (!isEmptyMissionChange(change)) reasons.push(...(await missionChangeRefusalsOf(mission.missionId, change, paseo, home)));
-  if (reasons.length > 0) throw invalid(reasons);
+  if (reasons.length > 0) throw missionInvalid(reasons);
 
   const at = now.toISOString();
   const result = coded("E_MISSION_WRITE_FAILED", "write the mission", () => store.update(mission.missionId, (current) => applyMissionChange(current, change, at)));
-  if (!result.ok) throw invalid(result.reasons);
+  if (!result.ok) throw missionInvalid(result.reasons);
   const lines = missionChangeLinesOf(change).join("; ");
-  try {
-    store.appendJournal(mission.missionId, { kind: "charter", by: "owner", text: `The owner changed the mission from the Missions screen: ${lines}.` });
-  } catch (error) {
-    log(`[paseo-bm] the journal of mission ${mission.code} could not record the owner's change: ${errorText(error)}`);
-  }
+  journalQuietly(store, mission.missionId, { kind: "charter", by: "owner", text: `The owner changed the mission from the Missions screen: ${lines}.` }, log);
   await tellMain(mission.missionId, mission.missionId, `The owner changed your mission from the Missions screen: ${lines}.`, {
     home,
     now,
@@ -419,7 +412,7 @@ export async function handleMissionChange(input: MissionChangeInput, paseo: unkn
   });
   await syncMainAfterChange(result.mission, change, { log, ...(deps.cli === undefined ? {} : { cli: deps.cli }) });
   const summary = await guarded("read the mission", () => summaryNow(paseo, home, mission.missionId, deps));
-  if (summary === null) throw invalid([`unknown mission ${input.missionId}`]);
+  if (summary === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
   return { summary };
 }
 

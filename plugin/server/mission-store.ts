@@ -23,6 +23,8 @@ import { randomBytes } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { CRITERION_ID_PATTERN, MISSION_CHANGE_CODE_PATTERN, MISSION_ID_PATTERN } from "../shared/mission-change";
+import { timeOrZero } from "../shared/time";
 import { redactText } from "./collector";
 import {
   appendToFile,
@@ -33,15 +35,16 @@ import {
   writeFileAtomically,
   type JsonFileStore,
 } from "./data-files";
+import { errorText } from "./rpc-kit";
 
 /** The missions' folder in the data folder (§2); the cleanup button deletes it. */
 export const MISSIONS_DIR_NAME = "missions";
 export const MISSIONS_VERSION = 1;
 export const MISSION_INDEX_FILE_NAME = "index.json";
 /** `mis-` + 10 hex digits: stable, never shown alone. */
-export const MISSION_ID_PATTERN = /^mis-[0-9a-f]{10}$/;
+export { MISSION_ID_PATTERN };
 /** The owner's short code, unique among open missions. */
-export const MISSION_CODE_PATTERN = /^[A-Z][A-Z0-9]{1,7}$/;
+export const MISSION_CODE_PATTERN = MISSION_CHANGE_CODE_PATTERN;
 export const MAX_MISSION_NAME = 80;
 export const MAX_MISSION_GOAL = 4_000;
 export const MAX_NON_GOAL = 300;
@@ -71,7 +74,7 @@ export type JournalKind = (typeof JOURNAL_KINDS)[number];
 const isoOrNull = z.string().nullable();
 
 const criterionSchema = z.object({
-  id: z.string().regex(/^D\d{1,4}$/),
+  id: z.string().regex(CRITERION_ID_PATTERN),
   text: z.string(),
   status: z.enum(["open", "met", "dropped"]),
   at: isoOrNull,
@@ -122,7 +125,6 @@ export const missionSchema = z.object({
 });
 
 export type Mission = z.infer<typeof missionSchema>;
-export type MissionCriterion = z.infer<typeof criterionSchema>;
 export type MissionContract = z.infer<typeof contractSchema>;
 
 const indexEntrySchema = z.object({
@@ -257,8 +259,14 @@ export interface MissionStore {
   get(missionId: string): Mission | null;
   /** Every mission's index entry, as the mission files say (rebuilt when missing or stale). Never throws. */
   list(): MissionIndexEntry[];
-  /** The open mission with this code, else the newest closed one, else null. Never throws. */
+  /** The open mission with this code, else the closed one closed last (else created last), else null. Never throws. */
   byCode(code: string): MissionIndexEntry | null;
+  /** The open mission whose current Main is `agentId`, or null. Never throws. */
+  openByMain(agentId: string): MissionIndexEntry | null;
+  /** The open mission other than `missionId` that holds `code`, or null. Never throws. */
+  codeTakenBy(code: string, missionId?: string | null): MissionIndexEntry | null;
+  /** Why a new mission cannot take `code` (its shape, an open mission holding it), one line each; `create` refuses the same. Never throws. */
+  codeRefusals(code: string): string[];
   /** A new open mission. Refused: a code of another shape or one an open mission holds. Throws when a file cannot be written. */
   create(init: NewMission): MissionResult;
   /**
@@ -272,8 +280,8 @@ export interface MissionStore {
   setMain(missionId: string, agentId: string, reason: Mission["mainHistory"][number]["reason"]): MissionResult;
   /** Appends a journal line (the newest `MAX_JOURNAL_LINES` kept). Throws when the file cannot be written. */
   appendJournal(missionId: string, entry: NewJournalEntry): JournalEntry;
-  /** The newest `limit` journal lines, oldest first; a line that does not parse is skipped. Never throws. */
-  journal(missionId: string, limit?: number): JournalEntry[];
+  /** The newest `limit` journal lines (of `kind` only, when given), oldest first; a line that does not parse is skipped. Never throws. */
+  journal(missionId: string, limit?: number, kind?: JournalKind): JournalEntry[];
 }
 
 /** A mission file's content: the mission, or `{}` for a missing one. */
@@ -387,12 +395,20 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     return rebuilt;
   };
 
-  const codeTakenBy = (code: string, missionId: string | null): MissionIndexEntry | undefined =>
-    list().find((entry) => entry.state === "open" && entry.code === code && entry.missionId !== missionId);
+  /** The open mission of `index` other than `missionId` that holds `code`. */
+  const holderIn = (index: readonly MissionIndexEntry[], code: string, missionId: string | null): MissionIndexEntry | null =>
+    index.find((entry) => entry.state === "open" && entry.code === code && entry.missionId !== missionId) ?? null;
+  const takenText = (code: string, taken: MissionIndexEntry): string => `code ${code} is taken by the open mission ${taken.name} (${taken.missionId})`;
 
-  /** Writes a mission, then its index entry. */
-  const put = (mission: Mission): Mission => {
-    const before = list().filter((entry) => entry.missionId !== mission.missionId);
+  const codeRefusalsIn = (index: readonly MissionIndexEntry[], code: string): string[] => {
+    if (!MISSION_CODE_PATTERN.test(code)) return [`code ${JSON.stringify(code)} is not 2 to 8 capital letters or digits starting with a letter`];
+    const taken = holderIn(index, code, null);
+    return taken === null ? [] : [takenText(code, taken)];
+  };
+
+  /** Writes a mission, then its index entry; `index` is the index as read before. */
+  const put = (mission: Mission, index: readonly MissionIndexEntry[]): Mission => {
+    const before = index.filter((entry) => entry.missionId !== mission.missionId);
     const written = missionFile(mission.missionId).write(mission) as Mission;
     writeIndex([...before, indexEntryOf(written)]);
     return written;
@@ -407,9 +423,10 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     const valid = missionSchema.safeParse(next);
     if (!valid.success) return { ok: false, reasons: valid.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`) };
     if (valid.data.missionId !== missionId) return { ok: false, reasons: ["a mission's id never changes"] };
-    const taken = valid.data.state === "open" ? codeTakenBy(valid.data.code, missionId) : undefined;
-    if (taken !== undefined) return { ok: false, reasons: [`code ${valid.data.code} is taken by the open mission ${taken.name} (${taken.missionId})`] };
-    return { ok: true, mission: put(valid.data) };
+    const index = list();
+    const taken = valid.data.state === "open" ? holderIn(index, valid.data.code, missionId) : null;
+    if (taken !== null) return { ok: false, reasons: [takenText(valid.data.code, taken)] };
+    return { ok: true, mission: put(valid.data, index) };
   };
 
   const journalPath = (missionId: string): string => join(dir, `${missionId}.journal.jsonl`);
@@ -433,13 +450,23 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     list,
     byCode(code) {
       const named = list().filter((entry) => entry.code === code);
-      return named.find((entry) => entry.state === "open") ?? named.at(-1) ?? null;
+      const open = named.find((entry) => entry.state === "open");
+      if (open !== undefined) return open;
+      // The index is in mission-id order: the closed one closed last is read from the missions.
+      const when = (entry: MissionIndexEntry): number => {
+        const mission = get(entry.missionId);
+        return timeOrZero(mission?.closedAt ?? mission?.createdAt);
+      };
+      return named.map((entry) => ({ entry, at: when(entry) })).sort((a, b) => b.at - a.at)[0]?.entry ?? null;
     },
+    openByMain(agentId) {
+      return list().find((entry) => entry.state === "open" && entry.mainId === agentId) ?? null;
+    },
+    codeTakenBy: (code, missionId = null) => holderIn(list(), code, missionId),
+    codeRefusals: (code) => codeRefusalsIn(list(), code),
     create(init) {
-      const reasons: string[] = [];
-      if (!MISSION_CODE_PATTERN.test(init.code)) reasons.push(`code ${JSON.stringify(init.code)} is not 2 to 8 capital letters or digits starting with a letter`);
-      const taken = MISSION_CODE_PATTERN.test(init.code) ? codeTakenBy(init.code, null) : undefined;
-      if (taken !== undefined) reasons.push(`code ${init.code} is taken by the open mission ${taken.name} (${taken.missionId})`);
+      const index = list();
+      const reasons = codeRefusalsIn(index, init.code);
       if (reasons.length > 0) return { ok: false, reasons };
       const known = new Set(missionFiles().map((file) => file.missionId));
       let missionId = newId();
@@ -463,7 +490,7 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
         plan: { text: "", updatedAt: null },
         contracts: [],
       });
-      return { ok: true, mission: put(mission) };
+      return { ok: true, mission: put(mission, index) };
     },
     update,
     setMain(missionId, agentId, reason) {
@@ -496,23 +523,48 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
       }
       return line;
     },
-    journal(missionId, limit = 50) {
-      if (!MISSION_ID_PATTERN.test(missionId)) return [];
+    journal(missionId, limit = 50, kind) {
+      if (!MISSION_ID_PATTERN.test(missionId) || limit <= 0) return [];
       try {
-        const entries = journalLines(missionId).lines.flatMap((line) => {
-          try {
-            const valid = journalSchema.safeParse(JSON.parse(line));
-            return valid.success ? [valid.data] : [];
-          } catch {
-            return [];
-          }
-        });
-        return limit <= 0 ? [] : entries.slice(-limit);
+        // From the newest line back, parsing only until `limit` lines are found; a line of `kind` names it verbatim.
+        const { lines } = journalLines(missionId);
+        const entries: JournalEntry[] = [];
+        for (let at = lines.length - 1; at >= 0 && entries.length < limit; at -= 1) {
+          const line = lines[at]!;
+          if (kind !== undefined && !line.includes(kind)) continue;
+          const entry = journalEntryOf(line);
+          if (entry !== null && (kind === undefined || entry.kind === kind)) entries.push(entry);
+        }
+        return entries.reverse();
       } catch {
         return [];
       }
     },
   };
+}
+
+/** One journal line, or null when it does not parse. */
+function journalEntryOf(line: string): JournalEntry | null {
+  try {
+    const valid = journalSchema.safeParse(JSON.parse(line));
+    return valid.success ? valid.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Appends a journal line that follows a state write already made: the
+ * journal is what happened, never state, so a line that cannot be written is
+ * one log line and never fails the caller. Returns the line, or null.
+ */
+export function journalQuietly(store: Pick<MissionStore, "appendJournal">, missionId: string, entry: NewJournalEntry, log: (message: string) => void): JournalEntry | null {
+  try {
+    return store.appendJournal(missionId, entry);
+  } catch (error) {
+    log(`[paseo-bm] the journal of mission ${missionId} could not record a ${entry.kind} line: ${errorText(error)}`);
+    return null;
+  }
 }
 
 /** A Main's suggestion that work belongs to a new mission (§9.6), as its journal line keeps it. */
@@ -541,8 +593,8 @@ export function openSplitSuggestionsOf(home: string, missionId: string): SplitSu
         return created !== undefined && Date.parse(created) >= Date.parse(at);
       });
     return store
-      .journal(missionId, MAX_JOURNAL_LINES)
-      .flatMap((line) => (line.kind === "split-suggested" && line.split !== undefined && !taken(line.split.code, line.at) ? [{ ...line.split, at: line.at, by: line.ref ?? line.by }] : []));
+      .journal(missionId, MAX_JOURNAL_LINES, "split-suggested")
+      .flatMap((line) => (line.split !== undefined && !taken(line.split.code, line.at) ? [{ ...line.split, at: line.at, by: line.ref ?? line.by }] : []));
   } catch {
     return [];
   }

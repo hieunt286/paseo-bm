@@ -172,12 +172,10 @@ const NOTHING_RAN = /^[\s`]*(?:$|not\s+run|none|n\/?a|skipped|no\s+(?:tests?|che
 
 /**
  * True when a report's `buildAndTests` names a failing check, once the zero
- * counts are set aside ("0 failed" is none). The one reading of it: the check
- * of a `correct` (`reportChecksOf`) and the work left that wakes the
- * Orchestrator (`server/event-bus.ts` `workLeftOf`; code review 2026-09-30
- * §3.5). Pure.
+ * counts are set aside ("0 failed" is none): what the check of a `correct`
+ * reads (`reportChecksOf`). Pure.
  */
-export function namesFailingChecks(buildAndTests: string): boolean {
+function namesFailingChecks(buildAndTests: string): boolean {
   return FAILING_CHECKS.test(buildAndTests.replace(ZERO_FAILURES, ""));
 }
 

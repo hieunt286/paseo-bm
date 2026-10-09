@@ -1,9 +1,11 @@
 /**
  * The one way a command of the Orchestrator's leaves (Orchestrator design §6A,
  * §6B.1, §6B.4; autonomy design §A.6, §A.7; code review 2026-09-30 §2.1,
- * §3.3): `bm_send_command`, `bm_direct_worker` and the delivery of the
- * prepared command of an option chosen by the owner, the owner's policy or an
- * owner precedent (`orchestrator-decisions.ts`) all call `sendCommand`.
+ * §3.3): `bm_govern`, `bm_direct_worker`, the governor's nudge, the handoff
+ * runner and the delivery of the prepared command of an option chosen by the
+ * owner, the owner's policy or an owner precedent (`orchestrator-decisions.ts`)
+ * all call `sendCommand`. No command spends a grant (ADR-031): a stored
+ * decision's grant is only read.
  *
  * The caller checks its target (a live paseo-bm Manager or Worker of the
  * project) and the authority, and builds the block. Then, in this order:
@@ -18,30 +20,27 @@
  *    §G.6) only while the owner's Settings → Coordination has handoff on; a
  *    governor command (`governor:<step>`, missions design §9.4) only to the
  *    current Main of an open mission, its loop guard counted per mission
- *    (`commandsSentForMission`: 12 in 24 hours). A refusal sends, records and
- *    spends nothing.
- * 2. **The grant is claimed** (`claimGrant`), so two sends never spend one.
- * 3. **Delivered** through the notice queue (`command:<id>`, or the kind the
+ *    (`commandsSentForMission`: 12 in 24 hours). A refusal sends and records
+ *    nothing.
+ * 2. **Delivered** through the notice queue (`command:<id>`, or the kind the
  *    caller names), or — an interrupt — sent at once. A target that cannot be
- *    reached gives the claim back and records nothing.
- * 4. **Once delivered:** the grant is spent (`spendGrant`); the command is
- *    appended to the commands store (`proposals.json`, source `chat`, its
- *    secrets masked) under
- *    its id, which is what the loop guard counts; the intervention it is, if
- *    any, is logged with that id (`interventionOfCommand`); a Worker's Manager
- *    gets the `copy: yes` block through the queue.
+ *    reached records nothing.
+ * 3. **Once delivered:** the command is appended to the commands store
+ *    (`proposals.json`, source `chat`, its secrets masked) under its id, which
+ *    is what the loop guard counts; the intervention it is, if any, is logged
+ *    with that id (`interventionOfCommand`); a Worker's Manager gets the
+ *    `copy: yes` block through the queue.
  *
  * The loop guard counts every delivered command. It refuses every one but the
  * prepared command of the owner's own answer, which it counts and never
  * refuses: the owner is who its refusal sends the Orchestrator to.
  *
- * Nothing after delivery fails the send: a grant that cannot be marked used,
- * a record or an intervention that cannot be written, and a copy that cannot
- * be delivered are reported in the result or as one log line.
+ * Nothing after delivery fails the send: a record or an intervention that
+ * cannot be written, and a copy that cannot be delivered, are reported in the
+ * result or as one log line.
  */
 import { randomUUID } from "node:crypto";
 import { redactText } from "./collector";
-import { createDecisionStore } from "./decision-store";
 import type { BmEvent } from "./event-bus";
 import { interventionOfCommand, recordIntervention } from "./intervention-store";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
@@ -49,7 +48,6 @@ import { commandKindOf } from "./orchestrator-state";
 import { createOrchestratorStore, type OrchestratorStoreDeps } from "./orchestrator-store";
 import { missionOfRequest } from "./orchestrator-tool-context";
 import { undeclaredCategoriesOf, undeclaredRefusalOf } from "../shared/decision-gate";
-import { useGrant, type Effect } from "../shared/decisions";
 import { isSentCommand, type Proposal } from "../shared/orchestrator";
 import { COORDINATION_HANDOFF_AUTHORITY, commandBlockOf, commandInputProblems, commandOf, isGovernorAuthority, type CommandInput } from "../shared/orchestrator-command";
 import { createMissionStore } from "./mission-store";
@@ -113,52 +111,6 @@ export function loopGuardFull(home: string, workspaceId: string, requestId: stri
 }
 
 // ---------------------------------------------------------------------------
-// The grant a command spends.
-// ---------------------------------------------------------------------------
-
-/** Decisions whose grant a command in flight is spending, so two sends never spend one (the store takes no lock). */
-const grantsInFlight = new Set<string>();
-
-/** True while a command in flight is spending the grant of `decisionId`. */
-export function grantInFlight(decisionId: string): boolean {
-  return grantsInFlight.has(decisionId);
-}
-
-/**
- * Marks the grant `decisionId` as being spent; returns what gives it back
- * when the command is not delivered, or null when another send already is
- * spending it. Synchronous, so no other call can come between the check and
- * the mark.
- */
-function claimGrant(decisionId: string | null): (() => void) | null {
-  if (decisionId === null) return () => {};
-  if (grantsInFlight.has(decisionId)) return null;
-  grantsInFlight.add(decisionId);
-  return () => grantsInFlight.delete(decisionId);
-}
-
-/**
- * Spends the grant of `decisionId` on a delivered command (`useGrant`, one
- * use); null when done, else what went wrong. A grant that could not be
- * marked used stays claimed in this run of the plugin, so it is not spent twice.
- */
-function spendGrant(decisionId: string | null, workspaceId: string, effects: readonly Effect[], home: string, now: Date): string | null {
-  if (decisionId === null) return null;
-  let problem: string;
-  try {
-    const result = createDecisionStore(home).transition(decisionId, (decision) => useGrant(decision, { effects, at: now.toISOString() }), workspaceId);
-    if (result.status === "updated") {
-      grantsInFlight.delete(decisionId);
-      return null;
-    }
-    problem = result.status === "refused" ? result.message : `decision ${decisionId} is gone`;
-  } catch (error) {
-    problem = errorText(error);
-  }
-  return `The plugin could not mark the grant of decision ${decisionId} as used (${problem}); do not use it again.`;
-}
-
-// ---------------------------------------------------------------------------
 // Who gets the copy.
 // ---------------------------------------------------------------------------
 
@@ -212,10 +164,6 @@ export interface CommandSend {
   missionId?: string;
   /** A Worker's Manager, who gets the `copy: yes` block (`copyRecipientOf`); null for none. */
   copyTo: string | null;
-  /** The decision whose grant the command spends once delivered; null when it spends none. */
-  grantOf: string | null;
-  /** The effects that grant covers. */
-  approved: readonly Effect[];
   /** Checks the text against its declared effects: every command the Orchestrator sends itself. */
   backstop: boolean;
   /**
@@ -257,14 +205,12 @@ export type CommandSendResult =
       outcome: "sent" | "queued";
       /** The Manager's copy: how it went, or null when there was none to send. */
       copy: "sent" | "queued" | "failed" | null;
-      /** Why the grant could not be marked used; null when it was, or there was none. */
-      spent: string | null;
       /** Why the command could not be recorded; null when it was. It was delivered either way. */
       unrecorded: string | null;
     }
   | {
       ok: false;
-      /** `check`: refused before anything left; `delivery`: the target could not be reached. Nothing was sent, recorded or spent. */
+      /** `check`: refused before anything left; `delivery`: the target could not be reached. Nothing was sent or recorded. */
       stage: "check" | "delivery";
       reason: string;
     };
@@ -322,8 +268,8 @@ export function commandRefusalOf(spec: CommandCheck): string | null {
 
 /**
  * Sends one command of the Orchestrator's (see the module comment). Resolves
- * with a refusal rather than throwing; only a queue that throws rejects —
- * after giving the grant back — as nothing was delivered.
+ * with a refusal rather than throwing; only a queue that throws rejects, as
+ * nothing was delivered.
  */
 export async function sendCommand(spec: CommandSend): Promise<CommandSendResult> {
   const log = spec.log ?? ((message: string) => console.warn(message));
@@ -340,34 +286,21 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
   const role = command.to === "worker" ? "Worker" : "Manager";
   const queue = spec.queue ?? noticeQueue;
 
-  const release = claimGrant(spec.grantOf);
-  if (release === null) return { ok: false, stage: "check", reason: `the grant of decision ${spec.grantOf} is being used by another command` };
   let outcome: "sent" | "queued";
   if (interrupt) {
     // The one send that replaces a running turn: the danger allowance is open (ADR-016 decision 2).
     try {
       await spec.paseo.agents.ref(spec.targetId).send(text);
     } catch (error) {
-      release();
       return { ok: false, stage: "delivery", reason: `${role} ${spec.targetId} could not be reached (${errorText(error)})` };
     }
     outcome = "sent";
   } else {
-    let queued: Awaited<ReturnType<NoticeQueue["enqueue"]>>;
-    try {
-      queued = await queue.enqueue(spec.targetId, kind, text, spec.paseo);
-    } catch (error) {
-      release();
-      throw error;
-    }
-    if (!delivered(queued)) {
-      release();
-      return { ok: false, stage: "delivery", reason: `${role} ${spec.targetId} could not be reached` };
-    }
+    const queued = await queue.enqueue(spec.targetId, kind, text, spec.paseo);
+    if (!delivered(queued)) return { ok: false, stage: "delivery", reason: `${role} ${spec.targetId} could not be reached` };
     outcome = queued;
   }
 
-  const spent = spendGrant(spec.grantOf, workspaceId, spec.approved, home, now);
   let unrecorded: string | null = null;
   try {
     const stored = commandOf(command);
@@ -418,5 +351,5 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
       copy = "failed";
     }
   }
-  return { ok: true, id, text, outcome, copy, spent, unrecorded };
+  return { ok: true, id, text, outcome, copy, unrecorded };
 }

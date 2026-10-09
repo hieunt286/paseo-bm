@@ -863,7 +863,7 @@ describe("the event bus: only BM-EVENTS, only to the Orchestrator, a finished st
   it("an all-owner project: a finished step sends nothing and starts no timer", async () => {
     vi.useFakeTimers({ now: NOW });
     seedOrchestrator();
-    await expect(eventBus.turnRecorded(finishedManagerRecord(), [], fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
+    await expect(eventBus.turnRecorded(finishedManagerRecord(), fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
     await turnEnded(managerEnded());
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
     expect(vi.getTimerCount()).toBe(0);
@@ -877,7 +877,8 @@ describe("the event bus: only BM-EVENTS, only to the Orchestrator, a finished st
     expect(fake.sends).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
 
-    await expect(eventBus.turnRecorded(finishedManagerRecord(), [openQuestion()], fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
+    openQuestion();
+    await expect(eventBus.turnRecorded(finishedManagerRecord(), fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
     await turnEnded(managerEnded());
     await turnEnded(workerEnded());
     expect(fake.sends).toEqual([]);
@@ -889,22 +890,23 @@ describe("the event bus: only BM-EVENTS, only to the Orchestrator, a finished st
     ownerScopes();
     fake.table.get(WORKER)!.status = "idle";
     fake.table.get(REVIEWER)!.status = "idle";
-    await expect(eventBus.turnRecorded({ ...finishedManagerRecord(), agentId: REVIEWER, role: "reviewer" }, [], fake.paseo)).resolves.toMatchObject({ status: "none" });
-    await expect(eventBus.turnRecorded(askingManagerRecord(), [], fake.paseo)).resolves.toMatchObject({ status: "none" });
+    await expect(eventBus.turnRecorded({ ...finishedManagerRecord(), agentId: REVIEWER, role: "reviewer" }, fake.paseo)).resolves.toMatchObject({ status: "none" });
+    await expect(eventBus.turnRecorded(askingManagerRecord(), fake.paseo)).resolves.toMatchObject({ status: "none" });
     expectBoundary();
   });
 
   it("a class above owner in another project only: this project's finished step sends nothing", async () => {
     seedOrchestrator();
     ownerScopes("wks-other", "delegate");
-    await expect(eventBus.turnRecorded(finishedManagerRecord(), [], fake.paseo)).resolves.toMatchObject({ status: "none" });
+    await expect(eventBus.turnRecorded(finishedManagerRecord(), fake.paseo)).resolves.toMatchObject({ status: "none" });
     await turnEnded(managerEnded());
     expectBoundary();
   });
 
   it("a class above owner but no Orchestrator: nothing is queued, sent or created (O-4)", async () => {
     ownerScopes();
-    await expect(eventBus.turnRecorded(finishedManagerRecord(), [openQuestion()], fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
+    openQuestion();
+    await expect(eventBus.turnRecorded(finishedManagerRecord(), fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
     expect(fake.creates).toEqual([]);
     expectBoundary();
   });

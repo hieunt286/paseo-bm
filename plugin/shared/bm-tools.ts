@@ -739,7 +739,6 @@ export const FINDINGS_MAX_CHARS = 4_000;
 export const AGENT_MESSAGES_SUMMARY = { count: 5, maxChars: 1_500 } as const;
 /** What `bm_repo` can run (design §6B.4); each is a fixed read-only git command. */
 export const REPO_ACTIONS = ["status", "diff-stat", "log", "show"] as const;
-export type RepoAction = (typeof REPO_ACTIONS)[number];
 /** The Main's `bm_repo` (missions design §4): the same, plus `read`, a window of one file's lines. */
 export const MAIN_REPO_ACTIONS = [...REPO_ACTIONS, "read"] as const;
 export type MainRepoAction = (typeof MAIN_REPO_ACTIONS)[number];

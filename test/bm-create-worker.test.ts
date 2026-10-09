@@ -16,6 +16,7 @@ import {
   NOT_BOUND_MESSAGE,
   NO_PASEO_MESSAGE,
   NO_WORKER_PROFILE_MESSAGE,
+  REPLACED_MAIN_MESSAGE,
   SCOPE_LINE,
   WORKER_TITLE,
   workerTitleOf,
@@ -569,6 +570,17 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
       ok: false,
       text: "You have no mission yet: record it with bm_mission_start before you create a Worker. Nothing was created.",
     });
+    nothingCreatedIn(home, fake, store);
+  });
+
+  it("a replaced Main creates no Worker for the mission its binding still names (missions design §3.4)", async () => {
+    const home = dataFolder();
+    const store = createBindingStore(home);
+    const fake = await missionDaemon(home, store);
+    const { missionId, caller } = mission(home, [BACK]);
+    createMissionStore(home).setMain(missionId, "agent-successor", "replaced");
+    expect(await toolsOf(home, fake, store).call("bm_create_worker", { request: "Do it.", context: [] }, caller)).toEqual({ ok: false, text: REPLACED_MAIN_MESSAGE });
+    expect(await toolsOf(home, fake, store).call("bm_create_worker", { request: "Do it.", context: [], project: BACK }, caller)).toEqual({ ok: false, text: REPLACED_MAIN_MESSAGE });
     nothingCreatedIn(home, fake, store);
   });
 

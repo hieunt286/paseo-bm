@@ -512,7 +512,7 @@ describe("authority values", () => {
     const prepared = (intent: string) => preparedActionSchema.safeParse({ kind: "command", to: "worker", agentId: "a", intent, body: "b", effects: [] }).success;
     for (const intent of DECLARED_COMMAND_INTENTS) expect(prepared(intent), intent).toBe(true);
     expect(prepared("ship")).toBe(false);
-    // A handoff is only bm_handoff's (autonomy design §G.6): no option prepares one.
+    // A handoff is only the plugin's (autonomy design §G.6): no option prepares one.
     expect(prepared(HANDOFF_INTENT)).toBe(false);
   });
 });

@@ -10,6 +10,7 @@
  * that is not in the list has no directory (null) — it may simply have been
  * archived — and each caller says what that means for it.
  */
+import { basename } from "node:path";
 import { listAllAgents, parentOf, roleOfAgent } from "./agent-role";
 import type { AgentFacts } from "./traces";
 import { withoutRoleMarker } from "./role-title";
@@ -72,6 +73,12 @@ export async function listedWorkspaces(paseo: DashboardPaseo): Promise<ListedWor
 /** The directory of `workspaceId` in a list `listedWorkspaces` read, or null. */
 export function directoryIn(listed: readonly ListedWorkspace[] | null, workspaceId: string): string | null {
   return listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
+}
+
+/** A project's title: the last part of its directory in `listed`, else its workspace id. */
+export function titleIn(listed: readonly ListedWorkspace[] | null, workspaceId: string): string {
+  const directory = directoryIn(listed, workspaceId);
+  return directory === null ? workspaceId : basename(directory);
 }
 
 /** Repository path of a workspace, or null when Paseo no longer lists it. */

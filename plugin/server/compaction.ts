@@ -255,8 +255,8 @@ function workerBrief(entry: CompactionEntry, trace: ReconstructedTrace | undefin
  */
 function missionRequestLines(entry: CompactionEntry, home: string, env: NodeJS.ProcessEnv): string[] | null {
   try {
-    const mission = createMissionStore(home).list().find((candidate) => candidate.state === "open" && candidate.mainId === entry.agentId);
-    if (mission === undefined) return null;
+    const mission = createMissionStore(home).openByMain(entry.agentId);
+    if (mission === null) return null;
     const decisions = createDecisionStore(home, { log: () => {} });
     const lines = createMissionRoster(home)
       .list(mission.missionId)

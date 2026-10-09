@@ -78,7 +78,7 @@ import { createAlertStore, type AlertInput } from "./alert-store";
 import { redactText } from "./collector";
 import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
 import { requestIndexOf } from "./mission-roster";
-import { createMissionStore } from "./mission-store";
+import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
 import { noticeQueue, type NoticeOutcome, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import { createRequestRegistry } from "./request-registry";
 import { errorText } from "./rpc-kit";
@@ -315,16 +315,24 @@ export function usePeerTargets(resolve: PeerTargetResolver, delivered: PeerDeliv
   peerTargets.delivered = delivered;
 }
 
+/** The mission a record of no request names by its `requestId` (`tellMain`): an `m:<missionId>:<n>` card, or the mission id itself; else null. */
+function missionOfReference(requestId: string): string | null {
+  const named = requestId.startsWith("m:") ? (requestId.split(":")[1] ?? "") : requestId;
+  return MISSION_ID_PATTERN.test(named) ? named : null;
+}
+
 /**
  * Who a record addressed to a Main goes to now (missions design §3.4): the
- * current Main of its request's mission, and whether the mission is open
- * (`hold`: a drop keeps it pending); null for a record of no mission, or one
- * whose `to` was never that mission's Main (a Worker, a Reviewer). Never throws.
+ * current Main of its request's mission — or of the mission its `requestId`
+ * names (`tellMain`'s `m:` card or mission id) — and whether the mission is
+ * open (`hold`: a drop keeps it pending); null for a record of no mission, or
+ * one whose `to` was never that mission's Main (a Worker, a Reviewer). Never throws.
  */
 export function mainTargetOf(home: string, workspaceId: string, record: Pick<OutboxRecord, "requestId" | "to">): { to: string; hold: boolean } | null {
   try {
-    const request = createRequestRegistry(home).get(workspaceId, record.requestId);
-    const missionId = request?.missionId ?? requestIndexOf(home, record.requestId)?.missionId ?? null;
+    const named = missionOfReference(record.requestId);
+    const request = named === null ? createRequestRegistry(home).get(workspaceId, record.requestId) : null;
+    const missionId = named ?? request?.missionId ?? requestIndexOf(home, record.requestId)?.missionId ?? null;
     const mission = missionId === null ? null : createMissionStore(home).get(missionId);
     if (mission === null) return null;
     const mains = new Set([...mission.mainHistory.map((entry) => entry.agentId), mission.mainId, request?.managerId ?? null]);

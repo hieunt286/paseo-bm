@@ -32,7 +32,7 @@
 import { basename } from "node:path";
 import { joinStreamedText, redactText } from "./collector";
 import { readTraceContext, traceDetailOf } from "./dashboard-rpc";
-import { bmAgentsOf, listedWorkspaces } from "./paseo-directory";
+import { bmAgentsOf, directoryIn, listedWorkspaces } from "./paseo-directory";
 import type { DataHomeDeps } from "./data-home";
 import { readTimelinePages } from "./live-timeline";
 import { isPluginOrigin, originOf } from "../shared/message-origin";
@@ -148,7 +148,7 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
     );
     const recent = recentTracesOf(traces, since);
     if (recent.length === 0 && !running.has(workspaceId)) continue;
-    const directory = listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
+    const directory = directoryIn(listed, workspaceId);
     const meta = readWorkspaceMeta(context.location, workspaceId);
     // The repo's Mains live in the Missions home (missions design §6).
     const mains = repoMainsOf(context.home, workspaceId);

@@ -171,8 +171,6 @@ export function createOrchestratorDecisionDelivery(deps: OrchestratorDeliveryDep
         command: preparedCommandOf(decision, option, action, [], policyClass),
         targetId: target.id,
         copyTo,
-        grantOf: null,
-        approved: [],
         // The backstop checked the text against the option's effects when it was asked (`bm_ask_owner`).
         backstop: false,
         // The owner's own answer is counted and never refused; one a precedent or the policy gave is refused once the guard is full.

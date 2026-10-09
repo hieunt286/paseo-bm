@@ -42,6 +42,7 @@ import {
 } from "../shared/decisions";
 import { assertNoSymlink, capBy, createJsonFileStore, type JsonFileStore } from "./data-files";
 import { createMemoryStore } from "./memory-store";
+import { errorText } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, assertWorkspaceId } from "./trace-store";
 import { timeOrZero } from "../shared/time";
 
@@ -187,7 +188,7 @@ function rememberOwnerAnswer(home: string, previous: Decision, next: Decision, l
     });
     if (!added.ok) log(`[paseo-bm] the owner's answer to ${next.id} was not added to the project memory: ${added.reasons.join("; ")}`);
   } catch (error) {
-    log(`[paseo-bm] the owner's answer to ${next.id} was not added to the project memory: ${error instanceof Error ? error.message : String(error)}`);
+    log(`[paseo-bm] the owner's answer to ${next.id} was not added to the project memory: ${errorText(error)}`);
   }
 }
 

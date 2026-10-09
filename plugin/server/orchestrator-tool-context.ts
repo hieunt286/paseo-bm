@@ -31,7 +31,7 @@ export type ServerToolResult = { ok: true; text: string } | { ok: false; text: s
 
 /** What more than one tool module reads of the plugin's deps. */
 export interface ToolDeps {
-  /** The store's own deps (fixed proposal ids in tests). A command `bm_send_command` records takes its id from `store.newId` too. */
+  /** The store's own deps (fixed proposal ids in tests). A command the Orchestrator sends takes its id from `store.newId` too. */
   store?: OrchestratorStoreDeps;
   /**
    * The events of the Orchestrator's running wake (the event bus's

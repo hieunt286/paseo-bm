@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,8 +7,7 @@ import { clearJsonFileCache } from "../plugin/server/data-files";
 import { handleDecisionsAnswer } from "../plugin/server/decision-rpc";
 import { clearDecisionStoreCache } from "../plugin/server/decision-store";
 import { createArbitrationStore } from "../plugin/server/governor-conflicts";
-import { MAX_SPLITS_PER_DAY, type GovernorMissionDeps } from "../plugin/server/governor-tools";
-import type { ManagerAgentProfile } from "../plugin/server/manager";
+import { MAX_SPLITS_PER_DAY, executeSplit, type GovernorMissionDeps } from "../plugin/server/governor-tools";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { clearRequestIndexCache, createMissionRoster, requestIndexOf } from "../plugin/server/mission-roster";
@@ -16,10 +15,10 @@ import { createMissionStore } from "../plugin/server/mission-store";
 import { createOrchestratorTools, type OrchestratorToolsDeps } from "../plugin/server/orchestrator-tools";
 import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { createRequestRegistry } from "../plugin/server/request-registry";
-import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import { clearTraceStoreCache } from "../plugin/server/trace-store";
 import { parseCommandBlock } from "../plugin/shared/orchestrator-command";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
+import { roleAliases, roleProfiles } from "./helpers/roles";
 
 /**
  * The governor's bm_arbitrate and bm_create_main (missions design §9.6, §4.1;
@@ -66,18 +65,6 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const roleAliases = (): Record<string, unknown> => ({
-  "bm-manager": { extends: "codex", label: "Beads Manager", paseoTools: rolePaseoToolsPolicy("manager") },
-  "bm-worker": { extends: "codex", label: "Beads Worker", paseoTools: rolePaseoToolsPolicy("worker") },
-  "bm-reviewer": { extends: "codex", label: "Beads Reviewer", paseoTools: rolePaseoToolsPolicy("reviewer") },
-  "bm-orchestrator": { extends: "codex", label: "Beads Orchestrator", paseoTools: rolePaseoToolsPolicy("orchestrator") },
-});
-const profiles = (): ManagerAgentProfile[] => [
-  { id: "bm-manager", provider: "bm-manager", model: "gpt-5.6-sol" },
-  { id: "bm-worker", provider: "bm-worker", model: "gpt-5.6-sol" },
-  { id: "bm-reviewer", provider: "bm-reviewer", model: "gpt-5.6-sol" },
-  { id: "bm-orchestrator", provider: "bm-orchestrator", model: "gpt-5.6-sol" },
-];
 
 const main = (id: string, missionId: string, status = "idle"): FakeAgent => ({
   id,
@@ -111,7 +98,7 @@ function daemon(mainStatus = "idle") {
       { id: "repo-a", directory: "/repo/api" },
       { id: "repo-b", directory: "/repo/web" },
     ],
-    config: { providers: roleAliases(), agentProfiles: profiles() },
+    config: { providers: roleAliases(), agentProfiles: roleProfiles() },
     omit: ["providers"],
   });
 }
@@ -236,6 +223,29 @@ describe("bm_create_main (§9.6)", () => {
     const made = createMissionStore(home).list().find((entry) => entry.code === "REF")!;
     expect(createMissionStore(home).get(made.missionId)).toMatchObject({ parentMissionId: A, mainId: "created-1" });
     expect(createMissionRoster(home).list(made.missionId).map((entry) => entry.requestId)).toEqual([RA2]);
+  });
+
+  it("undoes a split that fails after the new mission was written: the requests back, the new mission closed, the first failure kept", async () => {
+    twoMissions();
+    const fake = daemon();
+    // The source's journal cannot be written: the split stops after the new mission and the move.
+    const journal = join(createMissionStore(home).dir, `${A}.journal.jsonl`);
+    rmSync(journal, { force: true });
+    mkdirSync(journal);
+    const logs: string[] = [];
+    const source = createMissionStore(home).get(A)!;
+    const done = await executeSplit(source, { ...split, requestIds: [RA2] }, "orchestrator", A, { home, now: NOW, paseo: fake.paseo, log: (line) => logs.push(line), missions });
+    expect(done.ok).toBe(false);
+    expect(done.ok ? [] : done.reasons).toHaveLength(1);
+    expect(done.ok ? "" : done.reasons[0]).not.toContain("Main could not be created");
+    const made = createMissionStore(home).list().find((entry) => entry.code === "REF")!;
+    expect(createMissionStore(home).get(made.missionId)).toMatchObject({ state: "closed", closedAt: NOW.toISOString(), mainId: null });
+    expect(createMissionRoster(home).list(A).map((entry) => entry.requestId)).toEqual([RA, RA2]);
+    expect(createMissionRoster(home).list(made.missionId)).toEqual([]);
+    expect(requestIndexOf(home, RA2)).toMatchObject({ missionId: A });
+    expect(fake.creates).toEqual([]);
+    // Its own journal line on the source fails too: one log line, the rest of the undo done.
+    expect(logs).toEqual([expect.stringContaining("undoing the split into REF could not journal it")]);
   });
 
   it("refuses while the source's Main runs, a request off its roster, a taken code, and a third split in 24 hours, changing nothing", async () => {

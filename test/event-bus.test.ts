@@ -5,30 +5,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
-import { DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
 import {
   EVENTS_BATCH,
   WAKE_ACT_TOOLS,
   actsNoted,
-  compactCrossedEventOf,
   createEventBus,
-  decisionOpenedEventsOf,
   eventKeyOf,
   eventLineOf,
   eventScopeOf,
   eventsMessageOf,
   finishedRequestKeysOf,
-  handoffCrossedEventOf,
   isInEventScope,
   isWakeAct,
   missionReviewEventsOf,
   missionSignalEventsOf,
   missionsOfEvent,
   outsideCharterOf,
-  requestFinishedEventsOf,
   reviewMarksOf,
   wakesGovernor,
-  workLeftOf,
   type BmEvent,
   type EventBus,
   type WorkerSignalEvent,
@@ -47,23 +41,20 @@ import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-que
 import { EVENTS_NOTICE_MARKER, isPluginNotice, noticeMarkerOf } from "../plugin/server/notices";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
-import { unverifiedFinishesOf } from "../plugin/server/request-trace";
-import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import { alertKeyOf } from "../plugin/shared/alerts";
-import { EMPTY_AUTONOMY_POLICY, projectsAboveOwner, type AutonomyPolicy } from "../plugin/shared/autonomy";
+import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, predictionRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../plugin/shared/autonomy";
 import type { Decision, DecisionClass } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { MANAGER, WORKER, at, report, turn } from "./fixtures/orchestrator-traces";
-import type { Evidence } from "../plugin/shared/contracts";
 
 /**
  * The event bus to the Orchestrator (autonomy design §A.8, REQ-115 b;
  * missions design §9.7, §9.1): typed events with dedupe keys and lines; only
  * the governor's `mission.*` events and a `danger` signal wake the
- * Orchestrator, every other event is retired as a wake while its builder and
- * the advice count stay; at most one wake per mission per 15 minutes, danger
- * excepted; every event pending at the Orchestrator's idle moment delivered
+ * Orchestrator, every other event is retired as a wake while the advice
+ * count stays; at most one wake per mission per 15 minutes, danger excepted,
+ * held events kept by a publish that fails; every event pending at the Orchestrator's idle moment delivered
  * as ONE `BM-EVENTS` message through the notice queue's batch kind; an event
  * dropped when its subject settled before delivery; each wake recorded with
  * its event types and whether its turn acted (M-26). A fake Paseo SDK, a
@@ -188,9 +179,8 @@ describe("events: types, keys, lines (design §A.8)", () => {
   });
 
   it("writes one short line per event with the ids to look up, and one BM-EVENTS message for them", () => {
-    expect(eventLineOf(stalled)).toBe(
-      `- request.stalled idle-unfinished — project ${WS}, request ${REQUEST}, Manager ${MANAGER}, since 2026-09-29T08:00:00.000Z. Look with bm_request.`,
-    );
+    // An event retired as a wake (missions design §9.1) never goes: its line is its type and project alone.
+    expect(eventLineOf(stalled)).toBe(`- request.stalled — project ${WS}.`);
     const message = eventsMessageOf([eventLineOf(stalled), "- x"]);
     expect(message.split("\n")[0]).toBe(EVENTS_NOTICE_MARKER);
     expect(message.split("\n")).toHaveLength(4);
@@ -199,75 +189,6 @@ describe("events: types, keys, lines (design §A.8)", () => {
     // A plugin notice: never the owner's words, nor the owner's approval.
     expect(isPluginNotice(message)).toBe(true);
     expect(noticeMarkerOf(message)).toBe("BM-EVENTS");
-  });
-
-  it("takes decision.opened from new decisions the policy asks the Orchestrator about, and request.finished from a Manager's finished reports", () => {
-    const delegated: AutonomyPolicy = {
-      projects: {
-        [WS]: {
-          "reversible-technical": { mode: "delegate", at: "T" },
-          environment: { mode: "delegate", at: "T" },
-        },
-      },
-      challenger: {},
-    };
-    // An open Worker question and a fallback incident of a class delegated to the Orchestrator; a settled one and its own decision never.
-    const incident = makeDecision({ id: "f:fb-1", workspaceId: WS, requestId: null, askedBy: { role: "plugin", agentId: null }, options: LOCAL_OPTIONS });
-    expect(decisionOpenedEventsOf([question(1), question(2, { status: "answered" }), makeDecision({ id: "o:1", options: LOCAL_OPTIONS }), incident], delegated)).toEqual([
-      { type: "decision.opened", workspaceId: WS, requestId: REQUEST, decisionId: `q:${REQUEST}:Q1`, askedBy: "agent-worker", asks: "decision" },
-      { type: "decision.opened", workspaceId: WS, requestId: null, decisionId: "f:fb-1", askedBy: null, asks: "decision" },
-    ]);
-    // Nothing delegated and no challenger (a new install): no decision wakes the Orchestrator.
-    expect(decisionOpenedEventsOf([question(1), incident])).toEqual([]);
-    const record = turn({
-      workspaceId: WS,
-      requestId: REQUEST,
-      reports: [report({ at: at(5), requestId: REQUEST, phase: "finished", beadsReady: ["bd-1"] }), report({ at: at(6), requestId: null, phase: "blocked" })],
-    });
-    expect(requestFinishedEventsOf(record)).toEqual([{ type: "request.finished", workspaceId: WS, requestId: REQUEST, managerId: MANAGER, at: at(5) }]);
-    // A Worker's own record raises it too (design §7.17.8 i), told to its Manager; a Reviewer's never.
-    expect(requestFinishedEventsOf({ ...record, agentId: WORKER, role: "worker", parentAgentId: MANAGER })).toEqual([
-      { type: "request.finished", workspaceId: WS, requestId: REQUEST, managerId: MANAGER, at: at(5) },
-    ]);
-    expect(requestFinishedEventsOf({ ...record, role: "reviewer" })).toEqual([]);
-    expect(requestFinishedEventsOf(undefined)).toEqual([]);
-  });
-
-  it("wakes only for a judgement: release, data, security and cost wait for the owner (X-4), even with every other class delegated to the Orchestrator", () => {
-    const delegated: AutonomyPolicy = {
-      projects: { [WS]: Object.fromEntries(
-          (["reversible-technical", "scope", "preference", "environment", "dependency"] as const).map((c) => [c, { mode: "delegate" as const, at: "T" }]),
-        ) },
-      challenger: { [WS]: true },
-    };
-    // The default fixture asks about push and publish: the owner's alone.
-    expect(decisionOpenedEventsOf([makeDecision({ id: `q:${REQUEST}:Q9`, workspaceId: WS, requestId: REQUEST })], delegated)).toEqual([]);
-    const oneRelease = question(3, { options: [...LOCAL_OPTIONS, { key: "c", label: "Deploy", recommended: false, effects: ["deploy"] }] });
-    expect(decisionOpenedEventsOf([oneRelease], delegated)).toEqual([]);
-    expect(decisionOpenedEventsOf([question(4)], delegated).map((event) => event.decisionId)).toEqual([`q:${REQUEST}:Q4`]);
-  });
-
-  it("wakes on a finished request only when its report shows work left", () => {
-    const finished = (over: Parameters<typeof report>[0] = {}) => report({ at: at(5), requestId: REQUEST, phase: "finished", ...over });
-    // A clean finish, however it is written: nothing to judge.
-    for (const clean of [
-      finished(),
-      finished({ reviewFindingsOpen: "none", blockers: "None.", buildAndTests: "npm test passed, lint clean" }),
-      finished({ reviewFindingsOpen: "0", blockers: "-" }),
-      // Written by real Workers in the S1/S7 live check (2026-09-29).
-      finished({ blockers: "none. Suggestion (not done): add a test for the default", buildAndTests: "npm test (node --test): 1 pass, 0 fail" }),
-      finished({ buildAndTests: "npm test: 2 tests, 2 pass, 0 fail, exit 0. Committed; git push origin main, exit 0" }),
-      finished({ buildAndTests: "tests passed, failures: 0, no errors" }),
-    ]) {
-      expect(workLeftOf(clean)).toBe(false);
-      expect(requestFinishedEventsOf(turn({ workspaceId: WS, requestId: REQUEST, reports: [clean] }))).toEqual([]);
-    }
-    expect(workLeftOf(finished({ beadsReady: ["bd-2"] }))).toBe(true);
-    expect(workLeftOf(finished({ reviewFindingsOpen: "2 minor" }))).toBe(true);
-    expect(workLeftOf(finished({ blockers: "needs the staging key" }))).toBe(true);
-    expect(workLeftOf(finished({ buildAndTests: "2 tests failed" }))).toBe(true);
-    expect(workLeftOf(finished({ buildAndTests: "npm test: 3 pass, 1 fail" }))).toBe(true);
-    expect(workLeftOf(finished({ blockers: "nobody answered the key question" }))).toBe(true);
   });
 });
 
@@ -302,12 +223,10 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     ];
     expect(retired.filter(wakesGovernor)).toEqual([]);
     expect(await events.publish(retired, fake.paseo)).toEqual({ status: "none", published: [], skipped: retired.map(eventKeyOf) });
-    // A recorded turn with a delegated question and work left, and a fallback incident: nothing either.
+    // A recorded turn with a delegated question open and work left: nothing either.
     decisions().open(question(1));
     const record = turn({ workspaceId: WS, requestId: REQUEST, reports: [report({ at: at(5), requestId: REQUEST, phase: "finished", beadsReady: ["bd-1"] })] });
-    expect(await events.turnRecorded(record, [question(1)], fake.paseo, () => true)).toMatchObject({ status: "none", published: [] });
-    const incident = makeDecision({ id: "f:fb-1", workspaceId: WS, requestId: null, askedBy: { role: "plugin", agentId: null }, options: LOCAL_OPTIONS });
-    expect(await events.decisionsOpened([incident], fake.paseo)).toMatchObject({ status: "none", published: [] });
+    expect(await events.turnRecorded(record, fake.paseo)).toMatchObject({ status: "none", published: [] });
     expect(fake.paseo.agents.list).not.toHaveBeenCalled();
     expect(fake.sends).toEqual([]);
     expect(wakes()).toEqual([]);
@@ -502,6 +421,53 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     expect(fake.sends).toHaveLength(4);
     expect(lines(3)).toEqual(["- mission.signal drift"]);
   });
+
+  it("a publish that fails keeps what its mission's window held, and a key is remembered only once queued or sent", async () => {
+    inScope();
+    openMission();
+    const fake = daemon();
+    // The real queue, failing or dropping on demand first.
+    let failing = 0;
+    let dropping = 0;
+    const flaky: Pick<NoticeQueue, "enqueueBatch"> = {
+      enqueueBatch: async (targetId, batch, items, paseo) => {
+        if (failing > 0) {
+          failing -= 1;
+          throw new Error("queue down");
+        }
+        if (dropping > 0) {
+          dropping -= 1;
+          return items.map(() => "dropped" as const);
+        }
+        return queue.enqueueBatch(targetId, batch, items, paseo);
+      },
+    };
+    const events = createEventBus({ home: () => home, queue: flaky, now: () => clock, log: () => {} });
+    const start = clock.getTime();
+    expect((await events.governed([replanDue()], fake.paseo)).published).toHaveLength(1);
+    await orchestratorIdle(fake);
+
+    // Five minutes on, held for the mission's window.
+    clock = new Date(start + 5 * 60_000);
+    const drift: GovernorOutcome = { ...replanDue(), actions: [{ family: "drift", action: "replan-due", commandId: null, reason: null }] };
+    const driftKey = `mission.signal:${MISSION}:drift@${clock.toISOString()}`;
+    expect(await events.governed([drift], fake.paseo)).toMatchObject({ status: "none", published: [], skipped: [driftKey] });
+
+    // After the window the queue throws: the held event is kept, and goes with the next publish.
+    clock = new Date(start + 16 * 60_000);
+    failing = 1;
+    expect(await events.governed([], fake.paseo)).toMatchObject({ status: "failed", published: [] });
+    expect(await events.governed([], fake.paseo)).toMatchObject({ status: "done", published: [driftKey] });
+    expect(fake.sends.map((send) => send.text.split("\n").slice(2).map((line) => line.split(" — ")[0]))).toEqual([["- mission.signal stuck"], ["- mission.signal drift"]]);
+    await orchestratorIdle(fake);
+
+    // A danger signal the queue dropped is not remembered: raised again, it goes.
+    dropping = 1;
+    const signal = danger(1);
+    expect(await events.publish([signal], fake.paseo)).toEqual({ status: "done", published: [], skipped: [eventKeyOf(signal)] });
+    expect(await events.publish([signal], fake.paseo)).toEqual({ status: "done", published: [eventKeyOf(signal)], skipped: [] });
+    expect(await events.publish([signal], fake.paseo)).toEqual({ status: "none", published: [], skipped: [eventKeyOf(signal)] });
+  });
 });
 
 describe("the policy's scope (design §A.8 Scope, §B.2; change-007 C1)", () => {
@@ -537,77 +503,72 @@ describe("the policy's scope (design §A.8 Scope, §B.2; change-007 C1)", () => 
   });
 });
 
+/**
+ * What a decision asks of the Orchestrator by the owner's policy per cell (design §B.5, §B.9): a decision
+ * (`decideRefusalOf`, `bm_decide`) or a prediction (`predictionRefusalOf`, `bm_predict`), never both.
+ * `decision.opened` no longer wakes it (missions design §9.1); the rule stands for the tools.
+ */
+const asksOf = (decisions: readonly Decision[], policy: AutonomyPolicy = EMPTY_AUTONOMY_POLICY): string[] =>
+  decisions.flatMap((decision) => (decideRefusalOf(policy, decision) === null ? ["decision"] : predictionRefusalOf(policy, decision) === null ? ["prediction"] : []));
+
 describe("the challenger's predictions (design §B.3, §B.9; change-007 C1)", () => {
   const OPENED_WITH_PREDICTIONS = { prediction: { recommended: { optionKey: "a" }, orchestrator: null } } satisfies Partial<Decision>;
   /** A Worker question opened by this build: its recommended prediction recorded, none of the Orchestrator's yet. */
   const predictable = (n: number, over: Partial<Decision> = {}) => question(n, { ...OPENED_WITH_PREDICTIONS, ...over });
   const policy = (over: Partial<AutonomyPolicy> = {}): AutonomyPolicy => ({ projects: {}, challenger: { [WS]: true }, ...over });
-  const asks = (events: BmEvent[]) => events.map((event) => (event.type === "decision.opened" ? event.asks : event.type));
 
-  it("asks for a prediction for an owner or shadow cell of any class with the challenger on, and its line names bm_predict", () => {
+  it("asks for a prediction for an owner or shadow cell of any class with the challenger on", () => {
     // Every cell owner (nothing stored), the challenger on.
-    const [owner] = decisionOpenedEventsOf([predictable(1)], policy());
-    expect(owner).toEqual({ type: "decision.opened", workspaceId: WS, requestId: REQUEST, decisionId: `q:${REQUEST}:Q1`, askedBy: "agent-worker", asks: "prediction" });
-    expect(eventLineOf(owner!)).toBe(
-      `- decision.opened — project ${WS}, request ${REQUEST}, decision q:${REQUEST}:Q1, asked by Worker agent-worker. A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict, with your reason in one line. The owner sees it as your proposal and decides: answer nothing.`,
-    );
-    // Same type and dedupe key as every decision.opened.
-    expect(eventKeyOf(owner!)).toBe(`decision.opened:q:${REQUEST}:Q1`);
+    expect(asksOf([predictable(1)], policy())).toEqual(["prediction"]);
     const shadow = policy({ projects: { [WS]: { scope: { mode: "shadow", at: "T" } } } });
-    expect(asks(decisionOpenedEventsOf([predictable(2, { class: "scope" })], shadow))).toEqual(["prediction"]);
+    expect(asksOf([predictable(2, { class: "scope" })], shadow)).toEqual(["prediction"]);
     // A fallback incident is predicted too (the Orchestrator did not ask it); its own decision never is.
     const incident = makeDecision({ id: "f:fb-1", workspaceId: WS, requestId: null, askedBy: { role: "plugin", agentId: null }, options: LOCAL_OPTIONS, ...OPENED_WITH_PREDICTIONS });
     const own = makeDecision({ id: "o:1", workspaceId: WS, options: LOCAL_OPTIONS, ...OPENED_WITH_PREDICTIONS });
-    expect(asks(decisionOpenedEventsOf([incident, own], policy()))).toEqual(["prediction"]);
+    expect(asksOf([incident, own], policy())).toEqual(["prediction"]);
   });
 
   it("asks none with the challenger off, for a delegate cell, or for a decision opened before predictions; a release, data, security or cost class is predicted too (ADR-025)", () => {
-    // The challenger off (the default, DQ-4), or on for another project: an owner or shadow cell wakes nobody.
+    // The challenger off (the default, DQ-4), or on for another project: an owner or shadow cell asks nothing.
     const shadowOff = policy({ projects: { [WS]: { "reversible-technical": { mode: "shadow", at: "T" } } }, challenger: {} });
     for (const off of [EMPTY_AUTONOMY_POLICY, policy({ challenger: { [WS]: false } }), policy({ challenger: { [OTHER_WS]: true } }), shadowOff]) {
-      expect(decisionOpenedEventsOf([predictable(1)], off)).toEqual([]);
+      expect(asksOf([predictable(1)], off)).toEqual([]);
     }
     // A delegate cell is decided by the Orchestrator, not predicted.
     const delegated = policy({ projects: { [WS]: { "reversible-technical": { mode: "delegate", at: "T" } } } });
-    expect(asks(decisionOpenedEventsOf([predictable(1)], delegated))).toEqual(["decision"]);
+    expect(asksOf([predictable(1)], delegated)).toEqual(["decision"]);
     // Release, data, security, cost: predicted like any class with the challenger on, by an option's effect or the proposed class.
     const release = predictable(3, { options: [...LOCAL_OPTIONS, { key: "c", label: "Deploy", recommended: false, effects: ["deploy"] }] });
-    expect(asks(decisionOpenedEventsOf([release], policy()))).toEqual(["prediction"]);
+    expect(asksOf([release], policy())).toEqual(["prediction"]);
     for (const decisionClass of ["release", "data", "security", "cost"] as const) {
-      expect(asks(decisionOpenedEventsOf([predictable(4, { class: decisionClass })], policy())), decisionClass).toEqual(["prediction"]);
-      expect(decisionOpenedEventsOf([predictable(4, { class: decisionClass })], EMPTY_AUTONOMY_POLICY), decisionClass).toEqual([]);
+      expect(asksOf([predictable(4, { class: decisionClass })], policy()), decisionClass).toEqual(["prediction"]);
+      expect(asksOf([predictable(4, { class: decisionClass })], EMPTY_AUTONOMY_POLICY), decisionClass).toEqual([]);
     }
     // A settled decision, one the Orchestrator predicted already, one opened before predictions: none.
-    expect(decisionOpenedEventsOf([predictable(5, { status: "withdrawn", settledAt: at(1) })], policy())).toEqual([]);
+    expect(asksOf([predictable(5, { status: "withdrawn", settledAt: at(1) })], policy())).toEqual([]);
     const predicted = predictable(6, { prediction: { recommended: { optionKey: "a" }, orchestrator: { optionKey: "b", reason: "r", at: at(1) } } });
-    expect(decisionOpenedEventsOf([predicted, question(7)], policy())).toEqual([]);
+    expect(asksOf([predicted, question(7)], policy())).toEqual([]);
   });
 });
 
 describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)", () => {
   const OPENED_WITH_PREDICTIONS = { prediction: { recommended: { optionKey: "a" }, orchestrator: null } } satisfies Partial<Decision>;
   const predictable = (n: number, over: Partial<Decision> = {}) => question(n, { ...OPENED_WITH_PREDICTIONS, ...over });
-  const asks = (events: BmEvent[]) => events.map((event) => (event.type === "decision.opened" ? event.asks : event.type));
   const cellPolicy = (cell: AutonomyPolicy["projects"][string][DecisionClass] | null, challenger: boolean): AutonomyPolicy => ({
     projects: cell === null ? {} : { [WS]: { "reversible-technical": cell } },
     challenger: { [WS]: challenger },
   });
 
-  it("a delegate cell whose predictor is the Orchestrator raises decision.opened asking bm_decide, for a Worker's question and a fallback incident", () => {
+  it("a delegate cell asks the Orchestrator to decide, for a Worker's question and a fallback incident", () => {
     const delegated = cellPolicy({ mode: "delegate", at: "T" }, false);
-    const [opened] = decisionOpenedEventsOf([predictable(1)], delegated);
-    expect(opened).toEqual({ type: "decision.opened", workspaceId: WS, requestId: REQUEST, decisionId: `q:${REQUEST}:Q1`, askedBy: "agent-worker", asks: "decision" });
-    expect(eventLineOf(opened!)).toBe(
-      `- decision.opened — project ${WS}, request ${REQUEST}, decision q:${REQUEST}:Q1, asked by Worker agent-worker. A decision is asked: the owner's policy delegates its class to you. Read it with bm_decisions and choose the option the owner would, with bm_decide and your reason in one line.`,
-    );
-    expect(eventKeyOf(opened!)).toBe(`decision.opened:q:${REQUEST}:Q1`);
+    expect(asksOf([predictable(1)], delegated)).toEqual(["decision"]);
     // A fallback incident is environment: asked when that class is delegated to the Orchestrator.
     const incident = makeDecision({ id: "f:fb-1", workspaceId: WS, requestId: null, askedBy: { role: "plugin", agentId: null }, options: LOCAL_OPTIONS });
-    expect(decisionOpenedEventsOf([incident], delegated)).toEqual([]);
+    expect(asksOf([incident], delegated)).toEqual([]);
     const environment: AutonomyPolicy = { projects: { [WS]: { environment: { mode: "delegate", at: "T" } } }, challenger: {} };
-    expect(asks(decisionOpenedEventsOf([incident], environment))).toEqual(["decision"]);
+    expect(asksOf([incident], environment)).toEqual(["decision"]);
     // Its own decision is the owner's whatever the cell.
-    expect(decisionOpenedEventsOf([makeDecision({ id: "o:1", workspaceId: WS, options: LOCAL_OPTIONS })], delegated)).toEqual([]);
+    expect(asksOf([makeDecision({ id: "o:1", workspaceId: WS, options: LOCAL_OPTIONS })], delegated)).toEqual([]);
   });
 
   it("per cell: delegate asks bm_decide; owner or shadow asks bm_predict with the challenger on and nothing with it off", () => {
@@ -622,7 +583,7 @@ describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)
       ["shadow, challenger off", { mode: "shadow", at: "T" }, false, []],
     ];
     for (const [name, cell, challenger, expected] of cases) {
-      expect(asks(decisionOpenedEventsOf([predictable(1)], cellPolicy(cell, challenger))), name).toEqual(expected);
+      expect(asksOf([predictable(1)], cellPolicy(cell, challenger)), name).toEqual(expected);
     }
   });
 
@@ -642,7 +603,7 @@ describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)
       // Proposed as reversible-technical, but an option migrates: data.
       predictable(20, { options: [...LOCAL_OPTIONS, { key: "c", label: "Add a table", recommended: false, effects: ["migration"] }] }),
     ];
-    expect(asks(decisionOpenedEventsOf(risky, policy))).toEqual(["decision", "decision", "decision", "decision", "decision"]);
+    expect(asksOf(risky, policy)).toEqual(["decision", "decision", "decision", "decision", "decision"]);
   });
 });
 
@@ -817,14 +778,8 @@ describe("advice.due: after every N finished requests of a project (design §G.4
   const cadence = (value: number) => createCoordinationStore(home).set({ key: "advice.everyFinished", value });
   const request = (n: number) => `req-20260929T0${String(n).padStart(5, "0")}Z`;
 
-  it("has its own key and line: the project, the count, bm_findings and bm_ask_owner; it is not held back by the policy's scope", () => {
-    const event: BmEvent = { type: "advice.due", workspaceId: WS, finished: 5, at: at(9) };
-    expect(eventKeyOf(event)).toBe(`advice.due:${WS}@${at(9)}`);
-    expect(eventLineOf(event)).toBe(
-      `- advice.due — project ${WS}, 5 requests finished since the last advice. Read its figures with bm_findings; for each finding worth acting on, ask the owner with bm_ask_owner, one option carrying the prepared change. With none worth it, keep a note with bm_note.`,
-    );
-    // Every project gets its advice: an all-owner project included (the empty scope).
-    expect(isInEventScope(event, new Set())).toBe(true);
+  it("has its own key per project and count", () => {
+    expect(eventKeyOf({ type: "advice.due", workspaceId: WS, finished: 5, at: at(9) })).toBe(`advice.due:${WS}@${at(9)}`);
   });
 
   it("counts one key per finished request of a Manager's or a Worker's turn; a Reviewer's turn, a blocked report or no report counts nothing", () => {
@@ -849,7 +804,7 @@ describe("advice.due: after every N finished requests of a project (design §G.4
     cadence(0);
     const fake = daemon();
     const events = bus();
-    for (let n = 1; n <= 12; n += 1) await events.turnRecorded(finishedTurn(request(n), n), [], fake.paseo);
+    for (let n = 1; n <= 12; n += 1) await events.turnRecorded(finishedTurn(request(n), n), fake.paseo);
     expect(fake.sends).toEqual([]);
     expect(createAdviceStore(home).read()).toEqual({});
   });
@@ -861,238 +816,9 @@ describe("advice.due: after every N finished requests of a project (design §G.4
     const lines: string[] = [];
     const fake = daemon();
     const events = createEventBus({ home: () => home, queue, now: () => clock, log: (line) => lines.push(line) });
-    expect(await events.turnRecorded(finishedTurn(request(1), 1), [], fake.paseo)).toMatchObject({ status: "none" });
+    expect(await events.turnRecorded(finishedTurn(request(1), 1), fake.paseo)).toMatchObject({ status: "none" });
     expect(fake.sends).toEqual([]);
     expect(lines.join("\n")).toContain("could not count the finished requests toward the advice");
-  });
-});
-
-describe("a finished-unverified request is built as work left (design §C.3, §A.8; bead 7gxw.4; retired as a wake, missions design §9.1)", () => {
-  const traces = () => ({ tracesDir: join(root, "traces") });
-  /** No live agent: the request is rebuilt from its records alone. */
-  const noAgents = { agents: { list: async () => ({ entries: [] }) }, workspaces: { list: async () => ({ entries: [] }) } };
-  const edit = (minute: number): Evidence => ({ kind: "file", detail: "src/invoice.ts", agentId: WORKER, at: at(minute) });
-  const run = (command: string, minute: number, status?: string): Evidence => ({ kind: "shell", detail: command, agentId: WORKER, at: at(minute), ...(status === undefined ? {} : { status }) });
-  /** A clean finish (nothing else left) naming `npm test`, as the Manager received it. */
-  const cleanFinish = (over: Parameters<typeof report>[0] = {}) =>
-    report({ agentId: MANAGER, at: at(5), requestId: REQUEST, phase: "finished", filesChanged: ["src/invoice.ts"], buildAndTests: "`npm test` pass", ...over });
-  const managerTurn = (finished = cleanFinish()) => turn({ workspaceId: WS, requestId: REQUEST, at: at(6), endedAt: at(6), reports: [finished] });
-
-  /** The request's Worker turn and the Manager turn with its finish, written as the collector writes them; the Manager's record comes back. */
-  async function recorded(evidence: Evidence[], finished = cleanFinish()) {
-    await appendRecord(traces(), turn({ agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQUEST, at: at(4), endedAt: at(4), evidence }));
-    const record = managerTurn(finished);
-    await appendRecord(traces(), record);
-    return record;
-  }
-
-  beforeEach(() => clearTraceStoreCache());
-  afterEach(() => clearTraceStoreCache());
-
-  it("an unverified finish with nothing else left is published with unverified: true, and its line says so; the key is unchanged", () => {
-    const record = managerTurn();
-    const [event] = requestFinishedEventsOf(record, () => true);
-    expect(event).toEqual({ type: "request.finished", workspaceId: WS, requestId: REQUEST, managerId: MANAGER, at: at(5), unverified: true });
-    expect(eventKeyOf(event!)).toBe(`request.finished:${WS}:${REQUEST}@${at(5)}`);
-    expect(eventKeyOf(event!)).toBe(eventKeyOf({ ...event!, unverified: undefined }));
-    expect(eventLineOf(event!)).toBe(
-      `- request.finished — project ${WS}, request ${REQUEST}, Manager ${MANAGER}, at ${at(5)}: finished — unverified, its code changed and not every check it names was seen to pass. Check it with bm_request; a commit or release on the owner's policy waits for the owner.`,
-    );
-    // A detected finish with nothing left: nothing, as in Phase 1.
-    expect(requestFinishedEventsOf(record, () => false)).toEqual([]);
-    expect(requestFinishedEventsOf(record)).toEqual([]);
-    // Work left and unverified: one event, which says both.
-    expect(requestFinishedEventsOf(managerTurn(cleanFinish({ beadsReady: ["bd-2"] })), () => true)).toEqual([expect.objectContaining({ unverified: true })]);
-    // A Manager's or a Worker's record, never a Reviewer's; only a finished report.
-    expect(requestFinishedEventsOf({ ...record, role: "reviewer" }, () => true)).toEqual([]);
-    expect(requestFinishedEventsOf(managerTurn(cleanFinish({ phase: "bead-implemented" })), () => true)).toEqual([]);
-  });
-
-  it("reads a Worker's own finish against its request's records too (design §7.17.8 i)", async () => {
-    await appendRecord(traces(), turn({ workspaceId: WS, requestId: REQUEST, at: at(1), endedAt: at(1) }));
-    await appendRecord(traces(), turn({ agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQUEST, at: at(4), endedAt: at(4), evidence: [edit(2)] }));
-    const own = turn({ agentId: WORKER, role: "worker", parentAgentId: MANAGER, workspaceId: WS, requestId: REQUEST, at: at(6), endedAt: at(6), reports: [cleanFinish({ agentId: WORKER, recordId: "rec-1" })] });
-    await appendRecord(traces(), own);
-    const isUnverified = await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, own);
-    expect(requestFinishedEventsOf(own, isUnverified)).toEqual([expect.objectContaining({ requestId: REQUEST, managerId: MANAGER, unverified: true })]);
-  });
-
-  it("reads the request's records: code changed and npm test never ran → unverified; run and passed after the edit → not", async () => {
-    const unverifiedRecord = await recorded([edit(2), run("npm test", 1, "completed")]);
-    const isUnverified = await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, unverifiedRecord);
-    expect(isUnverified(unverifiedRecord.reports[0]!)).toBe(true);
-    expect(requestFinishedEventsOf(unverifiedRecord, isUnverified)).toEqual([expect.objectContaining({ requestId: REQUEST, unverified: true })]);
-
-    clearTraceStoreCache();
-    rmSync(traces().tracesDir, { recursive: true, force: true });
-    const detectedRecord = await recorded([edit(2), run("npm test", 3, "completed")]);
-    const detected = await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, detectedRecord);
-    expect(detected(detectedRecord.reports[0]!)).toBe(false);
-    expect(requestFinishedEventsOf(detectedRecord, detected)).toEqual([]);
-  });
-
-  it("a finish with no code changed, or a request not checked (recorded before shell entries had a status), publishes nothing for it", async () => {
-    // No file named, none edited: never finished-unverified, whatever the checks.
-    const noCode = await recorded([], cleanFinish({ filesChanged: [], buildAndTests: "npm test passed" }));
-    const noCodeTest = await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, noCode);
-    expect(requestFinishedEventsOf(noCode, noCodeTest)).toEqual([]);
-
-    clearTraceStoreCache();
-    rmSync(traces().tracesDir, { recursive: true, force: true });
-    // Not checked: shell entries, none with a status. Shown and published as before.
-    const old = await recorded([edit(2), run("npm test", 3)]);
-    const oldTest = await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, old);
-    expect(requestFinishedEventsOf(old, oldTest)).toEqual([]);
-  });
-
-  it("reads nothing for a Reviewer's turn, or one without a finish, and a store it cannot read changes nothing", async () => {
-    const reviewer = turn({ agentId: "agent-reviewer", role: "reviewer", workspaceId: WS, requestId: REQUEST, reports: [cleanFinish()] });
-    expect((await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, reviewer))(reviewer.reports[0]!)).toBe(false);
-    const worker = turn({ agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQUEST });
-    expect((await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, worker))(cleanFinish())).toBe(false);
-    expect((await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, undefined))(cleanFinish())).toBe(false);
-    // A rebuild that fails: one log line, nothing unverified (the events are as before).
-    const lines: string[] = [];
-    const failing = { filter: () => { throw new Error("agents unreadable"); } } as never;
-    const record = managerTurn();
-    const broken = await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home, allAgents: failing, log: (line) => lines.push(line) }, record);
-    expect(broken(record.reports[0]!)).toBe(false);
-    expect(lines).toEqual([`[paseo-bm] could not check the finish of ${MANAGER}'s turn: agents unreadable`]);
-  });
-});
-
-describe("threshold.crossed (compact): a Manager's or a Worker's turn over its compaction threshold (design §G.5, §G.7; change-008 C1; bead 7gxw.10)", () => {
-  const CLAUDE = "claude-opus-5";
-  /** A Worker's Claude turn that read 6.1M tokens: over the Worker's 5.7M. */
-  const crossing = (minute: number, over: Partial<Parameters<typeof turn>[0]> = {}) =>
-    turn({
-      workspaceId: WS,
-      agentId: WORKER,
-      role: "worker",
-      requestId: REQUEST,
-      turnId: `w-${minute}`,
-      at: at(minute),
-      endedAt: at(minute),
-      usage: { inputTokens: 100_000, cachedInputTokens: 6_000_000, outputTokens: 1_000, costUsd: null, costBasis: "unavailable", model: CLAUDE, pricesUpdatedAt: null },
-      runtime: { model: CLAUDE, thinkingOptionId: null, modeId: null, provider: "bm-worker" },
-      ...over,
-    });
-  const compactedTurn = (minute: number) =>
-    crossing(minute, { evidence: [{ kind: "compaction", detail: "manual", agentId: WORKER, at: at(minute), trigger: "manual", preTokens: null } as Evidence] });
-  const settings = DEFAULT_COORDINATION_SETTINGS;
-
-  it("has its own key per agent cycle and a line naming bm_compact; every project gets it, whatever the policy's scope", () => {
-    const event = compactCrossedEventOf(crossing(5), settings, { compactions: 0, pending: false })!;
-    expect(event).toEqual({
-      type: "threshold.crossed",
-      workspaceId: WS,
-      requestId: REQUEST,
-      agentId: WORKER,
-      role: "worker",
-      kind: "compact",
-      figure: "tokensPerTurn",
-      value: 6_100_000,
-      threshold: 5_700_000,
-      at: at(5),
-      cycle: 0,
-    });
-    expect(eventKeyOf(event)).toBe(`threshold.crossed:compact:${WORKER}#0`);
-    expect(eventKeyOf({ ...event, cycle: 1 })).toBe(`threshold.crossed:compact:${WORKER}#1`);
-    expect(eventLineOf(event)).toBe(
-      `- threshold.crossed compact — project ${WS}, Worker ${WORKER}, request ${REQUEST}, at ${at(5)}: it read 6,100,000 tokens in one turn (threshold 5,700,000). If a compaction is worth it, request it with bm_compact; the plugin runs it at that agent's next safe point. Otherwise keep a note with bm_note.`,
-    );
-    expect(isInEventScope(event, new Set())).toBe(true);
-  });
-
-  it("judges a Codex or OpenCode turn by its context share; none below it, for a turn with a compaction, a Reviewer, an unknown provider, compaction off, at compact.maxPerAgent or with one pending", () => {
-    const codex = (share: number, role: "manager" | "worker" = "manager") =>
-      crossing(6, {
-        agentId: role === "manager" ? MANAGER : WORKER,
-        role,
-        requestId: role === "manager" ? null : REQUEST,
-        usage: { inputTokens: 150_000, cachedInputTokens: 20_000, outputTokens: 500, costUsd: null, costBasis: "unavailable", model: "gpt-5.6-luna", pricesUpdatedAt: null, contextUsed: Math.round(share * 258_400), contextMax: 258_400 },
-        runtime: { model: "gpt-5.6-luna", thinkingOptionId: null, modeId: null, provider: "bm-manager" },
-      });
-    expect(compactCrossedEventOf(codex(0.6), settings, { compactions: 1, pending: false })).toMatchObject({
-      agentId: MANAGER,
-      role: "manager",
-      requestId: null,
-      figure: "contextShare",
-      threshold: 0.5,
-      cycle: 1,
-    });
-    // Its 150,000 tokens are the last call's: never compared with a per-turn threshold.
-    expect(compactCrossedEventOf(codex(0.3), settings, { compactions: 0, pending: false })).toBeNull();
-    expect(eventLineOf(compactCrossedEventOf(codex(0.6), settings, { compactions: 0, pending: false })!)).toContain("its context filled 60 % of its window (threshold 50 %)");
-    const none = { compactions: 0, pending: false };
-    expect(compactCrossedEventOf(compactedTurn(5), settings, none)).toBeNull();
-    expect(compactCrossedEventOf(crossing(5, { role: "reviewer" }), settings, none)).toBeNull();
-    expect(compactCrossedEventOf(crossing(5, { runtime: null, usage: { ...crossing(5).usage!, model: "mystery-1" } }), settings, none)).toBeNull();
-    expect(compactCrossedEventOf(crossing(5), { compact: { ...settings.compact, enabled: false } }, none)).toBeNull();
-    expect(compactCrossedEventOf(crossing(5), settings, { compactions: 2, pending: false })).toBeNull();
-    expect(compactCrossedEventOf(crossing(5), settings, { compactions: 0, pending: true })).toBeNull();
-    expect(compactCrossedEventOf(null, settings, none)).toBeNull();
-  });
-});
-
-describe("threshold.crossed (handoff): a Worker's request over its handoff threshold (design §G.6, §G.7; change-008 C1; bead 7gxw.11)", () => {
-  /** A model no provider claims: the turn is never judged for compaction, so only the handoff kind shows here. */
-  const CLAUDE = "mystery-1";
-  /** A Worker's turn of the request that read `read` tokens. */
-  const workerTurn = (minute: number, read: number, over: Partial<Parameters<typeof turn>[0]> = {}) =>
-    turn({
-      workspaceId: WS,
-      agentId: WORKER,
-      role: "worker",
-      requestId: REQUEST,
-      turnId: `w-${minute}`,
-      at: at(minute),
-      endedAt: at(minute),
-      usage: { inputTokens: 1_000, cachedInputTokens: read - 1_000, outputTokens: 1_000, costUsd: null, costBasis: "unavailable", model: CLAUDE, pricesUpdatedAt: null },
-      runtime: { model: CLAUDE, thinkingOptionId: null, modeId: null, provider: "bm-worker" },
-      ...over,
-    });
-  const request = { tokensRead: 160_000_000, handoffs: 0, pending: false, finished: false };
-  const settings = DEFAULT_COORDINATION_SETTINGS;
-
-  beforeEach(() => clearTraceStoreCache());
-  afterEach(() => clearTraceStoreCache());
-
-  it("has its own key per request cycle and a line naming bm_handoff; every project gets it, whatever the policy's scope", () => {
-    const event = handoffCrossedEventOf(workerTurn(5, 1_000_000), settings, request)!;
-    expect(event).toEqual({
-      type: "threshold.crossed",
-      workspaceId: WS,
-      requestId: REQUEST,
-      agentId: WORKER,
-      role: "worker",
-      kind: "handoff",
-      figure: "requestTokens",
-      value: 160_000_000,
-      threshold: 150_000_000,
-      at: at(5),
-      cycle: 0,
-    });
-    expect(eventKeyOf(event)).toBe(`threshold.crossed:handoff:${REQUEST}#0`);
-    expect(eventKeyOf({ ...event, agentId: "agent-successor", cycle: 1 })).toBe(`threshold.crossed:handoff:${REQUEST}#1`);
-    expect(eventLineOf(event)).toBe(
-      `- threshold.crossed handoff — project ${WS}, Worker ${WORKER}, request ${REQUEST}, at ${at(5)}: its request read 160,000,000 tokens (threshold 150,000,000). If a handoff to a new Worker is worth it, request it with bm_handoff; the plugin hands it over at that Worker's next safe point. Otherwise keep a note with bm_note.`,
-    );
-    expect(isInEventScope(event, new Set())).toBe(true);
-  });
-
-  it("none below the threshold, for a Manager's turn or one with no request, with handoff off, a finished request, one pending, or at handoff.maxPerRequest", () => {
-    const worker = workerTurn(5, 1_000_000);
-    expect(handoffCrossedEventOf(worker, settings, { ...request, tokensRead: 149_999_999 })).toBeNull();
-    expect(handoffCrossedEventOf(worker, settings, { ...request, tokensRead: null })).toBeNull();
-    expect(handoffCrossedEventOf({ ...worker, role: "manager" }, settings, request)).toBeNull();
-    expect(handoffCrossedEventOf({ ...worker, requestId: null }, settings, request)).toBeNull();
-    expect(handoffCrossedEventOf(worker, { handoff: { ...settings.handoff, enabled: false } }, request)).toBeNull();
-    expect(handoffCrossedEventOf(worker, settings, { ...request, finished: true })).toBeNull();
-    expect(handoffCrossedEventOf(worker, settings, { ...request, pending: true })).toBeNull();
-    expect(handoffCrossedEventOf(worker, settings, { ...request, handoffs: 2 })).toBeNull();
-    expect(handoffCrossedEventOf(worker, settings, { ...request, handoffs: 1 })).toMatchObject({ cycle: 1 });
-    expect(handoffCrossedEventOf(null, settings, request)).toBeNull();
   });
 });
 
@@ -1110,12 +836,9 @@ describe("writers.observed: two agents wrote one file in overlapping turns (desi
     at: at(15),
   });
 
-  it("has its own key per file and turn pair, and a line with the file, both agents and what to do", () => {
+  it("has its own key per file and turn pair", () => {
     const event = observed(alertKeyOf("writers-observed", WS, "src/math.js"));
     expect(eventKeyOf(event)).toBe(`writers.observed:${WS}:src/math.js:${WORKER}@${at(0)}+${OTHER_WORKER}@${at(5)}`);
-    expect(eventLineOf(event)).toBe(
-      `- writers.observed — project ${WS}, file src/math.js: Worker ${WORKER} (request ${REQUEST}) and Worker ${OTHER_WORKER} (request not known) wrote it in overlapping turns, at ${at(15)}. Check the file with bm_repo; if one change may have undone the other, tell that request's Manager with bm_send_command. Otherwise keep a note with bm_note.`,
-    );
     // Scoped like request.stalled and worker.signal: only a project with a class above owner.
     expect(isInEventScope(event, new Set([WS]))).toBe(true);
     expect(isInEventScope(event, new Set([OTHER_WS]))).toBe(false);
@@ -1140,12 +863,12 @@ describe("the advice count stays, with no wake (design §G.4, §7.17.8 i; REQ-18
     const events = bus();
     for (const n of [1, 2, 3]) {
       const record = turn({ workspaceId: WS, requestId: request(n), reports: [report({ at: at(n), requestId: request(n), phase: "finished", beadsReady: ["bd-1"] })] });
-      expect(await events.turnRecorded(record, [], fake.paseo), `request ${n}`).toMatchObject({ status: "none", published: [] });
+      expect(await events.turnRecorded(record, fake.paseo), `request ${n}`).toMatchObject({ status: "none", published: [] });
     }
     expect(createAdviceStore(home).read()[WS]).toEqual({ counted: [], at: at(3), dueAt: at(3) });
     // The default cadence is 5, with no Settings file.
     rmSync(home, { recursive: true, force: true });
-    for (const n of [1, 2, 3, 4]) await events.turnRecorded(turn({ workspaceId: WS, requestId: request(n), reports: [report({ at: at(n), requestId: request(n), phase: "finished" })] }), [], fake.paseo);
+    for (const n of [1, 2, 3, 4]) await events.turnRecorded(turn({ workspaceId: WS, requestId: request(n), reports: [report({ at: at(n), requestId: request(n), phase: "finished" })] }), fake.paseo);
     expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [1, 2, 3, 4].map(request), dueAt: null });
     expect(fake.sends).toEqual([]);
     expect(fake.paseo.agents.list).not.toHaveBeenCalled();
@@ -1158,16 +881,16 @@ describe("the advice count stays, with no wake (design §G.4, §7.17.8 i; REQ-18
     cadence(2);
     const fake = daemon();
     const events = bus();
-    expect(await events.turnRecorded(workerTurn(finished), [], fake.paseo)).toMatchObject({ status: "none", published: [] });
-    await events.turnRecorded(managerTurn(), [], fake.paseo);
+    expect(await events.turnRecorded(workerTurn(finished), fake.paseo)).toMatchObject({ status: "none", published: [] });
+    await events.turnRecorded(managerTurn(), fake.paseo);
     expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [REQUEST], dueAt: null });
 
     const reverse = bus();
     rmSync(home, { recursive: true, force: true });
     cadence(2);
-    await reverse.turnRecorded(managerTurn(), [], fake.paseo);
-    await reverse.turnRecorded(workerTurn(finished), [], fake.paseo);
-    await reverse.turnRecorded(managerTurn(), [], fake.paseo);
+    await reverse.turnRecorded(managerTurn(), fake.paseo);
+    await reverse.turnRecorded(workerTurn(finished), fake.paseo);
+    await reverse.turnRecorded(managerTurn(), fake.paseo);
     expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [REQUEST], dueAt: null });
     expect(fake.sends).toEqual([]);
   });
