@@ -16,7 +16,7 @@
  */
 import { z } from "zod";
 import { coordinationChangeSchema, type ReviewBudget } from "./coordination";
-import { missionChangeActionSchema } from "./mission-change";
+import { MISSION_ACTION_KINDS, arbitrationActionSchema, missionChangeActionSchema, missionSplitActionSchema } from "./mission-change";
 import type { Tier } from "./contracts";
 
 // ---------------------------------------------------------------------------
@@ -280,6 +280,9 @@ export const preparedActionSchema = z.discriminatedUnion("kind", [
   }),
   /** A mission change on the owner's `m:` card (missions design §4.1), applied by the plugin on the owner's tap only. */
   missionChangeActionSchema,
+  /** A split and an arbitration's goal change on an `m:` card (missions design §9.6), the same way. */
+  missionSplitActionSchema,
+  arbitrationActionSchema,
 ]);
 export type PreparedAction = z.infer<typeof preparedActionSchema>;
 
@@ -306,8 +309,8 @@ export function isPreparedChange(action: PreparedAction | undefined): action is 
  * `resolveAtOpen`).
  */
 export function carriesPreparedChange(decision: Pick<Decision, "options">): boolean {
-  // A mission change (missions design §4.1) is the owner's alone too.
-  return decision.options.some((option) => isPreparedChange(option.action) || option.action?.kind === "mission-change");
+  // A mission change, a split and an arbitration (missions design §4.1, §9.6) are the owner's alone too.
+  return decision.options.some((option) => isPreparedChange(option.action) || (MISSION_ACTION_KINDS as readonly string[]).includes(option.action?.kind ?? ""));
 }
 
 /** Why a decision that carries a prepared change is only the owner's, for every refusal of another answerer. */
@@ -805,7 +808,9 @@ export interface AnswerInput {
  * Answers an unsettled decision with one option or the owner's own words
  * (trimmed). The answer grants the chosen option's declared effects — or, for
  * own words, every effect the decision declares — for one use until
- * `at + GRANT_TTL_MS`; an answer that grants nothing carries no grant. The
+ * `at + GRANT_TTL_MS`; an answer that grants nothing carries no grant, and
+ * neither does one to an Orchestrator's `o:` decision (missions design §9.1:
+ * its options may name effects, as information only). The
  * policy's answer (`by: policy`, §B.5) is always an option and keeps its
  * reason; it grants what its option declares, as the owner's would (ADR-025:
  * no class is the owner's by rule). A new `by: orchestrator` answer is refused: the
@@ -874,7 +879,8 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
         ...(precedentId === undefined ? {} : { precedentId }),
       },
       // Missions design §4: the Main's answer never grants; the repo's action boundary decides its effects.
-      grant: effects.length === 0 || by === "main" ? null : { effects, expiresAt, usedAt: null },
+      // Missions design §9.1: nor does an answer to the Orchestrator's own decision (or an override of one): it sends only effect-less commands.
+      grant: effects.length === 0 || by === "main" || deliveryKindOf(decision) === "orchestrator" ? null : { effects, expiresAt, usedAt: null },
     },
   };
 }

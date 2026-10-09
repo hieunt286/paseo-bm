@@ -2,9 +2,19 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { COMMAND_LIMIT_MESSAGE, COMMAND_LIMIT_PER_REQUEST, HANDOFF_OFF_MESSAGE, INTERRUPT_REFUSED_MESSAGE, commandRefusalOf, sendCommand } from "../plugin/server/command-send";
+import {
+  COMMAND_LIMIT_MESSAGE,
+  COMMAND_LIMIT_PER_REQUEST,
+  HANDOFF_OFF_MESSAGE,
+  INTERRUPT_REFUSED_MESSAGE,
+  MISSION_COMMAND_LIMIT_MESSAGE,
+  commandRefusalOf,
+  commandsSentForMission,
+  sendCommand,
+} from "../plugin/server/command-send";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
-import { COORDINATION_HANDOFF_AUTHORITY, HANDOFF_INTENT, type CommandInput } from "../plugin/shared/orchestrator-command";
+import { COORDINATION_HANDOFF_AUTHORITY, HANDOFF_INTENT, governorAuthorityOf, type CommandInput } from "../plugin/shared/orchestrator-command";
+import { createMissionStore } from "../plugin/server/mission-store";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { fakePaseo } from "./helpers/fake-paseo";
 
@@ -121,5 +131,55 @@ describe("commandRefusalOf: the send's checks, read without sending (design §16
     expect(sent).toEqual({ ok: false, stage: "check", reason: HANDOFF_OFF_MESSAGE });
     expect(enqueue).not.toHaveBeenCalled();
     expect(createOrchestratorStore(home).listCommands()).toHaveLength(COMMAND_LIMIT_PER_REQUEST);
+  });
+});
+
+describe("a governor command (missions design §9.4): only to the mission's current Main, its loop guard per mission", () => {
+  const NOW = new Date("2026-10-09T12:00:00.000Z");
+  const nudge: CommandInput = {
+    from: "orchestrator",
+    via: "chat",
+    to: "manager",
+    requestId: null,
+    re: "Governor: stuck figures of mission PAY crossed",
+    body: "Re-plan or explain in one line in your next reply.",
+    intent: "other",
+    effects: [],
+    authority: governorAuthorityOf("nudge"),
+    approved: [],
+  };
+  const missionOf = (code: string, id: string, mainId: string | null) => {
+    const created = createMissionStore(home, { newId: () => id, env: {} }).create({ code, name: code, goal: "g", repos: ["repo-a"], createdBy: "owner", mainId });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+  };
+  const check = (over: Partial<Parameters<typeof commandRefusalOf>[0]> = {}) =>
+    commandRefusalOf({ home, now: NOW, workspaceId: "home-ws", command: nudge, backstop: false, loopGuard: "refuse", targetId: "main-1", missionId: "mis-0000000001", log: () => {}, ...over });
+
+  it("refuses one without its mission, to an agent that is not the current Main, or to a closed mission", () => {
+    missionOf("PAY", "mis-0000000001", "main-1");
+    expect(check()).toBeNull();
+    expect(check({ missionId: undefined })).toBe("a governor command names its mission");
+    expect(check({ missionId: "mis-00000000ff" })).toBe("unknown mission mis-00000000ff");
+    expect(check({ targetId: "main-old" })).toBe("main-old is not the current Main of mission PAY");
+    createMissionStore(home).update("mis-0000000001", (mission) => ({ ...mission, state: "closed", closedAt: NOW.toISOString() }));
+    expect(check()).toBe("mission PAY is closed");
+  });
+
+  it("counts 12 commands per mission in 24 hours, apart from other missions and projects, and stores the mission on each", async () => {
+    missionOf("PAY", "mis-0000000001", "main-1");
+    missionOf("SHIP", "mis-0000000002", "main-2");
+    const enqueue = vi.fn(async () => "sent" as const);
+    let n = 0;
+    const send = (missionId: string, targetId: string) =>
+      sendCommand({ home, now: NOW, paseo: fakePaseo().paseo as never, workspaceId: "home-ws", command: nudge, targetId, missionId, copyTo: null, grantOf: null, approved: [], backstop: false, loopGuard: "refuse", intervention: null, queue: { enqueue }, store: { newId: () => `cmd-${++n}`, now: () => NOW }, redactEnv: {} });
+    for (let i = 0; i < COMMAND_LIMIT_PER_REQUEST; i += 1) expect((await send("mis-0000000001", "main-1")).ok).toBe(true);
+    expect(await send("mis-0000000001", "main-1")).toEqual({ ok: false, stage: "check", reason: MISSION_COMMAND_LIMIT_MESSAGE });
+    expect((await send("mis-0000000002", "main-2")).ok).toBe(true);
+    const commands = createOrchestratorStore(home).listCommands();
+    expect(commandsSentForMission(commands, "mis-0000000001", NOW)).toBe(COMMAND_LIMIT_PER_REQUEST);
+    expect(commandsSentForMission(commands, "mis-0000000002", NOW)).toBe(1);
+    expect(commandsSentForMission(commands, "mis-0000000001", new Date(NOW.getTime() + 24 * 3_600_000 + 1))).toBe(0);
+    expect(commands.every((entry) => entry.missionId !== undefined)).toBe(true);
+    expect(MISSION_COMMAND_LIMIT_MESSAGE).toBe("the governor sent 12 commands to this mission's Main in 24 hours; ask the owner with bm_ask_owner");
   });
 });

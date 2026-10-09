@@ -189,3 +189,46 @@ export async function replaceMain(missionId: string, newMainId: string, reason: 
   log(`[paseo-bm] ${newMainId} is the Main of mission ${mission.code} now (${reason}${old === null ? "" : `, replacing ${old}`}).`);
   return { ok: true, replaced: old, requests, workers: [...workers], moved, redelivered };
 }
+
+/**
+ * A split's moved requests (missions design §9.6: §3.4 steps 2–4 for those
+ * requests only): each one's registry `managerId` becomes the new mission's
+ * Main and its cached `missionId` the new mission; each of their Workers gets
+ * its binding re-pointed and its mission, and when live the `BM-SETTINGS`
+ * notice and its `paseo.parent-agent-id` label. The source mission and its
+ * Main are untouched. Returns the Workers moved. Never throws: each failure
+ * is one log line.
+ */
+export async function reassignRequests(
+  missionId: string,
+  requests: ReadonlyArray<{ requestId: string; workspaceId: string; workerIds: readonly string[] }>,
+  newMainId: string,
+  deps: Omit<ReplaceMainDeps, "replaced" | "setTitle" | "queue"> & { queue?: Pick<NoticeQueue, "enqueue"> },
+): Promise<string[]> {
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  const registry = createRequestRegistry(deps.home, { log });
+  const bindings = deps.bindings ?? createBindingStore(deps.home);
+  const queue = deps.queue ?? noticeQueue;
+  const setLabel = deps.setLabel ?? ((agentId: string, key: string, value: string) => setAgentLabel(agentId, key, value, deps.cli));
+  const live = await liveAgentsOf(deps.paseo);
+  const workers = new Set<string>();
+  for (const entry of requests) {
+    try {
+      registry.reassignManager(entry.workspaceId, entry.requestId, newMainId, missionId);
+    } catch (error) {
+      log(`[paseo-bm] request ${entry.requestId} could not be reassigned to the Main ${newMainId}: ${errorText(error)}`);
+    }
+    for (const workerId of [...entry.workerIds, ...(registry.get(entry.workspaceId, entry.requestId)?.workerIds ?? [])]) workers.add(workerId);
+  }
+  for (const workerId of workers) {
+    bindings?.reparent(workerId, newMainId);
+    bindings?.assignMission(workerId, missionId);
+    if (live !== null && !live.has(workerId)) continue;
+    const outcome = await queue.enqueue(workerId, SETTINGS_NOTICE_MARKER, managerIdNotice(newMainId), deps.paseo as NoticePaseo | undefined);
+    if (outcome === "dropped") log(`[paseo-bm] Worker ${workerId} could not be told its new Main ${newMainId}.`);
+    if (parentOf(live?.get(workerId)) === newMainId) continue;
+    const labelled = await setLabel(workerId, PARENT_AGENT_LABEL, newMainId).catch((error: unknown) => ({ ok: false as const, reason: errorText(error) }));
+    if (!labelled.ok) log(`[paseo-bm] Worker ${workerId} keeps its parent label (its Main is ${newMainId} now): ${labelled.reason}`);
+  }
+  return [...workers];
+}

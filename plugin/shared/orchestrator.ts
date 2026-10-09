@@ -133,6 +133,8 @@ export const proposalSchema = z
     to: commandTargetSchema.optional(),
     /** The Worker a `to: "worker"` command went to; `managerId` is then that Worker's Manager (who got the copy), or null. */
     workerId: z.string().min(1).optional(),
+    /** The mission a governor command went to (missions design §9.4): its loop guard counts per mission. Additive; absent on every other command. */
+    missionId: z.string().min(1).optional(),
   })
   .superRefine((entry, context) => {
     if (entry.kind === "command") {
@@ -254,9 +256,11 @@ export type WakeUsage = z.infer<typeof wakeUsageSchema>;
  * One wake of the Orchestrator by the plugin: a `BM-EVENTS` message the
  * notice queue delivered (`at`), and when that Orchestrator's turn ended
  * (`endedAt`, null until the plugin saw it end — or when a reload lost it).
- * Ids, times and counts only: never an event line or any other text. Whether
- * the wake ended with an action is read from the stores that record actions
- * (`shared/eval-metrics.ts`), not stored here.
+ * Ids, times and counts only: never an event line or any other text. Since
+ * the governor's wakes (missions design §9.7, M-26) a wake also names its
+ * event types and, at its end, whether that turn acted (`acted`); before
+ * them, whether a wake ended with an action is read from the stores that
+ * record actions (`shared/eval-metrics.ts`).
  */
 export const wakeEntrySchema = z.object({
   orchestratorId: z.string().min(1),
@@ -272,6 +276,15 @@ export const wakeEntrySchema = z.object({
    * written before it, or still open. Both read as unknown, never zero.
    */
   usage: wakeUsageSchema.nullable().optional(),
+  /** The types of the events the message carried, each once, sorted (missions design §9.7). Absent on a wake written before them. */
+  eventTypes: z.array(z.string().min(1).max(40)).max(20).optional(),
+  /**
+   * Whether the Orchestrator called an act tool in the wake's turn (M-26:
+   * `bm_govern`, `bm_arbitrate`, `bm_create_main`, `bm_direct_worker` stop,
+   * `bm_ask_owner`, `bm_note`, `WAKE_ACT_TOOLS`), written with `endedAt`.
+   * Absent while open, and on a wake written before it.
+   */
+  acted: z.boolean().optional(),
 });
 export type WakeEntry = z.infer<typeof wakeEntrySchema>;
 

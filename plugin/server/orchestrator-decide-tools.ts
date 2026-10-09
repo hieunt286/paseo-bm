@@ -5,8 +5,9 @@
  *
  * - `bm_ask_owner` (§6A, §6B.4; autonomy design §A.3, §A.6) stores an open
  *   `o:` decision in the decision store (`decision-store.ts`), each option
- *   with its declared effects and, optionally, a prepared command the plugin
- *   delivers itself once the owner picks it (`orchestrator-decisions.ts`); its
+ *   with its declared effects and, optionally, a prepared command to a Main
+ *   (never a Worker, missions design §9.1) the plugin delivers itself once
+ *   the owner picks it (`orchestrator-decisions.ts`); its
  *   class is the riskier of the one proposed and its effects' (autonomy design
  *   §B.1). It replaces the Orchestrator's open decision of the same request unless
  *   `separate`, and says which one it replaced; it sends nothing itself. An
@@ -25,7 +26,7 @@
  * - `bm_decisions` (autonomy design §A.9) lists stored decisions, read-only
  *   (`decision-tools.ts`).
  * - `bm_decide` (change-004; autonomy design §B.5, §B.9) decides for the
- *   owner an open decision the Orchestrator did not ask (`q:`, `f:`) whose
+ *   owner an open fallback incident (`f:`) whose
  *   class the owner's policy delegates — a `delegate` cell, any class
  *   (`decideRefusalOf`, ADR-025) — answering `by: policy`
  *   with its reason, and hands it to the delivery the owner's answers take
@@ -33,16 +34,16 @@
  *   (`recordInterventionOf`). The log never holds back or fails the tool.
  * - `bm_predict` (autonomy design §B.3, §B.9) records the challenger's
  *   prediction of the owner's answer (`prediction.orchestrator`) on an open
- *   decision the Orchestrator did not ask, of any class in an `owner` or
+ *   fallback incident (`f:`), of any class in an `owner` or
  *   `shadow` cell, where the project's prediction switch is on (a level of 1
  *   or more), once (`predictionRefusalOf`). The owner sees it as the
  *   Orchestrator's proposal on the decision's card (ADR-025). It answers
  *   nothing, sends nothing and is no intervention; A-7 counts it as its
  *   wake's action.
  *
- * Neither decides nor predicts an `ownerOnly` question, nor a Worker's
- * question of a request of a mission: that is its Main's (`bm_answer_worker`)
- * or the owner's (missions design §5, §8; `outsideMissions`).
+ * Neither decides nor predicts a Worker's question (`q:`): that is its Main's
+ * (`bm_answer_worker`) or the owner's (missions design §8, §9.1;
+ * `notAQuestion`). The Orchestrator's own `o:` decisions are the owner's.
  *
  * `bm_decide` and `bm_predict` write through one step, `transitionUnderPolicy`.
  * Nothing here sends to an agent.
@@ -58,8 +59,6 @@ import { decisionsText, type DecisionsQuery } from "./decision-tools";
 import { interventionOfAdvice, interventionOfDecision, recordIntervention } from "./intervention-store";
 import { commandRequestIdOf } from "./orchestrator-state";
 import { preparedChangeFactsOf } from "./prepared-changes";
-import { isFinishedUnverifiedNow } from "./request-trace";
-import { policyGrantCapAt } from "./review-tools";
 import {
   Refusal,
   belongsToProject,
@@ -77,8 +76,7 @@ import {
 } from "./orchestrator-tool-context";
 import { resolveAtOpen } from "./policy-resolve";
 import { undeclaredCategoriesOf } from "../shared/decision-gate";
-import { actsOnFinish, decideRefusalOf, missionQuestionRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../shared/autonomy";
-import { requestIndexOf } from "./mission-roster";
+import { decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../shared/autonomy";
 import {
   MAX_ANSWER_REASON_CHARS,
   MAX_ASK_OWNER_OPTIONS,
@@ -142,6 +140,7 @@ interface AskOwnerOption {
   label: string;
   effects: Effect[];
   recommended?: boolean;
+  /** A Main only (missions design §9.1); `to` is kept for the stored action's shape. */
   command?: { to: CommandTo; agentId: string; intent: DeclaredCommandIntent; body: string };
   /** A prepared change of the owner's settings (autonomy design §G.4), applied only on the owner's own answer. */
   change?: PreparedChangeInput;
@@ -197,9 +196,10 @@ function replacedByAsk(workspaceId: string, requestId: string | null, subject: s
 /**
  * `bm_ask_owner` (design §6A, §6B.4; autonomy design §A.3, §A.6): stores an
  * open `o:` decision for the owner and sends nothing. Each option carries its
- * declared effects and, optionally, a prepared command to a Manager or a
- * Worker of the project, checked now as it will be sent: a live paseo-bm
- * agent of that role in the project, a block that can be written, and no
+ * declared effects and, optionally, a prepared command to a Main (a Manager)
+ * of the project — never a Worker (missions design §9.1) — checked now as it
+ * will be sent: a live paseo-bm Manager in the project (a mission request's
+ * current Main), a block that can be written, and no
  * category of the backstop in its text that the option's effects do not
  * declare. Its class is the riskier of the one proposed and the one its
  * options' effects imply (autonomy design §B.1), and the answer names it. It
@@ -249,13 +249,17 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
     const command = option.command;
     if (command === undefined) return entry;
     const at = `input.options[${index}].command`;
-    const role = command.to === "manager" ? "Manager" : "Worker";
+    // Missions design §9.1: a Worker is its Main's to command.
+    if (command.to !== "manager") {
+      problems.push(`${at}.to: a prepared command goes to a Main (manager) only; the Main directs its Workers`);
+      return entry;
+    }
     // A command to a mission request's Main names the mission's current Main (missions design §6).
-    const agentId = command.to === "manager" ? commandManagerIdOf(context.home, command.agentId, requestId) : command.agentId;
+    const agentId = commandManagerIdOf(context.home, command.agentId, requestId);
     const target = agents.find((agent) => agent.id === agentId);
-    if (target === undefined || target.role !== command.to) problems.push(`${at}.agentId: ${agentId} is not a paseo-bm ${role}; use an id bm_projects or bm_request gave`);
-    else if (!belongsToProject(target, input.workspaceId, context.home)) problems.push(`${at}.agentId: ${role} ${agentId} does not belong to project ${input.workspaceId}`);
-    else if (target.archived) problems.push(`${at}.agentId: ${role} ${agentId} is archived; nothing can be sent to it`);
+    if (target === undefined || target.role !== "manager") problems.push(`${at}.agentId: ${agentId} is not a paseo-bm Manager; use an id bm_projects or bm_request gave`);
+    else if (!belongsToProject(target, input.workspaceId, context.home)) problems.push(`${at}.agentId: Manager ${agentId} does not belong to project ${input.workspaceId}`);
+    else if (target.archived) problems.push(`${at}.agentId: Manager ${agentId} is archived; nothing can be sent to it`);
     const action = { to: command.to, intent: command.intent, body: command.body, effects };
     const block = preparedCommandOf({ id, requestId }, { label }, action, effects);
     problems.push(...commandInputProblems(block).map((problem) => `${at}: ${problem}`));
@@ -289,7 +293,7 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
     const asked = createDecisionStore(context.home)
       .list({ workspaceId: input.workspaceId, requestId, statuses: UNSETTLED_STATUSES })
       .find((decision) => decisionKindOf(decision.id) === "question" && decision.subject === subject);
-    if (asked !== undefined) refuse(`the Worker's question ${asked.id} of this request asks "${subject}" already: decide it with bm_decide, or leave it to the owner; nothing was stored`);
+    if (asked !== undefined) refuse(`the Worker's question ${asked.id} of this request asks "${subject}" already: its Main or the owner answers it; nothing was stored`);
   }
 
   const replaced = input.separate === true ? null : replacedByAsk(input.workspaceId, requestId, subject, context.home);
@@ -375,17 +379,6 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
   return { ok: true, text: `${said}\n${json(facts)}` };
 }
 
-/** What reading a request's finish needs of a tool call (`isFinishedUnverifiedNow`). */
-export function finishReadOf(context: Pick<ToolContext, "location" | "paseo" | "home">) {
-  return { location: context.location, paseo: context.paseo, home: context.home };
-}
-
-/** The Worker a decision's prepared commands go to, when they name one: its request is the decision's, else that Worker's (change-008 C4). */
-function workerOfCommands(decision: Pick<Decision, "options">): string | null {
-  const workers = new Set(decision.options.flatMap((option) => (option.action?.kind === "command" && option.action.to === "worker" ? [option.action.agentId] : [])));
-  return workers.size === 1 ? [...workers][0]! : null;
-}
-
 /**
  * Logs a decision of `bm_ask_owner` that is left to the owner as an `advice`
  * intervention (autonomy design §G.3, §G.4) when it is one
@@ -422,13 +415,18 @@ export interface DecideInput {
   reason: string;
 }
 
+/** Why the Orchestrator leaves a Worker's question (missions design §8, §9.1): its Main or the owner answers it. */
+export function questionIsTheMainsText(decisionId: string): string {
+  return `${decisionId} is a Worker's question: its Main answers it (bm_answer_worker), or the owner does, never you; leave it`;
+}
+
 /**
- * Missions design §8: a Worker's question of a mission request is its Main's
- * or the owner's, never the Orchestrator's — the refusal, else `rule`'s.
+ * Missions design §9.1: a Worker's question (`q:`) is its Main's or the
+ * owner's, never the Orchestrator's — the refusal, else `rule`'s.
  */
-function outsideMissions(home: string, rule: (policy: AutonomyPolicy, decision: Decision) => string | null) {
+function notAQuestion(rule: (policy: AutonomyPolicy, decision: Decision) => string | null) {
   return (policy: AutonomyPolicy, decision: Decision): string | null =>
-    missionQuestionRefusalOf(decision, decision.requestId === null ? null : (requestIndexOf(home, decision.requestId)?.missionId ?? null)) ?? rule(policy, decision);
+    decisionKindOf(decision.id) === "question" ? questionIsTheMainsText(decision.id) : rule(policy, decision);
 }
 
 /** What one tool writes under the owner's policy (`transitionUnderPolicy`). */
@@ -487,22 +485,15 @@ function transitionUnderPolicy(input: DecideInput, context: ToolContext, rule: P
   return { decision: mutation.decision, store };
 }
 
-/** What the Orchestrator's decision did, in one sentence, from the delivery the plugin recorded. */
+/** What the Orchestrator's decision of an incident did, in one sentence, from the delivery the plugin recorded. */
 function decidedDeliveryText(decision: Decision): string {
-  const fallback = decisionKindOf(decision.id) === "fallback";
   switch (decision.delivery?.outcome) {
     case "sent":
-      return fallback ? "The plugin ran the option's action on the incident." : "The Worker has it now, as the plugin's BM-DELIVERY.";
-    case "queued":
-      return "The Worker gets it, as the plugin's BM-DELIVERY, when its current turn ends.";
+      return "The plugin ran the option's action on the incident.";
     case "failed":
-      return fallback
-        ? "The plugin could not run the option's action; the owner sees that in the Inbox."
-        : "The plugin could not deliver it: the request has no single live Worker. The owner sees that on the decision.";
+      return "The plugin could not run the option's action; the owner sees that in the Inbox.";
     default:
-      return fallback
-        ? "The plugin runs the option's action as it runs the owner's choice."
-        : "The plugin delivers it to the Worker at its next idle moment, as it delivers the owner's answers.";
+      return "The plugin runs the option's action as it runs the owner's choice.";
   }
 }
 
@@ -523,47 +514,26 @@ async function recordInterventionOf(of: Decision, context: ToolContext, deps: De
 }
 
 /**
- * `bm_decide` (autonomy design §B.5, §B.9; change-004, bead `t9lm.11`): the
- * Orchestrator decides for the owner a decision it did not ask — a Worker's
- * question (`q:`) or a fallback incident (`f:`) — where the owner's policy
+ * `bm_decide` (autonomy design §B.5, §B.9; change-004, bead `t9lm.11`;
+ * missions design §9.1): the Orchestrator decides for the owner a fallback
+ * incident (`f:`) — never a Worker's question (`notAQuestion`) — where the owner's policy
  * delegates its class: a `delegate` cell, any class at the project's level
  * (`decideRefusalOf`, the policy read now; ADR-025). It answers with one of
  * the decision's options, `by: policy`, `via: inbox` (as the other policy
  * answers: nothing was typed in a chat), the cell's `class` and the
- * Orchestrator's reason (redacted, one line), with the grant the owner's
- * choice of that option would give — a push, publish, deploy, migration, real
- * data or cost included where its class is delegated. From the read to the
- * write nothing awaits, and the write checks the rule again, so no other
- * answer comes between (the first answer wins: `transitionUnderPolicy`). The
+ * Orchestrator's reason (redacted, one line). From the read to the write
+ * nothing awaits, and the write checks the rule again, so no other answer
+ * comes between (the first answer wins: `transitionUnderPolicy`). The
  * answered decision then goes to `onSettled`, the delivery the owner's answers
- * take: a Worker gets it in the same `BM-DELIVERY answers` block, an
- * incident's option runs through `fallback.act`. It is logged as an `answer`
+ * take: the incident's option runs through `fallback.act`. It is logged as an `answer`
  * intervention (§G.3) and is its wake's action for A-7. A refusal writes,
  * sends and logs nothing; a decision nobody decides stays open for the owner.
  */
 export async function bmDecide(input: DecideInput, context: ToolContext, deps: DecideToolDeps): Promise<ServerToolResult> {
-  // Autonomy design §C.6 (change-008 C4): an option that acts on its request's finish — a commit, a release — is the
-  // owner's while that request stands finished-unverified. Read from the trace store now, before the write (which
-  // awaits nothing), and only for such an option; a decision that cannot be read here is refused by the write.
-  let finishedUnverified = false;
-  let grantCap: number | undefined;
-  try {
-    const target = createDecisionStore(context.home).get(input.decisionId);
-    // Design §7.17.8 (a): the policy grants a request review calls up to its tier's budget, in all.
-    if (target?.subject === REVIEW_BUDGET_SUBJECT) grantCap = policyGrantCapAt(context.home, target.workspaceId, target.requestId, deps.log);
-    const option = target?.options.find((entry) => entry.key === input.optionKey);
-    if (target !== null && option !== undefined && actsOnFinish(option)) {
-      finishedUnverified = await isFinishedUnverifiedNow({ ...finishReadOf(context), ...(deps.log === undefined ? {} : { log: deps.log }) }, target.workspaceId, {
-        requestId: target.requestId,
-        agentId: target.askedBy.role === "worker" ? target.askedBy.agentId : workerOfCommands(target),
-      });
-    }
-  } catch {
-    // The write reads the decision again and refuses what it cannot read.
-  }
+  // An incident's options allow no effect (`fallback-decisions.ts`): none acts on a request's finish or grants review calls.
   const { decision: answered, store } = transitionUnderPolicy(input, context, {
-    refusalOf: outsideMissions(context.home, (policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey, finishedUnverified, grantCap })),
-    idsFrom: "a decision.opened line or bm_decisions gave",
+    refusalOf: notAQuestion((policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey, finishedUnverified: false })),
+    idsFrom: "bm_decisions gave",
     what: "the answer to",
     change: (current, { reason, at }) =>
       answerDecision(current, { by: "policy", via: "inbox", optionKey: input.optionKey, class: decisionClassOf(current), reason, at }),
@@ -579,12 +549,8 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
   }
   const decisionClass = decisionClassOf(answered);
   const option = answered.options.find((entry) => entry.key === input.optionKey)!;
-  const what =
-    decisionKindOf(answered.id) === "fallback"
-      ? `fallback incident ${answered.id}`
-      : `${answered.id.slice(answered.id.lastIndexOf(":") + 1)} of ${answered.requestId}`;
   const said = [
-    `Decided ${what} for the owner with option ${option.key} (${option.label}), on the owner's policy: ${decisionClass} is delegated to you in this project.`,
+    `Decided fallback incident ${answered.id} for the owner with option ${option.key} (${option.label}), on the owner's policy: ${decisionClass} is delegated to you in this project.`,
     "The owner sees your choice and your reason on the decision.",
     decidedDeliveryText(now),
     "Send nothing more for it. Tell the owner in one line what you chose and why.",
@@ -607,8 +573,8 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
  */
 export function bmPredict(input: DecideInput, context: ToolContext): ServerToolResult {
   const { decision: predicted } = transitionUnderPolicy(input, context, {
-    refusalOf: outsideMissions(context.home, predictionRefusalOf),
-    idsFrom: "a decision.opened line gave",
+    refusalOf: notAQuestion(predictionRefusalOf),
+    idsFrom: "bm_decisions gave",
     what: "the prediction for",
     change: (current, { reason, at }) => {
       const orchestrator = { optionKey: input.optionKey, reason, at };

@@ -266,6 +266,7 @@ export const INTERVENTION_LABELS: Readonly<Record<InterventionKind, string>> = {
   compact: "Compactions",
   handoff: "Handoffs",
   advice: "Advice",
+  govern: "Governor steps",
 };
 
 /** What the Coordination figures are, and the target they are held to (A-12). */

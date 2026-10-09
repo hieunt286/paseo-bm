@@ -116,6 +116,9 @@ function coordinationChangeText(change: CoordinationChange): string {
       return `sets the review budget of a Medium request to ${change.value} review calls ${exact}`;
     case "review.largeBudget":
       return `sets the review budget of a Large request to ${change.value} review calls ${exact}`;
+    default:
+      // Missions design §9.2: one of the governor's thresholds.
+      return `sets the governor's ${change.key.slice("governor.".length)} to ${grouped(change.value)} ${exact}`;
   }
 }
 

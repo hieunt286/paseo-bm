@@ -546,7 +546,9 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
   for (const { signal, worker, clockAt, detail } of cases) {
     const alertKind = SIGNAL_ALERT_KINDS[signal];
-    it(`${signal}: one event to the Orchestrator in a BM-EVENTS message${alertKind === undefined ? "" : `, and a ${alertKind} alert`}`, async () => {
+    // Missions design §9.7, §9.1: only danger wakes the Orchestrator; every other signal is built and retired as a wake.
+    const wakes = signal === "danger";
+    it(`${signal}: one worker.signal event${wakes ? " to the Orchestrator in a BM-EVENTS message" : ", retired as a wake: nothing sent"}${alertKind === undefined ? "" : `, and a ${alertKind} alert`}`, async () => {
       await seed();
       inScope();
       if (clockAt !== undefined) clock = clockAt;
@@ -554,12 +556,14 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
 
       const first = await watch.workerPass();
       expect(first.events).toEqual([expect.objectContaining({ type: "worker.signal", workspaceId: WORKSPACE_ID, workerId: WORKER, requestKey: REQUEST_ID, signal, turnStart: TURN_START })]);
-      expect(fake.sends).toHaveLength(1);
-      const sent = fake.sends[0]!;
-      expect(sent.id).toBe(ORCHESTRATOR);
-      expect(isPluginNotice(sent.text)).toBe(true);
-      expect(sent.text.split("\n")[0]).toBe("BM-EVENTS");
-      expect(eventLines(fake.sends)).toEqual([expect.stringMatching(new RegExp(`^- worker\\.signal ${signal} — project ${WORKSPACE_ID}, Worker ${WORKER}, request ${REQUEST_ID}, since \\S+\\. Look with bm_agent_messages\\.`))]);
+      expect(fake.sends).toHaveLength(wakes ? 1 : 0);
+      if (wakes) {
+        const sent = fake.sends[0]!;
+        expect(sent.id).toBe(ORCHESTRATOR);
+        expect(isPluginNotice(sent.text)).toBe(true);
+        expect(sent.text.split("\n")[0]).toBe("BM-EVENTS");
+        expect(eventLines(fake.sends)).toEqual([expect.stringMatching(new RegExp(`^- worker\\.signal ${signal} — project ${WORKSPACE_ID}, Worker ${WORKER}, request ${REQUEST_ID}, since \\S+\\. Look with bm_agent_messages\\.`))]);
+      }
       if (alertKind === undefined) {
         expect(first.raised).toEqual([]);
         expect(alerts().list()).toEqual([]);
@@ -573,7 +577,7 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
       expect(await watch.workerPass()).toMatchObject({ raised: [] });
       clock = new Date(clock.getTime() + WORKER_PASS_MS);
       await watch.workerPass();
-      expect(fake.sends).toHaveLength(1);
+      expect(fake.sends).toHaveLength(wakes ? 1 : 0);
     });
   }
 
@@ -601,30 +605,32 @@ describe("the Worker pass: each signal is one worker.signal event per Worker tur
     const { fake, watch } = watching([managerAgent(), worker, orchestratorAgent()]);
 
     expect(await watch.workerPass()).toMatchObject({ raised: [alertOf("danger")] });
-    expect(eventLines(fake.sends).map((line) => line.split(" — ")[0])).toEqual(["- worker.signal danger", "- worker.signal heavy"]);
+    // The heavy signal is built too, and retired as a wake (missions design §9.1).
+    expect(eventLines(fake.sends).map((line) => line.split(" — ")[0])).toEqual(["- worker.signal danger"]);
     // Not a Worker, or no id: nothing cleared.
     expect(watch.workerTurnEnded({ id: MANAGER, provider: "bm-manager" })).toEqual([]);
     expect(watch.workerTurnEnded(undefined)).toEqual([]);
     expect(watch.workerTurnEnded({ id: WORKER, provider: "bm-worker/claude-opus-5-5" })).toEqual([alertOf("danger")]);
     expect(alerts().list({ open: true })).toEqual([]);
 
-    // The next turn starts at 10:30 and runs br create again.
+    // The next turn starts at 10:30 and pushes again.
     const next = at(30);
-    change(fake, worker, { snapshot: { activeTurn: { turnId: "t-2", startedAt: next } }, timeline: [...healthyTurn(), userMessage("Go on.", next), shellCall("br create y", at(31))] });
+    change(fake, worker, { snapshot: { activeTurn: { turnId: "t-2", startedAt: next } }, timeline: [...healthyTurn(), userMessage("Go on.", next), shellCall("git push", at(31))] });
     clock = when(32);
     fake.byId(ORCHESTRATOR)!.status = "idle";
-    expect(await watch.workerPass()).toMatchObject({ raised: [], events: [expect.objectContaining({ signal: "heavy", turnStart: next })] });
+    expect(await watch.workerPass()).toMatchObject({ raised: [alertOf("danger")], events: [expect.objectContaining({ signal: "danger", turnStart: next })] });
     expect(fake.sends).toHaveLength(2);
-    expect(eventLines([fake.sends[1]!])).toEqual([expect.stringMatching(/^- worker\.signal heavy/)]);
+    expect(eventLines([fake.sends[1]!])).toEqual([expect.stringMatching(/^- worker\.signal danger/)]);
   });
 
   it("an event whose Worker turn ended before the Orchestrator was idle is dropped", async () => {
     await seed();
     inScope();
     const orchestrator = { ...orchestratorAgent(), status: "running" };
-    const { fake, watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("br create x", at(24, 10))] }), orchestrator]);
+    const { fake, watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24, 10))] }), orchestrator]);
     await watch.workerPass();
     expect(queue.pending(ORCHESTRATOR)).toHaveLength(1);
+    // The turn end clears the danger alert: the queued event is settled.
     watch.workerTurnEnded({ id: WORKER, provider: "bm-worker" });
     fake.byId(ORCHESTRATOR)!.status = "idle";
     await queue.turnEnded({ agent: { id: ORCHESTRATOR } }, fake.paseo);
@@ -822,7 +828,8 @@ describe("the policy's scope: alerts for every project, events in scope (design 
     const orchestrator = { ...orchestratorAgent(), status: "running" };
     const { fake, watch } = watching([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24)), shellCall("br create x", at(24, 10))] }), orchestrator]);
     expect((await watch.workerPass()).events.map((event) => event.type === "worker.signal" && event.signal)).toEqual(["danger", "heavy"]);
-    expect(queue.pending(ORCHESTRATOR)).toHaveLength(2);
+    // Only danger is queued: heavy is retired as a wake (missions design §9.1).
+    expect(queue.pending(ORCHESTRATOR)).toHaveLength(1);
     // The owner returns every class to owner before the Orchestrator is idle.
     createAutonomyStore(home).reset(WORKSPACE_ID);
     fake.byId(ORCHESTRATOR)!.status = "idle";
@@ -1028,7 +1035,7 @@ describe("the action boundary's held requests in the watch (§D.2, change-009 C7
 
 // Design §16.8: the off-tool-review signal is raised at an off-tool Reviewer's creation, not by a pass.
 describe("the off-tool-review signal (design §16.8)", () => {
-  it("reaches the Orchestrator as a worker.signal line in scope; its alert is about the Reviewer and neither a pass nor the Worker's turn end clears it", async () => {
+  it("is a worker.signal retired as a wake (missions design §9.1); its alert is about the Reviewer and neither a pass nor the Worker's turn end clears it", async () => {
     await seed();
     inScope();
     const bindings = createBindingStore(home);
@@ -1046,9 +1053,7 @@ describe("the off-tool-review signal (design §16.8)", () => {
     });
     expect(finding).toMatchObject({ reviewerId: "rev-off", workerId: WORKER, requestId: REQUEST_ID });
     expect(SIGNAL_ALERT_KINDS["off-tool-review"]).toBe("off-tool-reviewer");
-    expect(eventLines(fake.sends)).toEqual([
-      expect.stringMatching(new RegExp(`^- worker\\.signal off-tool-review — project ${WORKSPACE_ID}, Worker ${WORKER}, request ${REQUEST_ID}, since \\S+\\. Look with bm_agent_messages\\.`)),
-    ]);
+    expect(fake.sends).toEqual([]);
 
     const key = alertKeyOf("off-tool-reviewer", WORKSPACE_ID, "rev-off");
     await watch.workerPass();

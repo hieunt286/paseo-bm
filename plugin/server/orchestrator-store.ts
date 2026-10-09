@@ -18,10 +18,12 @@
  *   older builds kept here are ignored and dropped by the next write: stalls
  *   and signals are Inbox alerts now (`alert-store.ts`, autonomy design §A.8);
  * - `notes/<workspaceId>.json` — the Orchestrator's notes about a project, the
- *   20 newest (design §6B.4 `bm_note`);
+ *   20 newest (design §6B.4 `bm_note`); `notes/missions/<missionId>.json`, a
+ *   mission's (missions design §9.1: `bm_note` keyed by mission);
  * - `wakes.json` — each time the event bus woke the Orchestrator with a
  *   `BM-EVENTS` message, when that turn ended and its tokens, the 500 newest:
- *   ids, times and counts only (evaluation design §4, A-7; change-007 C6).
+ *   ids, times and counts only (evaluation design §4, A-7; change-007 C6),
+ *   with its event types and whether that turn acted (missions design §9.7, M-26).
  *
  * An old `nudges.json` from the first design, the `settings.json` that held
  * the projects on Autopilot and their Allow… categories until Autopilot was
@@ -83,6 +85,7 @@ import {
   keyedEntriesOf,
   type JsonFileStore,
 } from "./data-files";
+import { MISSION_ID_PATTERN } from "./mission-store";
 import { assertWorkspaceId } from "./trace-store";
 import { timeOrZero } from "../shared/time";
 
@@ -94,6 +97,11 @@ export const WAKES_FILE = "wakes.json";
 /** Where an earlier build kept the workflow assessments; retired (autonomy design §B.9), never read or written. */
 export const RETIRED_ASSESSMENTS_DIR_NAME = "assessments";
 export const NOTES_DIR_NAME = "notes";
+/** A mission's notes, inside `NOTES_DIR_NAME` (missions design §9.1). */
+export const MISSION_NOTES_DIR_NAME = "missions";
+
+/** Whose notes: a project's, by its workspace id, or a mission's (missions design §9.1). */
+export type NotesOwner = string | { missionId: string };
 
 /** At most this many recorded commands; the oldest go first (design §5.4). */
 export const COMMAND_LOG_LIMIT = 200;
@@ -139,6 +147,8 @@ export interface SentCommandInput {
   /** `manager` when absent. */
   to?: CommandTarget;
   workerId?: string;
+  /** A governor command's mission (missions design §9.4). */
+  missionId?: string;
 }
 
 /** An interrupt allowance (design §6B.3): the Worker may be interrupted until `until`. */
@@ -172,30 +182,31 @@ export interface OrchestratorStore {
   /** Every stored allowance, or only the open (`open: true`) or expired ones, oldest first. */
   listDangerAllowances(filter?: { open?: boolean }): DangerAllowanceView[];
 
-  /** The project's notes, oldest first (design §6B.4 `bm_note`); none when it has no file. */
-  readNotes(workspaceId: string): OrchestratorNote[];
+  /** The project's (or the mission's) notes, oldest first (design §6B.4 `bm_note`); none when it has no file. */
+  readNotes(owner: NotesOwner): OrchestratorNote[];
   /**
    * Adds a note (1–500 characters once trimmed, else throws); with `replace`
-   * the project's notes are emptied first. The 20 newest are kept. Returns the
-   * notes as stored, oldest first.
+   * the project's (or the mission's) notes are emptied first. The 20 newest
+   * are kept. Returns the notes as stored, oldest first.
    */
-  appendNote(workspaceId: string, text: string, options?: { replace?: boolean }): OrchestratorNote[];
+  appendNote(owner: NotesOwner, text: string, options?: { replace?: boolean }): OrchestratorNote[];
 
   /**
    * Records a wake (evaluation design §4, A-7): the event bus delivered a
-   * `BM-EVENTS` message of `events` events of these projects to this
-   * Orchestrator, now. Returns the entry stored; throws when it does not
-   * validate or cannot be written.
+   * `BM-EVENTS` message of `events` events of these projects and these types
+   * (missions design §9.7) to this Orchestrator, now. Returns the entry
+   * stored; throws when it does not validate or cannot be written.
    */
-  appendWake(input: { orchestratorId: string; workspaceIds: readonly string[]; events: number }): WakeEntry;
+  appendWake(input: { orchestratorId: string; workspaceIds: readonly string[]; events: number; eventTypes?: readonly string[] }): WakeEntry;
   /**
    * The Orchestrator's turn ended: its **oldest** wake still without an end,
    * started no later than now, ends now. Oldest, because the turn end that
    * closes one wake may already have delivered the next. `usage` is the
-   * tokens of that closing turn (change-007 C6), null when unknown. Returns the
+   * tokens of that closing turn (change-007 C6), null when unknown; `acted`,
+   * whether that turn called an act tool (M-26), when known. Returns the
    * wake it ended, or null — writing nothing — when none was open.
    */
-  endWake(orchestratorId: string, usage?: WakeUsage | null): WakeEntry | null;
+  endWake(orchestratorId: string, usage?: WakeUsage | null, acted?: boolean): WakeEntry | null;
   /** The recorded wakes in file order (oldest first). */
   readWakes(): WakeEntry[];
 
@@ -335,13 +346,22 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
     return { key, workspaceId: parts.workspaceId, workerId: parts.workerId, openedAt: entry.raisedAt, until: new Date(until).toISOString(), open: at < until };
   };
 
-  /** A project's notes file; the 20 newest are kept. */
-  const notesFile = (workspaceId: string): JsonFileStore<EntriesFile<OrchestratorNote[]>> => {
-    assertWorkspaceId(workspaceId);
-    return entriesFile(join(ORCHESTRATOR_DIR_NAME, NOTES_DIR_NAME), `${workspaceId}.json`, (raw) => entriesOf(orchestratorNoteSchema, raw), () => [], (entries) => capBy(entries, MAX_NOTES));
+  /** A project's (or a mission's) notes file; the 20 newest are kept. */
+  const notesFile = (owner: NotesOwner): JsonFileStore<EntriesFile<OrchestratorNote[]>> => {
+    let dir = join(ORCHESTRATOR_DIR_NAME, NOTES_DIR_NAME);
+    let id: string;
+    if (typeof owner === "string") {
+      assertWorkspaceId(owner);
+      id = owner;
+    } else {
+      if (!MISSION_ID_PATTERN.test(owner.missionId)) throw new Error(`not a mission id: ${JSON.stringify(owner.missionId)}`);
+      dir = join(dir, MISSION_NOTES_DIR_NAME);
+      id = owner.missionId;
+    }
+    return entriesFile(dir, `${id}.json`, (raw) => entriesOf(orchestratorNoteSchema, raw), () => [], (entries) => capBy(entries, MAX_NOTES));
   };
 
-  const readNotes = (workspaceId: string): OrchestratorNote[] => notesFile(workspaceId).read().entries;
+  const readNotes = (owner: NotesOwner): OrchestratorNote[] => notesFile(owner).read().entries;
 
   /** The wakes in file order; an entry that does not validate is skipped and dropped by the next write. */
   const readWakes = (): WakeEntry[] => wakes.read().entries;
@@ -369,6 +389,7 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
         error: null,
         ...(input.to === undefined ? {} : { to: input.to }),
         ...(input.workerId === undefined ? {} : { workerId: input.workerId }),
+        ...(input.missionId === undefined ? {} : { missionId: input.missionId }),
       });
       commands.update(({ entries }) => {
         if (entries.some((entry) => entry.id === command.id)) throw new Error(`command id already used: ${command.id}`);
@@ -414,8 +435,8 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
 
     readNotes,
 
-    appendNote(workspaceId, text, options = {}) {
-      const notes = notesFile(workspaceId);
+    appendNote(owner, text, options = {}) {
+      const notes = notesFile(owner);
       const note = orchestratorNoteSchema.parse({ at: now().toISOString(), text: text.trim() });
       return notes.update(({ entries }) => ({ entries: [...(options.replace === true ? [] : entries), note] })).entries;
     },
@@ -427,12 +448,13 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
         endedAt: null,
         workspaceIds: [...new Set(input.workspaceIds)].sort().slice(0, MAX_WAKE_WORKSPACES),
         events: input.events,
+        ...(input.eventTypes === undefined ? {} : { eventTypes: [...new Set(input.eventTypes)].sort() }),
       });
       wakes.update(({ entries }) => ({ entries: [...entries, entry] }));
       return entry;
     },
 
-    endWake(orchestratorId, usage = null) {
+    endWake(orchestratorId, usage = null, acted) {
       const end = now();
       const entries = readWakes();
       const index = entries.findIndex(
@@ -441,7 +463,7 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
       if (index < 0) return null;
       // Usage that does not validate is unknown, and never costs the wake its end.
       const known = wakeUsageSchema.safeParse(usage);
-      const ended: WakeEntry = { ...entries[index]!, endedAt: end.toISOString(), usage: known.success ? known.data : null };
+      const ended: WakeEntry = { ...entries[index]!, endedAt: end.toISOString(), usage: known.success ? known.data : null, ...(acted === undefined ? {} : { acted }) };
       entries[index] = ended;
       wakes.write({ entries });
       return ended;

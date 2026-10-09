@@ -1,15 +1,21 @@
 /**
- * Compaction on the Orchestrator's request (autonomy design §G.5; PRD
- * REQ-134; ADR-021; bead `7gxw.10`): the sequence the plugin runs once
- * `bm_compact` accepted a compaction (`orchestrator-coordination-tools.ts`),
- * kept in `compaction-store.ts` so a reload continues it.
+ * Compaction run by the plugin itself (missions design §9.5; autonomy design
+ * §G.5; PRD REQ-134, REQ-195; ADR-021; bead `7gxw.10`): the sequence a
+ * compaction takes once it starts, kept in `compaction-store.ts` so a reload
+ * continues it. No model asks for it and the Orchestrator is not woken.
  *
+ * 0. **The start** (`turnRecorded`): a Manager's or a Worker's recorded turn
+ *    whose context crosses the owner's threshold (`contextCrossingOf`, §G.7)
+ *    starts one, while compaction is on for the provider the turn shows,
+ *    the agent is below `compact.maxPerAgent` and none of it is pending. It
+ *    is logged as a `compact` intervention with trigger `threshold.crossed`.
  * 1. **The idle moment after a safe point.** A Worker's, right after a turn
  *    that sent a report (`reportedIn`; a bound Worker's report is its newest
- *    `report` outbox record, `pending` or `delivered`, design §16.7); a Manager's, whenever it is idle with
- *    no notice queued for it. It is looked for when `bm_compact` is called
- *    (`safeIdleMoment`) and at each recorded turn end of the target
- *    (`turnRecorded`, the collector's `onRecorded`); never inside a running
+ *    `report` outbox record, which the collector puts in its turn record,
+ *    design §16.7); a Manager's, whenever it is idle with
+ *    no notice queued for it. It is looked for at each recorded turn end of
+ *    the target (`turnRecorded`, the collector's `onRecorded`), the start's
+ *    own included; never inside a running
  *    turn — the command goes through the notice queue, which sends only to an
  *    idle agent. It waits at most `SAFE_POINT_WAIT_MS`.
  * 2. **The command** (`compactCommandOf`), recorded in the send log just
@@ -39,28 +45,31 @@
  * Nothing here throws into the plugin: a failure is one log line.
  */
 import { join } from "node:path";
-import { compactionOnFor, type CoordinationRole } from "../shared/coordination";
+import { compactCrossingOf, compactionOnFor, type CoordinationRole, type CoordinationSettings, type ThresholdCrossing } from "../shared/coordination";
 import type { ParsedReport, TraceMessage, TraceRecord } from "../shared/contracts";
-import { BRIEF_CHARACTERS } from "../shared/eval-metrics/tokens";
+import { BRIEF_CHARACTERS, turnTokensOf } from "../shared/eval-metrics/tokens";
 import { STATE_NOTICE_MARKER } from "../shared/notices";
 import { shorten } from "../shared/text";
 import { timeOrNull } from "../shared/time";
 import type { Decision } from "../shared/decisions";
 import { redactText, sliceLastTurn } from "./collector";
 import {
+  MAX_COMPACTION_REASON_CHARS,
   createCompactionStore,
   endedEntry,
   pendingCompactionOf,
+  sentCompactionsOf,
   type CompactionEntry,
   type CompactionStore,
 } from "./compaction-store";
+import { recordIntervention } from "./intervention-store";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
 import { createDecisionStore } from "./decision-store";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import { readRecords } from "./trace-store";
 import { reconstructTraces, type ReconstructedTrace } from "./traces";
-import { dataHome, errorText } from "./rpc-kit";
+import { errorText } from "./rpc-kit";
 import { newestReportRecordOf, reportPhaseOf } from "./outbox";
 import { createMissionStore } from "./mission-store";
 import { createMissionRoster } from "./mission-roster";
@@ -85,6 +94,44 @@ export const STATE_BRIEF_MAX_CHARS = BRIEF_CHARACTERS;
 /** The provider's compaction command (design §G.5 Verified): Claude honours a focus; Paseo drops it for Codex and OpenCode. */
 export function compactCommandOf(provider: CompactionEntry["provider"]): string {
   return provider === "claude" ? `/compact ${COMPACT_FOCUS}` : "/compact";
+}
+
+// ---------------------------------------------------------------------------
+// The start: the owner's threshold (§G.7).
+// ---------------------------------------------------------------------------
+
+/** The base provider a recorded turn shows (`turnTokensOf`): claude, codex or opencode; null when it is not known. */
+export function turnProviderOf(record: TraceRecord): string | null {
+  const provider = turnTokensOf(record).provider;
+  return provider === "unknown" ? null : provider;
+}
+
+/**
+ * Whether a Manager's or a Worker's recorded turn crosses its context
+ * threshold (`compactCrossingOf`: its tokens read against its role's
+ * `compact.*TokensPerTurn` where the provider counts the whole turn, else its
+ * context share), and on which figure. Null for another role, below, or a
+ * turn holding a compaction, whose figure understates (the next turn is
+ * judged). Pure.
+ */
+export function contextCrossingOf(record: TraceRecord, settings: Pick<CoordinationSettings, "compact">): ThresholdCrossing | null {
+  if (record.role !== "manager" && record.role !== "worker") return null;
+  if (record.evidence.some((evidence) => evidence.kind === "compaction")) return null;
+  const turn = turnTokensOf(record);
+  return compactCrossingOf(record.role, { coverage: turn.coverage, tokensRead: turn.tokensRead, contextShare: turn.contextShare }, settings);
+}
+
+/** A crossing in words, the reason a compaction or a handoff keeps. */
+export function crossingWordsOf(crossing: ThresholdCrossing): string {
+  const count = (value: number) => Math.round(value).toLocaleString("en-US");
+  switch (crossing.figure) {
+    case "contextShare":
+      return `its context filled ${Math.round(crossing.value * 100)} % of its window (threshold ${Math.round(crossing.threshold * 100)} %)`;
+    case "tokensPerTurn":
+      return `it read ${count(crossing.value)} tokens in one turn (threshold ${count(crossing.threshold)})`;
+    case "requestTokens":
+      return `its request read ${count(crossing.value)} tokens (threshold ${count(crossing.threshold)})`;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -124,68 +171,9 @@ export function reportedIn(items: readonly unknown[]): boolean {
   });
 }
 
-/** The newest timeline entries of an agent, oldest first: one page from the tail; none when it cannot be read. */
-async function tailEntriesOf(paseo: unknown, agentId: string): Promise<Array<{ item: unknown; timestamp: string | null }>> {
-  try {
-    const ref = (paseo as { agents?: { ref?: (id: string) => { timeline?: { refetch?: (options: Record<string, unknown>) => Promise<unknown> } } } } | null)
-      ?.agents?.ref?.(agentId);
-    const payload = (await ref?.timeline?.refetch?.({ direction: "tail", limit: 200 })) as { entries?: Array<{ item?: unknown; timestamp?: unknown }> } | undefined;
-    return (payload?.entries ?? [])
-      .filter((entry) => entry.item !== undefined && entry.item !== null)
-      .map((entry) => ({ item: entry.item, timestamp: typeof entry.timestamp === "string" ? entry.timestamp : null }));
-  } catch {
-    return [];
-  }
-}
-
-/**
- * When the last turn in these entries started: the timestamp of its
- * `user_message` (`sliceLastTurn`), or null when it has none.
- */
-function lastTurnStartOf(entries: ReadonlyArray<{ item: unknown; timestamp: string | null }>): string | null {
-  const first = sliceLastTurn(entries, (entry) => entry.item)[0];
-  const type = (first?.item as { type?: unknown } | null | undefined)?.type;
-  return type === "user_message" ? (first?.timestamp ?? null) : null;
-}
-
-/**
- * Whether a bound agent sent a report in its last turn (design §16.7): its
- * newest `report` outbox record, `pending` or `delivered`, created at or after
- * that turn's start. Never throws.
- */
-export function reportRecordedSince(home: string | null, workspaceId: string | null, agentId: string, since: string | null): boolean {
-  if (home === null || workspaceId === null || since === null) return false;
-  try {
-    return newestReportRecordOf(home, workspaceId, agentId, since) !== null;
-  } catch {
-    return false;
-  }
-}
-
 /** Whether another notice is queued for `agentId`: its own `/compact`, held from an earlier moment, does not count. */
 function othersQueued(queue: Pick<NoticeQueue, "pending">, agentId: string): boolean {
   return queue.pending(agentId).some((notice) => !notice.kind.startsWith(`${COMPACT_BATCH_NAME}:`));
-}
-
-/**
- * Whether `target` is at an idle moment after a safe point now: not running,
- * no notice queued for it, and — a Worker — its last turn sent a report: a
- * `BM-REPORT` block in its timeline (the hand path), or a `report` outbox
- * record of a bound Worker (design §16.7). Reads one page of a Worker's
- * timeline. Never throws.
- */
-export async function safeIdleMoment(
-  target: { id: string; role: CoordinationRole; status: string; workspaceId?: string | null },
-  paseo: unknown,
-  queue: Pick<NoticeQueue, "pending"> = noticeQueue,
-  deps: { home?: string | null } = {},
-): Promise<boolean> {
-  if (target.status === "running" || target.status === "initializing") return false;
-  if (othersQueued(queue, target.id)) return false;
-  if (target.role === "manager") return true;
-  const entries = await tailEntriesOf(paseo, target.id);
-  if (reportedIn(entries.map((entry) => entry.item))) return true;
-  return reportRecordedSince(dataHome(deps.home === undefined ? {} : { home: deps.home }), target.workspaceId ?? null, target.id, lastTurnStartOf(entries));
 }
 
 /** Whether a recorded turn shows a completed compaction at or after `sentAt` (a few seconds of clock slack). */
@@ -240,7 +228,7 @@ function reportLines(reports: readonly ParsedReport[], env: NodeJS.ProcessEnv): 
 }
 
 const BRIEF_INTRO =
-  "From the paseo-bm plugin, not the owner: your context was just compacted at the Orchestrator's request. Below is what the plugin's stores hold, so what matters comes from the records rather than from the summary alone; keep it as your working memory. Nothing is asked of you: reply `noted` in one line and end this turn.";
+  "From the paseo-bm plugin, not the owner: your context was just compacted, as it crossed the owner's threshold. Below is what the plugin's stores hold, so what matters comes from the records rather than from the summary alone; keep it as your working memory. Nothing is asked of you: reply `noted` in one line and end this turn.";
 
 /** The Worker's brief: its request, the owner's words, the decisions and its reports. */
 function workerBrief(entry: CompactionEntry, trace: ReconstructedTrace | undefined, decisions: readonly Decision[], env: NodeJS.ProcessEnv): string[] {
@@ -375,18 +363,13 @@ export interface CompactionRunnerDeps extends DataHomeDeps {
 
 export interface CompactionRunner {
   /**
-   * Right after `bm_compact` recorded `entry`: sends its `/compact` now when
-   * `safe` says the target is at an idle moment after a safe point, else
-   * leaves it waiting for one. Never rejects.
-   */
-  begin(entry: CompactionEntry, paseo: unknown, safe: boolean): Promise<"sent" | "queued" | "waiting">;
-  /**
-   * One recorded turn (the collector's `onRecorded`): for its agent's pending
-   * compaction, sends the `/compact` at a safe point, or the brief once the
-   * compaction completed. Never rejects.
+   * One recorded turn (the collector's `onRecorded`): a turn crossing its
+   * agent's threshold starts a compaction (missions design §9.5); for its
+   * agent's pending compaction, sends the `/compact` at a safe point — this
+   * turn's included — or the brief once the compaction completed. Never rejects.
    */
   turnRecorded(event: unknown, record: TraceRecord | null | undefined, paseo: unknown): Promise<void>;
-  /** The notice queue it sends through (`safeIdleMoment` reads what is queued). */
+  /** The notice queue it sends through. */
   readonly queue: Pick<NoticeQueue, "pending">;
 }
 
@@ -454,19 +437,39 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
     if (outcome === "dropped") log(`[paseo-bm] the BM-STATE brief of compaction ${entry.id} could not be delivered to ${entry.agentId}.`);
   }
 
+  /**
+   * A turn of an agent with no pending compaction that crosses its threshold
+   * (missions design §9.5): a `waiting` compaction, logged as a `compact`
+   * intervention with trigger `threshold.crossed` — while compaction is on for
+   * the provider the turn shows and the agent is below `compact.maxPerAgent`.
+   * Null otherwise.
+   */
+  function start(home: string, store: CompactionStore, record: TraceRecord): CompactionEntry | null {
+    const settings = readCoordinationSettings({ home, log });
+    const provider = turnProviderOf(record);
+    if (!compactionOnFor(settings, provider)) return null;
+    const crossing = contextCrossingOf(record, settings);
+    if (crossing === null || sentCompactionsOf(store.list(), record.agentId) >= settings.compact.maxPerAgent) return null;
+    const role = record.role as CoordinationRole;
+    const requestId = role === "worker" ? record.requestId : null;
+    const intervention = recordIntervention(
+      home,
+      { kind: "compact", workspaceId: record.workspaceId, requestId, targetAgentId: record.agentId, trigger: "threshold.crossed" },
+      { now, log },
+    );
+    return store.add({
+      workspaceId: record.workspaceId,
+      requestId,
+      agentId: record.agentId,
+      role,
+      provider: provider as CompactionEntry["provider"],
+      interventionId: intervention?.id ?? null,
+      reason: shorten(crossingWordsOf(crossing), MAX_COMPACTION_REASON_CHARS),
+    });
+  }
+
   return {
     queue,
-
-    async begin(entry, paseo, safe) {
-      try {
-        const home = homeOf();
-        if (home === null || !safe) return "waiting";
-        return await sendCompact(home, entry, paseo);
-      } catch (error) {
-        log(`[paseo-bm] could not start compaction ${entry.id}: ${errorText(error)}`);
-        return "waiting";
-      }
-    },
 
     async turnRecorded(event, record, paseo) {
       try {
@@ -475,7 +478,7 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
         if (home === null) return;
         const store = storeOf(home);
         store.expire();
-        const entry = pendingCompactionOf(store.list(), record.agentId, now());
+        const entry = pendingCompactionOf(store.list(), record.agentId, now()) ?? start(home, store, record);
         if (entry === null) return;
         if (entry.state === "compacting") {
           const compactedAt = compactedIn(record, entry.sentAt);

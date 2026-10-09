@@ -8,6 +8,7 @@ import {
   COMMAND_INTENTS,
   COORDINATION_HANDOFF_AUTHORITY,
   DECLARED_COMMAND_INTENTS,
+  GOVERNOR_STEPS,
   HANDOFF_INTENT,
   COMMAND_LIMITS,
   COMMAND_MARKER,
@@ -24,7 +25,9 @@ import {
   decisionAuthorityOf,
   decisionIdOfAuthority,
   effectsWithheldBy,
+  governorAuthorityOf,
   isCommandAuthority,
+  isGovernorAuthority,
   isReadCommandAuthority,
   limitsOf,
   parseCommandBlock,
@@ -561,6 +564,42 @@ describe("the handoff command (autonomy design §G.6, change-008 C3): intent han
     expect(parseCommandBlock(good.replace("authority: coordination:handoff", "authority: owner"))).toBeNull();
     expect(parseCommandBlock(good.replace("to: manager", "to: worker"))).toBeNull();
     expect(parseCommandBlock(good.replace("effects: none", "effects: commit"))).toBeNull();
+    expect(parseCommandBlock(good.replace("from: orchestrator", "from: owner"))).toBeNull();
+  });
+});
+
+describe("the governor command (missions design §9.3, §9.4): governor:<step>, from the Orchestrator to a Main, no effect", () => {
+  const governed = (over: Partial<CommandInput> = {}): CommandInput =>
+    input({ requestId: null, re: "Governor: mess figures of mission PAY crossed", body: "Re-plan or explain in one line.", why: null, intent: "other", effects: [], authority: governorAuthorityOf("nudge"), approved: [], ...over });
+
+  it("writes and reads back each step's authority, with both fixed limits", () => {
+    expect(GOVERNOR_STEPS).toEqual(["nudge", "replan", "arbitrate"]);
+    for (const step of GOVERNOR_STEPS) {
+      const command = governed({ authority: governorAuthorityOf(step), intent: step === "replan" ? "redirect" : "other" });
+      const block = commandBlockOf(command);
+      expect(block).toContain(`authority: governor:${step}`);
+      expect(block).toContain("limits: no-commit-push-deploy, no-real-data");
+      expect(parseCommandBlock(block)).toEqual(commandOf(command));
+      expect(isGovernorAuthority(`governor:${step}`)).toBe(true);
+      expect(isCommandAuthority(`governor:${step}`)).toBe(true);
+    }
+    expect(isGovernorAuthority("governor:stop")).toBe(false);
+    expect(isCommandAuthority("governor:stop")).toBe(false);
+  });
+
+  it.each([
+    ["one to a Worker", { to: "worker" }, "a governor command goes from the Orchestrator to a Main"],
+    ["the owner's own", { from: "owner", via: "tab" }, "a governor command goes from the Orchestrator to a Main"],
+    ["one declaring an effect", { effects: ["commit"] }, "a governor command declares and approves no effect"],
+    ["one with intent handoff", { intent: "handoff" }, "intent handoff goes only on authority coordination:handoff"],
+  ] as const)("refuses %s, in the builder and the reader", (_label, over, problem) => {
+    const bad = governed(over as Partial<CommandInput>);
+    expect(commandInputProblems(bad).join("\n")).toContain(problem);
+    expect(() => commandBlockOf(bad)).toThrow(/^Not a valid BM-COMMAND: /);
+    const good = commandBlockOf(governed());
+    expect(parseCommandBlock(good.replace("to: manager", "to: worker"))).toBeNull();
+    expect(parseCommandBlock(good.replace("effects: none", "effects: commit"))).toBeNull();
+    expect(parseCommandBlock(good.replace("intent: other", "intent: handoff"))).toBeNull();
     expect(parseCommandBlock(good.replace("from: orchestrator", "from: owner"))).toBeNull();
   });
 });

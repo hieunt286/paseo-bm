@@ -28,6 +28,8 @@ import {
   COORDINATION_FILE_VERSION,
   COORDINATION_KEYS,
   DEFAULT_COORDINATION_SETTINGS,
+  GOVERNOR_BOUNDS,
+  GOVERNOR_SETTINGS,
   HANDOFF_MAX_PER_REQUEST,
   HANDOFF_REQUEST_TOKENS,
   REVIEW_BUDGET_KEYS,
@@ -285,6 +287,8 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       "review.smallBudget",
       "review.mediumBudget",
       "review.largeBudget",
+      // Missions Phase 2: the governor's thresholds and window (missions design §9.2, §9.3).
+      ...GOVERNOR_SETTINGS.map((name) => `governor.${name}`),
     ]);
   });
 
@@ -294,6 +298,7 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       compact: { enabled: true, managerTokensPerTurn: 390_000, workerTokensPerTurn: 5_700_000, contextShare: 0.5, maxPerAgent: 2 },
       handoff: { enabled: true, requestTokens: 150_000_000, maxPerRequest: 2 },
       review: { smallBudget: 2, mediumBudget: 2, largeBudget: 4 },
+      governor: DEFAULT_COORDINATION_SETTINGS.governor,
       guard: { compact: { countsFrom: null, switchedOff: null }, handoff: { countsFrom: null, switchedOff: null } },
     });
     // "On for the providers the compaction spike passed" (§G.5 Verified): all three; any other provider never compacts.
@@ -396,6 +401,9 @@ describe("the compaction and handoff settings in the store and the owner's RPCs"
     "review.smallBudget": { value: 3, read: (settings) => settings.review.smallBudget },
     "review.mediumBudget": { value: 5, read: (settings) => settings.review.mediumBudget },
     "review.largeBudget": { value: 8, read: (settings) => settings.review.largeBudget },
+    ...Object.fromEntries(
+      GOVERNOR_SETTINGS.map((name) => [`governor.${name}`, { value: GOVERNOR_BOUNDS[name].default + 1, read: (settings: CoordinationSettings) => settings.governor[name] }]),
+    ),
   };
 
   it("coordination.set saves each field on its own and coordination.settings reads it back; nothing else changes", () => {

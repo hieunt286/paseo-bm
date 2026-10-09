@@ -296,12 +296,13 @@ export interface MissionAnswerDeps {
 
 /**
  * Tells the mission's current Main what the owner decided on its card: a
- * `message` record from `owner` in the Main's workspace's outbox (its
- * binding's, else the Missions home), delivered as `BM-DELIVERY message`.
- * A mission with no Main, or no workspace to store in, is one log line.
- * Never throws.
+ * `message` record from `from` (`owner` by default; the governor's splits and
+ * arbitrations, §9.6, pass `orchestrator`) in the Main's workspace's outbox
+ * (its binding's, else the Missions home), delivered as `BM-DELIVERY
+ * message`. A mission with no Main, or no workspace to store in, is one log
+ * line. Never throws.
  */
-async function tellMain(missionId: string, decisionId: string, text: string, deps: MissionAnswerDeps): Promise<void> {
+export async function tellMain(missionId: string, decisionId: string, text: string, deps: MissionAnswerDeps, from = "owner"): Promise<void> {
   try {
     const mainId = createMissionStore(deps.home).get(missionId)?.mainId ?? null;
     const bound = mainId === null ? undefined : createBindingStore(deps.home, { log: deps.log }).list().find((binding) => binding.agentId === mainId);
@@ -309,7 +310,7 @@ async function tellMain(missionId: string, decisionId: string, text: string, dep
     if (mainId === null || workspaceId === null) return deps.log(`[paseo-bm] the Main of mission ${missionId} could not be told of ${decisionId}: it has no Main or workspace now.`);
     await storeAndDeliver(
       workspaceId,
-      { kind: "message", requestId: decisionId, from: "owner", to: mainId, text: `${text}\nbm_mission shows the mission as it stands.` },
+      { kind: "message", requestId: decisionId, from, to: mainId, text: `${text}\nbm_mission shows the mission as it stands.` },
       { home: deps.home, log: deps.log, now: () => deps.now, ...(deps.paseo === undefined || deps.paseo === null ? {} : { paseo: deps.paseo as NoticePaseo }) },
     );
   } catch (error) {

@@ -22,7 +22,7 @@ import {
 } from "../plugin/shared/bm-tools";
 import { WORKSPACE_ID_PATTERN } from "../plugin/server/trace-store";
 import { parseReports, parseReviews } from "../plugin/shared/bm-report";
-import { DECISION_CLASSES, EFFECTS } from "../plugin/shared/decisions";
+import { DECISION_CLASSES } from "../plugin/shared/decisions";
 
 /**
  * The agents' block-building tools (design delta 20260924b-agent-tools, AT-1).
@@ -373,7 +373,8 @@ describe("the tool list", () => {
   });
 
   it("lists the Orchestrator's server-run tools only, the Worker's bm_reply after bm_report, the Manager's bm_decisions after bm_answers, and nothing new for the Reviewer (orchestrator design §5, autonomy design §A.9, change-014)", () => {
-    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why", "bm_reply"]);
+    // Missions design §9.1: bm_send_command replaced by bm_govern, bm_compact and bm_handoff retired from the model.
+    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_govern", "bm_arbitrate", "bm_create_main", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_why", "bm_reply"]);
     expect(toolFacesFor("reviewer")).toEqual(toolsFor("reviewer"));
     expect(toolFacesFor("worker").map((tool) => tool.name)).toEqual(["bm_report", "bm_reply"]);
     expect(toolFacesFor("manager").map((tool) => tool.name)).toEqual(["bm_answers", "bm_decisions"]);
@@ -424,24 +425,18 @@ describe("the tool list", () => {
     ]);
   });
 
-  it("the ADR-016 faces: bm_direct_worker needs re and command, bm_repo takes only its four actions, bm_note caps a note, bm_ask_owner caps its options (orchestrator design §6B.4)", () => {
+  it("the ADR-016 faces: bm_direct_worker only stops, bm_repo takes only its four actions, bm_note caps a note, bm_ask_owner caps its options (orchestrator design §6B.4; missions design §9.1)", () => {
     const face = (name: string) => ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === name)!;
-    expect(face("bm_direct_worker").inputSchema.required).toEqual(["workspaceId", "workerId", "re", "intent", "effects", "command"]);
+    // Missions design §9.1: narrowed to a stop at once, with no effect; decisionId is optional.
+    expect(face("bm_direct_worker").inputSchema.required).toEqual(["workspaceId", "workerId", "re", "intent", "command", "interrupt"]);
     expect(
-      schemaIssues(face("bm_direct_worker").inputSchema, { workspaceId: "wks_1", workerId: "w", re: "x".repeat(121), intent: "stop", effects: ["none"], command: "Go.", interrupt: "yes" }),
+      schemaIssues(face("bm_direct_worker").inputSchema, { workspaceId: "wks_1", workerId: "w", re: "x".repeat(121), intent: "stop", command: "Go.", interrupt: "yes" }),
     ).toEqual(["input.re: must be at most 120 characters", "input.interrupt: must be a boolean"]);
-    // Both command tools declare intent and effects (autonomy design §A.7); decisionId is optional.
-    for (const name of ["bm_send_command", "bm_direct_worker"]) {
-      expect(face(name).inputSchema.required).toEqual(expect.arrayContaining(["intent", "effects"]));
-      expect(face(name).inputSchema.required).not.toContain("decisionId");
-    }
-    expect(schemaIssues(face("bm_direct_worker").inputSchema, { workspaceId: "wks_1", workerId: "w", re: "r", intent: "ship", effects: [], command: "Go." })).toEqual([
-      "input.intent: must be one of answer, continue, redirect, stop, release, other",
-      "input.effects: needs at least 1 item(s)",
+    expect(schemaIssues(face("bm_direct_worker").inputSchema, { workspaceId: "wks_1", workerId: "w", re: "r", intent: "redirect", effects: ["none"], command: "Go.", interrupt: true })).toEqual([
+      "input.intent: must be one of stop",
+      "input.effects: is not a field of this tool",
     ]);
-    expect(schemaIssues(face("bm_send_command").inputSchema, { workspaceId: "wks_1", managerId: "m", intent: "release", effects: ["push", "rocket"], command: "c", reason: "r" })).toEqual([
-      `input.effects[1]: must be one of ${EFFECTS.join(", ")}`,
-    ]);
+    expect(face("bm_direct_worker").description).toMatch(/only while a danger signal of that Worker is open or a family of its mission stands at step 4/);
     expect(schemaIssues(face("bm_repo").inputSchema, { workspaceId: "wks_1", action: "push" })).toEqual(["input.action: must be one of status, diff-stat, log, show"]);
     expect(schemaIssues(face("bm_note").inputSchema, { workspaceId: "wks_1", text: "x".repeat(501) })).toEqual(["input.text: must be at most 500 characters"]);
     const option = { label: "Push", effects: ["push"] };
@@ -454,14 +449,14 @@ describe("the tool list", () => {
         workspaceId: "wks_1",
         question: "q",
         recommendation: "r",
-        options: [{ label: "Push" }, { label: "Go", effects: ["none"], command: { to: "reviewer", agentId: "a", intent: "stop" } }],
+        options: [{ label: "Push" }, { label: "Go", effects: ["none"], command: { to: "worker", agentId: "a", intent: "stop" } }],
         subject: "Push It",
         separate: "yes",
       }),
     ).toEqual([
       "input.options[0].effects: is required",
       "input.options[1].command.body: is required",
-      "input.options[1].command.to: must be one of manager, worker",
+      "input.options[1].command.to: must be one of manager",
       "input.subject: must match ^[a-z0-9-]{1,60}$",
       "input.separate: must be a boolean",
     ]);
@@ -476,8 +471,24 @@ describe("the tool list", () => {
       "input.status: must be one of open, needs-confirmation, answered, superseded, withdrawn, expired, unsettled",
       "input.limit: must be at most 50",
     ]);
-    expect(face("bm_send_command").description).not.toMatch(/limit line/);
-    expect(face("bm_send_command").inputSchema.properties?.["re"]).toMatchObject({ maxLength: 120 });
+  });
+
+  it("bm_missions and bm_govern (missions design §9.1, §9.4): a read by mission, and a governor command to a mission's Main with no effect", () => {
+    const face = (name: string) => ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === name)!;
+    expect(face("bm_missions").inputSchema.required).toBeUndefined();
+    expect(Object.keys(face("bm_missions").inputSchema.properties ?? {})).toEqual(["missionId", "closed"]);
+    expect(schemaIssues(face("bm_missions").inputSchema, { missionId: "QA" })).toEqual(["input.missionId: must match ^mis-[0-9a-f]{10}$"]);
+    expect(face("bm_govern").inputSchema.required).toEqual(["missionId", "step", "text"]);
+    expect(Object.keys(face("bm_govern").inputSchema.properties ?? {})).toEqual(["missionId", "step", "text", "figures"]);
+    expect(schemaIssues(face("bm_govern").inputSchema, { missionId: "mis-0123456789", step: "nudge", text: "Re-plan.", figures: ["writersOnOneFile"] })).toEqual([]);
+    expect(schemaIssues(face("bm_govern").inputSchema, { missionId: "mis-0123456789", step: "stop", text: "x".repeat(4_001), effects: ["push"] })).toEqual([
+      "input.step: must be one of nudge, replan, arbitrate",
+      "input.text: must be at most 4000 characters",
+      "input.effects: is not a field of this tool",
+    ]);
+    for (const part of ["governor:<step>", "with no effect", "whichever Main holds the mission now", "at most 12 per mission in 24 hours", "Never to a Worker"]) {
+      expect(face("bm_govern").description, part).toContain(part);
+    }
   });
 
   it("bm_decide (change-004, bead t9lm.11): a decision, one option and a one-line reason, nothing else — never own words", () => {
@@ -491,18 +502,12 @@ describe("the tool list", () => {
       "input.words: is not a field of this tool",
     ]);
     expect(schemaIssues(face.inputSchema, { decisionId: "f:fb-0123456789ab", optionKey: "wait", reason: "The limit resets soon." })).toEqual([]);
-    // Its authority is in its description, where the model reads it: the owner's policy delegating the class to the
-    // Orchestrator (autonomy design §B.5, §B.9, bead t9lm.11), any class at the project's level (ADR-025).
-    expect(face.description).toMatch(/when a decision\.opened line asks you to: the owner's policy delegates its class to you in that project/);
-    expect(face.description).toMatch(/a Worker's question \(q:…\) or a fallback incident \(f:…\)/);
-    expect(face.description).toMatch(/its class is delegated in that project \(by the project's autonomy level; any class, a release, data, security or cost one included\)/);
-    expect(face.description).not.toMatch(/never release/);
+    // Its authority is in its description, where the model reads it: a fallback incident whose class the owner's policy
+    // delegates (autonomy design §B.5, §B.9); a Worker's question is its Main's or the owner's (missions design §9.1).
+    expect(face.description).toMatch(/Decide a fallback incident \(f:…\) for the owner, where the owner's policy delegates its class to you in that project/);
+    expect(face.description).toMatch(/a Worker's question \(q:…\) is its Main's or the owner's/);
     expect(face.description).toMatch(/your own decisions \(o:…\) are always the owner's/);
-    expect(face.description).toMatch(/A decision you leave stays open for the owner/);
-    // The command tools point at it for a stored question.
-    for (const name of ["bm_send_command", "bm_direct_worker"]) {
-      expect(ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === name)!.inputSchema.properties?.["command"]?.description).toContain("bm_decide");
-    }
+    expect(face.description).toMatch(/An incident you leave stays open for the owner/);
   });
 
   it("bm_predict (autonomy design §B.3, §B.9): a decision, the option expected and a one-line reason, nothing else", () => {
@@ -518,7 +523,8 @@ describe("the tool list", () => {
       "input.words: is not a field of this tool",
     ]);
     // What it is and what it is not, where the model reads it: it answers and sends nothing; the owner sees it as the proposal (ADR-025).
-    expect(face.description).toMatch(/It answers nothing and sends nothing: the owner still decides, and sees your option and reason on the decision as your proposal/);
+    expect(face.description).toMatch(/It answers nothing and sends nothing: the owner still decides, and sees your option and reason on the incident as your proposal/);
+    expect(face.description).toMatch(/a Worker's question \(q:…\) is its Main's or the owner's/);
     expect(face.description).toMatch(/autonomy level is 1 or more \(Co-pilot and up\)/);
     expect(face.description).toMatch(/you have not predicted it yet/);
     expect(face.description).not.toMatch(/Do not tell the owner/);

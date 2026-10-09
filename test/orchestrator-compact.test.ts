@@ -9,9 +9,10 @@ import {
   SAFE_SEND_MS,
   STATE_BRIEF_MAX_CHARS,
   compactCommandOf,
+  contextCrossingOf,
   createCompactionRunner,
+  crossingWordsOf,
   reportedIn,
-  safeIdleMoment,
   stateBriefOf,
   type CompactionRunner,
 } from "../plugin/server/compaction";
@@ -31,20 +32,20 @@ import { createInterventionStore } from "../plugin/server/intervention-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 import { ORCHESTRATOR_DIR_NAME } from "../plugin/server/orchestrator-store";
-import { createOrchestratorTools, type OrchestratorTools } from "../plugin/server/orchestrator-tools";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
-import { createOutbox } from "../plugin/server/outbox";
 import type { Evidence, TraceRecord, Usage } from "../plugin/shared/contracts";
 import { answerDecision } from "../plugin/shared/decisions";
+import { DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
 import { STATE_NOTICE_MARKER, isPluginNotice } from "../plugin/shared/notices";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo, type FakePaseo } from "./helpers/fake-paseo";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, msg, report, turn } from "./fixtures/orchestrator-traces";
 
 /**
- * Compaction on the Orchestrator's request (autonomy design §G.5; PRD
- * REQ-134; bead `7gxw.10`): `bm_compact`'s refusals, one per rule, each
- * writing nothing; the command per provider; the sequence — held until the
+ * Compaction run by the plugin itself (missions design §9.5; autonomy design
+ * §G.5; PRD REQ-134, REQ-195; bead `7gxw.10`): a recorded turn crossing the
+ * owner's threshold starts it, and every rule that starts nothing writes
+ * nothing; the command per provider; the sequence — held until the
  * target's idle moment after a safe point, the `/compact` sent once, the
  * `BM-STATE` brief after the completed compaction, never into a running turn —
  * with the one fake of `test/helpers/fake-paseo.ts`; the brief built from the
@@ -184,95 +185,80 @@ function runnerOf(): CompactionRunner {
   return createCompactionRunner({ home: () => home, now: () => clock, queue, log: (line) => logs.push(line), redactEnv: { PASEO_PASSWORD: SECRET } });
 }
 
-function toolsOf(fake: FakePaseo<unknown>, runner: CompactionRunner = runnerOf()): OrchestratorTools {
-  const tools = createOrchestratorTools({
-    env: { PASEO_BM_HOME: home },
-    homedir: () => root,
-    now: () => clock,
-    redactEnv: { PASEO_PASSWORD: SECRET },
-    compaction: runner,
-    log: (line) => logs.push(line),
-  });
-  tools.usePaseo(fake.paseo);
-  return tools;
-}
-
-const compact = (tools: OrchestratorTools, agentId = WORKER, reason = "Its context keeps growing.") => tools.call("bm_compact", { agentId, reason });
-
 /** A turn-ended event of the Worker, with the timeline items the hook hands over. */
 const workerEnded = (items: readonly unknown[]) => ({ agent: { id: WORKER }, turnId: "t", timeline: items });
 const itemsOf = (timeline: ReadonlyArray<{ item: unknown }>) => timeline.map((line) => line.item);
 
-describe("bm_compact refuses, writing nothing (design §G.5 The tool)", () => {
+/** A turn of `record`'s agent recorded and handed to the runner (the collector's `onRecorded`), with its turn's timeline items. */
+async function recorded(fake: FakePaseo<unknown>, record: TraceRecord, items: readonly unknown[] = [], runner: CompactionRunner = runnerOf()): Promise<CompactionRunner> {
+  await store(record);
+  await runner.turnRecorded({ agent: { id: record.agentId }, turnId: "t", timeline: items }, record, fake.paseo);
+  return runner;
+}
+
+describe("the start: a recorded turn crossing the owner's threshold, else nothing written (missions design §9.5, autonomy design §G.7)", () => {
   const nothingWritten = () => {
     expect(existsSync(compactionsFile())).toBe(false);
     expect(interventions()).toEqual([]);
   };
 
-  it("when compaction is off", async () => {
+  it("judges a Manager's or a Worker's turn by its role's figure, never a turn holding a compaction", () => {
+    const settings = DEFAULT_COORDINATION_SETTINGS;
+    expect(contextCrossingOf(agentTurn(WORKER, 10), settings)).toEqual({ figure: "tokensPerTurn", value: 6_100_000, threshold: 5_700_000 });
+    expect(contextCrossingOf(agentTurn(MANAGER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 400_000 }) }), settings)).toMatchObject({ figure: "tokensPerTurn", threshold: 390_000 });
+    expect(contextCrossingOf(agentTurn(WORKER, 10, "codex"), settings)).toMatchObject({ figure: "contextShare", threshold: 0.5 });
+    expect(contextCrossingOf(agentTurn(WORKER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 1_000_000 }) }), settings)).toBeNull();
+    expect(contextCrossingOf(agentTurn(REVIEWER, 10, "claude", { role: "reviewer" }), settings)).toBeNull();
+    expect(contextCrossingOf(agentTurn(WORKER, 10, "claude", { evidence: [compactionEvidence(WORKER, iso(T0 + 10 * MIN))] }), settings)).toBeNull();
+    expect(crossingWordsOf({ figure: "tokensPerTurn", value: 6_100_000, threshold: 5_700_000 })).toBe("it read 6,100,000 tokens in one turn (threshold 5,700,000)");
+    expect(crossingWordsOf({ figure: "contextShare", value: 0.58, threshold: 0.5 })).toBe("its context filled 58 % of its window (threshold 50 %)");
+  });
+
+  it("starts nothing when compaction is off", async () => {
     createCoordinationStore(home).set({ key: "compact.enabled", value: false });
-    await store(agentTurn(WORKER, 10));
     const fake = daemon();
-    expect(await compact(toolsOf(fake))).toEqual({ ok: false, text: "Refused: compaction is off in the owner's Settings → Coordination; only the owner turns it on." });
+    await recorded(fake, agentTurn(WORKER, 10), itemsOf(reportedTimeline));
     nothingWritten();
     expect(fake.sends).toEqual([]);
   });
 
-  it("when the target is a Reviewer, the Orchestrator itself, or no paseo-bm Manager or Worker", async () => {
-    await store(agentTurn(WORKER, 10));
+  it("starts nothing for a Reviewer's or an Orchestrator's turn, below the threshold, or for a turn holding a compaction", async () => {
     const fake = daemon();
-    const tools = toolsOf(fake);
-    expect(await compact(tools, REVIEWER)).toEqual({ ok: false, text: `Refused: ${REVIEWER} is a Reviewer: a Reviewer is short-lived and never compacted.` });
-    expect(await compact(tools, ORCHESTRATOR)).toEqual({ ok: false, text: "Refused: you never compact yourself: you are replaced instead, by the plugin." });
-    expect(await compact(tools, "agent-nobody")).toEqual({ ok: false, text: "Refused: agent-nobody is not a paseo-bm Manager or Worker; use an agentId bm_projects gave." });
-    expect(await tools.call("bm_compact", { agentId: WORKER })).toMatchObject({ ok: false, text: expect.stringContaining("- input.reason: is required") });
+    const runner = runnerOf();
+    await recorded(fake, agentTurn(REVIEWER, 10, "claude", { role: "reviewer" }), [], runner);
+    await recorded(fake, agentTurn(ORCHESTRATOR, 10, "claude", { role: "orchestrator" }), [], runner);
+    await recorded(fake, agentTurn(WORKER, 11, "claude", { usage: usageOf("claude", { cachedInputTokens: 1_000_000 }) }), itemsOf(reportedTimeline), runner);
+    await recorded(fake, agentTurn(WORKER, 13, "claude", { evidence: [compactionEvidence(WORKER, iso(T0 + 13 * MIN))] }), itemsOf(reportedTimeline), runner);
     nothingWritten();
     expect(fake.sends).toEqual([]);
   });
 
-  it("below its threshold, with the figures of its last measured turn; and with no turn measured since its last compaction", async () => {
-    await store(agentTurn(WORKER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 1_000_000 }) }));
-    const fake = daemon();
-    const tools = toolsOf(fake);
-    expect((await compact(tools)).text).toBe(
-      `Refused: Worker ${WORKER} is below its threshold: in its last measured turn (ended ${iso(T0 + 10 * MIN)}) it read 1,100,000 tokens (threshold 5,700,000), and its context share is not known.`,
-    );
-    // The crossing turn is followed by a compaction: the figure after it understates, so nothing is judged until the next turn.
-    await store(agentTurn(WORKER, 12), agentTurn(WORKER, 13, "claude", { usage: usageOf("claude", { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 }), evidence: [compactionEvidence(WORKER, iso(T0 + 13 * MIN))] }));
-    expect((await compact(tools)).text).toBe(`Refused: no turn of Worker ${WORKER} was measured since its last compaction; ask again after its next turn ends.`);
+  it("starts nothing when its provider cannot compact on request", async () => {
+    const fake = daemon({ aliases: false });
+    await recorded(fake, agentTurn(WORKER, 10, "claude", { usage: usageOf("claude", { model: "mystery-1" }), runtime: { model: "mystery-1", thinkingOptionId: null, modeId: null, provider: "bm-worker" } }), itemsOf(reportedTimeline));
     nothingWritten();
   });
 
-  it("when its provider cannot compact on request", async () => {
-    await store(agentTurn(WORKER, 10, "claude", { usage: usageOf("claude", { model: "mystery-1" }), runtime: { model: "mystery-1", thinkingOptionId: null, modeId: null, provider: "bm-worker" } }));
-    const tools = toolsOf(daemon({ aliases: false }));
-    expect((await compact(tools)).text).toBe(`Refused: Worker ${WORKER}'s provider (not known) cannot compact on request; only Claude, Codex and OpenCode can.`);
-    nothingWritten();
-  });
-
-  it("while a compaction of it is pending, and at compact.maxPerAgent — for a Worker, naming a handoff as its next step", async () => {
+  it("starts one per agent while one is pending, and none at compact.maxPerAgent — a Manager's as a Worker's", async () => {
     createCoordinationStore(home).set({ key: "compact.maxPerAgent", value: 1 });
-    await store(agentTurn(WORKER, 10), agentTurn(MANAGER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 500_000 }) }));
-    const fake = daemon({ worker: "running" });
-    const tools = toolsOf(fake);
-    expect((await compact(tools)).ok).toBe(true);
+    const fake = daemon({ worker: "running", timeline: busyTimeline });
+    const runner = runnerOf();
+    await recorded(fake, agentTurn(WORKER, 10), itemsOf(busyTimeline), runner);
     const written = { compactions: compactions().list(), interventions: interventions() };
-    expect((await compact(tools)).text).toBe(`Refused: a compaction of Worker ${WORKER} is already pending, requested at ${clock.toISOString()}.`);
+    expect(written.compactions).toMatchObject([{ agentId: WORKER, state: "waiting" }]);
+    // A second crossing turn while it waits: the same compaction, nothing more written.
+    await recorded(fake, agentTurn(WORKER, 12), itemsOf(busyTimeline), runner);
+    expect(compactions().list()).toEqual(written.compactions);
     // Its /compact went out: one compaction so far, the owner's limit of 1.
     compactions().update(written.compactions[0]!.id, (current) => ({ ...current, state: "done", sentAt: clock.toISOString(), endedAt: clock.toISOString() }));
     const done = compactions().list();
-    expect((await compact(tools)).text).toBe(
-      `Refused: Worker ${WORKER} was compacted 1 times, the owner's limit per agent (compact.maxPerAgent); its next step is a handoff to a new Worker (bm_handoff).`,
-    );
-    // A Manager at its limit is not compacted again, and no handoff is named.
+    await recorded(fake, agentTurn(WORKER, 14), itemsOf(reportedTimeline), runner);
+    expect(compactions().list()).toEqual(done);
+    // A Manager at its limit is not compacted again.
     compactions().add({ workspaceId: WORKSPACE_ID, requestId: null, agentId: MANAGER, role: "manager", provider: "claude", interventionId: null, reason: "" });
-    const manager = compactions().list().at(-1)!;
-    compactions().update(manager.id, (current) => ({ ...current, state: "done", sentAt: clock.toISOString(), endedAt: clock.toISOString() }));
+    compactions().update(compactions().list().at(-1)!.id, (current) => ({ ...current, state: "done", sentAt: clock.toISOString(), endedAt: clock.toISOString() }));
     const before = compactions().list();
-    expect((await compact(tools, MANAGER)).text).toBe(
-      `Refused: Manager ${MANAGER} was compacted 1 times, the owner's limit per agent (compact.maxPerAgent); a Manager is not compacted again.`,
-    );
-    expect(done).toHaveLength(1);
+    await recorded(fake, agentTurn(MANAGER, 15, "claude", { usage: usageOf("claude", { cachedInputTokens: 500_000 }) }), [], runner);
     expect(compactions().list()).toEqual(before);
     expect(interventions()).toEqual(written.interventions);
     expect(fake.sends).toEqual([]);
@@ -295,21 +281,18 @@ describe("the command per provider (design §G.5 Verified)", () => {
     ["claude", `/compact ${COMPACT_FOCUS}`],
     ["codex", "/compact"],
     ["opencode", "/compact"],
-  ] as const)("an idle %s Worker right after a report gets its command at once, through the notice queue", async (provider, command) => {
-    await store(agentTurn(WORKER, 10, provider));
+  ] as const)("an idle %s Worker whose crossing turn sent a report gets its command at once, through the notice queue", async (provider, command) => {
     const fake = daemon({ provider });
-    const result = await compact(toolsOf(fake));
-    expect(result).toMatchObject({ ok: true, text: expect.stringContaining("The /compact went out now") });
+    await recorded(fake, agentTurn(WORKER, 10, provider), itemsOf(reportedTimeline));
     expect(fake.sends).toEqual([{ id: WORKER, text: command }]);
     expect(compactions().list()).toMatchObject([{ agentId: WORKER, role: "worker", provider, state: "compacting", sentAt: clock.toISOString(), requestId: REQUEST }]);
     // The send log keeps the agent, the time and the text's hash, never the text.
     expect(compactions().sent()).toEqual([{ agentId: WORKER, at: clock.toISOString(), hash: sentTextHashOf(command), compactionId: compactions().list()[0]!.id }]);
   });
 
-  it("the provider comes from the alias's base; without one, from the turn's model", async () => {
-    await store(agentTurn(WORKER, 10, "codex"));
+  it("the provider comes from the turn's model", async () => {
     const fake = daemon({ aliases: false });
-    expect((await compact(toolsOf(fake))).ok).toBe(true);
+    await recorded(fake, agentTurn(WORKER, 10, "codex"), itemsOf(reportedTimeline));
     expect(fake.sends).toEqual([{ id: WORKER, text: "/compact" }]);
     expect(compactions().list()[0]).toMatchObject({ provider: "codex" });
   });
@@ -317,19 +300,14 @@ describe("the command per provider (design §G.5 Verified)", () => {
 
 describe("the sequence (design §G.5): idle after a safe point, the /compact once, the brief after the compaction, never into a running turn", () => {
   it("a running Worker waits; a turn end without a report does not send; the turn end after its report sends the /compact once; the brief follows the completed compaction", async () => {
-    await store(agentTurn(WORKER, 10));
     const fake = daemon({ worker: "running", timeline: busyTimeline });
-    const runner = runnerOf();
-    const tools = toolsOf(fake, runner);
-
-    const accepted = await compact(tools);
-    expect(accepted).toMatchObject({ ok: true, text: expect.stringContaining(`It waits for Worker ${WORKER}'s next idle moment after a safe point (right after a report)`) });
-    expect(accepted.text).toContain(`accepted: it read 6,100,000 tokens in one turn (threshold 5,700,000)`);
+    // Its crossing turn sent no report: the compaction starts and waits for a safe point.
+    const runner = await recorded(fake, agentTurn(WORKER, 10), itemsOf(busyTimeline));
     expect(fake.sends).toEqual([]);
     expect(queue.pending(WORKER)).toEqual([]);
     const [waiting] = compactions().list();
-    expect(waiting).toMatchObject({ state: "waiting", sentAt: null, reason: "Its context keeps growing." });
-    expect(interventions()).toMatchObject([{ id: waiting!.interventionId, kind: "compact", targetAgentId: WORKER, requestId: REQUEST, trigger: "orchestrator", expected: "tokens-per-turn-down" }]);
+    expect(waiting).toMatchObject({ state: "waiting", sentAt: null, reason: "it read 6,100,000 tokens in one turn (threshold 5,700,000)" });
+    expect(interventions()).toMatchObject([{ id: waiting!.interventionId, kind: "compact", targetAgentId: WORKER, requestId: REQUEST, trigger: "threshold.crossed", expected: "tokens-per-turn-down" }]);
 
     // Its turn ends without a report: no safe point, nothing sent.
     fake.byId(WORKER)!.status = "idle";
@@ -375,17 +353,20 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
     expect(compactions().list()[0]).toMatchObject({ state: "done", compactedAt: iso(T0 + 42 * MIN), briefAt: clock.toISOString() });
     // The brief is logged too; nothing went to the Manager, the Reviewer or the Orchestrator.
     expect(compactions().sent().map((sent) => sent.hash)).toEqual([sentTextHashOf(compactCommandOf("claude")), sentTextHashOf(fake.sends[1]!.text)]);
-    // A later turn of the Worker sends nothing more.
+    // A later turn of the Worker below its threshold sends nothing more.
     fake.byId(WORKER)!.status = "idle";
-    await runner.turnRecorded(workerEnded(itemsOf(reportedTimeline)), agentTurn(WORKER, 45), fake.paseo);
+    await runner.turnRecorded(workerEnded(itemsOf(reportedTimeline)), agentTurn(WORKER, 45, "claude", { usage: usageOf("claude", { cachedInputTokens: 1_000_000 }) }), fake.paseo);
     expect(fake.sends).toHaveLength(2);
+    // One crossing again starts the next compaction (its second, the owner's limit), at that safe point.
+    await runner.turnRecorded(workerEnded(itemsOf(reportedTimeline)), agentTurn(WORKER, 46), fake.paseo);
+    expect(fake.sends.map((sent) => sent.text.split("\n")[0])).toEqual([compactCommandOf("claude"), STATE_NOTICE_MARKER, compactCommandOf("claude")]);
+    expect(compactions().list().map((entry) => entry.state)).toEqual(["done", "compacting"]);
   });
 
   it("a /compact held while the Worker turned busy is replaced, not doubled, at its next safe point", async () => {
-    await store(agentTurn(WORKER, 10));
     const fake = daemon({ worker: "running", timeline: busyTimeline });
-    const runner = runnerOf();
-    expect((await compact(toolsOf(fake, runner))).ok).toBe(true);
+    const runner = await recorded(fake, agentTurn(WORKER, 10), itemsOf(busyTimeline));
+    expect(compactions().list()).toMatchObject([{ state: "waiting" }]);
     // A safe point, but it runs again at once: held in the queue.
     clock = new Date(T0 + 34 * MIN);
     await runner.turnRecorded(workerEnded(itemsOf(reportedTimeline)), agentTurn(WORKER, 34), fake.paseo);
@@ -401,10 +382,8 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
   });
 
   it("a Codex Worker compacts in a turn of its own: the brief follows that turn's completed item", async () => {
-    await store(agentTurn(WORKER, 10, "codex"));
     const fake = daemon({ provider: "codex" });
-    const runner = runnerOf();
-    expect((await compact(toolsOf(fake, runner))).ok).toBe(true);
+    const runner = await recorded(fake, agentTurn(WORKER, 10, "codex"), itemsOf(reportedTimeline));
     expect(fake.sends).toEqual([{ id: WORKER, text: "/compact" }]);
     fake.byId(WORKER)!.status = "idle";
     clock = new Date(T0 + 31 * MIN);
@@ -414,7 +393,6 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
   });
 
   it("an idle Manager with nothing queued is compacted at once; with a notice queued for it, at a later turn end with none", async () => {
-    await store(agentTurn(MANAGER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 400_000 }) }));
     const fake = daemon();
     const runner = runnerOf();
     await queue.enqueue(MANAGER, "BM-TEST", "BM-TOOLS a notice first", fake.paseo as never);
@@ -424,8 +402,8 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
     fake.byId(MANAGER)!.status = "running";
     await queue.enqueue(MANAGER, "BM-OTHER", "BM-SETTINGS second", fake.paseo as never);
     fake.byId(MANAGER)!.status = "idle";
-    const accepted = await compact(toolsOf(fake, runner), MANAGER, "Long chat.");
-    expect(accepted).toMatchObject({ ok: true, text: expect.stringContaining("with nothing queued for it") });
+    await recorded(fake, agentTurn(MANAGER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 400_000 }) }), [], runner);
+    expect(compactions().list()).toMatchObject([{ agentId: MANAGER, state: "waiting" }]);
     expect(fake.sends).toHaveLength(1);
     // The queued notice goes at its turn end; the next one, with nothing queued, sends the /compact.
     await queue.turnEnded({ agent: { id: MANAGER } }, fake.paseo);
@@ -437,51 +415,41 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
     expect(compactions().list()).toMatchObject([{ agentId: MANAGER, role: "manager", requestId: null, state: "compacting" }]);
   });
 
-  it("an idle Manager with nothing queued gets its /compact at once, and its compaction is logged against the threshold.crossed its wake carried", async () => {
-    await store(agentTurn(MANAGER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 400_000 }) }));
+  it("an idle Manager with nothing queued gets its /compact at the end of its crossing turn, logged as threshold.crossed with the crossing as its reason", async () => {
     const fake = daemon();
-    const crossed = { type: "threshold.crossed", workspaceId: WORKSPACE_ID, requestId: null, agentId: MANAGER, role: "manager", kind: "compact", figure: "tokensPerTurn", value: 500_000, threshold: 390_000, at: iso(T0 + 10 * MIN), cycle: 0 } as const;
-    const tools = createOrchestratorTools({
-      env: { PASEO_BM_HOME: home },
-      homedir: () => root,
-      now: () => clock,
-      redactEnv: { PASEO_PASSWORD: SECRET },
-      compaction: runnerOf(),
-      wakeEventsOf: (orchestratorId) => (orchestratorId === ORCHESTRATOR ? [crossed] : []),
-      log: (line) => logs.push(line),
-    });
-    tools.usePaseo(fake.paseo);
-    expect(await compact(tools, MANAGER, `Long chat, ${SECRET}\nand growing.`)).toMatchObject({ ok: true, text: expect.stringContaining("with nothing queued") });
+    await recorded(fake, agentTurn(MANAGER, 10, "claude", { usage: usageOf("claude", { cachedInputTokens: 400_000 }) }));
     expect(fake.sends).toEqual([{ id: MANAGER, text: compactCommandOf("claude") }]);
     expect(interventions()).toMatchObject([{ kind: "compact", targetAgentId: MANAGER, requestId: null, trigger: "threshold.crossed" }]);
-    expect(compactions().list()).toMatchObject([{ agentId: MANAGER, role: "manager", requestId: null, state: "compacting", reason: "Long chat, [redacted] and growing." }]);
-    expect(JSON.stringify(compactions().list())).not.toContain(SECRET);
+    expect(compactions().list()).toMatchObject([{ agentId: MANAGER, role: "manager", requestId: null, state: "compacting", reason: "it read 500,000 tokens in one turn (threshold 390,000)" }]);
+    // Nothing reached the Orchestrator: no model asked for it.
+    expect(fake.sends.filter((sent) => sent.id === ORCHESTRATOR)).toEqual([]);
   });
 
   it("turned off while it waits: dropped at the next safe point, nothing sent; waiting past its bound, or compacting past its bound, ends it", async () => {
-    await store(agentTurn(WORKER, 10));
     const fake = daemon({ worker: "running", timeline: busyTimeline });
-    const runner = runnerOf();
-    const tools = toolsOf(fake, runner);
-    expect((await compact(tools)).ok).toBe(true);
+    const runner = await recorded(fake, agentTurn(WORKER, 10), itemsOf(busyTimeline));
+    expect(compactions().list()).toMatchObject([{ state: "waiting" }]);
     createCoordinationStore(home).set({ key: "compact.enabled", value: false });
     fake.byId(WORKER)!.status = "idle";
     await runner.turnRecorded(workerEnded(itemsOf(reportedTimeline)), agentTurn(WORKER, 32), fake.paseo);
     expect(fake.sends).toEqual([]);
     expect(compactions().list()[0]).toMatchObject({ state: "dropped", ending: "off" });
 
-    // Back on: a new one may be asked; with no safe point within its bound it is dropped, and the next may be asked.
+    // Back on: the next crossing turn starts a new one; with no safe point within its bound it is dropped, and the next starts again.
     createCoordinationStore(home).set({ key: "compact.enabled", value: true });
     fake.byId(WORKER)!.status = "running";
-    expect((await compact(tools)).ok).toBe(true);
+    await recorded(fake, agentTurn(WORKER, 33), itemsOf(busyTimeline), runner);
+    expect(compactions().list()).toHaveLength(2);
     clock = new Date(clock.getTime() + SAFE_POINT_WAIT_MS + 1);
     expect(compactions().expire()).toMatchObject([{ state: "dropped", ending: "no-safe-point" }]);
-    expect((await compact(tools)).ok).toBe(true);
+    await recorded(fake, agentTurn(WORKER, 100), itemsOf(busyTimeline), runner);
+    expect(compactions().list()).toHaveLength(3);
     // Sent, and no compaction seen within its bound: failed, and it counts as sent.
-    compactions().update(compactions().list().at(-1)!.id, (current) => ({ ...current, state: "compacting", sentAt: clock.toISOString() }));
+    const sent = compactions().list().at(-1)!;
+    compactions().update(sent.id, (current) => ({ ...current, state: "compacting", sentAt: clock.toISOString() }));
     clock = new Date(clock.getTime() + COMPACTION_WAIT_MS + 1);
     await runner.turnRecorded(workerEnded([]), agentTurn(WORKER, 200), fake.paseo);
-    expect(compactions().list().at(-1)).toMatchObject({ state: "failed", ending: "no-compaction" });
+    expect(compactions().get(sent.id)).toMatchObject({ state: "failed", ending: "no-compaction" });
     expect(fake.sends).toEqual([]);
   });
 
@@ -497,31 +465,11 @@ describe("the sequence (design §G.5): idle after a safe point, the /compact onc
   });
 });
 
-describe("a bound Worker's safe point: its report outbox records (design §16.7)", () => {
-  const addReport = (minute: number, state: "pending" | "delivered" = "pending") => {
-    const outbox = createOutbox(home, { now: () => new Date(T0 + minute * MIN) });
-    const record = outbox.add(WORKSPACE_ID, { kind: "report", requestId: REQUEST, from: WORKER, to: MANAGER, text: `BM-REPORT\nrequestId: ${REQUEST}\nphase: finished` });
-    if (state !== "pending") outbox.settle(WORKSPACE_ID, record.id, state);
-    return record;
-  };
-  const worker = { id: WORKER, role: "worker" as const, status: "idle", workspaceId: WORKSPACE_ID };
-
-  it("finds the newest report from a pending or delivered record created in its last turn, where its timeline holds no BM-REPORT", async () => {
+describe("a bound Worker's safe point: its report in its turn record (design §16.7)", () => {
+  it("its bm_report, which the collector puts in its turn record from the outbox, is its safe point though its timeline holds no BM-REPORT", async () => {
     const fake = daemon({ timeline: busyTimeline });
-    // The busy timeline's last turn starts at minute 1 and sent no report block.
-    expect(await safeIdleMoment(worker, fake.paseo, queue, { home })).toBe(false);
-    addReport(0);
-    expect(await safeIdleMoment(worker, fake.paseo, queue, { home })).toBe(false);
-    addReport(2, "delivered");
-    expect(await safeIdleMoment(worker, fake.paseo, queue, { home })).toBe(true);
-  });
-
-  it("counts a pending record too, never another agent's, and still reads an unbound Worker's BM-REPORT text", async () => {
-    addReport(2);
-    expect(await safeIdleMoment(worker, daemon({ timeline: busyTimeline }).paseo, queue, { home })).toBe(true);
-    expect(await safeIdleMoment({ ...worker, id: REVIEWER }, daemon({ timeline: busyTimeline }).paseo, queue, { home })).toBe(false);
-    // The hand path: the report block in the timeline, no outbox at all.
-    expect(await safeIdleMoment(worker, daemon({ timeline: reportedTimeline }).paseo, queue, { home: join(root, "elsewhere") })).toBe(true);
+    await recorded(fake, agentTurn(WORKER, 10, "claude", { reports: [report({ agentId: WORKER, at: iso(T0 + 10 * MIN), requestId: REQUEST, phase: "bead-implemented" })] }), itemsOf(busyTimeline));
+    expect(fake.sends).toEqual([{ id: WORKER, text: compactCommandOf("claude") }]);
   });
 });
 
@@ -651,10 +599,10 @@ describe("the send log: the plugin's /compact is never the owner's words (design
   it.each(["claude", "codex"] as const)(
     "the collector records the plugin's %s /compact as the plugin's, and the same text typed by the owner — no log entry — as the owner's",
     async (provider) => {
-      await store(agentTurn(WORKER, 10, provider));
       const fake = daemon({ provider });
-      expect((await compact(toolsOf(fake))).ok).toBe(true);
+      await recorded(fake, agentTurn(WORKER, 10, provider), itemsOf(reportedTimeline));
       const command = compactCommandOf(provider);
+      expect(fake.sends).toEqual([{ id: WORKER, text: command }]);
       // As the Paseo app and the SDK store it: a user_message with a clientMessageId.
       const event = (agentId: string) =>
         ({

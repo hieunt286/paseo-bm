@@ -20,6 +20,7 @@ import { createMissionStore } from "../plugin/server/mission-store";
 import { createMissionTools } from "../plugin/server/mission-tools";
 import { createOutbox } from "../plugin/server/outbox";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
+import { questionIsTheMainsText } from "../plugin/server/orchestrator-decide-tools";
 import { createOrchestratorTools } from "../plugin/server/orchestrator-tools";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
@@ -358,22 +359,21 @@ describe("the Orchestrator on a mission request's question (missions design §8)
     return created;
   }
 
-  it("bm_decide and bm_predict refuse an ownerOnly question and a question of a mission request; a request of no mission is decided as before", async () => {
+  it("bm_decide and bm_predict refuse every Worker's question — ownerOnly, of a mission request, or of a request of no mission (missions design §9.1)", async () => {
     delegateRepo("scope");
     createAutonomyStore(home).setChallenger({ workspaceId: WS, enabled: true });
     const store = createDecisionStore(home);
     store.open(question({ ownerOnly: true }));
-    const tools = await orchestrator();
-    const ownerOnly = await tools.call("bm_decide", { decisionId: `q:${REQ}:Q1`, optionKey: "a", reason: "The owner said so." });
-    expect(ownerOnly).toMatchObject({ ok: false, text: expect.stringContaining("ownerOnly") });
-
     store.open(question({ n: 2, subject: "other" }));
-    const created = mission();
-    const decided = await tools.call("bm_decide", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." });
-    expect(decided).toMatchObject({ ok: false, text: expect.stringContaining(`of mission ${created.missionId}: its Main decides it (bm_answer_worker)`) });
+    const tools = await orchestrator();
+    const refusal = (n: number) => ({ ok: false, text: `Refused: ${questionIsTheMainsText(`q:${REQ}:Q${n}`)}.` });
+    expect(await tools.call("bm_decide", { decisionId: `q:${REQ}:Q1`, optionKey: "a", reason: "The owner said so." })).toEqual(refusal(1));
+    // A request of no mission.
+    expect(await tools.call("bm_decide", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." })).toEqual(refusal(2));
+    mission();
+    expect(await tools.call("bm_decide", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." })).toEqual(refusal(2));
     delegateRepo("scope", "shadow");
-    const predicted = await tools.call("bm_predict", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." });
-    expect(predicted).toMatchObject({ ok: false, text: expect.stringContaining("its Main decides it") });
+    expect(await tools.call("bm_predict", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." })).toEqual(refusal(2));
     expect(store.get(`q:${REQ}:Q2`, WS)).toMatchObject({ status: "open", prediction: { orchestrator: null } });
   });
 });

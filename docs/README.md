@@ -52,7 +52,7 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [014](adr/ADR-014-orchestrator-agent-proposes-owner-approves.md) | One machine-wide Orchestrator agent proposes; the owner approves | Accepted; decisions 4–5 superseded by 015 |
 | [015](adr/ADR-015-orchestrator-autopilot-per-project.md) | Autopilot per project; the owner's word in chat counts as approval | Accepted; amended by 016 |
 | [016](adr/ADR-016-orchestrator-coordinates-workers-live.md) | The Orchestrator watches and commands running Workers live | Accepted |
-| [017](adr/ADR-017-decisions-are-stored-objects.md) | Decisions are stored objects; typed handoffs; nobody relays | Accepted |
+| [017](adr/ADR-017-decisions-are-stored-objects.md) | Decisions are stored objects; typed handoffs; nobody relays | Accepted; decision 4 amended by 031 for `o:` decisions |
 | [018](adr/ADR-018-calibrated-autonomy-per-class.md) | Autonomy per project × decision class, measured by agreement | Thresholds superseded by 023; decision 3, demotion and the predictor by 025 |
 | [019](adr/ADR-019-action-boundary-permission-events.md) | Effectful actions held through Paseo's permission events | Accepted |
 | [020](adr/ADR-020-paseo-tools-policy-per-role.md) | Every role's Paseo-tools policy written explicitly | Accepted |
@@ -66,6 +66,7 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [028](adr/ADR-028-projects-ask-each-other-through-the-plugin.md) | Projects ask each other through the plugin: peer links; every Manager bound | Accepted; decision 3 superseded by 029 |
 | [029](adr/ADR-029-missions-mains-and-a-process-governor.md) | Missions and their Mains in a shared home; the Orchestrator governs the process | Accepted |
 | [030](adr/ADR-030-published-bundle-minifies-identifiers.md) | The published bundle minifies identifiers and keeps names | Accepted |
+| [031](adr/ADR-031-orchestrator-decisions-grant-no-effects.md) | An answer to an Orchestrator decision grants no effect (amends ADR-017 decision 4) | Accepted |
 
 ## Work in progress — `plans/`
 

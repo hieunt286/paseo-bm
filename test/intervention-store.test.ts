@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { createCompactionStore } from "../plugin/server/compaction-store";
 import { createHandoffStore, type HandoffEntry } from "../plugin/server/handoff-store";
+import { createGovernorStore, type FamilyState } from "../plugin/server/governor-store";
 import { guardCoordination } from "../plugin/server/coordination-guard";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
@@ -19,6 +20,7 @@ import {
   createInterventionStore,
   interventionOfCommand,
   interventionOfDecision,
+  interventionOfGovern,
   outcomeOf,
   recordIntervention,
   type CommandFacts,
@@ -35,6 +37,7 @@ import { answerDecision, withdrawDecision, type DecisionDelivery } from "../plug
 import {
   EXPECTED_OUTCOME_OF,
   INTERVENTION_KINDS,
+  INTERVENTION_TRIGGERS,
   INTERVENTION_WINDOW_MS,
   reportChecksOf,
   type InterventionKind,
@@ -152,8 +155,10 @@ describe("the log file (design §G.3, the alerts store's rules)", () => {
     expect(JSON.parse(readFileSync(file(), "utf8"))).toEqual({ version: 1, entries: [entry] });
   });
 
-  it("names the seven kinds with their expected outcome and window", () => {
-    expect(INTERVENTION_KINDS).toEqual(["answer", "unblock", "correct", "stop", "compact", "handoff", "advice"]);
+  it("names the eight kinds with their expected outcome and window, and the triggers (missions design §9.3: govern, governor)", () => {
+    expect(INTERVENTION_KINDS).toEqual(["answer", "unblock", "correct", "stop", "compact", "handoff", "advice", "govern"]);
+    expect(INTERVENTION_TRIGGERS).toEqual(["decision.opened", "request.stalled", "worker.signal", "advice.due", "threshold.crossed", "owner", "orchestrator", "governor"]);
+    expect(EXPECTED_OUTCOME_OF.govern).toBe("figures-clear");
     expect(INTERVENTION_WINDOW_MS).toEqual({
       answer: 10 * MIN,
       unblock: 15 * MIN,
@@ -162,6 +167,7 @@ describe("the log file (design §G.3, the alerts store's rules)", () => {
       compact: 60 * MIN,
       handoff: 60 * MIN,
       advice: 7 * 24 * 60 * MIN,
+      govern: 30 * MIN,
     });
     expect(Object.keys(EXPECTED_OUTCOME_OF)).toEqual([...INTERVENTION_KINDS]);
   });
@@ -355,21 +361,23 @@ describe("the event bus keeps a wake's events until its turn ends (design §G.3)
       }),
     };
     const bus = createEventBus({ home: () => home, queue, now: () => new Date(T0), log: () => {} });
-    const stall: RequestStalledEvent = {
-      type: "request.stalled",
+    // Missions design §9.7: a danger signal still wakes the Orchestrator (a request.stalled no longer does, §9.1).
+    const danger: WorkerSignalEvent = {
+      type: "worker.signal",
       workspaceId: WORKSPACE_ID,
+      workerId: "agent-worker",
       requestKey: REQUEST,
-      managerId: MANAGER,
-      reason: "idle-unfinished",
-      alertKey: alertKeyOf("request-stalled", WORKSPACE_ID, REQUEST),
+      signal: "danger",
+      turnStart: iso(T0),
+      alertKey: alertKeyOf("danger", WORKSPACE_ID, "agent-worker"),
       since: iso(T0),
     };
 
-    expect((await bus.publish([stall], paseo)).status).toBe("done");
+    expect((await bus.publish([danger], paseo)).status).toBe("done");
     // Queued, not yet delivered: no wake.
     expect(bus.wakeEventsOf(ORCHESTRATOR)).toEqual([]);
     batches[0]!.batch.onSent!(ORCHESTRATOR, batches[0]!.keys);
-    expect(bus.wakeEventsOf(ORCHESTRATOR)).toEqual([stall]);
+    expect(bus.wakeEventsOf(ORCHESTRATOR)).toEqual([danger]);
     expect(bus.wakeEventsOf("agent-other")).toEqual([]);
     await batches[0]!.batch.onTurnEnded!(ORCHESTRATOR, undefined);
     expect(bus.wakeEventsOf(ORCHESTRATOR)).toEqual([]);
@@ -580,6 +588,45 @@ describe("the outcome check, one kind at a time (design §G.3)", () => {
         ["i-1", "missed"],
         ["i-2", "unknown"],
       ]);
+    });
+  });
+
+  describe("govern: the families it concerns fall back under their thresholds within 30 minutes (missions design §9.3)", () => {
+    const MISSION = "mis-0000000010";
+    const MAIN = "agent-main";
+    /** A family's state on the ladder: `step`, with its last action. */
+    const family = (step: number, lastAction: FamilyState["lastAction"] = null): FamilyState => ({ step, since: step === 0 ? null : iso(T0), figures: [], lastAction, mainTurnsAt: null });
+    const reset = (minute: number): FamilyState => family(0, { at: iso(T0 + minute * MIN), kind: "reset", id: null });
+    beforeEach(() => {
+      store().record(interventionOfGovern({ workspaceId: WORKSPACE_ID, missionId: MISSION, mainId: MAIN, step: "nudge", families: ["mess", "drift"], commandId: "c-1" }));
+    });
+
+    it("records a nudge, re-plan or arbitration with its step, mission, families and command, trigger governor, targeting the Main", () => {
+      expect(only()).toMatchObject({ kind: "govern", step: "nudge", trigger: "governor", requestId: null, targetAgentId: MAIN, missionId: MISSION, families: ["mess", "drift"], commandId: "c-1", expected: "figures-clear", windowMs: 30 * MIN });
+    });
+
+    it("met: every family it concerns was reset within the window", () => {
+      createGovernorStore(home).put(MISSION, { mess: reset(10), drift: reset(20), stuck: family(2) });
+      expect(check(T0 + 25 * MIN).map((entry) => entry.outcome)).toEqual(["met"]);
+    });
+
+    it("pending while a family still stands above 0 within the window; missed once it is over, or when a reset came only after it", () => {
+      createGovernorStore(home).put(MISSION, { mess: reset(10), drift: family(2) });
+      expect(check(T0 + 20 * MIN)).toEqual([]);
+      expect(check(T0 + 32 * MIN).map((entry) => entry.outcome)).toEqual(["missed"]);
+      rmSync(home, { recursive: true, force: true });
+      ids = 0;
+      store().record(interventionOfGovern({ workspaceId: WORKSPACE_ID, missionId: MISSION, mainId: MAIN, step: "replan", families: ["mess"], commandId: "c-2" }));
+      createGovernorStore(home).put(MISSION, { mess: reset(40) });
+      expect(check(T0 + 45 * MIN).map((entry) => entry.outcome)).toEqual(["missed"]);
+    });
+
+    it("unknown: an arbitration that concerned no family, once its window is over", () => {
+      rmSync(home, { recursive: true, force: true });
+      ids = 0;
+      store().record(interventionOfGovern({ workspaceId: WORKSPACE_ID, missionId: MISSION, mainId: MAIN, step: "arbitrate", families: [], commandId: "c-3" }));
+      expect(check(T0 + 10 * MIN)).toEqual([]);
+      expect(check(T0 + 32 * MIN).map((entry) => entry.outcome)).toEqual(["unknown"]);
     });
   });
 

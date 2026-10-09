@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTONOMY_DIR_NAME, AUTONOMY_POLICY_FILE, createAutonomyStore } from "../plugin/server/autonomy-store";
-import { answersMessageOf, createQuestionDecisionDelivery } from "../plugin/server/decision-delivery";
+import { createQuestionDecisionDelivery } from "../plugin/server/decision-delivery";
 import { clearMaterialiserMemory, materialiseTurn } from "../plugin/server/decision-materialiser";
 import { handleDecisionsAnswer, settledByKind, type OnDecisionsSettled } from "../plugin/server/decision-rpc";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
@@ -23,11 +23,10 @@ import {
   unverifiedFinishRefusalOf,
   type AutonomyPolicy,
 } from "../plugin/shared/autonomy";
-import { UNVERIFIED_FINISH_INSTEAD } from "../plugin/server/command-authority";
-import { agreementLedger } from "../plugin/shared/autonomy-ledger";
+import { questionIsTheMainsText } from "../plugin/server/orchestrator-decide-tools";
 import type { FallbackIncident, TraceRecord } from "../plugin/shared/contracts";
 import { openingPrediction, type Decision, type DecisionClass } from "../plugin/shared/decisions";
-import { commandBlockOf, parseCommandBlock } from "../plugin/shared/orchestrator-command";
+import { commandBlockOf } from "../plugin/shared/orchestrator-command";
 import { MANAGER, WORKER, WORKSPACE_ID, at, msg, report as reportOf, turn } from "./fixtures/orchestrator-traces";
 
 /**
@@ -36,10 +35,9 @@ import { MANAGER, WORKER, WORKSPACE_ID, at, msg, report as reportOf, turn } from
  * `delegate` cell stays open — nothing answers it by code at open, the
  * recommended predictor is gone —, raises a `decision.opened` asking
  * `bm_decide`, and the Orchestrator's answer (`by: policy`) is delivered
- * through the same hook, exactly as the owner's. Any class may be delegated:
- * at Turbo and Full auto a release, data, security or cost decision too, with
- * the grant its option declares, and a command whose effects' classes are
- * delegated goes on `policy:<class>`.
+ * through the same hook, exactly as the owner's. Since missions design §9.1
+ * `bm_decide` decides a fallback incident only: a Worker's question is its
+ * Main's or the owner's.
  *
  * Every delivery runs for real (`settledByKind` over the question,
  * Orchestrator and fallback deliveries) against a fake SDK and a spying
@@ -320,32 +318,17 @@ describe("a decision opening in a class delegated to the Orchestrator (bm_decide
   const decide = async (decisionId: string, optionKey: string, reason = "The owner chose this the last three times.") =>
     (await decideTools()).call("bm_decide", { decisionId, optionKey, reason });
 
-  it("a Worker's question is not answered at open; it asks the Orchestrator, whose bm_decide reaches the Worker exactly as an owner answer", async () => {
+  it("a Worker's question is not answered at open, and bm_decide leaves it to its Main or the owner (missions design §9.1)", async () => {
     delegate("scope");
     const outcome = await ask(SCOPE_Q1);
     expect(stored(qid(1))).toMatchObject({ status: "open", answer: null });
     expect(outcome.answered).toEqual([]);
     expect(enqueued).toEqual([]);
-    expect(decisionOpenedEventsOf(outcome.opened, autonomy().read())).toEqual([expect.objectContaining({ decisionId: qid(1), asks: "decision" })]);
 
-    const result = await decide(qid(1), "b", "ISO dates sort in the export the accountant reads.");
-    expect(result.ok, result.text).toBe(true);
-    expect(result.text).toContain("The Worker has it now, as the plugin's BM-DELIVERY.");
-    const answered = stored(qid(1));
-    expect(answered).toMatchObject({
-      status: "answered",
-      answer: { by: "policy", via: "inbox", optionKey: "b", class: "scope", reason: "ISO dates sort in the export the accountant reads." },
-      grant: { effects: ["commit"], usedAt: null },
-      delivery: { to: WORKER, kind: `answers:${REQUEST}`, at: NOW.toISOString(), outcome: "sent" },
-    });
-    // Exactly what an owner answer of the same option would have sent: nothing about the policy or the Orchestrator.
-    const asOwner = { ...answered, answer: { by: "owner" as const, via: "inbox" as const, optionKey: "b", words: null, at: NOW.toISOString() } };
-    expect(enqueued).toEqual([{ target: WORKER, kind: `answers:${REQUEST}`, text: answersMessageOf(REQUEST, [asOwner]) }]);
+    expect(await decide(qid(1), "b", "ISO dates sort in the export the accountant reads.")).toEqual({ ok: false, text: `Refused: ${questionIsTheMainsText(qid(1))}.` });
+    expect(stored(qid(1))).toMatchObject({ status: "open", answer: null, grant: null, delivery: null });
+    expect(enqueued).toEqual([]);
     expect(sends).toEqual([]);
-    // The ledger counts it as delegated to the Orchestrator's predictor, never as an owner agreement.
-    const ledger = agreementLedger(decisions().list({ workspaceId: WORKSPACE_ID, statuses: ["answered"] }), { workspaceId: WORKSPACE_ID });
-    expect(ledger.cells).toEqual([]);
-    expect(ledger.delegated).toMatchObject([{ class: "scope", by: "policy", predictor: "orchestrator", count: 1 }]);
   });
 
   it("a fallback incident stays open at the pass, asks the Orchestrator, and bm_decide runs its option through fallback.act", async () => {
@@ -401,54 +384,20 @@ describe("a decision opening in a class delegated to the Orchestrator (bm_decide
     expect(sends).toEqual([]);
   });
 
-  it("at Full auto decides a release or security decision too, granting the option's push, and a push command goes on policy:release (ADR-025)", async () => {
+  it("at Full auto a Worker's release or security question is still its Main's or the owner's; the command builder writes a policy authority approving a release effect (ADR-025)", async () => {
     writePolicyFile(Object.fromEntries(["release", "data", "security", "cost", "reversible-technical", "scope", "preference", "environment", "dependency"].map((c) => [c, delegateCell()])));
-    const outcome = await ask(
+    await ask(
       [
         "Q1: Push the date fix to origin/dev? [class: reversible-technical]",
         "- a: Push it (recommended) [effects: push]",
         "- b: Hold",
-        "Q2: Rotate the API key the tests use? [class: security]",
-        "- a: Rotate it (recommended)",
-        "- b: Keep it",
       ].join("\n"),
     );
-    // Both wake the Orchestrator to decide: no class is the owner's by rule.
-    expect(decisionOpenedEventsOf(outcome.opened, autonomy().read()).map((event) => [event.decisionId, event.asks])).toEqual([
-      [qid(1), "decision"],
-      [qid(2), "decision"],
-    ]);
-    const pushed = await decide(qid(1), "a", "The review passed and the owner pushes fixes to dev.");
-    expect(pushed.ok, pushed.text).toBe(true);
-    expect(stored(qid(1))).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "a", class: "release" }, grant: { effects: ["push"], usedAt: null } });
-    expect((await decide(qid(2), "b")).ok).toBe(true);
-    enqueued = [];
-
-    // A command declaring a push goes out on the policy: release is delegated.
-    const tools = await decideTools();
-    const pushCommand = { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, intent: "release", command: "Push the date fix to origin/dev.", reason: "Delegated." };
-    const sent = await tools.call("bm_send_command", { ...pushCommand, effects: ["push"] });
-    expect(sent.ok, sent.text).toBe(true);
-    expect(parseCommandBlock(enqueued[0]!.text)).toMatchObject({ authority: "policy:release", approved: ["push"] });
-    // The command builder writes a policy authority approving a release effect.
+    expect(await decide(qid(1), "a", "The review passed and the owner pushes fixes to dev.")).toEqual({ ok: false, text: `Refused: ${questionIsTheMainsText(qid(1))}.` });
+    expect(stored(qid(1))).toMatchObject({ status: "open", answer: null, grant: null });
     expect(
       commandBlockOf({ from: "orchestrator", via: "chat", to: "manager", requestId: REQUEST, re: "Push", body: "Push it.", why: "Policy.", intent: "release", effects: ["push"], authority: "policy:release", approved: ["push"] }),
     ).toContain("authority: policy:release");
-  });
-
-  it("at Cruise a release decision is the owner's: not asked of the Orchestrator, bm_decide refused, and a push command needs the owner's decision", async () => {
-    for (const decisionClass of ["reversible-technical", "preference", "scope", "environment", "dependency"] as const) delegate(decisionClass);
-    const outcome = await ask(["Q1: Push the date fix to origin/dev? [class: reversible-technical]", "- a: Push it (recommended) [effects: push]", "- b: Hold"].join("\n"));
-    expect(decisionOpenedEventsOf(outcome.opened, autonomy().read())).toEqual([]);
-    expect(await decide(qid(1), "a")).toEqual({ ok: false, text: `Refused: release is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner.` });
-    expect(stored(qid(1))).toMatchObject({ status: "open", answer: null, grant: null });
-    const tools = await decideTools();
-    for (const effect of ["push", "publish", "deploy", "real-data", "migration", "security", "cost"]) {
-      const sent = await tools.call("bm_send_command", { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, intent: "release", command: "Push the date fix.", reason: "Delegated.", effects: [effect] });
-      expect(sent.ok, effect).toBe(false);
-      expect(sent.text, effect).toContain(`${effect} needs the owner's decision`);
-    }
-    expect(enqueued).toEqual([]);
   });
 });
 
@@ -521,19 +470,6 @@ describe("a finished-unverified request: a delegate cannot act on it as done (de
   }
   const ownerAnswers = (id: string, optionKey: string) =>
     handleDecisionsAnswer({ id, optionKey }, paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled: onSettledHook() });
-  const COMMIT_BODY = "Commit the invoice fix on the feature branch.";
-  const commitAsk = (command: boolean) => ({
-    workspaceId: WORKSPACE_ID,
-    requestId: REQUEST,
-    question: "Commit the invoice fix now?",
-    recommendation: "Yes: the Worker says the tests pass.",
-    separate: true,
-    options: [
-      { label: "Commit the invoice fix", effects: ["commit"], recommended: true, ...(command ? { command: { to: "manager", agentId: MANAGER, intent: "continue", body: COMMIT_BODY } } : {}) },
-      { label: "Hold", effects: ["none"] },
-    ],
-  });
-
   it("the rule: an option acts on the finish when it declares commit, or its command approves commit or releases", () => {
     const option = (effects: Decision["options"][number]["effects"], action?: Decision["options"][number]["action"]) => ({ effects, ...(action === undefined ? {} : { action }) });
     const command = (intent: "continue" | "release", effects: Decision["options"][number]["effects"]) =>
@@ -570,98 +506,18 @@ describe("a finished-unverified request: a delegate cannot act on it as done (de
     expect(stored(qid(1)).answer).toMatchObject({ by: "precedent", optionKey: "a", precedentId: precedent.id });
   });
 
-  it("(a) bm_decide: choosing a commit option is refused — nothing delivered, the decision stays open, the owner's answer is accepted", async () => {
+  it("(a) bm_decide never answers the Worker's commit question; the owner's own answer is accepted and delivered", async () => {
     delegate("reversible-technical");
     await finish(false, 3);
-    await askAfterFinish([COMMIT_Q(1), COMMIT_Q(2).replace("Q2: Commit", "Q2: Also commit")].join("\n"));
+    await askAfterFinish(COMMIT_Q(1));
     expect(stored(qid(1))).toMatchObject({ status: "open", answer: null });
-    const decide = async (id: string, optionKey: string) => (await tools()).call("bm_decide", { decisionId: id, optionKey, reason: "The Worker says the tests pass." });
-
-    const refused = await decide(qid(1), "a");
-    expect(refused).toEqual({ ok: false, text: `Refused: ${UNVERIFIED}; leave decision ${qid(1)} to the owner.` });
+    const refused = await (await tools()).call("bm_decide", { decisionId: qid(1), optionKey: "a", reason: "The Worker says the tests pass." });
+    expect(refused).toEqual({ ok: false, text: `Refused: ${questionIsTheMainsText(qid(1))}.` });
     expect(stored(qid(1))).toMatchObject({ status: "open", answer: null, grant: null, delivery: null });
     expect(enqueued).toEqual([]);
     expect(sends).toEqual([]);
 
-    // An option that does not act on the finish may still be chosen…
-    expect((await decide(qid(2), "b")).ok).toBe(true);
-    expect(stored(qid(2)).answer).toMatchObject({ by: "policy", optionKey: "b" });
-    // …and the owner's own answer to the refused one is accepted and delivered.
-    enqueued = [];
     expect((await ownerAnswers(qid(1), "a")).decision).toMatchObject({ status: "answered", answer: { by: "owner", optionKey: "a" } });
     expect(enqueued.map(({ target, kind }) => [target, kind])).toEqual([[WORKER, `answers:${REQUEST}`]]);
-  });
-
-  it("(a) bm_decide: after a new finished report with every check detected, the delegate may commit again", async () => {
-    delegate("reversible-technical");
-    await finish(false, 3);
-    await askAfterFinish(COMMIT_Q(1));
-    const decide = async () => (await tools()).call("bm_decide", { decisionId: qid(1), optionKey: "a", reason: "The tests passed after the last edit." });
-    expect((await decide()).ok).toBe(false);
-    await finish(true, 4);
-    const allowed = await decide();
-    expect(allowed.ok, allowed.text).toBe(true);
-    expect(stored(qid(1))).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "a" }, grant: { effects: ["commit"] } });
-  });
-
-  it("(b) bm_send_command on policy:<class> approving commit, or with intent release, is refused naming bm_ask_owner; nothing is sent", async () => {
-    delegate("reversible-technical");
-    await finish(false, 3);
-    const tool = await tools();
-    const send = { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, reason: "The Worker finished." };
-    const refusal = `Refused: ${UNVERIFIED}; ${UNVERIFIED_FINISH_INSTEAD}.`;
-    expect(await tool.call("bm_send_command", { ...send, intent: "continue", effects: ["commit"], command: COMMIT_BODY })).toEqual({ ok: false, text: refusal });
-    expect(await tool.call("bm_send_command", { ...send, intent: "release", effects: ["none"], command: "Tag the release." })).toEqual({ ok: false, text: refusal });
-    expect(refusal).toContain("bm_ask_owner");
-    expect(enqueued).toEqual([]);
-    expect(sends).toEqual([]);
-
-    // A command that does not act on the finish still goes on the policy: asking the Worker to prove it, say.
-    const prove = await tool.call("bm_send_command", { ...send, intent: "continue", effects: ["none"], command: "Ask the Worker to run npm test after its last edit and report again." });
-    expect(prove.ok, prove.text).toBe(true);
-    expect(parseCommandBlock(enqueued[0]!.text)).toMatchObject({ authority: "policy:reversible-technical", approved: [] });
-
-    // Once a new finish is detected, the commit goes on the policy again.
-    await finish(true, 4);
-    const commit = await tool.call("bm_send_command", { ...send, intent: "continue", effects: ["commit"], command: COMMIT_BODY });
-    expect(commit.ok, commit.text).toBe(true);
-    expect(parseCommandBlock(enqueued[1]!.text)).toMatchObject({ authority: "policy:reversible-technical", approved: ["commit"] });
-  });
-
-  it("(b) bm_direct_worker on the policy is refused for the Worker's request when it names none", async () => {
-    delegate("reversible-technical");
-    await finish(false, 3);
-    const direct = { workspaceId: WORKSPACE_ID, workerId: WORKER, re: "commit the fix", intent: "continue", effects: ["commit"], command: COMMIT_BODY };
-    expect(await (await tools()).call("bm_direct_worker", direct)).toEqual({ ok: false, text: `Refused: ${UNVERIFIED}; ${UNVERIFIED_FINISH_INSTEAD}.` });
-    expect(await (await tools()).call("bm_direct_worker", { ...direct, requestId: REQUEST, intent: "release", effects: ["none"] })).toEqual({
-      ok: false,
-      text: `Refused: ${UNVERIFIED}; ${UNVERIFIED_FINISH_INSTEAD}.`,
-    });
-    expect(enqueued).toEqual([]);
-    expect(sends).toEqual([]);
-  });
-
-  it("(b) a grant — the owner's answer to the Orchestrator's own decision — is not refused", async () => {
-    delegate("reversible-technical");
-    await finish(false, 3);
-    const tool = await tools();
-    // Asked without a command: the policy leaves it to the owner, who answers it with commit.
-    expect((await tool.call("bm_ask_owner", commitAsk(false))).text).toMatch(/^Asked\. /);
-    const oid = "o:0c7a-1";
-    await ownerAnswers(oid, "a");
-    expect(stored(oid).grant).toMatchObject({ effects: ["commit"], usedAt: null });
-    enqueued = [];
-    const sent = await tool.call("bm_send_command", {
-      workspaceId: WORKSPACE_ID,
-      managerId: MANAGER,
-      requestId: REQUEST,
-      decisionId: oid,
-      intent: "continue",
-      effects: ["commit"],
-      command: COMMIT_BODY,
-      reason: "The owner chose to commit.",
-    });
-    expect(sent.ok, sent.text).toBe(true);
-    expect(parseCommandBlock(enqueued[0]!.text)).toMatchObject({ authority: `decision:${oid}`, approved: ["commit"] });
   });
 });

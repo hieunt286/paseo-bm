@@ -47,7 +47,7 @@ import { UI_DIR_NAME } from "./data-home";
 import { hasOutdatedInstructions } from "./instructions-label";
 import { VERSION_LABEL, createMain, ensureRolesFor, findMain, setupNoticeFor, type ManagerPaseo } from "./manager";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
-import { replaceMain } from "./mission-replace";
+import { replaceMain, type ReplaceMainDeps } from "./mission-replace";
 import { createMissionRoster } from "./mission-roster";
 import { MISSIONS_DIR_NAME, createMissionStore, type Mission } from "./mission-store";
 import { briefLineOf } from "./notices";
@@ -362,6 +362,39 @@ export async function handleMissionEnsure(input: MissionEnsureInput, paseo: Miss
     if (!replaced.ok) logOf(deps)(`[paseo-bm] Main ${main.agentId} replaces ${old}, but the replacement could not complete: ${replaced.reasons.join("; ")}`);
   }
   return { agentId: main.agentId, created: true, replacedMainId: live, toolsNotice: main.toolsNotice };
+}
+
+/**
+ * A code handoff of a Main (missions design §9.5): its successor, created as
+ * `mission.ensure`'s replacement is — in the home, from the brief of §3.5
+ * with `notice` after it, `bm.replaces` = the old Main — then §3.4 steps 2–5
+ * (`replaceMain`, reason `handoff`). Returns the successor's id. Throws as
+ * `createMain` does; a replacement that cannot complete is one log line.
+ */
+export async function handOverMain(
+  mission: Mission,
+  paseo: MissionsPaseo,
+  notice: string,
+  deps: MissionsHomeDeps & { queue?: ReplaceMainDeps["queue"] } = {},
+): Promise<string> {
+  const home = requireDataHome(deps, "hand a Main over");
+  const old = mission.mainId;
+  const { workspaceId: homeWorkspaceId } = await ensureMissionsHome(paseo, deps);
+  const prompt = `${await mainBriefOf(paseo, home, mission)}\n${notice}`;
+  const main = await createMain({ homeWorkspaceId, mission, prompt, reason: "handoff", replaces: old }, managerDeps(paseo, home, mission.missionId, deps));
+  const bindings = deps.bindings?.() ?? undefined;
+  const replaced = await replaceMain(mission.missionId, main.agentId, "handoff", {
+    home,
+    paseo,
+    replaced: old,
+    ...(bindings ? { bindings } : {}),
+    ...(deps.queue !== undefined ? { queue: deps.queue } : {}),
+    ...(deps.cli !== undefined ? { cli: deps.cli } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+    ...(deps.log !== undefined ? { log: deps.log } : {}),
+  });
+  if (!replaced.ok) logOf(deps)(`[paseo-bm] Main ${main.agentId} replaces ${old ?? "none"}, but the replacement could not complete: ${replaced.reasons.join("; ")}`);
+  return main.agentId;
 }
 
 // ---------------------------------------------------------------------------

@@ -86,3 +86,4 @@ Targeted tests per WP by the implementing agents; `npm run build` and `npm run v
 | Date | Who | Change |
 |---|---|---|
 | 2026-10-09 | Claude for hieu.nt10 | Created after the independent design review; `plan-ready-for-beads` PASS |
+| 2026-10-09 | Claude for hieu.nt10 | Phase 2 built and accepted (record `operations/paseo-bm-missions-governor-acceptance-20261009.md`, M-26 0 of 4); from the run: `bm_split_mission` added to WP-204's scope (the owner's decision that a Main's split goes to the governor), ADR-031. Phase 3 waits for the mockup's approval |

@@ -174,6 +174,13 @@ export interface MissionRoster {
   add(missionId: string, init: { requestId: string; workspaceId: string; topic: string; workerId?: string | null }): RosterEntry | null;
   /** Sets a listed request's state; false when it is not listed. Throws when the file cannot be written. */
   setState(missionId: string, requestId: string, state: RosterState): boolean;
+  /**
+   * A split (missions design §9.6): the entries of `requestIds` leave the
+   * roster of `fromMissionId` and join that of `toMissionId` as they are.
+   * Returns the entries moved; one listed in neither is skipped. Throws when a
+   * file cannot be written (the source is put back first).
+   */
+  move(fromMissionId: string, toMissionId: string, requestIds: readonly string[]): RosterEntry[];
 }
 
 /** The roster store of the data folder `home`. Creating it touches nothing on disk. */
@@ -230,6 +237,21 @@ export function createMissionRoster(home: string, deps: MissionRosterDeps = {}):
         return { requests: current.requests.map((request, at) => (at === index ? { ...request, state } : request)) };
       });
       return found;
+    },
+    move(fromMissionId, toMissionId, requestIds) {
+      const wanted = new Set(requestIds);
+      const source = rosterFile(home, fromMissionId);
+      const moved = source.read().requests.filter((entry) => wanted.has(entry.requestId));
+      if (moved.length === 0) return [];
+      const ids = new Set(moved.map((entry) => entry.requestId));
+      source.update((current) => ({ requests: current.requests.filter((entry) => !ids.has(entry.requestId)) }));
+      try {
+        rosterFile(home, toMissionId).update((current) => ({ requests: [...current.requests.filter((entry) => !ids.has(entry.requestId)), ...moved] }));
+      } catch (error) {
+        source.update((current) => ({ requests: [...current.requests, ...moved] }));
+        throw error;
+      }
+      return moved;
     },
   };
 }

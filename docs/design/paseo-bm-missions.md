@@ -474,6 +474,60 @@ Built by beads `bm-missions-9qc3.1`–`.17` and `.27`; acceptance: [operations r
   - `test/setup/no-real-installers.ts` points `PASEO_HOME` at a worker's temporary folder and drops the agent's `PASEO_*` variables, so no test reaches a real daemon. Before this, a suite run inside a Paseo agent could reach the owner's daemon through the `paseo` CLI with fake agent ids.
   - Not yet built: Main answers in the Inbox "Decided for you" digest.
 
+## 17. As built — Phase 2 (2026-10-09)
+
+Built by beads `bm-missions-9qc3.18`–`.24` and `.28`; acceptance: [operations record](../operations/paseo-bm-missions-governor-acceptance-20261009.md). Where this section and §9 differ, this one describes the code.
+
+- **§9.2 figures.** `governor-figures.ts` `governorFiguresOf(snapshot, bounds)` returns `GOVERNOR_FIGURES` entries `{ family, id, value, threshold, op, crossed, detail }` (detail ≤ 200), read from the stores by `readGovernorSnapshot`; recent means the last 24 hours (`GOVERNOR_RECENT_MS`).
+  - mess: `writersOnOneFile`, `workersInOneRepo`, `reAsks`, `dropped`;
+  - overengineering: `processDocsPerCriterion`, `beadsPerFinishedRequest`, `tierRaised`, `reviewBudgetExhausted`, `openApprovals` (open `q:`, `o:` and `m:` cards; a document in Review is not counted);
+  - drift: `mainTurnsSinceCriterion`, `finishedSinceCriterion`, `outsideCharter`;
+  - stuck: `stalled`, `unansweredLinks`, `oldCards`;
+  - budget: requests, Workers, review calls and days, as a percentage of the charter's budget.
+  
+  `mainTurnsSinceCriterion` counts no turns while every done criterion is met or dropped and no request is open: the Main only answers the owner. `workersInOneRepo` counts the live Workers whose request is still open on the roster: a finished Worker left idle for its Main to reuse is no sprawl. Written files are `file` evidence and the files a shell command writes (an output redirection or `tee`, `shellWrittenPathsOf` in `shared/writers-observed.ts`), which the conflicts and the writers alert read too. Both came from the acceptance run.
+
+  The thresholds are `GOVERNOR_BOUNDS` in `shared/coordination.ts`, set as `governor.<name>` through `coordination.set`. Defaults: writersPerFile 2, workersPerRepo 3, reAsks 2, dropped 1, processDocsPerCriterion 3, beadsPerRequest 15, tierRaised 2, reviewExhausted 2, openApprovals 8, mainTurnsSinceCriterion 40, finishedSinceCriterion 6, outsideCharter 1, cardAgeHours 24, budgetPercent 100, windowMinutes 30, windowTurns 5. `dropped` counts nothing yet.
+- **§9.3 the ladder.** `governor-store.ts` keeps `orchestrator/governor.json`, one ladder per mission and family; `ladderStepOf` moves a crossed family 0 → 1 (a `governor` journal line), 1 → 2 (a nudge at the next recomputation), and 2 → 3 (`replan-due`) once both `windowMinutes` and `windowTurns` have passed; a family back under its threshold resets to 0. Steps 1 and 2 run in code: `nudgeCommandOf` is a `BM-COMMAND` with authority `governor:nudge`, no effect, sent to the current Main through `sendCommand` (backstop off, loop guard on); a failed nudge is retried after 10 minutes (`NUDGE_RETRY_MS`). `createGovernor` recomputes at the stall watcher's pass and at each recorded turn.
+  - Every step 2–4 writes an intervention entry: kind `govern` with its `step`, trigger `governor`, expected outcome `figures-clear` (every family the step concerns back at step 0 within 30 minutes). A stop that only the stop step allowed is `kind: stop`, `trigger: governor`. An escalation through `bm_ask_owner` is not a `govern` entry.
+- **§9.4 commands.** `bm_govern { missionId, step: nudge | replan | arbitrate, text ≤ 4000, figures? ≤ 20 }` (`command-authority.ts`): `from: orchestrator`, `to: manager`, `requestId` null, `re: Governor: <step>, mission <code>`, no effect, authority `governor:<step>`, then a `Figures:` block of the named figures read now. It goes only to the current Main of an open mission (`governorTargetRefusalOf`); the loop guard counts per mission (12 in 24 hours, `MISSION_COMMAND_LIMIT_MESSAGE`). The backstop reads the Orchestrator's own words only (`CommandSend.backstopText`): a mission the owner named "Billing" does not read as cost. A replan at step 3 moves the families to `GOVERNOR_STOP_STEP` 4.
+- **§9.1 tools.** The Orchestrator's list, in order: `bm_projects`, `bm_missions`, `bm_request`, `bm_agent_messages`, `bm_govern`, `bm_arbitrate`, `bm_create_main`, `bm_decisions`, `bm_ask_owner`, `bm_decide`, `bm_predict`, `bm_direct_worker`, `bm_repo`, `bm_note`, `bm_findings`, `bm_why`, `bm_reply` (17). `bm_send_command`, `bm_compact` and `bm_handoff` are gone (`orchestrator-coordination-tools.ts` deleted).
+  - `bm_missions { missionId?, closed? }`: each mission's charter, roster, figures (`crossed`, `under`), ladder, open `m:` cards and notes.
+  - `bm_direct_worker` only stops (`intent: stop`, `interrupt: true`, no effect), while a danger signal of the Worker is open or a family of its mission is at the stop step; its Main gets a copy.
+  - `bm_decide` and `bm_predict` answer only `f:` fallback incidents; a `q:` question is the Main's or the owner's.
+  - `bm_ask_owner` prepares a command to a Main only; its effects are information.
+  - `bm_note { workspaceId | missionId, text, replace? }`, exactly one id; mission notes in `orchestrator/notes/missions/<missionId>.json`.
+- **ADR-031.** An answer to an `o:` decision grants nothing (`answerDecision`, `shared/decisions.ts`): `BM-ANSWER` names no grant and a prepared command goes with `approved: none`.
+- **§9.7 events and wakes.** The event bus publishes:
+  - `mission.signal { missionId, family, figures, step: 3 }`, settled when the governor resets the family;
+  - `mission.conflict { missions, workspaceId, area, evidence }`, settled when a mission closes;
+  - `mission.scope { missionId, workspaceId, requestId | null, linkId | null }`, for work outside the charter while `scope-repo` is not delegated and no `m:` card asks it, after `windowMinutes`;
+  - `mission.review { missionId, reason: finished-10 | budget-50 | budget-100 }`;
+  - and keeps `worker.signal danger`.
+  
+  `decision.opened`, `request.finished`, `advice.due` and `threshold.crossed` no longer wake (their data, advice and alerts stay). A mission's events are debounced 15 minutes (`MISSION_WAKE_MS`); the held events and marks are kept in memory, so a reload starts from a fresh baseline. `wakes.json` records each wake's event types and whether a tool acted (`acted`).
+- **§9.6 conflicts and splits.** `governor-conflicts.ts` `createConflictWatch` finds three kinds:
+  - two charters writing one area (a folder, `areaOfFile`) of a shared repo within 7 days (at most 3 areas per pair);
+  - writers of two open missions on one file;
+  - a link into another mission's repo.
+  
+  An area an arbitration already settled is skipped. `orchestrator/arbitrations.json` keeps at most 500 entries `{ id arb-<10 hex>, at, missions, workspaceId, area, owner, reason, commandIds, decisionId }`.
+  - `bm_arbitrate { missions[2], workspaceId, area, owner, reason ≤ 500, goal? ≤ 4000 }` records the entry, writes both journals and tells both Mains with `governor:arbitrate` commands. A `goal` becomes an `m:` card on the other mission (the `arbitration` prepared change); its goal stands until the owner applies it.
+  - `bm_create_main { fromMissionId, name ≤ 80, code, goal ≤ 4000, repos 1–20, requestIds? ≤ 50, reason ≤ 500 }`:
+    - when the source mission's `split` cell is delegated, it runs `executeSplit`: a new mission (`createdBy: orchestrator`, `parentMissionId`, `splitReason`), `roster.move`, both journals, its Main (rolled back on failure), the requests reassigned (registry, bindings, labels) and both Mains told;
+    - otherwise it opens the owner's `m:` card (the `mission-split` prepared change), one per code.
+    
+    It refuses an unknown or closed source, a taken or invalid code, a repo outside the charter, a request not on the roster, a running source Main, more than 2 splits a day (`MAX_SPLITS_PER_DAY`), and an area another mission holds or an arbitration gave away. The owner's tap goes through `decisions.answer` → `governorAnswerRefusalsOf` → `applyGovernorDecision`.
+- **A Main suggests a split** (`bm_split_mission`, `mission-split.ts`). When the owner's new work is another goal, the Main asks the owner. On the owner's yes it calls `bm_split_mission { name, code, goal, repos, requestIds?, reason }` with the bounds of `bm_create_main`; the same refusals apply, except that its own Main may be running, plus a second open suggestion of one code.
+  - It writes a `split-suggested` journal line with the details (`split`), and publishes `mission.split { missionId, code, name, goal, repos, requestIds, reason, at }`. Its key is `mission.split:<missionId>:<code>`; it is dropped once a mission takes the code or the source closes, and it follows the 15-minute mission window.
+  - `bm_missions` lists each mission's open `splitSuggestions`.
+  - The governor decides: `bm_create_main` with the suggestion's fields (run on the `split` cell, else the owner's card), or `bm_govern` to the Main with why.
+  - The open suggestions are read from the journal (`openSplitSuggestionsOf`), an exception to §2.2's "the journal is never a source of state". A suggestion the governor declines stays open until a mission takes the code or the source closes.
+- **§9.5 compaction and handoff in code.** The compaction and handoff runners act at a recorded turn that crosses the owner's threshold (`contextCrossingOf`), within the Coordination settings, without waking the Orchestrator:
+  - a Worker gets `/compact` and the `BM-STATE` brief; its handoff creates the successor in its repo under its Main and on the roster;
+  - a Main that crosses with no compaction possible is handed over once per run (`handOverMain` → `createMain` reason `handoff` → `replaceMain`).
+- **§11 the governor's file.** `plugin/roles/orchestrator.md` is the governor's file (100 lines, 3 limits): it governs the process and the Mains run the work; it reads `bm_missions` before acting; the plugin runs steps 1–2, the governor re-plans on `mission.signal`, escalates with `bm_ask_owner` when the drift persists at step 4, arbitrates on `mission.conflict`, splits with `bm_create_main`, and stops a Worker only on danger or the stop step. It never briefs, corrects or answers a Worker, decides only `f:` incidents, and keeps one `bm_note` per decision by mission or project. Rule 2 says its commands carry no effect and no answer grants one.
+
 ## 14. Revision History
 
 | Date | Author | Change |
@@ -481,3 +535,4 @@ Built by beads `bm-missions-9qc3.1`–`.17` and `.27`; acceptance: [operations r
 | 2026-10-09 | Claude (owner decisions of 2026-10-09; technical choices under the owner's delegation) | Created |
 | 2026-10-09 | Claude (owner's delegation) | Independent review against the code (19 findings) applied: §8 rewritten (the Main decides repo-delegated questions; mission cells a further reach), §3.4 resolve-at-delivery and the store list, §3.3 a cleared conversation is a replacement, §3.6 legacy cases, §4.1 `m:` decisions with prepared changes, `ownerOnly` stored and guarded in English and Vietnamese, the Main's `bm_repo`, §6 rows added (Orchestrator targeting in Phase 1), §13 compatibility corrected, §15 phases with ADR-030 first. `design-ready`: PASS |
 | 2026-10-09 | Claude (owner's delegation) | Phase 1 built (beads bm-missions-9qc3.1–.17, .27) and accepted on an isolated daemon (M-22 0, M-23 1, M-24 0, M-25 0, M-27 0): §16 as built; §2.6 `route`, §4.1 `mission-change` location corrected inline |
+| 2026-10-09 | Claude (owner's delegation) | Phase 2 built (beads bm-missions-9qc3.18–.24, .28) and accepted on an isolated daemon (M-26: 0 of 4 wakes without action): §17 as built; ADR-031 (an `o:` answer grants nothing); the backstop reads the Orchestrator's own words; from the run: shell writes count as written, sprawl counts Workers at work, drift pauses when every criterion is settled, a Main suggests a split with `bm_split_mission` |

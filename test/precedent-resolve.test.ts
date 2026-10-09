@@ -402,14 +402,14 @@ describe("bm_ask_owner", () => {
     expect(answerNoticeOf(stored)).toContain(`precedent: ${standing.id}, the owner's standing answer on "${SUBJECT}"`);
   });
 
-  it("answers a release question by the precedent too (ADR-025), granting its push, and hands it to onSettled", async () => {
+  it("answers a release question by the precedent too (ADR-025), granting nothing (missions design §9.1: an o: answer grants no effect), and hands it to onSettled", async () => {
     const standing = save();
     const onSettled = vi.fn();
     const result = await (await tools(onSettled)).call("bm_ask_owner", ask(SUBJECT, ["push"]));
     expect(result.ok, result.text).toBe(true);
     expect(result.text).toContain(`Answered at once by the owner's precedent ${standing.id}`);
     const { decisionId } = JSON.parse(result.text.slice(result.text.indexOf("{"))) as { decisionId: string };
-    expect(decisions().get(decisionId, DECISION_WS)).toMatchObject({ status: "answered", answer: { by: "precedent", class: "release" }, grant: { effects: ["push"] } });
+    expect(decisions().get(decisionId, DECISION_WS)).toMatchObject({ status: "answered", answer: { by: "precedent", class: "release" }, grant: null });
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
 });

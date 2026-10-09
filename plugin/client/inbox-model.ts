@@ -567,6 +567,7 @@ const INTERVENTION_WHAT: Readonly<Record<InterventionKind, (target: string | nul
   compact: (target) => (target === null ? "Had an agent compact its context" : `Had the ${target} compact its context`),
   handoff: (target) => (target === null ? "Handed an agent's work to a new one" : `Handed the ${target}'s work to a new ${target}`),
   advice: () => "Advised you",
+  govern: (target) => (target === null ? "Told a mission's Main to fix its process" : `Told the ${target} to fix the mission's process`),
 };
 
 /** What a Worker signal said, as the reason of a correction or a stop. */
@@ -597,6 +598,8 @@ function triggerWords(trigger: InterventionTrigger, signal: WorkerSignal | undef
       return "You asked for it in the Orchestrator's chat";
     case "orchestrator":
       return "On the Orchestrator's own look";
+    case "governor":
+      return "A mission's figures crossed their thresholds";
   }
 }
 
@@ -609,6 +612,7 @@ const EXPECTED_WORDS: Readonly<Record<ExpectedOutcome, string>> = {
   "tokens-per-turn-down": "fewer tokens per turn",
   "successor-progresses": "the successor makes progress",
   "owner-answers": "you answer it",
+  "figures-clear": "the figures fall back under their thresholds",
 };
 
 /** Each outcome's word and colour: `unknown` is said as such, never hidden. */

@@ -27,16 +27,16 @@ import { createDecisionThreadStore } from "../plugin/server/decision-thread-stor
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
 import { createQuestionDecisionDelivery } from "../plugin/server/decision-delivery";
 import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrator-decisions";
-import { answerDecision, type Decision } from "../plugin/shared/decisions";
+import type { Decision } from "../plugin/shared/decisions";
 import { parseAnswers } from "../plugin/shared/bm-questions";
 import { DELIVERY_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, STATE_NOTICE_MARKER } from "../plugin/shared/notices";
-import { compactCommandOf, createCompactionRunner } from "../plugin/server/compaction";
-import { createCompactionStore } from "../plugin/server/compaction-store";
-import { createCoordinationStore } from "../plugin/server/coordination-store";
+import { createMissionStore } from "../plugin/server/mission-store";
+import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
+import { createCompactionRunner } from "../plugin/server/compaction";
 import { createHandoffRunner } from "../plugin/server/handoff";
-import { createHandoffStore } from "../plugin/server/handoff-store";
+import { createInterventionStore } from "../plugin/server/intervention-store";
 import { makeDecision } from "./helpers/decisions";
-import type { TraceRecord } from "../plugin/shared/contracts";
+import type { TraceRecord, Usage } from "../plugin/shared/contracts";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, shell, turn } from "./fixtures/orchestrator-traces";
 
 /**
@@ -51,14 +51,12 @@ import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, shell,
  * deleting an agent, any configuration write, any creation but the
  * Orchestrator's on `orchestrator.open { confirmed: true }`, any workspace
  * opened but the Orchestrator's own home, any `send` the path is not allowed
- * (a Manager only for `bm_send_command` on the owner's policy,
- * right after the owner's own message or on an answered decision's grant, for a prepared command the
- * owner picked, and for the copy of a `bm_direct_worker` command; a Worker only
- * for `bm_direct_worker` under the same authority; the Manager or Worker
- * `bm_compact` names only for its `/compact` and `BM-STATE` brief (autonomy
- * design §G.5); the Worker `bm_handoff` names only for its `BM-HANDOFF` note
- * request, and that Worker's Manager only for the handoff `BM-COMMAND`
- * (autonomy design §G.6); the Orchestrator only for
+ * (a Manager only for a mission's `bm_govern` command to its current Main
+ * (missions design §9.4), for a prepared command the owner picked, and for
+ * the copy of a `bm_direct_worker` stop; a Worker only for `bm_direct_worker`'s
+ * stop at once, on the owner's policy, word or answered decision, while its
+ * danger or its mission's governor stop step is open (missions design §9.1);
+ * `bm_compact` and `bm_handoff` are retired from the model (§9.5); the Orchestrator only for
  * the event bus's `BM-EVENTS` (a project in the policy's scope; a Worker question by its own filter) and the owner's
  * `BM-ANSWER` (autonomy design §A.6, §A.8); never a Reviewer), any immediate send to a running Worker without an open danger
  * allowance, any timeline read of an agent that is not `bm-*`, and any use of
@@ -70,25 +68,24 @@ import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, shell,
  *
  * | Item | Where it is proved |
  * |---|---|
- * | REQ-079 a, O-2: a Manager gets only the prepared command of an option the owner picked, or `bm_send_command`'s on the owner's policy, right after the owner's own word in chat (ADR-015) or on a grant; a Worker, Reviewer or other agent nothing, whatever the mode; an earlier build's Autopilot authorises nothing (autonomy design §B.8) | `PATHS` (`sendsTo`), the `bm_send_command` and decision paths |
+ * | REQ-079 a, O-2: a Manager gets only the prepared command of an option the owner picked, a `bm_govern` command as its mission's current Main, or the copy of a stop; a Worker, Reviewer or other agent nothing, whatever the mode; an earlier build's Autopilot authorises nothing (autonomy design §B.8) | `PATHS` (`sendsTo`), the `bm_govern` and decision paths |
  * | REQ-082 c, design §6B.1: every command the plugin delivers, sent now or queued, is a `BM-COMMAND` block from the Orchestrator and carries the limits field | `PATHS` (`limits`, checked on every path by `expectBoundary`) |
  * | REQ-084 a, ADR-016 decision 2: a direct Worker command only on the project's policy or right after the owner's own word (never after a plugin notice, nor on another project's policy), to a Worker only (never a Reviewer, Manager or other agent); every block a Worker gets is `to: worker`, and its Manager has the same block as a copy | the `bm_direct_worker` paths; `expectBoundary` checks the copy on every path |
  * | REQ-084 b: a running Worker's turn is replaced only while its danger allowance is open — not another Worker's, not an expired one | the spy's `send` (every path), the `bm_direct_worker` refusal and interrupt paths |
- * | REQ-085, design §6B.5: a gated command (body or subject) sends and records nothing, on `bm_send_command` and `bm_direct_worker`; a negated mention passes, and no category is allowed any more (Allow… retired, autonomy design §B.8) | the gate paths of `bm_send_command`, the `bm_direct_worker` refusal path |
+ * | REQ-085, design §6B.5: a gated command (body or subject) sends and records nothing, on `bm_govern` and `bm_direct_worker`; a negated mention passes, and no category is allowed any more (Allow… retired, autonomy design §B.8) | the `bm_govern` path, the `bm_direct_worker` refusal path |
  * | Autonomy design §B.8 (the F2 exemption retired): a stop naming the push un-negated is gated like any command, even to the Worker whose danger allowance is open; one whose stop word negates the push passes | the `bm_direct_worker` "stopping a Worker's open danger" path |
  * | REQ-086 a: `bm_repo` stays in the project's folder and never writes | the `bm_repo` path, "bm_repo never writes" |
  * | REQ-083 a (Phase 2, change-007 C1): the Worker watch refreshes and reads only running `bm-*` Workers, of every project for the Inbox alerts; its events and the danger allowance only for a project with a class above `owner` in the policy | "the live watch of running Workers" |
  * | REQ-079 b, REQ-115 b: the Orchestrator gets only `BM-EVENTS` (a decision opened that the policy asks it to decide or predict; for a project in the policy's scope a request finished or stalled, a Worker signal — batched) and `BM-ANSWER`; stalls and Worker signals are Inbox alerts, never messages | `PATHS` (`sendsTo`), "the event bus", "the stall pass" |
- * | Loop guard (design §6A): a 13th command for one request in 24 hours is refused and sends nothing | the `bm_send_command` loop-guard path |
- * | Autonomy design §B.9: a command answering no decision goes out on the owner's policy only when every class of its effects is delegated for its project (`policy:<class>`), never with a hard-owner effect, and the backstop holds whatever the policy | the three policy paths of `bm_send_command` and `bm_direct_worker` |
- * | Autonomy design §B.5: an Orchestrator question the owner's policy answers as it opens sends its prepared command to that Manager only, on `policy:<class>`, the grant spent once; a release question stays open and sends nothing | the policy path of `bm_ask_owner` |
+ * | Loop guard (design §6A): a 13th command for one request in 24 hours is refused and sends nothing | the `bm_direct_worker` loop-guard path |
+ * | Autonomy design §B.9: a command answering no decision goes out on the owner's policy only when every class of its effects is delegated for its project (`policy:<class>`), never with a hard-owner effect, and the backstop holds whatever the policy | the policy paths of `bm_direct_worker` |
+ * | Autonomy design §B.5, ADR-025: the owner's policy never answers an Orchestrator question as it opens; an owner's answer to one grants nothing (missions design §9.1): its prepared command approves no effect | the `bm_ask_owner` paths |
  * | change-004 (ADR-017, the field case of 2026-09-30): a Worker's question has one answer and only the plugin's `BM-DELIVERY` reaches the Worker, each `Qn` once; a command carrying the answer to a stored `Qn` is refused and sends nothing; `bm_decide` answers only a question whose class the owner's policy delegates to the Orchestrator, never a hard-owner one, and its answer reaches the Worker only as that `BM-DELIVERY` (autonomy design §B.5, §B.9, bead t9lm.11) | the `bm_decide` paths; `expectBoundary` (`deliveries`) |
  * | REQ-079 c: no stop, archive, delete, config write; no instruction write (autonomy design §B.8) | the spy + `expectBoundary` after every path |
  * | O-3: an all-`owner` project → no finished, stalled or Worker-signal event and no message to the Orchestrator; a stall is only an Inbox alert | "the stall pass", "the event bus" |
  * | O-4: no Orchestrator agent and no send before the owner starts it | "O-4 — before the user opens the Orchestrator" |
- * | Autonomy design §G.5: `bm_compact` reaches only the Manager or Worker it names, with the provider's `/compact` at its idle moment after a safe point and then the `BM-STATE` brief — never a Reviewer, never a command | the `bm_compact` path (`compaction`), O-4 |
- * | Autonomy design §G.6: `bm_handoff` reaches only the Worker it names, with the `BM-HANDOFF` note request at its idle moment after a safe point, and then that Worker's Manager with one `BM-COMMAND` (`intent: handoff`, `coordination:handoff`, the brief in its body) — never a Reviewer, never a creation, a label or an archive by the plugin | the `bm_handoff` path (`handoff`), O-4 |
  * | Autonomy design §E.2: `bm_why` only reads — the chain behind a decision, a bead or a file — and writes, sends and reads no timeline | the `bm_why` path, O-4 |
+ * | Missions design §9.5, REQ-195 a: the plugin's own compaction and handoff at a crossing Worker's or Main's turn send only the `/compact`, the `BM-STATE` brief and the `BM-HANDOFF` note request, through the queue, create nothing and wake no one | the two code-run paths |
  * | Coverage: every registered RPC and every Orchestrator tool | the two "covers every…" tests |
  *
  * Mutants this suite was run against (2026-09-29, bead muzh.5), each made by
@@ -510,7 +507,9 @@ function earlierAutopilotSettings(allow: readonly string[] = ["security", "relea
 }
 
 /** The refusal of a command no authority covers: the class not delegated, then the owner's missing word (autonomy design §B.9). */
-const NOT_DELEGATED = "reversible-technical is not delegated in this project and the owner has not just told you to send";
+const NOT_DELEGATED = "reversible-technical is not delegated in this project and the owner has not just told you to stop it";
+/** The refusal of a stop while no danger signal of the Worker and no governor stop step of its mission is open (missions design §9.1). */
+const STOP_NOT_OPEN = "a Worker is stopped only while a danger signal of it is open";
 
 /** A host that validates input with each contract before calling the handler, as Paseo's RPC host does. */
 function hostOf(paseo: unknown) {
@@ -871,24 +870,18 @@ describe("the event bus: only BM-EVENTS, only to the Orchestrator, a finished st
     expectBoundary();
   });
 
-  it("a class above owner: a question and a finished step reach the Orchestrator as one BM-EVENTS message, once; setting the policy itself sends nothing", async () => {
+  it("a class above owner: a delegated question and a finished step wake nobody, retired as wakes (missions design §9.1); setting the policy itself sends nothing", async () => {
     vi.useFakeTimers({ now: NOW });
     seedOrchestrator();
-    fake.policy.sendTo.add(ORCHESTRATOR_ID);
     ownerDelegatesToOrchestrator();
     expect(fake.sends).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
 
-    const first = await eventBus.turnRecorded(finishedManagerRecord(), [openQuestion()], fake.paseo);
-    expect(first.published).toEqual([`decision.opened:q:${REQUEST_ID}:Q1`, `request.finished:${WORKSPACE_ID}:${REQUEST_ID}@${at(8)}`]);
-    // The same turn recorded again: nothing new.
-    await expect(eventBus.turnRecorded(finishedManagerRecord(), [openQuestion()], fake.paseo)).resolves.toMatchObject({ published: [] });
+    await expect(eventBus.turnRecorded(finishedManagerRecord(), [openQuestion()], fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
     await turnEnded(managerEnded());
     await turnEnded(workerEnded());
-
-    expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text)])).toEqual([[ORCHESTRATOR_ID, "BM-EVENTS"]]);
-    expect(fake.sends[0]!.text.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(2);
-    expectBoundary({ sendsTo: [ORCHESTRATOR_ID] });
+    expect(fake.sends).toEqual([]);
+    expectBoundary();
   });
 
   it("a Reviewer's turn is never a request.finished event (a Worker's own finish is, design §7.17.8 i), and a Manager turn without a report is no event at all (a Manager's turn wakes nobody)", async () => {
@@ -911,7 +904,7 @@ describe("the event bus: only BM-EVENTS, only to the Orchestrator, a finished st
 
   it("a class above owner but no Orchestrator: nothing is queued, sent or created (O-4)", async () => {
     ownerScopes();
-    await expect(eventBus.turnRecorded(finishedManagerRecord(), [openQuestion()], fake.paseo)).resolves.toMatchObject({ status: "no-orchestrator" });
+    await expect(eventBus.turnRecorded(finishedManagerRecord(), [openQuestion()], fake.paseo)).resolves.toMatchObject({ status: "none", published: [] });
     expect(fake.creates).toEqual([]);
     expectBoundary();
   });
@@ -977,11 +970,8 @@ describe("the live watch of running Workers (design §6B.3)", () => {
     await expect(stallWatcher.workerPass()).resolves.toMatchObject({ raised: [], allowances: [] });
 
     expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text)])).toEqual([[ORCHESTRATOR_ID, "BM-EVENTS"]]);
-    expect(fake.sends[0]!.text.split("\n").filter((line) => line.startsWith("- ")).map((line) => line.split(" — ")[0])).toEqual([
-      "- worker.signal stuck",
-      "- worker.signal danger",
-      "- worker.signal heavy",
-    ]);
+    // Only danger wakes it: stuck and heavy are retired as wakes (missions design §9.7, §9.1).
+    expect(fake.sends[0]!.text.split("\n").filter((line) => line.startsWith("- ")).map((line) => line.split(" — ")[0])).toEqual(["- worker.signal danger"]);
     // Besides the Orchestrator's own chat (read before it is woken, design §6B.6), only the watched Worker's timeline.
     expect(new Set(fake.reads.filter((id) => id !== ORCHESTRATOR_ID))).toEqual(new Set([WORKER]));
     expect(new Set(fake.refreshes.filter((id) => id !== ORCHESTRATOR_ID))).toEqual(new Set([WORKER]));
@@ -1003,7 +993,7 @@ interface BoundaryPath {
   tool?: string;
   /** The bm-orchestrator agents the path creates (orchestrator.open with confirmed: true). */
   creates?: number;
-  /** The only agents the path may send to: a Manager (bm_send_command, a prepared command, a direct command's copy), a Worker (bm_direct_worker) or the Orchestrator (BM-EVENTS, BM-ANSWER). */
+  /** The only agents the path may send to: a Manager (bm_govern, a prepared command, a stop's copy), a Worker (bm_direct_worker) or the Orchestrator (BM-EVENTS, BM-ANSWER). */
   sendsTo?: readonly string[];
   /** What the path sends the Manager or the Worker is the Orchestrator's (its tools, or a command it prepared): each block carries the limits. Otherwise none does. */
   limits?: boolean;
@@ -1017,6 +1007,28 @@ interface BoundaryPath {
 }
 
 const ORCHESTRATOR_ID = "agent-orchestrator-main";
+
+/** A Claude turn's usage: `read` tokens read in the turn (input + cached). */
+const claudeUsage = (read: number): Usage => ({
+  inputTokens: 1_000,
+  cachedInputTokens: read - 1_000,
+  outputTokens: 2_000,
+  costUsd: null,
+  costBasis: "unavailable",
+  model: "claude-opus-5",
+  pricesUpdatedAt: null,
+});
+
+/**
+ * A recorded turn handed to the plugin's own compaction and handoff runners,
+ * in the order the collector's `onRecorded` runs them (`index.server.ts`),
+ * through the shared notice queue (missions design §9.5).
+ */
+async function codeRunTurn(record: TraceRecord, items: readonly unknown[] = []): Promise<void> {
+  const event = { agent: { id: record.agentId }, turnId: record.turnId, timeline: items };
+  await createCompactionRunner({ home: () => home, now: () => NOW, log: () => {} }).turnRecorded(event, record, fake.paseo);
+  await createHandoffRunner({ home: () => home, now: () => NOW, log: () => {} }).turnRecorded(event, record, fake.paseo);
+}
 
 /** Every command the Orchestrator's store records. */
 const allCommands = () => createOrchestratorStore(home).listCommands();
@@ -1061,24 +1073,19 @@ const ownerMessage = (text: string, when: string): Entry => ({ item: { type: "us
 const EVENTS_NOTICE = `BM-EVENTS\nFrom the paseo-bm plugin, not the owner: 1 event, oldest first. Look before you act; when nothing needs doing, do nothing.\n- request.stalled idle-unfinished — project ${WORKSPACE_ID}, request ${REQUEST_ID}, since ${at(3)}. Look with bm_request.`;
 /** A plugin notice in the Orchestrator's chat: the notice queue sends through the app's path, so it carries one too. */
 const pluginNotice = (text: string, when: string): Entry => ({ item: { type: "user_message", text, clientMessageId: `n-${when}` }, timestamp: when });
-/** What `bm_send_command` asks the Manager for, in the boundary paths. */
-const SEND = { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST_ID, intent: "continue", effects: ["none"], command: "Continue with Q2.", reason: "Nobody runs." };
-/** The block `bm_send_command` delivers for `SEND` (design §6B.1, autonomy design §A.7): the Orchestrator's, via chat, with its limits; on the owner's word unless another authority is given. */
-const sendBlock = (overrides: Partial<CommandInput> = {}) =>
-  commandBlockOf({ from: "orchestrator", via: "chat", to: "manager", requestId: REQUEST_ID, re: SEND.command, body: SEND.command, why: SEND.reason, intent: "continue", ...overrides });
-/** What `bm_direct_worker` asks the running Worker, in the boundary paths. */
-const DIRECT = {
+/** What `bm_direct_worker` stops the running Worker with, in the boundary paths (missions design §9.1: only a stop at once). */
+const STOP = {
   workspaceId: WORKSPACE_ID,
   workerId: WORKER,
   requestId: REQUEST_ID,
-  re: "answer to Q1",
-  intent: "answer",
-  effects: ["none"],
-  command: "BM-ANSWERS\nQ1: use dd/mm/yyyy.",
-  why: "The owner chose it.",
+  re: "stop at once",
+  intent: "stop",
+  interrupt: true,
+  command: "Stop now and wait for your Main; change nothing more.",
+  why: "Its danger signal is open.",
 };
-const directBlock = (overrides: Partial<CommandInput> = {}) =>
-  commandBlockOf({ from: "orchestrator", via: "chat", to: "worker", requestId: REQUEST_ID, re: DIRECT.re, body: DIRECT.command, why: DIRECT.why, intent: "answer", ...overrides });
+const stopBlock = (overrides: Partial<CommandInput> = {}) =>
+  commandBlockOf({ from: "orchestrator", via: "chat", to: "worker", requestId: REQUEST_ID, re: STOP.re, body: STOP.command, why: STOP.why, intent: "stop", ...overrides });
 /** The refusal of a text that shows a release the command does not declare (autonomy design §A.7). */
 const RELEASE_UNDECLARED = "the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner";
 
@@ -1134,47 +1141,37 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "the stall pass with a class above owner tells the Orchestrator only, once, in BM-EVENTS",
+    name: "the stall pass with a class above owner: an Inbox alert, nobody woken (request.stalled is retired as a wake, missions design §9.1)",
     rpc: null,
-    sendsTo: [ORCHESTRATOR_ID],
     run: async () => {
       vi.useFakeTimers({ now: NOW });
       seedOrchestrator();
       fake.table.get(WORKER)!.status = "idle";
-      fake.policy.sendTo.add(ORCHESTRATOR_ID);
-      ownerScopes();
-      stallWatcher.usePaseo(fake.paseo);
-      stallWatcher.start();
-      await vi.advanceTimersByTimeAsync(60 * 1000);
-      fake.table.get(ORCHESTRATOR_ID)!.status = "idle";
-      await vi.advanceTimersByTimeAsync(60 * 1000);
-      stallWatcher.stop();
-      expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text)])).toEqual([[ORCHESTRATOR_ID, "BM-EVENTS"]]);
-      expect(fake.sends[0]!.text).toContain(`- request.stalled idle-unfinished — project ${WORKSPACE_ID}, request ${REQUEST_ID}`);
-      expect(fake.reads.filter((id) => id !== ORCHESTRATOR_ID)).toEqual([]);
-    },
-  },
-  {
-    name: "the stall pass with a class above owner replaces an outdated Orchestrator with exactly one bm-orchestrator agent, and tells only the new one",
-    rpc: null,
-    creates: 1,
-    sendsTo: ["agent-orchestrator-1"],
-    run: async () => {
-      vi.useFakeTimers({ now: NOW });
-      // Opened before its instructions were labelled: Paseo keeps the old system prompt (design §3.3).
-      seedOrchestrator([], { "bm.role": "orchestrator", "bm.orchestrator": "main" });
-      fake.table.get(WORKER)!.status = "idle";
-      fake.policy.create = true;
-      fake.policy.sendTo.add("agent-orchestrator-1");
       ownerScopes();
       stallWatcher.usePaseo(fake.paseo);
       stallWatcher.start();
       await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
       stallWatcher.stop();
-      expect(fake.creates).toHaveLength(1);
-      expect(fake.creates[0]!.config.provider.split("/")[0]).toBe(ORCHESTRATOR_PROVIDER_ID);
-      expect(fake.creates[0]!.labels).toMatchObject(CURRENT_ORCHESTRATOR_LABELS);
-      expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text)])).toEqual([["agent-orchestrator-1", "BM-EVENTS"]]);
+      expect(createAlertStore(home).list({ open: true })).toMatchObject([{ kind: "request-stalled", subject: REQUEST_ID }]);
+      expect(fake.sends).toEqual([]);
+      expect(fake.reads.filter((id) => id !== ORCHESTRATOR_ID)).toEqual([]);
+    },
+  },
+  {
+    name: "the stall pass with a class above owner and an outdated Orchestrator: nothing replaced or told, since a stall wakes nobody (missions design §9.1)",
+    rpc: null,
+    run: async () => {
+      vi.useFakeTimers({ now: NOW });
+      // Opened before its instructions were labelled: Paseo keeps the old system prompt (design §3.3).
+      seedOrchestrator([], { "bm.role": "orchestrator", "bm.orchestrator": "main" });
+      fake.table.get(WORKER)!.status = "idle";
+      ownerScopes();
+      stallWatcher.usePaseo(fake.paseo);
+      stallWatcher.start();
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+      stallWatcher.stop();
+      expect(fake.creates).toEqual([]);
+      expect(fake.sends).toEqual([]);
       // The old one stays: not archived, not messaged.
       expect(fake.table.get(ORCHESTRATOR_ID)!.archivedAt).toBeNull();
     },
@@ -1232,332 +1229,139 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "tool bm_send_command is refused without the owner's policy and word, right after a plugin notice, and to a Worker or Reviewer even on the policy",
+    name: "tool bm_govern sends the mission's current Main one governor command, with no effect and the limits, and nothing to anyone else; an unknown mission is refused (missions design §9.4)",
     rpc: null,
-    tool: "bm_send_command",
-    run: async () => {
-      // No Orchestrator, then one whose latest inbound message is the plugin's BM-EVENTS after the owner's word.
-      expect(await callTool("bm_send_command", SEND)).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
-      seedOrchestrator([ownerMessage("Send it.", T(0)), assistantMessage("Proposed.", T(1)), pluginNotice(EVENTS_NOTICE, T(2))]);
-      expect(await callTool("bm_send_command", SEND)).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
-      ownerDelegatesAll();
-      for (const target of [WORKER, REVIEWER, ORCHESTRATOR_ID, STRANGER]) {
-        expect(await callTool("bm_send_command", { ...SEND, managerId: target })).toMatchObject({ isError: true, text: expect.stringContaining("is not a paseo-bm Manager") });
-      }
-      expect(createOrchestratorStore(home).listCommands()).toEqual([]);
-    },
-  },
-  {
-    name: "tool bm_send_command and bm_direct_worker with an earlier build's Autopilot on and every category allowed, nothing delegated and no owner's word: refused, nothing sent (autonomy design §B.8)",
-    rpc: null,
-    tool: "bm_send_command",
-    run: async () => {
-      earlierAutopilotSettings();
-      seedOrchestrator([pluginNotice(EVENTS_NOTICE, T(0))]);
-      for (const [tool, args] of [["bm_send_command", SEND], ["bm_direct_worker", DIRECT]] as const) {
-        expect(await callTool(tool, args), tool).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
-      }
-      expect(allCommands()).toEqual([]);
-    },
-  },
-  {
-    name: "tool bm_send_command right after the owner's own message sends to that Manager only, recorded with source chat",
-    rpc: null,
-    tool: "bm_send_command",
+    tool: "bm_govern",
     sendsTo: [MANAGER],
     limits: true,
     run: async () => {
-      seedOrchestrator([pluginNotice(EVENTS_NOTICE, T(0)), assistantMessage("Q1 waits for you.", T(1)), ownerMessage("Chốt dd/mm/yyyy, gửi đi.", T(2))]);
-      fake.policy.sendTo.add(MANAGER);
-      expect((await callTool("bm_send_command", { ...SEND, re: "answer to Q1", command: "Q1: use dd/mm/yyyy." })).isError).toBe(false);
-      expect(fake.sends).toEqual([{ id: MANAGER, text: sendBlock({ re: "answer to Q1", body: "Q1: use dd/mm/yyyy." }) }]);
-      expect(allCommands()).toMatchObject([{ status: "sent", source: "chat" }]);
-      // Only the Orchestrator's own chat was read for the check; no Worker, Reviewer or stranger.
-      expect(fake.reads).toEqual([ORCHESTRATOR_ID]);
-    },
-  },
-  {
-    name: "tool bm_send_command on the owner's policy to a running Manager: queued, delivered at that Manager's turn end only",
-    rpc: null,
-    tool: "bm_send_command",
-    sendsTo: [MANAGER],
-    limits: true,
-    run: async () => {
-      ownerDelegatesAll();
-      fake.table.get(MANAGER)!.status = "running";
-      const answer = await callTool("bm_send_command", SEND);
-      expect(answer).toMatchObject({ isError: false, text: expect.stringMatching(/^Queued\./) });
+      const made = createMissionStore(home, { now: () => NOW }).create({ code: "DATES", name: "Dates", goal: "Fix the date format.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER });
+      if (!made.ok) throw new Error(made.reasons.join("; "));
+      expect(await callTool("bm_govern", { missionId: "mis-0000000099", step: "nudge", text: "Re-plan." })).toMatchObject({ isError: true, text: expect.stringContaining("no mission mis-0000000099") });
+      expect(await callTool("bm_govern", { missionId: made.mission.missionId, step: "nudge", text: "Push the fix now." })).toMatchObject({ isError: true, text: expect.stringContaining(RELEASE_UNDECLARED) });
       expect(fake.sends).toEqual([]);
-      await turnEnded(workerEnded());
-      expect(fake.sends).toEqual([]);
-      fake.table.get(MANAGER)!.status = "idle";
       fake.policy.sendTo.add(MANAGER);
-      await turnEnded(managerEnded());
-      expect(fake.sends).toEqual([{ id: MANAGER, text: sendBlock({ authority: "policy:reversible-technical" }) }]);
-      expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ source: "chat", outcome: "queued" }]);
-    },
-  },
-  {
-    name: "tool bm_send_command with every class delegated for another project only, and a plugin notice after the owner's word: refused",
-    rpc: null,
-    tool: "bm_send_command",
-    run: async () => {
-      ownerDelegatesAll("wks-other");
-      // The owner spoke, but the Orchestrator's latest inbound message is the plugin's: not the owner's word.
-      seedOrchestrator([ownerMessage("Send it.", T(0)), pluginNotice(EVENTS_NOTICE, T(1)), assistantMessage("Proposed.", T(2))]);
-      expect(await callTool("bm_send_command", SEND)).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
-      expect(createOrchestratorStore(home).listCommands()).toEqual([]);
-    },
-  },
-  {
-    name: "tool bm_send_command on the owner's policy (reversible-technical delegated; no owner's word): to that Manager only, policy:reversible-technical, with the limits",
-    rpc: null,
-    tool: "bm_send_command",
-    sendsTo: [MANAGER],
-    limits: true,
-    run: async () => {
-      // The owner's own setting (autonomy.set); what the tool itself writes is checked from here on.
-      createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
-      before = { ...before, data: dataOutsideStores() };
-      fake.policy.sendTo.add(MANAGER);
-      expect(await callTool("bm_send_command", SEND)).toMatchObject({ isError: false, text: expect.stringContaining('"authority": "policy:reversible-technical"') });
-      expect(fake.sends).toEqual([{ id: MANAGER, text: sendBlock({ via: "chat", authority: "policy:reversible-technical" }) }]);
-      expect(allCommands()).toMatchObject([{ managerId: MANAGER, status: "sent", source: "chat" }]);
-      // No Orchestrator's chat is read: the policy is the authority, not the owner's word.
+      expect((await callTool("bm_govern", { missionId: made.mission.missionId, step: "replan", text: "Your Workers re-ask the same question: settle it in one line." })).isError).toBe(false);
+      expect(fake.sends.map((sent) => [sent.id, parseCommandBlock(sent.text)])).toEqual([
+        [MANAGER, expect.objectContaining({ from: "orchestrator", to: "manager", authority: "governor:replan", effects: [], approved: [] })],
+      ]);
+      expect(allCommands()).toMatchObject([{ managerId: MANAGER, missionId: made.mission.missionId }]);
       expect(fake.reads).toEqual([]);
     },
   },
   {
-    name: "tool bm_send_command and bm_direct_worker in a project with no delegated class (another project's delegation aside): refused, naming the class",
+    name: "tool bm_missions reads the missions with their figures and ladder, and writes, sends and reads no timeline (missions design §9.1)",
     rpc: null,
-    tool: "bm_direct_worker",
+    tool: "bm_missions",
     run: async () => {
-      createAutonomyStore(home).set({ workspaceId: "wks-other", class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
-      createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "shadow" }, NOW.toISOString());
+      expect(createMissionStore(home, { now: () => NOW }).create({ code: "DATES", name: "Dates", goal: "Fix the date format.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER }).ok).toBe(true);
       before = { ...before, data: dataOutsideStores() };
-      seedOrchestrator([ownerMessage("Send it.", T(0)), pluginNotice(EVENTS_NOTICE, T(1))]);
-      for (const [tool, args] of [["bm_send_command", SEND], ["bm_direct_worker", DIRECT]] as const) {
-        expect(await callTool(tool, args), tool).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
-      }
+      const read = await callTool("bm_missions", {});
+      expect(read.isError).toBe(false);
+      expect(JSON.parse(read.text)).toMatchObject({ missions: [{ code: "DATES", mainId: MANAGER }] });
+      expect(allCommands()).toEqual([]);
+      expect(fake.reads).toEqual([]);
+    },
+  },
+  {
+    name: "tool bm_arbitrate records the area's owner and tells the Mains with governor commands, with no effect and the limits; a goal change is only the owner's card; a bad pair is refused and sends nothing (missions design §9.6)",
+    rpc: null,
+    tool: "bm_arbitrate",
+    sendsTo: [MANAGER],
+    limits: true,
+    run: async () => {
+      const missions = createMissionStore(home, { now: () => NOW });
+      const owner = missions.create({ code: "DATES", name: "Dates", goal: "Fix the date format.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER });
+      const loser = missions.create({ code: "BILL", name: "Billing", goal: "Rework the invoices.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: null });
+      if (!owner.ok || !loser.ok) throw new Error("missions not created");
+      const pair = [owner.mission.missionId, loser.mission.missionId];
+      const input = { missions: pair, workspaceId: WORKSPACE_ID, area: "src/dates", owner: owner.mission.missionId, reason: "Dates owns the date helpers." };
+      expect(await callTool("bm_arbitrate", { ...input, missions: [pair[0], "mis-0000000099"] })).toMatchObject({ isError: true, text: expect.stringContaining("no mission mis-0000000099") });
+      expect(await callTool("bm_arbitrate", { ...input, owner: "mis-0000000099" })).toMatchObject({ isError: true, text: expect.stringContaining("owner: must be one of the two missions") });
+      expect(fake.sends).toEqual([]);
+      fake.policy.sendTo.add(MANAGER);
+      const told = await callTool("bm_arbitrate", { ...input, goal: "Rework the invoices, leaving the date helpers to Dates." });
+      expect(told.isError).toBe(false);
+      // Billing has no Main yet: only the Dates Main is told; Billing's goal waits on the owner's card. The backstop
+      // reads the Orchestrator's words only, so the owner's mission name "Billing" does not read as cost.
+      expect(told.text).toContain("the Main of DATES is told");
+      expect(fake.sends.map((sent) => [sent.id, parseCommandBlock(sent.text)])).toEqual([
+        [MANAGER, expect.objectContaining({ from: "orchestrator", to: "manager", authority: "governor:arbitrate", effects: [], approved: [] })],
+      ]);
+      expect(createMissionDecisionStore(home).list(loser.mission.missionId)).toMatchObject([{ status: "open" }]);
+      expect(missions.get(loser.mission.missionId)!.charter.goal).toBe("Rework the invoices.");
+      expect(fake.creates).toEqual([]);
+      expect(fake.reads).toEqual([]);
+    },
+  },
+  {
+    name: "tool bm_create_main without the mission's split cell only opens the owner's card: it creates no mission, no agent and sends nothing; a bad split is refused (missions design §9.6)",
+    rpc: null,
+    tool: "bm_create_main",
+    run: async () => {
+      const missions = createMissionStore(home, { now: () => NOW });
+      const source = missions.create({ code: "DATES", name: "Dates", goal: "Fix the date format and rework the invoices.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER });
+      if (!source.ok) throw new Error(source.reasons.join("; "));
+      const split = { fromMissionId: source.mission.missionId, name: "Invoices", code: "INV", goal: "Rework the invoices.", repos: [WORKSPACE_ID], reason: "Two goals in one mission." };
+      expect(await callTool("bm_create_main", { ...split, fromMissionId: "mis-0000000099" })).toMatchObject({ isError: true });
+      expect(await callTool("bm_create_main", { ...split, code: "DATES" })).toMatchObject({ isError: true });
+      const asked = await callTool("bm_create_main", split);
+      expect(asked).toMatchObject({ isError: false, text: expect.stringContaining("the owner's") });
+      expect(createMissionDecisionStore(home).list(source.mission.missionId)).toMatchObject([{ status: "open" }]);
+      expect(missions.byCode("INV")).toBeNull();
+      expect(missions.list()).toHaveLength(1);
+      expect(fake.creates).toEqual([]);
+      expect(fake.sends).toEqual([]);
       expect(allCommands()).toEqual([]);
     },
   },
   {
-    name: "tool bm_send_command and bm_direct_worker with every class that may be delegated delegated: a hard-owner effect still needs a grant, and a text showing git push under effects none is refused by the backstop",
-    rpc: null,
-    tool: "bm_send_command",
-    run: async () => {
-      for (const decisionClass of ["dependency", "environment", "scope", "preference", "reversible-technical"] as const) {
-        createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: decisionClass, mode: "delegate", confirmed: true }, NOW.toISOString());
-      }
-      before = { ...before, data: dataOutsideStores() };
-      for (const effect of ["push", "deploy", "real-data", "security", "cost"]) {
-        expect(await callTool("bm_send_command", { ...SEND, intent: "release", effects: [effect] }), effect).toMatchObject({
-          isError: true,
-          text: expect.stringContaining(`${effect} needs the owner's decision`),
-        });
-      }
-      expect(await callTool("bm_send_command", { ...SEND, command: "Run git push origin main." })).toMatchObject({ isError: true, text: expect.stringContaining(RELEASE_UNDECLARED) });
-      expect(await callTool("bm_direct_worker", { ...DIRECT, command: "Commit it, then git push." })).toMatchObject({ isError: true, text: expect.stringContaining(RELEASE_UNDECLARED) });
-      expect(allCommands()).toEqual([]);
-    },
-  },
-  {
-    name: "tool bm_direct_worker is refused without the owner's policy and word, to a Reviewer, a Manager or another agent even on the policy, on a big decision, and for an interrupt with no open danger",
+    name: "tool bm_direct_worker is refused for anything but a stop at once, without an open danger signal or stop step, without the owner's policy and word, and to a Reviewer, a Manager or another agent",
     rpc: null,
     tool: "bm_direct_worker",
     run: async () => {
-      expect(await callTool("bm_direct_worker", DIRECT)).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
-      ownerDelegatesAll();
-      for (const target of [REVIEWER, MANAGER, STRANGER]) {
-        expect(await callTool("bm_direct_worker", { ...DIRECT, workerId: target })).toMatchObject({ isError: true, text: expect.stringContaining("is not a paseo-bm Worker") });
-      }
-      expect(await callTool("bm_direct_worker", { ...DIRECT, command: "Deploy it to production now." })).toMatchObject({
-        isError: true,
-        text: expect.stringContaining(RELEASE_UNDECLARED),
-      });
-      // Declared, the deploy still needs the owner's decision: the policy does not cover it.
-      expect(await callTool("bm_direct_worker", { ...DIRECT, intent: "release", effects: ["deploy"], command: "Deploy it to production now." })).toMatchObject({
-        isError: true,
-        text: expect.stringContaining("deploy needs the owner's decision"),
-      });
-      expect(await callTool("bm_direct_worker", { ...DIRECT, interrupt: true })).toMatchObject({
-        isError: true,
-        text: expect.stringContaining("interrupt is allowed only while a danger signal of this Worker is open"),
-      });
-      // An allowance of another Worker, or one opened more than 10 minutes ago, allows no interrupt either.
+      earlierAutopilotSettings();
+      seedOrchestrator([ownerMessage("Stop it.", T(0)), pluginNotice(EVENTS_NOTICE, T(1))]);
+      expect(await callTool("bm_direct_worker", { ...STOP, interrupt: false })).toMatchObject({ isError: true, text: expect.stringContaining("only stops a Worker at once") });
+      expect(await callTool("bm_direct_worker", { ...STOP, intent: "redirect" })).toMatchObject({ isError: true, text: expect.stringContaining("input.intent: must be one of stop") });
+      // No allowance; another Worker's, or one opened more than 10 minutes ago, allows no stop either.
+      expect(await callTool("bm_direct_worker", STOP)).toMatchObject({ isError: true, text: expect.stringContaining(STOP_NOT_OPEN) });
       createOrchestratorStore(home).openDangerAllowance(WORKSPACE_ID, "agent-worker-other");
       createOrchestratorStore(home, { now: () => new Date(Date.now() - 11 * 60 * 1000) }).openDangerAllowance(WORKSPACE_ID, WORKER);
-      expect(createOrchestratorStore(home).isDangerOpen(WORKSPACE_ID, WORKER)).toBe(false);
-      expect(await callTool("bm_direct_worker", { ...DIRECT, interrupt: true })).toMatchObject({
-        isError: true,
-        text: expect.stringContaining("interrupt is allowed only while a danger signal of this Worker is open"),
-      });
+      expect(await callTool("bm_direct_worker", STOP)).toMatchObject({ isError: true, text: expect.stringContaining(STOP_NOT_OPEN) });
+      // With the danger open: the owner's word was followed by a plugin notice, and no class is delegated here (another project's aside).
+      createAutonomyStore(home).set({ workspaceId: "wks-other", class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
+      before = { ...before, data: dataOutsideStores() };
+      createOrchestratorStore(home).openDangerAllowance(WORKSPACE_ID, WORKER);
+      expect(await callTool("bm_direct_worker", STOP)).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
+      expect(fake.reads).toEqual([ORCHESTRATOR_ID]);
+      ownerDelegatesAll();
+      for (const target of [REVIEWER, MANAGER, STRANGER]) {
+        expect(await callTool("bm_direct_worker", { ...STOP, workerId: target })).toMatchObject({ isError: true, text: expect.stringContaining("is not a paseo-bm Worker") });
+      }
+      expect(await callTool("bm_direct_worker", { ...STOP, command: "Stop, then deploy it to production." })).toMatchObject({ isError: true, text: expect.stringContaining(RELEASE_UNDECLARED) });
       expect(createOrchestratorStore(home).listCommands()).toEqual([]);
     },
   },
   {
-    name: "tool bm_direct_worker with nothing delegated: refused right after a plugin notice, and with every class delegated for another project only",
-    rpc: null,
-    tool: "bm_direct_worker",
-    run: async () => {
-      ownerDelegatesAll("wks-other");
-      // The owner spoke, but the latest inbound message is the plugin's Worker signal: not the owner's word.
-      seedOrchestrator([ownerMessage("Handle it.", T(0)), pluginNotice(EVENTS_NOTICE, T(1))]);
-      expect(await callTool("bm_direct_worker", DIRECT)).toMatchObject({ isError: true, text: expect.stringContaining(NOT_DELEGATED) });
-      expect(allCommands()).toEqual([]);
-      expect(fake.reads).toEqual([ORCHESTRATOR_ID]);
-    },
-  },
-  {
-    name: "tool bm_direct_worker right after the owner's own message, nothing delegated: queued for the Worker, the copy to its Manager, via chat",
+    name: "tool bm_direct_worker right after the owner's own message, the Worker's danger open: the stop at once to that Worker, the copy to its Manager",
     rpc: null,
     tool: "bm_direct_worker",
     sendsTo: [WORKER, MANAGER],
     limits: true,
     run: async () => {
-      seedOrchestrator([pluginNotice(EVENTS_NOTICE, T(0)), ownerMessage("Tell the Worker to stop retrying the test.", T(1))]);
-      fake.policy.sendTo.add(MANAGER);
-      const stop = { ...DIRECT, re: "stop retrying", command: "Stop re-running the failing test; report what fails." };
-      expect(await callTool("bm_direct_worker", stop)).toMatchObject({ isError: false, text: expect.stringMatching(/^Queued\./) });
-      expect(fake.sends).toEqual([{ id: MANAGER, text: directBlock({ re: stop.re, body: stop.command, copy: true }) }]);
-      expect(noticeQueue.pending(WORKER).map((queued) => queued.text)).toEqual([directBlock({ re: stop.re, body: stop.command })]);
-      expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ to: "worker", workerId: WORKER, managerId: MANAGER, source: "chat" }]);
-      // Only the Orchestrator's own chat was read for the check.
-      expect(fake.reads).toEqual([ORCHESTRATOR_ID]);
-    },
-  },
-  {
-    name: "tool bm_send_command whose text shows an undeclared effect: refused by the backstop, nothing sent or recorded, no decision made for the Orchestrator",
-    rpc: null,
-    tool: "bm_send_command",
-    run: async () => {
-      ownerDelegatesAll();
-      // Allow… is retired (autonomy design §B.8): every category an earlier build let the owner allow is gated again.
-      earlierAutopilotSettings();
-      for (const command of ["Push the fix to main.", "Run the migration on the real data.", "Rotate the API token.", "npm install left-pad", "Upgrade to the paid plan."]) {
-        expect(await callTool("bm_send_command", { ...SEND, command })).toMatchObject({ isError: true, text: expect.stringContaining("declare the effect or ask the owner") });
-      }
-      // The subject is checked too, not only the body.
-      expect(await callTool("bm_send_command", { ...SEND, re: "deploy it" })).toMatchObject({ isError: true, text: expect.stringContaining(RELEASE_UNDECLARED) });
-      expect(allCommands()).toEqual([]);
-    },
-  },
-  {
-    name: "tool bm_send_command with the mention negated: sent to that Manager only, with the limits; with the category an earlier build allowed: refused",
-    rpc: null,
-    tool: "bm_send_command",
-    sendsTo: [MANAGER],
-    limits: true,
-    run: async () => {
-      ownerDelegatesAll();
-      earlierAutopilotSettings(["release"]);
-      fake.policy.sendTo.add(MANAGER);
-      expect(await callTool("bm_send_command", { ...SEND, command: "Push the fix branch." })).toMatchObject({ isError: true, text: expect.stringContaining(RELEASE_UNDECLARED) });
-      expect((await callTool("bm_send_command", { ...SEND, requestId: "req-20260926T110000Z", command: "Do not touch the real data; fix the parser." })).isError).toBe(
-        false,
-      );
-      expect(fake.sends.map((sent) => parseCommandBlock(sent.text)!.body)).toEqual(["Do not touch the real data; fix the parser."]);
-    },
-  },
-  {
-    name: "tool bm_send_command on the grant of the owner's answered push decision (replay of 2026-09-29): one command to that Manager, approved: push, the grant spent, no second question",
-    rpc: null,
-    tool: "bm_send_command",
-    sendsTo: [MANAGER],
-    limits: true,
-    run: async () => {
-      clearDecisionStoreCache();
-      const decisionId = "o:replay-20260929-push";
-      createDecisionStore(home).open({
-        id: decisionId,
-        workspaceId: WORKSPACE_ID,
-        requestId: REQUEST_ID,
-        askedBy: { role: "orchestrator", agentId: ORCHESTRATOR_ID },
-        askedAt: new Date(NOW.getTime() - 20 * 60_000).toISOString(),
-        round: null,
-        question: "Push the date fix to origin/dev?",
-        subject: "push-date-fix",
-        options: [
-          { key: "a", label: "Push it", recommended: true, effects: ["push"] },
-          { key: "b", label: "Hold", recommended: false, effects: ["none"] },
-        ],
-        status: "open",
-        settledAt: null,
-        needsConfirmation: null,
-        answer: null,
-        grant: null,
-        delivery: null,
-        supersedes: null,
-        supersededBy: null,
-      });
-      // The owner answers in words; the plugin hands the answer to the Orchestrator, so its latest inbound message is a notice, not the owner's word.
-      const answered = createDecisionStore(home).transition(decisionId, (decision) =>
-        answerDecision(decision, { via: "inbox", words: "Yes, push it to origin/dev.", at: new Date(NOW.getTime() - 5 * 60_000).toISOString() }),
-      );
-      expect(answered).toMatchObject({ status: "updated", decision: { grant: { effects: ["push"], usedAt: null } } });
-      seedOrchestrator([pluginNotice(`BM-ANSWER\ndecisionId: ${decisionId}`, T(0))]);
-      fake.policy.sendTo.add(MANAGER);
-      const push = { ...SEND, decisionId, intent: "release", effects: ["push"], command: "Push the date fix to origin/dev.", reason: "The owner answered the push decision." };
-
-      expect((await callTool("bm_send_command", push)).isError).toBe(false);
-      expect(fake.sends).toHaveLength(1);
-      expect(parseCommandBlock(fake.sends[0]!.text)).toMatchObject({
-        from: "orchestrator",
-        to: "manager",
-        intent: "release",
-        authority: `decision:${decisionId}`,
-        approved: ["push"],
-        limits: ["no-commit", "no-deploy", "no-real-data"],
-      });
-      expect(createDecisionStore(home).get(decisionId, WORKSPACE_ID)!.grant!.usedAt).toBe(NOW.toISOString());
-      // One use: the same command again is refused; nothing asked the owner a second time.
-      expect(await callTool("bm_send_command", push)).toMatchObject({ isError: true, text: expect.stringContaining("was used at") });
-      expect(fake.sends).toHaveLength(1);
-    },
-  },
-  {
-    name: "tool bm_direct_worker on the owner's policy: queued for the running Worker, a copy to its Manager, each delivered at its own idle moment",
-    rpc: null,
-    tool: "bm_direct_worker",
-    sendsTo: [WORKER, MANAGER],
-    limits: true,
-    run: async () => {
-      ownerDelegatesAll();
-      fake.policy.sendTo.add(MANAGER);
-      const onPolicy = { authority: "policy:reversible-technical" } as const;
-      expect(await callTool("bm_direct_worker", DIRECT)).toMatchObject({ isError: false, text: expect.stringMatching(/^Queued\./) });
-      // The Manager is idle: its copy goes now. The Worker runs: its command waits for its turn end.
-      expect(fake.sends).toEqual([{ id: MANAGER, text: directBlock({ ...onPolicy, copy: true }) }]);
-      await turnEnded(managerEnded());
-      expect(fake.sends).toHaveLength(1);
-      fake.table.get(WORKER)!.status = "idle";
-      fake.policy.sendTo.add(WORKER);
-      await turnEnded(workerEnded());
-      expect(fake.sends).toEqual([
-        { id: MANAGER, text: directBlock({ ...onPolicy, copy: true }) },
-        { id: WORKER, text: directBlock(onPolicy) },
-      ]);
-      expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ to: "worker", workerId: WORKER, managerId: MANAGER, source: "chat", outcome: "queued" }]);
-    },
-  },
-  {
-    name: "tool bm_direct_worker with interrupt while the Worker's danger allowance is open: sent at once to that Worker, the copy to its Manager",
-    rpc: null,
-    tool: "bm_direct_worker",
-    sendsTo: [WORKER, MANAGER],
-    limits: true,
-    run: async () => {
-      ownerDelegatesAll();
+      seedOrchestrator([pluginNotice(EVENTS_NOTICE, T(0)), ownerMessage("Stop the Worker now.", T(1))]);
       createOrchestratorStore(home).openDangerAllowance(WORKSPACE_ID, WORKER);
       fake.policy.sendTo.add(WORKER);
       fake.policy.sendTo.add(MANAGER);
-      const stop = { ...DIRECT, re: "stop at once", command: "Stop. Do not push; wait for the owner.", interrupt: true };
-      expect((await callTool("bm_direct_worker", stop)).isError).toBe(false);
+      expect(await callTool("bm_direct_worker", STOP)).toMatchObject({ isError: false, text: expect.stringMatching(/^Stopped:/) });
       expect(fake.sends).toEqual([
-        { id: WORKER, text: directBlock({ re: stop.re, body: stop.command, authority: "policy:reversible-technical" }) },
-        { id: MANAGER, text: directBlock({ re: stop.re, body: stop.command, authority: "policy:reversible-technical", copy: true }) },
+        { id: WORKER, text: stopBlock() },
+        { id: MANAGER, text: stopBlock({ copy: true }) },
       ]);
+      expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ to: "worker", workerId: WORKER, managerId: MANAGER, source: "chat" }]);
+      // Only the Orchestrator's own chat was read for the check.
+      expect(fake.reads).toEqual([ORCHESTRATOR_ID]);
     },
   },
   {
@@ -1570,36 +1374,24 @@ const PATHS: BoundaryPath[] = [
       ownerDelegatesAll();
       // Allow… release, as an earlier build stored it: it exempts nothing any more (autonomy design §B.8).
       earlierAutopilotSettings(["release"]);
-      const second = "agent-worker-second";
-      fake.table.set(second, fakeAgentOf(agent({ id: second, role: "worker", status: "running", parentAgentId: MANAGER, createdAt: at(3) })));
       // The stop the gate held in the coordination run of 2026-09-29 (F2): it names the push it stops.
-      const stop = {
-        ...DIRECT,
-        re: "stop and report",
-        command: "Stop what you are doing now: run no more git push and no more waits. Send your report: how many git push runs you made.",
-        intent: "stop",
-        interrupt: true,
-      };
+      const f2 = { ...STOP, re: "stop and report", command: "Stop what you are doing now: run no more git push and no more waits. Send your report: how many git push runs you made." };
       const gated = { isError: true, text: expect.stringContaining(RELEASE_UNDECLARED) };
-      // No open danger: gated like any command.
-      expect(await callTool("bm_direct_worker", { ...stop, interrupt: false })).toMatchObject(gated);
-      // This Worker's open danger exempts nothing either, to it or to another Worker.
       createOrchestratorStore(home).openDangerAllowance(WORKSPACE_ID, WORKER);
-      expect(await callTool("bm_direct_worker", stop)).toMatchObject(gated);
-      expect(await callTool("bm_direct_worker", { ...stop, workerId: second, interrupt: false })).toMatchObject(gated);
-      expect(await callTool("bm_direct_worker", { ...stop, re: "push again", command: "Push the branch once more and report." })).toMatchObject(gated);
+      expect(await callTool("bm_direct_worker", f2)).toMatchObject(gated);
+      expect(await callTool("bm_direct_worker", { ...f2, command: "Push the branch once more and report." })).toMatchObject(gated);
       expect(fake.sends).toEqual([]);
       expect(allCommands()).toEqual([]);
 
       // Its stop word before the push negates it: the stop passes, at once to that Worker only.
       fake.policy.sendTo.add(WORKER);
       fake.policy.sendTo.add(MANAGER);
-      const negated = { ...stop, command: "Stop the git push runs and the waits now. Send your report: what git said each time." };
+      const negated = { ...f2, command: "Stop the git push runs and the waits now. Send your report: what git said each time." };
       expect((await callTool("bm_direct_worker", negated)).isError).toBe(false);
-      const onPolicy = { re: stop.re, body: negated.command, intent: "stop", authority: "policy:reversible-technical" } as const;
+      const onPolicy = { re: f2.re, body: negated.command, authority: "policy:reversible-technical" } as const;
       expect(fake.sends).toEqual([
-        { id: WORKER, text: directBlock(onPolicy) },
-        { id: MANAGER, text: directBlock({ ...onPolicy, copy: true }) },
+        { id: WORKER, text: stopBlock(onPolicy) },
+        { id: MANAGER, text: stopBlock({ ...onPolicy, copy: true }) },
       ]);
       expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ to: "worker", workerId: WORKER, managerId: MANAGER }]);
     },
@@ -1626,102 +1418,12 @@ const PATHS: BoundaryPath[] = [
     run: async () => {
       expect((await callTool("bm_note", { workspaceId: WORKSPACE_ID, text: "The owner wants dd/mm/yyyy everywhere." })).isError).toBe(false);
       expect(createOrchestratorStore(home).readNotes(WORKSPACE_ID)).toMatchObject([{ text: "The owner wants dd/mm/yyyy everywhere." }]);
-    },
-  },
-  {
-    name: "tool bm_compact sends the named Worker its /compact at its idle moment after a report, then the BM-STATE brief, and nothing else to anyone (autonomy design §G.5)",
-    rpc: null,
-    tool: "bm_compact",
-    sendsTo: [WORKER],
-    compaction: true,
-    run: async () => {
-      // The Worker's turn that read 6.1M tokens (over its 5.7M), and its report that ended it; it is idle now.
-      const claude = { model: "claude-opus-5", thinkingOptionId: null, modeId: null, provider: "bm-worker" };
-      const usage = { inputTokens: 100_000, cachedInputTokens: 6_000_000, outputTokens: 1_000, costUsd: null, costBasis: "unavailable" as const, model: "claude-opus-5", pricesUpdatedAt: null };
-      await appendRecord(location(), turn({ agentId: WORKER, role: "worker", at: at(5), turnId: "w-5", requestId: REQUEST_ID, parentAgentId: MANAGER, endedAt: at(5), usage, runtime: claude }));
-      const worker = fake.table.get(WORKER)!;
-      worker.status = "idle";
-      worker.timeline = [
-        userMessage(`Request ${REQUEST_ID}: ${VI_REQUEST}`, T(0)),
-        { item: { type: "tool_call", name: "mcp__paseo__send_agent_prompt", detail: { input: { agentId: MANAGER, prompt: `BM-REPORT\nrequestId: ${REQUEST_ID}\nphase: finished` } } }, timestamp: T(2) },
-      ];
-      // Never a Reviewer or a Manager below its threshold: refused, nothing sent.
-      expect(await callTool("bm_compact", { agentId: REVIEWER, reason: "Heavy." })).toMatchObject({ isError: true, text: expect.stringContaining("never compacted") });
-      expect((await callTool("bm_compact", { agentId: MANAGER, reason: "Heavy." })).isError).toBe(true);
-      expect(fake.sends).toEqual([]);
-      fake.policy.sendTo.add(WORKER);
-      expect((await callTool("bm_compact", { agentId: WORKER, reason: "Its context keeps growing." })).isError).toBe(false);
-      expect(fake.sends).toEqual([{ id: WORKER, text: compactCommandOf("claude") }]);
-      // Its compaction completes, a minute on: the brief follows, to that Worker only.
-      const later = new Date(NOW.getTime() + 60_000).toISOString();
-      const compacted = turn({
-        agentId: WORKER,
-        role: "worker",
-        at: later,
-        turnId: "w-6",
-        requestId: REQUEST_ID,
-        parentAgentId: MANAGER,
-        endedAt: later,
-        usage: { ...usage, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
-        runtime: claude,
-        evidence: [{ kind: "compaction", detail: "manual", agentId: WORKER, at: later, trigger: "manual", preTokens: null }],
-      });
-      await createCompactionRunner({ home: () => home, now: () => new Date(later), log: () => {} }).turnRecorded({ agent: { id: WORKER }, timeline: [] }, compacted, fake.paseo);
-      expect(fake.sends.map((sent) => [sent.id, sent.text.split("\n")[0]])).toEqual([
-        [WORKER, compactCommandOf("claude")],
-        [WORKER, STATE_NOTICE_MARKER],
-      ]);
-      expect(createCompactionStore(home).list()).toMatchObject([{ agentId: WORKER, state: "done" }]);
-      expect(allCommands()).toEqual([]);
-    },
-  },
-  {
-    name: "tool bm_handoff asks the named Worker for its note at its idle moment after a safe point, then sends its Manager the handoff BM-COMMAND with the brief, and nothing else to anyone (autonomy design §G.6)",
-    rpc: null,
-    tool: "bm_handoff",
-    sendsTo: [WORKER, MANAGER],
-    limits: true,
-    handoff: true,
-    run: async () => {
-      // The owner's threshold at its lowest (10M); the Worker's turn read 12M and closed a bead, its safe point; it is idle now.
-      createCoordinationStore(home).set({ key: "handoff.requestTokens", value: 10_000_000 });
+      // Missions design §9.1: a note keyed by mission.
+      const made = createMissionStore(home, { now: () => NOW }).create({ code: "DATES", name: "Dates", goal: "Fix the date format.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER });
+      if (!made.ok) throw new Error(made.reasons.join("; "));
       before = { ...before, data: dataOutsideStores() };
-      const claude = { model: "claude-opus-5", thinkingOptionId: null, modeId: null, provider: "bm-worker" };
-      const usage = { inputTokens: 1_000_000, cachedInputTokens: 11_000_000, outputTokens: 1_000, costUsd: null, costBasis: "unavailable" as const, model: "claude-opus-5", pricesUpdatedAt: null };
-      const closed = { kind: "shell" as const, detail: `br close bm-d1 --reason "date format proved"`, agentId: WORKER, at: at(4, 30), status: "completed", exitCode: 0 };
-      await appendRecord(location(), turn({ agentId: WORKER, role: "worker", at: at(5), turnId: "w-5", requestId: REQUEST_ID, parentAgentId: MANAGER, startedAt: at(4), endedAt: at(5), usage, runtime: claude, evidence: [closed] }));
-      fake.table.get(WORKER)!.status = "idle";
-      // Never a Reviewer or a Manager: refused, nothing sent.
-      expect(await callTool("bm_handoff", { workerId: REVIEWER, reason: "Heavy." })).toMatchObject({ isError: true, text: expect.stringContaining("is not a paseo-bm Worker") });
-      expect(await callTool("bm_handoff", { workerId: MANAGER, reason: "Heavy." })).toMatchObject({ isError: true });
-      expect(fake.sends).toEqual([]);
-      fake.policy.sendTo.add(WORKER);
-      expect((await callTool("bm_handoff", { workerId: WORKER, reason: "Its request grew heavy." })).isError).toBe(false);
-      expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text)])).toEqual([[WORKER, HANDOFF_NOTICE_MARKER]]);
-      // Its note turn ends: the brief goes to its Manager as the handoff command, and to nobody else.
-      fake.policy.sendTo.add(MANAGER);
-      fake.table.get(WORKER)!.status = "idle";
-      const later = new Date(NOW.getTime() + 60_000).toISOString();
-      const noted = turn({
-        agentId: WORKER,
-        role: "worker",
-        at: later,
-        turnId: "w-6",
-        requestId: REQUEST_ID,
-        parentAgentId: MANAGER,
-        startedAt: NOW.toISOString(),
-        endedAt: later,
-        reports: [report({ agentId: WORKER, at: later, requestId: REQUEST_ID, phase: "beads-done", handoffNote: "The date parser is done; the PDF export is next." })],
-      });
-      const runner = createHandoffRunner({ home: () => home, now: () => new Date(later), log: () => {}, git: async () => ({ stdout: "" }) });
-      await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, noted, fake.paseo);
-      expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text)])).toEqual([
-        [WORKER, HANDOFF_NOTICE_MARKER],
-        [MANAGER, "BM-COMMAND"],
-      ]);
-      expect(parseCommandBlock(fake.sends[1]!.text)).toMatchObject({ intent: "handoff", authority: "coordination:handoff", to: "manager", effects: [], approved: [] });
-      expect(createHandoffStore(home).list()).toMatchObject([{ workerId: WORKER, managerId: MANAGER, state: "commanded", note: "The date parser is done; the PDF export is next." }]);
-      expect(allCommands()).toMatchObject([{ managerId: MANAGER, requestId: REQUEST_ID }]);
+      expect((await callTool("bm_note", { missionId: made.mission.missionId, text: "Watch the drift." })).isError).toBe(false);
+      expect(createOrchestratorStore(home).readNotes({ missionId: made.mission.missionId })).toMatchObject([{ text: "Watch the drift." }]);
     },
   },
   {
@@ -1858,22 +1560,25 @@ const PATHS: BoundaryPath[] = [
       // The owner turns the project's challenger on; what the path itself writes is checked from here on.
       createAutonomyStore(home).setChallenger({ workspaceId: WORKSPACE_ID, enabled: true });
       before = { ...before, data: dataOutsideStores() };
-      const qid = `q:${REQUEST_ID}:Q1`;
+      // A fallback incident: a Worker's question is its Main's or the owner's (missions design §9.1).
+      const qid = "f:fb-0123456789ab";
       createDecisionStore(home).open(
         makeDecision({
           id: qid,
           workspaceId: WORKSPACE_ID,
-          requestId: REQUEST_ID,
-          askedBy: { role: "worker", agentId: WORKER },
+          requestId: null,
+          askedBy: { role: "plugin", agentId: null },
+          round: null,
           subject: null,
           options: [
-            { key: "a", label: "dd/mm/yyyy", recommended: true, effects: ["none"] },
-            { key: "b", label: "yyyy-mm-dd", recommended: false, effects: ["commit"] },
+            { key: "a", label: "Wait for the reset", recommended: true, effects: ["none"] },
+            { key: "b", label: "I'll handle it", recommended: false, effects: ["none"] },
           ],
           prediction: { recommended: { optionKey: "a" }, orchestrator: null },
         }),
       );
-      expect(await callTool("bm_predict", { decisionId: qid, optionKey: "a", reason: "The owner asked for dd/mm/yyyy before." })).toMatchObject({ isError: false });
+      expect(await callTool("bm_predict", { decisionId: `q:${REQUEST_ID}:Q1`, optionKey: "a", reason: "The owner asked for dd/mm/yyyy before." })).toMatchObject({ isError: true });
+      expect(await callTool("bm_predict", { decisionId: qid, optionKey: "a", reason: "The reset is soon." })).toMatchObject({ isError: false });
       expect(createDecisionStore(home).get(qid, WORKSPACE_ID)).toMatchObject({ status: "open", answer: null, prediction: { orchestrator: { optionKey: "a" } } });
       expect(await callTool("bm_predict", { decisionId: qid, optionKey: "b", reason: "Again." })).toMatchObject({ isError: true });
       expect(allCommands()).toEqual([]);
@@ -1881,7 +1586,7 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "tool bm_decide answers a question whose class the owner delegated to the Orchestrator, and only that one (autonomy design §B.5, §B.9); the owner answers the rest, a command re-sending an answer is refused, and the Worker gets each Qn once",
+    name: "tool bm_decide never answers a Worker's question, delegated or not (missions design §9.1); the owner answers them, a stop re-sending an answer is refused, and the Worker gets each Qn once",
     rpc: null,
     tool: "bm_decide",
     sendsTo: [WORKER],
@@ -1913,36 +1618,25 @@ const PATHS: BoundaryPath[] = [
       open(1, { class: "scope" });
       open(2);
       open(3);
-      // A release question proposed as scope: its push makes it release, which is not delegated here (Cruise and below).
       open(4, { class: "scope", options: [{ key: "a", label: "Push the fix", recommended: true, effects: ["push"] }, { key: "b", label: "Hold", recommended: false, effects: ["none"] }] });
-      expect(await callTool("bm_decide", { decisionId: qid(1), optionKey: "a", reason: "The owner asked for dd/mm/yyyy." })).toMatchObject({ isError: false });
-      expect(createDecisionStore(home).get(qid(1), WORKSPACE_ID)).toMatchObject({ status: "answered", answer: { by: "policy", class: "scope" } });
-      for (const [n, text] of [
-        [2, "reversible-technical is not delegated to you"],
-        [4, "release is not delegated to you"],
-      ] as const) {
-        expect(await callTool("bm_decide", { decisionId: qid(n), optionKey: "a", reason: "The owner asked for it." }), `Q${n}`).toMatchObject({ isError: true, text: expect.stringContaining(text) });
+      for (const n of [1, 2, 4]) {
+        expect(await callTool("bm_decide", { decisionId: qid(n), optionKey: "a", reason: "The owner asked for it." }), `Q${n}`).toMatchObject({ isError: true, text: expect.stringContaining("is a Worker's question: its Main answers it") });
         expect(createDecisionStore(home).get(qid(n), WORKSPACE_ID)).toMatchObject({ status: "open", answer: null });
       }
-      // The Worker is running: its answer waits for the turn end; nothing is sent yet.
       expect(fake.sends).toEqual([]);
 
-      // The owner answers Q2 and Q3 in the Inbox; one block for the request keeps waiting.
+      // The owner answers Q1, Q2 and Q3 in the Inbox; one block for the request keeps waiting, since the Worker runs.
       const onSettled = settledByKind({ question: questionDelivery().onSettled });
-      for (const n of [2, 3]) {
+      for (const n of [1, 2, 3]) {
         await handleDecisionsAnswer({ id: qid(n), optionKey: "a", via: "inbox" }, fake.paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled });
       }
       // The Orchestrator re-sending an answer by hand, as it did in the field: refused, nothing sent or recorded.
-      expect(await callTool("bm_direct_worker", { ...DIRECT, command: `BM-ANSWERS\nrequestId: ${REQUEST_ID}\nQ2: a — dd/mm/yyyy` })).toMatchObject({
+      createOrchestratorStore(home).openDangerAllowance(WORKSPACE_ID, WORKER);
+      expect(await callTool("bm_direct_worker", { ...STOP, command: `BM-ANSWERS\nrequestId: ${REQUEST_ID}\nQ2: a — dd/mm/yyyy` })).toMatchObject({
         isError: true,
         text: expect.stringContaining(`Q2 of ${REQUEST_ID} is the stored decision ${qid(2)}, already answered by the owner`),
       });
       expect(allCommands()).toEqual([]);
-      // bm_decide on an answered question says so: the first answer stands.
-      expect(await callTool("bm_decide", { decisionId: qid(1), optionKey: "b", reason: "Changed my mind." })).toMatchObject({
-        isError: true,
-        text: expect.stringContaining("already answered by the policy"),
-      });
 
       // The Worker's turn ends: ONE BM-DELIVERY with Q1, Q2 and Q3, each once; Q4 still waits for the owner.
       fake.table.get(WORKER)!.status = "idle";
@@ -1957,7 +1651,7 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "tool bm_direct_worker with a BM-ANSWERS naming an open stored question: refused, pointing at bm_decide; the question stays open",
+    name: "tool bm_direct_worker with a BM-ANSWERS naming an open stored question: refused, naming its Main or the owner; the question stays open",
     rpc: null,
     tool: "bm_direct_worker",
     run: async () => {
@@ -1965,20 +1659,17 @@ const PATHS: BoundaryPath[] = [
       ownerDelegatesAll();
       const id = `q:${REQUEST_ID}:Q1`;
       createDecisionStore(home).open(makeDecision({ id, workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, askedBy: { role: "worker", agentId: WORKER }, subject: null }));
-      expect(await callTool("bm_direct_worker", DIRECT)).toEqual({
+      createOrchestratorStore(home).openDangerAllowance(WORKSPACE_ID, WORKER);
+      expect(await callTool("bm_direct_worker", { ...STOP, command: "BM-ANSWERS\nQ1: use dd/mm/yyyy." })).toEqual({
         isError: true,
-        text: `Refused: Q1 of ${REQUEST_ID} is the stored decision ${id}: answer it with bm_decide, not in a BM-ANSWERS block.`,
-      });
-      expect(await callTool("bm_send_command", { ...SEND, intent: "answer", command: `BM-ANSWERS\nrequestId: ${REQUEST_ID}\nQ1: a` })).toMatchObject({
-        isError: true,
-        text: expect.stringContaining("answer it with bm_decide"),
+        text: `Refused: Q1 of ${REQUEST_ID} is the stored decision ${id}: its Main or the owner answers it, never a BM-ANSWERS block of yours.`,
       });
       expect(createDecisionStore(home).get(id, WORKSPACE_ID)!.status).toBe("open");
       expect(allCommands()).toEqual([]);
     },
   },
   {
-    name: "the owner picks an Orchestrator option with a prepared command: one command to that Manager, approved = the option's effects, the grant spent once",
+    name: "the owner picks an Orchestrator option with a prepared command: one command to that Manager, approving no effect (missions design §9.1), every limit kept",
     rpc: null,
     sendsTo: [MANAGER],
     limits: true,
@@ -1997,11 +1688,11 @@ const PATHS: BoundaryPath[] = [
       });
       const decisionId = (JSON.parse(asked.text.slice(asked.text.indexOf("{"))) as { decisionId: string }).decisionId;
       const answered = await answerDecisionRpc({ id: decisionId, optionKey: "a", confirmed: true });
-      expect(answered.decision).toMatchObject({ grant: { effects: ["push"], usedAt: NOW.toISOString() }, delivery: { to: MANAGER } });
+      expect(answered.decision).toMatchObject({ grant: null, delivery: { to: MANAGER } });
       const blocks = [...fake.sends.filter((sent) => sent.id === MANAGER).map((sent) => sent.text), ...noticeQueue.pending(MANAGER).map((queued) => queued.text)].map(
         (text) => parseCommandBlock(text)!,
       );
-      expect(blocks).toMatchObject([{ to: "manager", authority: `decision:${decisionId}`, effects: ["push"], approved: ["push"], limits: ["no-commit", "no-deploy", "no-real-data"] }]);
+      expect(blocks).toMatchObject([{ to: "manager", authority: `decision:${decisionId}`, effects: ["push"], approved: [], limits: ["no-commit-push-deploy", "no-real-data"] }]);
       // Handed over again, it is not delivered twice.
       await orchestratorDelivery()([createDecisionStore(home).get(decisionId)!], { paseo: fake.paseo });
       expect(enqueueSpy).toHaveBeenCalledTimes(1);
@@ -2032,7 +1723,7 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "the owner answers an Orchestrator decision in words: only the Orchestrator gets BM-ANSWER, with the grant",
+    name: "the owner answers an Orchestrator decision in words: only the Orchestrator gets BM-ANSWER, which issues and announces no grant (missions design §9.1)",
     rpc: null,
     sendsTo: [ORCHESTRATOR_ID],
     run: async () => {
@@ -2051,12 +1742,12 @@ const PATHS: BoundaryPath[] = [
       const told = [...fake.sends.filter((sent) => sent.id === ORCHESTRATOR_ID).map((sent) => sent.text), ...noticeQueue.pending(ORCHESTRATOR_ID).map((queued) => queued.text)];
       expect(told).toHaveLength(1);
       expect(told[0]).toMatch(new RegExp(`^BM-ANSWER\\ndecisionId: ${decisionId}\\n`));
-      expect(told[0]).toContain("grant: push, for one command");
-      expect(createDecisionStore(home).get(decisionId)!.grant).toMatchObject({ effects: ["push"], usedAt: null });
+      expect(told[0]).not.toContain("grant");
+      expect(createDecisionStore(home).get(decisionId)!.grant).toBeNull();
     },
   },
   {
-    name: "a stored prepared command naming a Reviewer is never delivered: nothing to the Reviewer, the grant unused, the Orchestrator told",
+    name: "a stored prepared command naming a Reviewer is never delivered: nothing to the Reviewer, the Orchestrator told",
     rpc: null,
     sendsTo: [ORCHESTRATOR_ID],
     run: async () => {
@@ -2086,23 +1777,93 @@ const PATHS: BoundaryPath[] = [
         supersededBy: null,
       });
       const answered = await answerDecisionRpc({ id: decisionId, optionKey: "a" });
-      expect(answered.decision).toMatchObject({ grant: { effects: ["commit"], usedAt: null }, delivery: { to: REVIEWER, outcome: "failed" } });
+      expect(answered.decision).toMatchObject({ grant: null, delivery: { to: REVIEWER, outcome: "failed" } });
       expect(enqueueSpy.mock.calls.map(([target]) => target)).toEqual([ORCHESTRATOR_ID]);
     },
   },
   {
-    name: "tool bm_send_command at the loop guard: refused, nothing sent or recorded",
+    name: "tool bm_direct_worker at the loop guard: refused, nothing sent or recorded",
     rpc: null,
-    tool: "bm_send_command",
+    tool: "bm_direct_worker",
     run: async () => {
       ownerDelegatesAll();
+      createOrchestratorStore(home).openDangerAllowance(WORKSPACE_ID, WORKER);
       const store = createOrchestratorStore(home, { now: () => new Date(NOW.getTime() - 3_600_000) });
       for (let index = 0; index < 12; index += 1) {
-        store.appendCommand({ workspaceId: SEND.workspaceId, managerId: SEND.managerId, requestId: SEND.requestId, command: SEND.command, reason: SEND.reason, situation: "", sentText: "Continue.", outcome: "sent" });
+        store.appendCommand({ workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST_ID, command: "Continue.", reason: "", situation: "", sentText: "Continue.", outcome: "sent" });
       }
-      const refused = await callTool("bm_send_command", SEND);
+      const refused = await callTool("bm_direct_worker", STOP);
       expect(refused).toMatchObject({ isError: true, text: expect.stringContaining("you sent 12 commands for this request in 24 hours; ask the owner with bm_ask_owner") });
       expect(createOrchestratorStore(home).listCommands()).toHaveLength(12);
+    },
+  },
+  {
+    name: "a Worker's turn crossing its compaction and handoff thresholds: the plugin compacts it and asks its handoff note itself, through the queue, waking no one (missions design §9.5)",
+    rpc: null,
+    sendsTo: [WORKER],
+    compaction: true,
+    handoff: true,
+    run: async () => {
+      seedOrchestrator();
+      fake.table.get(WORKER)!.status = "idle";
+      fake.policy.sendTo.add(WORKER);
+      // 160M tokens read in one turn that closed a bead and sent beads-done: both thresholds crossed, both safe points.
+      const crossing = turn({
+        agentId: WORKER,
+        role: "worker",
+        at: at(20),
+        turnId: "w-heavy",
+        requestId: REQUEST_ID,
+        parentAgentId: MANAGER,
+        startedAt: at(19),
+        endedAt: at(20),
+        usage: claudeUsage(160_000_000),
+        runtime: { model: "claude-opus-5", thinkingOptionId: null, modeId: null, provider: "bm-worker" },
+        evidence: [{ kind: "shell", detail: `br close bm-d1 --reason "date format proved"`, agentId: WORKER, at: at(19, 30), status: "completed", exitCode: 0 }],
+        reports: [report({ agentId: MANAGER, at: at(20), requestId: REQUEST_ID, phase: "beads-done", tier: "Medium", beadsClosed: ["bm-d1"] })],
+      });
+      await appendRecord(location(), crossing);
+      await codeRunTurn(crossing, [{ type: "tool_call", name: "mcp__paseo__send_agent_prompt", status: "completed", detail: { type: "unknown", input: { agentId: MANAGER, prompt: `BM-REPORT\nrequestId: ${REQUEST_ID}\nphase: beads-done\ntier: Medium` } } }]);
+      expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text).split(" ")[0]])).toEqual([
+        [WORKER, "/compact"],
+        [WORKER, HANDOFF_NOTICE_MARKER],
+      ]);
+      expect(createInterventionStore(home).list().map((entry) => [entry.kind, entry.trigger, entry.targetAgentId])).toEqual([
+        ["compact", "threshold.crossed", WORKER],
+        ["handoff", "threshold.crossed", WORKER],
+      ]);
+      // No command: the Orchestrator is not woken and no Manager is told yet.
+      expect(allCommands()).toEqual([]);
+    },
+  },
+  {
+    name: "a Main's turn crossing its context threshold: the plugin compacts it itself, creates nothing and wakes no one (missions design §9.5)",
+    rpc: null,
+    sendsTo: [MANAGER],
+    compaction: true,
+    run: async () => {
+      seedOrchestrator();
+      const made = createMissionStore(home, { now: () => NOW }).create({ code: "DATES", name: "Dates", goal: "Fix the date format.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER });
+      if (!made.ok) throw new Error(made.reasons.join("; "));
+      before = { ...before, data: dataOutsideStores() };
+      fake.policy.sendTo.add(MANAGER);
+      const crossing = turn({
+        agentId: MANAGER,
+        role: "manager",
+        at: at(20),
+        turnId: "m-heavy",
+        startedAt: at(19),
+        endedAt: at(20),
+        usage: claudeUsage(500_000),
+        runtime: { model: "claude-opus-5", thinkingOptionId: null, modeId: null, provider: "bm-manager" },
+      });
+      await appendRecord(location(), crossing);
+      await codeRunTurn(crossing);
+      expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text).split(" ")[0]])).toEqual([[MANAGER, "/compact"]]);
+      expect(createInterventionStore(home).list().map((entry) => [entry.kind, entry.trigger, entry.targetAgentId])).toEqual([["compact", "threshold.crossed", MANAGER]]);
+      // Compactable, the Main is not handed over: the mission keeps it.
+      expect(createMissionStore(home).get(made.mission.missionId)?.mainId).toBe(MANAGER);
+      expect(allCommands()).toEqual([]);
     },
   },
   {
@@ -2160,14 +1921,11 @@ describe("O-4 — before the user opens the Orchestrator: no Orchestrator agent,
     await callTool("bm_projects", {});
     await callTool("bm_request", { workspaceId: WORKSPACE_ID, requestId: REQUEST_ID });
     await callTool("bm_agent_messages", { agentId: MANAGER });
-    // No Orchestrator, so no owner's word: refused; a decision is only recorded.
-    expect((await callTool("bm_send_command", { workspaceId: WORKSPACE_ID, managerId: MANAGER, command: "Continue.", reason: "Nobody runs." })).isError).toBe(true);
+    // No mission and no open danger: refused; a decision is only recorded.
+    expect((await callTool("bm_govern", { missionId: "mis-0000000099", step: "nudge", text: "Re-plan." })).isError).toBe(true);
     await callTool("bm_ask_owner", { workspaceId: WORKSPACE_ID, question: "Delete the old invoices?", recommendation: "No." });
-    expect((await callTool("bm_direct_worker", DIRECT)).isError).toBe(true);
-    // No turn of the Worker was measured: no compaction, nothing queued.
-    expect((await callTool("bm_compact", { agentId: WORKER, reason: "Heavy." })).isError).toBe(true);
-    // Its request read no measured token: below the handoff threshold, nothing written or sent.
-    expect((await callTool("bm_handoff", { workerId: WORKER, reason: "Heavy." })).isError).toBe(true);
+    expect((await callTool("bm_direct_worker", STOP)).isError).toBe(true);
+    await callTool("bm_missions", {});
     expect((await callTool("bm_decide", { decisionId: `q:${REQUEST_ID}:Q1`, optionKey: "a", reason: "Nothing is asked yet." })).isError).toBe(true);
     await callTool("bm_note", { workspaceId: WORKSPACE_ID, text: "Nothing is open yet." });
     await callTool("bm_repo", { workspaceId: WORKSPACE_ID, action: "status" });

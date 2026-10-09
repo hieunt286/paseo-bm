@@ -190,9 +190,10 @@ export interface RequestRegistry {
   /**
    * Missions design §3.4 step 2: the request's Manager becomes `managerId` (a
    * mission's new Main). False when the request is not registered. Throws when
-   * the file cannot be written.
+   * the file cannot be written. A split (§9.6) passes the request's new
+   * `missionId` too, so the entry's cache names it.
    */
-  reassignManager(workspaceId: string, requestId: string, managerId: string): boolean;
+  reassignManager(workspaceId: string, requestId: string, managerId: string, missionId?: string): boolean;
   /**
    * A report of the request was stored (design §16.6, `bm_report`): `tier`
    * becomes the report's, and `finishedAt` is `at` for a `finished` report and
@@ -406,14 +407,15 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
       });
       return found;
     },
-    reassignManager(workspaceId, requestId, managerId) {
+    reassignManager(workspaceId, requestId, managerId, missionId) {
       let found = false;
       update(workspaceId, (requests) => {
         const index = requests.findIndex((request) => request.requestId === requestId);
         if (index === -1) return null;
         found = true;
-        if (requests[index]!.managerId === managerId) return null;
-        return requests.map((entry, at) => (at === index ? { ...entry, managerId } : entry));
+        const request = requests[index]!;
+        if (request.managerId === managerId && (missionId === undefined || request.missionId === missionId)) return null;
+        return requests.map((entry, at) => (at === index ? { ...entry, managerId, ...(missionId === undefined ? {} : { missionId }) } : entry));
       });
       return found;
     },

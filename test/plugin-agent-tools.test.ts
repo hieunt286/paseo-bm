@@ -172,7 +172,7 @@ describe("the MCP conversation", () => {
 });
 
 describe("the Orchestrator's endpoint (orchestrator design §5.1)", () => {
-  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why", "bm_reply"];
+  const ORCHESTRATOR_TOOLS = ["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_govern", "bm_arbitrate", "bm_create_main", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_why", "bm_reply"];
   /** The Orchestrator's tools no other role has: the Manager has a bm_decisions of its own, the Worker a bm_reply (change-014). */
   // A Main has its own bm_repo (missions design §4), refused to every caller but a Main.
   const ORCHESTRATOR_ONLY = ORCHESTRATOR_TOOLS.filter((name) => name !== "bm_decisions" && name !== "bm_reply" && name !== "bm_repo");
@@ -217,8 +217,8 @@ describe("the Orchestrator's endpoint (orchestrator design §5.1)", () => {
     const called = await rpc(url, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "bm_note", arguments: { workspaceId: "wks_a", text: "A note." } } });
     expect(called.body.result.isError).toBe(true);
     expect(called.body.result.content[0].text).toMatch(/^Refused: paseo-bm has no connection to Paseo yet/);
-    const invalid = await rpc(url, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bm_note", arguments: { text: "A note." } } });
-    expect(invalid.body.result.content[0].text).toBe("The call was refused. Fix these and call bm_note again:\n- input.workspaceId: is required");
+    const invalid = await rpc(url, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bm_note", arguments: { workspaceId: "wks_a" } } });
+    expect(invalid.body.result.content[0].text).toBe("The call was refused. Fix these and call bm_note again:\n- input.text: is required");
     expect(snapshot(dir)).toEqual(before);
     expect(logs).toEqual(["[paseo-bm] bm_note refused a call for the orchestrator", "[paseo-bm] bm_note refused a call for the orchestrator"]);
   });
@@ -636,7 +636,7 @@ describe("the creation hook's part", () => {
     const orchestrator = applyAgentTools(request("bm-orchestrator/claude-opus-5"), tools, "claude");
     expect(orchestrator?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: "http://127.0.0.1:4567/mcp/orchestrator", alwaysLoad: true });
     expect(orchestrator?.config.toolPolicy?.preapproved).toEqual(
-      ["bm_projects", "bm_request", "bm_agent_messages", "bm_send_command", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_compact", "bm_handoff", "bm_why", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
+      ["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_govern", "bm_arbitrate", "bm_create_main", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_why", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })),
     );
     expect(applyAgentTools(request("bm-orchestrator"), tools, "copilot")).toBeUndefined();
     // Paseo refuses a toolPolicy on Pi, Oh My Pi or Copilot: the agent must still be created.
@@ -697,7 +697,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     const { endpoint } = await start();
     const store = endpoint.bindings!;
     const list = async (url: string) => (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((tool: { name: string }) => tool.name);
-    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1")}`)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1")}`)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(await list(endpoint.urlFor("manager")!)).toEqual(["bm_answers", "bm_decisions"]);
     // A pending binding lists them; calling waits for the binding (the shared guard).
     const pending = store.issue({ role: "manager", workspaceId: "wks_1" }).token;
@@ -710,7 +710,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
     expect(await list(`${endpoint.urlFor("reviewer")!}/${bindAs("reviewer", "agent-r1")}`)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).not.toContain("bm_create_worker");
-    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
   });
 
@@ -733,7 +733,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
       const request = { config: { provider: "bm-manager/claude-opus-5", cwd: "/repo", mcpServers: { [AGENT_TOOLS_SERVER]: { type: "http", url: `${urlFor("manager")}/${token}` } } } } as unknown as AgentCreateRequest;
       return applyAgentTools(request, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
     };
-    expect(created()).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(created()).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     // A creation without a token: the role path and today's list.
     expect(applyAgentTools({ config: { provider: "bm-manager", cwd: "/repo" } } as unknown as AgentCreateRequest, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool)).toEqual([
       "bm_answers",

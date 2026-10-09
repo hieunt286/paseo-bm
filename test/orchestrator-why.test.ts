@@ -400,6 +400,8 @@ describe("the Orchestrator's first prompt (change-011 C6)", () => {
   it("names every tool of its endpoint, bm_why and bm_handoff among them", () => {
     for (const face of ORCHESTRATOR_SERVER_TOOLS) expect(ORCHESTRATOR_FIRST_PROMPT, face.name).toContain(`${face.name} (`);
     expect(ORCHESTRATOR_FIRST_PROMPT).toContain("bm_why (why a bead, a changed file or a decision exists");
-    expect(ORCHESTRATOR_FIRST_PROMPT).toContain("bm_handoff (have a Worker's request handed to a new Worker");
+    expect(ORCHESTRATOR_FIRST_PROMPT).toContain("bm_govern (a nudge, re-plan or arbitration to a mission's current Main)");
+    // Missions design §9.1: the retired tools are not offered.
+    for (const retired of ["bm_send_command", "bm_compact", "bm_handoff"]) expect(ORCHESTRATOR_FIRST_PROMPT).not.toContain(retired);
   });
 });

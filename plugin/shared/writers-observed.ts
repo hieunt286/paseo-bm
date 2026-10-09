@@ -14,7 +14,10 @@
  * - **Unknown**: a pair whose turn has no start (or no readable end) cannot be
  *   judged. It is counted apart, never as a collision nor as none.
  * - **One file** is the `file` evidence path relative to the workspace folder
- *   (`workspaceFileOf`): Claude records absolute paths, Codex relative ones,
+ *   (`workspaceFileOf`), or the target of a shell command's output redirection
+ *   or `tee` (`shellWrittenPathsOf`; a `cat > f <<EOF` writes a file as an
+ *   edit does), resolved against the command's folder: Claude records absolute
+ *   paths, Codex relative ones,
  *   so both forms of one file match. A write outside the workspace folder —
  *   an absolute path not below it, a relative one that climbs above it — is
  *   ignored. Without the folder, paths are compared as written.
@@ -30,6 +33,7 @@
  */
 import type { TraceRecord } from "./contracts";
 import { normalisedPath } from "./evidence";
+import { parseShellLine } from "./shell";
 import { timeOrNull, timeOrZero } from "./time";
 
 /** A span in epoch milliseconds, half-open: `[start, end)`. */
@@ -97,13 +101,38 @@ export function workspaceFileOf(path: string, workspaceDirectory: string | null)
   return key.startsWith(`${folder}/`) ? key.slice(folder.length + 1) : null;
 }
 
-/** The files a turn edited or wrote, relative to the workspace folder, once each, in their order; writes outside it left out. Pure. */
+/**
+ * The paths a shell line writes, as written: each output redirection's target
+ * and each `tee` argument, a target the shell fills in (`$f`, `$(…)`) and the
+ * `/dev/` devices left out. None for a line that cannot be read as the shell
+ * would. Pure.
+ */
+export function shellWrittenPathsOf(line: string): string[] {
+  const parsed = parseShellLine(line);
+  if (parsed.unbalanced) return [];
+  const paths: string[] = [];
+  for (const command of parsed.commands) {
+    const tee = command.words[0]?.value === "tee" ? command.words.slice(1).filter((word) => !word.value.startsWith("-")) : [];
+    for (const word of [...command.writes, ...tee]) {
+      if (!word.dynamic && word.value !== "" && !word.value.startsWith("/dev/")) paths.push(word.value);
+    }
+  }
+  return paths;
+}
+
+/** A path a shell command wrote, against the folder it ran in when it is relative and the folder is known. */
+const shellPathOf = (path: string, cwd: string | null | undefined): string =>
+  path.startsWith("/") || cwd === null || cwd === undefined || !cwd.startsWith("/") ? path : `${cwd}/${path}`;
+
+/** The files a turn edited or wrote — `file` evidence and shell writes — relative to the workspace folder, once each, in their order; writes outside it left out. Pure. */
 export function writtenFilesOf(record: Pick<TraceRecord, "evidence">, workspaceDirectory: string | null): string[] {
   const files = new Set<string>();
   for (const evidence of record.evidence) {
-    if (evidence.kind !== "file") continue;
-    const file = workspaceFileOf(evidence.detail, workspaceDirectory);
-    if (file !== null) files.add(file);
+    const paths = evidence.kind === "file" ? [evidence.detail] : evidence.kind === "shell" ? shellWrittenPathsOf(evidence.detail).map((path) => shellPathOf(path, evidence.cwd)) : [];
+    for (const path of paths) {
+      const file = workspaceFileOf(path, workspaceDirectory);
+      if (file !== null) files.add(file);
+    }
   }
   return [...files];
 }

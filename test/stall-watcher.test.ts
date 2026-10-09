@@ -484,8 +484,8 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
   });
 });
 
-describe("request.stalled: an event for the Orchestrator of a project in the policy's scope only", () => {
-  it("publishes the event once, as one BM-EVENTS message to the Orchestrator and nobody else", async () => {
+describe("request.stalled: built for a project in the policy's scope, retired as a wake (missions design §9.1)", () => {
+  it("builds the event once but tells the Orchestrator nothing: the stall stays an Inbox alert", async () => {
     await seed([...handedOver(), relayed("received", at(1, 10))]);
     inScope();
     const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent()]);
@@ -493,22 +493,15 @@ describe("request.stalled: an event for the Orchestrator of a project in the pol
     stalls.usePaseo(fake.paseo);
 
     const first = await stalls.pass();
+    expect(first.raised).toEqual([alertOf()]);
     expect(first.events).toEqual([
       { type: "request.stalled", workspaceId: WORKSPACE_ID, requestKey: REQUEST_ID, managerId: MANAGER, reason: "idle-unfinished", alertKey: alertOf(), since: when(20).toISOString() },
     ]);
-    expect(fake.sends).toEqual([
-      {
-        id: ORCHESTRATOR,
-        text: [
-          "BM-EVENTS",
-          "From the paseo-bm plugin, not the owner: 1 event, oldest first. Look before you act; when nothing needs doing, do nothing.",
-          `- request.stalled idle-unfinished — project ${WORKSPACE_ID}, request ${REQUEST_ID}, Manager ${MANAGER}, since ${when(20).toISOString()}. Look with bm_request.`,
-        ].join("\n"),
-      },
-    ]);
+    expect(fake.sends).toEqual([]);
+    expect(queue.pending(ORCHESTRATOR)).toEqual([]);
     clock = when(40);
     expect((await stalls.pass()).events).toEqual([]);
-    expect(fake.sends).toHaveLength(1);
+    expect(fake.sends).toEqual([]);
   });
 
   it("an all-owner project gets its alert and no event, whatever the other projects' cells", async () => {
@@ -521,35 +514,6 @@ describe("request.stalled: an event for the Orchestrator of a project in the pol
     stalls.usePaseo(fake.paseo);
     expect(await stalls.pass()).toMatchObject({ raised: [alertOf()], events: [] });
     expect(fake.sends).toEqual([]);
-  });
-
-  it("a project with a delegated class gets the event as well", async () => {
-    await seed([...handedOver(), relayed("received", at(1, 10))]);
-    inScope(WORKSPACE_ID, "delegate");
-    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent()]);
-    const stalls = watcher();
-    stalls.usePaseo(fake.paseo);
-    expect(await stalls.pass()).toMatchObject({ raised: [alertOf()], events: [expect.objectContaining({ type: "request.stalled", workspaceId: WORKSPACE_ID })] });
-    expect(fake.sends.map((sent) => sent.id)).toEqual([ORCHESTRATOR]);
-  });
-
-  it("drops the event when the stall ends before the Orchestrator is idle", async () => {
-    await seed([...handedOver(), relayed("received", at(1, 10))]);
-    inScope();
-    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent({ status: "running" })]);
-    const stalls = watcher();
-    stalls.usePaseo(fake.paseo);
-    expect((await stalls.pass()).events).toHaveLength(1);
-    expect(queue.pending(ORCHESTRATOR)).toHaveLength(1);
-
-    // The Worker runs again: the alert is cleared, so the queued event is settled.
-    fake.byId(WORKER)!.status = "running";
-    clock = when(21);
-    expect((await stalls.pass()).cleared).toEqual([alertOf()]);
-    fake.byId(ORCHESTRATOR)!.status = "idle";
-    await queue.turnEnded({ agent: { id: ORCHESTRATOR } }, fake.paseo);
-    expect(fake.sends).toEqual([]);
-    expect(queue.pending(ORCHESTRATOR)).toEqual([]);
   });
 
   it("without an Orchestrator only the alert is kept; one opened later is not told about it", async () => {
@@ -570,22 +534,18 @@ describe("request.stalled: an event for the Orchestrator of a project in the pol
   it.each([
     ["outdated (created before its instructions were labelled)", { labels: { "bm.role": "orchestrator", "bm.orchestrator": "main" } }, {}],
     ["tools-stale (created before the endpoint's secret)", {}, { isToolsStale: toolsStaleSince(new Date(at(0, 30))) }],
-  ] as Array<[string, Partial<FakeAgent>, StallWatcherDeps]>)(
-    "an Orchestrator that is %s is replaced once, and the new one gets the events; the old one is left alone",
-    async (_case, extra, extraDeps) => {
-      await seed([...handedOver(), relayed("received", at(1, 10))]);
-      inScope();
-      const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent(extra)]);
-      const stalls = watcher(extraDeps);
-      stalls.usePaseo(fake.paseo);
+  ] as Array<[string, Partial<FakeAgent>, StallWatcherDeps]>)("an Orchestrator that is %s is not replaced for a stall: nothing wakes it", async (_case, extra, extraDeps) => {
+    await seed([...handedOver(), relayed("received", at(1, 10))]);
+    inScope(WORKSPACE_ID, "delegate");
+    const fake = daemonWith([...fakeAgentsFor(), orchestratorAgent(extra)]);
+    const stalls = watcher(extraDeps);
+    stalls.usePaseo(fake.paseo);
 
-      expect((await stalls.pass()).events).toHaveLength(1);
-      expect(fake.creates).toHaveLength(1);
-      expect(fake.creates[0]!.options.labels).toMatchObject({ "bm.role": "orchestrator", "bm.orchestrator": "main", "bm.instructions": ORCHESTRATOR_INSTRUCTIONS_HASH });
-      expect(fake.sends.map((sent) => [sent.id, sent.text.split("\n")[0]])).toEqual([["agent-orchestrator-new-1", "BM-EVENTS"]]);
-      expect(fake.byId(ORCHESTRATOR)?.archivedAt).toBeUndefined();
-    },
-  );
+    expect(await stalls.pass()).toMatchObject({ raised: [alertOf()], events: [expect.objectContaining({ type: "request.stalled", workspaceId: WORKSPACE_ID })] });
+    expect(fake.creates).toEqual([]);
+    expect(fake.sends).toEqual([]);
+    expect(fake.byId(ORCHESTRATOR)?.archivedAt).toBeUndefined();
+  });
 });
 
 describe("every request of a Manager is watched, and the shared Manager is left out (regression of 2026-09-28)", () => {

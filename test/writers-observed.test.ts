@@ -89,11 +89,23 @@ describe("one file, relative to the workspace folder", () => {
     expect(workspaceFileOf("src/math.js", null)).toBe("src/math.js");
   });
 
-  it("reads only edit and write evidence, each file once", () => {
+  it("reads edit and write evidence and the files a shell command writes, each file once", () => {
+    const shell = (detail: string, cwd?: string) => ({ kind: "shell" as const, detail, agentId: WORKER, at: at(4), ...(cwd === undefined ? {} : { cwd }) });
     const record = wrote(WORKER, 0, 5, ["src/a.js", `${DIR}/src/a.js`, "/tmp/x"], {
-      evidence: [file("src/a.js", at(1)), file(`${DIR}/src/a.js`, at(2)), file("/tmp/x", at(3)), { kind: "shell", detail: "echo > src/b.js", agentId: WORKER, at: at(4) }],
+      evidence: [
+        file("src/a.js", at(1)),
+        file(`${DIR}/src/a.js`, at(2)),
+        file("/tmp/x", at(3)),
+        // The 2026-10-09 field run: Workers write files with a here-document, which leaves no file evidence.
+        shell("cat > src/routes/invoice.js <<'EOF'\nexport const x = 1;\nEOF"),
+        shell("echo done >> notes.md && npm test 2>/dev/null", DIR),
+        shell("node gen.js | tee -a lib/out.json > /dev/null", `${DIR}/src`),
+        shell("echo hi > $OUT; echo > \"/tmp/scratch\""),
+        shell("cat src/a.js; grep -rn x src"),
+        shell("echo 'unclosed > src/c.js"),
+      ],
     });
-    expect(writtenFilesOf(record, DIR)).toEqual(["src/a.js"]);
+    expect(writtenFilesOf(record, DIR)).toEqual(["src/a.js", "src/routes/invoice.js", "notes.md", "src/lib/out.json"]);
   });
 });
 

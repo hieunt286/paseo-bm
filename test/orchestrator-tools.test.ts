@@ -7,26 +7,26 @@ import { REDACTED } from "../plugin/server/collector";
 import { createOrchestratorTools, type OrchestratorToolsDeps } from "../plugin/server/orchestrator-tools";
 import { AGENT_MESSAGE_MAX_CHARS, PROJECTS_BOUNDED_NOTE, REQUEST_BOUNDED_NOTE, agentMessagesBoundedNote } from "../plugin/server/orchestrator-read-tools";
 import {
-  SEND_REFUSED_MESSAGE,
   DIRECT_REFUSED_MESSAGE,
-  needsDecisionMessageOf,
-  commandClassesOf,
+  GOVERNOR_STOP_STEP,
+  STOP_NOT_OPEN_MESSAGE,
+  STOP_ONLY_MESSAGE,
+  governedLadderOf,
   notDelegatedRefusalOf,
-  policyCoverOf,
   storedAnswerRefusalOf,
 } from "../plugin/server/command-authority";
+import { createGovernorStore, type FamilyState } from "../plugin/server/governor-store";
+import { createInterventionStore } from "../plugin/server/intervention-store";
+import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { GIT_READ_ONLY_PREFIX, REPO_OUTPUT_MAX_CHARS, type GitRunner } from "../plugin/server/repo-tool";
 import type { ServerToolResult } from "../plugin/server/orchestrator-tool-context";
-import { ASK_OWNER_OPTION_KEYS } from "../plugin/server/orchestrator-decide-tools";
+import { ASK_OWNER_OPTION_KEYS, questionIsTheMainsText } from "../plugin/server/orchestrator-decide-tools";
 import { firstLine } from "../plugin/server/request-trace";
-import { COMMAND_LIMIT_MESSAGE, COMMAND_LIMIT_PER_REQUEST, INTERRUPT_REFUSED_MESSAGE } from "../plugin/server/command-send";
-import { ORCHESTRATOR_FIRST_PROMPT, ORCHESTRATOR_FIRST_PROMPT_START, isOwnerWord } from "../plugin/server/orchestrator-agent";
+import { COMMAND_LIMIT_MESSAGE, COMMAND_LIMIT_PER_REQUEST, MISSION_COMMAND_LIMIT_MESSAGE } from "../plugin/server/command-send";
+import { isOwnerWord } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
-import { createCoordinationStore } from "../plugin/server/coordination-store";
-import { createRequestRegistry } from "../plugin/server/request-registry";
-import { applyReviewBudgetGrants } from "../plugin/server/review-tools";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { clearRequestIndexCache, createMissionRoster } from "../plugin/server/mission-roster";
@@ -36,22 +36,15 @@ import { EMPTY_AUTONOMY_POLICY, LEVELS, decideRefusalOf, predictionRefusalOf, ty
 /** Cruise's classes (level 2, ADR-025), riskiest first: every class but release, data, security and cost. */
 const CRUISE = DECISION_CLASSES.filter((decisionClass) => LEVELS[2]!.delegated.includes(decisionClass));
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
-import { handleDecisionsAnswer, handleDecisionsGet, handleDecisionsList, settledByKind } from "../plugin/server/decision-rpc";
-import { DECISION_UI_IDLE, decisionCardView } from "../plugin/client/chat-card-decision";
-import { inboxView } from "../plugin/client/inbox-model";
+import { handleDecisionsAnswer, handleDecisionsGet, settledByKind } from "../plugin/server/decision-rpc";
 import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrator-decisions";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { isPluginNotice } from "../plugin/shared/notices";
 import {
-  CONFIRM_EFFECTS,
   DECISION_CLASSES,
-  GRANT_TTL_MS,
   MAX_DECISION_TEXT_CHARS,
   answerDecision,
   expireDecision,
-  markNeedsConfirmation,
-  supersedeDecision,
-  withdrawDecision,
   type Decision,
   type DecisionClass,
   type Effect,
@@ -60,9 +53,9 @@ import { makeDecision, storedOrchestratorAnswer } from "./helpers/decisions";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import type { AgentFacts } from "../plugin/server/traces";
 import type { TraceRecord } from "../plugin/shared/contracts";
-import { MAX_PROPOSAL_COMMAND_CHARS, RULE_IDS } from "../plugin/shared/orchestrator";
+import { RULE_IDS } from "../plugin/shared/orchestrator";
 import { commandBlockOf, parseCommandBlock, type CommandInput } from "../plugin/shared/orchestrator-command";
-import { AGENT_MESSAGES_SUMMARY, ORCHESTRATOR_SERVER_TOOLS, REQUEST_SUMMARY_MAX_CHARS } from "../plugin/shared/bm-tools";
+import { AGENT_MESSAGES_SUMMARY, REQUEST_SUMMARY_MAX_CHARS } from "../plugin/shared/bm-tools";
 import { REQUEST_MAX_CHARS, TRUNCATED_MARKER } from "../plugin/server/request-render";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_DIRECTORY, WORKSPACE_ID, at, clean, msg, smallWithBead, turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo } from "./helpers/fake-paseo";
@@ -590,14 +583,17 @@ describe("bounded reads by default (autonomy design §A.9)", () => {
 });
 
 describe("the tool set", () => {
-  it("lists the sixteen tools in order (bm_reply last, change-014), and answers an unknown name without running anything", async () => {
+  it("lists the seventeen tools in order (bm_reply last, change-014; missions design §9.1, §9.6), and answers an unknown name without running anything", async () => {
     const { paseo } = daemonWith([]);
     const tools = toolsWith(paseo);
     expect(tools.faces.map((face) => face.name)).toEqual([
       "bm_projects",
+      "bm_missions",
       "bm_request",
       "bm_agent_messages",
-      "bm_send_command",
+      "bm_govern",
+      "bm_arbitrate",
+      "bm_create_main",
       "bm_decisions",
       "bm_ask_owner",
       "bm_decide",
@@ -606,13 +602,13 @@ describe("the tool set", () => {
       "bm_repo",
       "bm_note",
       "bm_findings",
-      "bm_compact",
-      "bm_handoff",
       "bm_why",
       "bm_reply",
     ]);
     expect(tools.has("bm_report")).toBe(false);
     expect(await tools.call("bm_report", {})).toEqual({ ok: false, text: "Unknown tool: bm_report" });
+    // Missions design §9.1: replaced by bm_govern, or run by code.
+    for (const retired of ["bm_send_command", "bm_compact", "bm_handoff"]) expect(await tools.call(retired, {})).toEqual({ ok: false, text: `Unknown tool: ${retired}` });
     // Nothing is recorded.
     expect(filesUnder(home)).toEqual([]);
     // Only the stall pass's rule is left; the Orchestrator reads no rule flag.
@@ -636,7 +632,7 @@ describe("the tool set", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Design §6A (ADR-015): bm_send_command, bm_ask_owner.
+// Design §6A (ADR-015): bm_ask_owner.
 // ---------------------------------------------------------------------------
 
 const ORCHESTRATOR = "agent-orchestrator";
@@ -652,7 +648,6 @@ const orchestratorAgent = {
 /** The Orchestrator's own chat, as its timeline holds it. */
 const ownerSays = (text: string, when: string): Entry => ({ item: { type: "user_message", text, clientMessageId: `c-${when}` }, timestamp: when });
 const pluginSays = (text: string, when: string): Entry => ({ item: { type: "user_message", text, clientMessageId: `n-${when}` }, timestamp: when });
-const agentSays = (text: string, when: string): Entry => ({ item: { type: "user_message", text }, timestamp: when });
 const itSays = (text: string, when: string): Entry => ({ item: { type: "assistant_message", text }, timestamp: when });
 const toolCall = (when: string): Entry => ({ item: { type: "tool_call", name: "mcp__paseo-bm__bm_agent_messages" }, timestamp: when });
 
@@ -667,749 +662,6 @@ const OWNER_JUST_SPOKE: Entry[] = [
   toolCall(at(1, 5)),
   itSays("Sending the answer to the Manager", at(1, 10)),
 ];
-
-describe("bm_send_command (design §6A, ADR-015)", () => {
-  const managers = () => [
-    snapshotOf(clean().agents[0]!),
-    snapshotOf(clean().agents[1]!),
-    { id: REVIEWER, provider: "bm-reviewer", status: "idle", workspaceId: WORKSPACE_ID, labels: { "bm.role": "reviewer" } },
-    { id: "agent-manager-other", provider: "bm-manager", status: "idle", workspaceId: OTHER_WORKSPACE, labels: { "bm.role": "manager" } },
-    { id: "agent-manager-archived", provider: "bm-manager", status: "closed", workspaceId: WORKSPACE_ID, labels: { "bm.role": "manager" }, archivedAt: "2026-09-26T11:00:00.000Z" },
-    orchestratorAgent,
-  ];
-  const command = {
-    workspaceId: WORKSPACE_ID,
-    managerId: MANAGER,
-    requestId: "req-20260926T100020Z",
-    intent: "answer",
-    effects: ["none"],
-    command: "Q2: PDF, A4, keep the date format.",
-    reason: "The owner said PDF.",
-  };
-  /** `command` without the intent and effects bm_send_command requires. */
-  const undeclared = { workspaceId: command.workspaceId, managerId: command.managerId, requestId: command.requestId, command: command.command, reason: command.reason };
-  /** The BM-COMMAND block the Manager gets for `command` (design §6B.1; v2, autonomy design §A.7): via chat, on the owner's word unless another authority is given. */
-  const blockOf = (overrides: Partial<CommandInput> = {}) =>
-    commandBlockOf({
-      from: "orchestrator",
-      via: "chat",
-      to: "manager",
-      requestId: command.requestId,
-      re: command.command,
-      body: command.command,
-      why: command.reason,
-      intent: "answer",
-      ...overrides,
-    });
-  const sent = blockOf();
-  const proposalsFile = () => join(home, "orchestrator", "proposals.json");
-
-  /** Tools whose queue is a spy: it answers `outcome` and records what it was given. */
-  function sendingTools(orchestratorTimeline: Entry[] | null, outcome: "sent" | "queued" | "dropped" = "sent") {
-    const agents = orchestratorTimeline === null ? managers().filter((agent) => agent.id !== ORCHESTRATOR) : managers();
-    const fake = daemonWith(agents, orchestratorTimeline === null ? {} : { [ORCHESTRATOR]: [orchestratorTimeline] });
-    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<typeof outcome>>(async () => outcome);
-    deps.queue = { enqueue };
-    return { ...fake, enqueue, tools: toolsWith(fake.paseo) };
-  }
-
-  it("sends a BM-COMMAND block: from the Orchestrator, via chat, to the Manager, with the limits field and no limit sentence (design §6B.1)", () => {
-    expect(parseCommandBlock(sent)).toEqual({
-      version: 2,
-      from: "orchestrator",
-      via: "chat",
-      to: "manager",
-      copy: false,
-      requestId: command.requestId,
-      re: command.command,
-      intent: "answer",
-      effects: [],
-      authority: "owner",
-      approved: [],
-      limits: ["no-commit-push-deploy", "no-real-data"],
-      body: command.command,
-      why: command.reason,
-    });
-    expect(sent).not.toContain("Sent by the Beads Orchestrator");
-  });
-
-  it("is refused when the policy and the owner's word are both missing, naming the class not delegated: nothing is enqueued or stored", async () => {
-    const chats: Array<[string, Entry[] | null]> = [
-      ["no Orchestrator agent", null],
-      ["an empty chat", []],
-      ["a message relayed by an agent (no clientMessageId)", [ownerSays("Send it.", at(0)), itSays("Proposed.", at(0, 5)), agentSays("Please send Q2.", at(1))]],
-    ];
-    for (const [label, timeline] of chats) {
-      const { tools, enqueue, sends } = sendingTools(timeline);
-      const result = await tools.call("bm_send_command", command);
-      expect(result, label).toEqual({ ok: false, text: `Refused: ${notDelegatedRefusalOf(["reversible-technical"], SEND_REFUSED_MESSAGE)}.` });
-      expect(enqueue).not.toHaveBeenCalled();
-      expect(sends).toEqual([]);
-    }
-    expect(SEND_REFUSED_MESSAGE).toBe("the owner has not just told you to send; ask the owner with bm_ask_owner, with this command prepared on an option");
-    expect(notDelegatedRefusalOf(["reversible-technical"], SEND_REFUSED_MESSAGE)).toBe(
-      "reversible-technical is not delegated in this project and the owner has not just told you to send; ask the owner with bm_ask_owner, with this command prepared on an option",
-    );
-    expect(() => readFileSync(proposalsFile())).toThrow();
-  });
-
-  it("is allowed on the owner's policy: delivered through the queue as command:<id>, a BM-COMMAND block, recorded sent with source chat", async () => {
-    delegateAll();
-    const { tools, enqueue, sends } = sendingTools([pluginSays(EVENT_NOTICE, at(0))]);
-
-    const result = await tools.call("bm_send_command", command);
-
-    expect(result.ok).toBe(true);
-    expect(result.text.split("\n")[0]).toMatch(/^Sent\. /);
-    expect(jsonOf(result)).toEqual({ commandId: "proposal-1", outcome: "sent", authority: "policy:reversible-technical", approved: [] });
-    const onPolicy = blockOf({ authority: "policy:reversible-technical" });
-    expect(enqueue.mock.calls).toEqual([[MANAGER, "command:proposal-1", onPolicy, expect.anything()]]);
-    expect(createOrchestratorStore(home).listCommands()).toEqual([
-      expect.objectContaining({
-        id: "proposal-1",
-        kind: "command",
-        workspaceId: WORKSPACE_ID,
-        managerId: MANAGER,
-        requestId: command.requestId,
-        situation: command.command,
-        command: command.command,
-        reason: command.reason,
-        source: "chat",
-        status: "sent",
-        sentText: onPolicy,
-        outcome: "sent",
-      }),
-    ]);
-    // The tool itself never calls send: the queue does.
-    expect(sends).toEqual([]);
-  });
-
-  it("is allowed right after the owner's own message, and recorded with source chat; a queued delivery says so", async () => {
-    const { tools, enqueue } = sendingTools(OWNER_JUST_SPOKE, "queued");
-
-    const result = await tools.call("bm_send_command", command);
-
-    expect(result.ok).toBe(true);
-    expect(result.text.split("\n")[0]).toMatch(/^Queued\. The Manager is busy/);
-    expect(jsonOf(result)).toEqual({ commandId: "proposal-1", outcome: "queued", authority: "owner", approved: [] });
-    expect(enqueue).toHaveBeenCalledTimes(1);
-    expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ source: "chat", outcome: "queued", sentText: blockOf() }]);
-  });
-
-  it("is refused right after a plugin notice, the plugin's first prompt, or anything but the owner's own message", async () => {
-    const afterOwner = OWNER_JUST_SPOKE;
-    const chats: Array<[string, Entry[]]> = [
-      ["a BM-EVENTS decision event after the owner's message", [...afterOwner, itSays("Done.", at(2)), pluginSays(EVENT_NOTICE, at(3))]],
-      ["a BM-EVENTS stall event after the owner's message", [...afterOwner, itSays("Done.", at(2)), pluginSays(STALL_NOTICE, at(3)), itSays("Looking.", at(3, 5))]],
-      ["the first prompt", [pluginSays(ORCHESTRATOR_FIRST_PROMPT, at(0)), itSays("Ready.", at(0, 5))]],
-      [
-        "the first prompt of an older version, with another tool list",
-        [pluginSays(`${ORCHESTRATOR_FIRST_PROMPT_START}the Orchestrator tab of paseo-bm.\nYour tools: bm_projects.\nWait for the user.`, at(0)), itSays("Ready.", at(0, 5))],
-      ],
-    ];
-    for (const [label, timeline] of chats) {
-      const { tools, enqueue } = sendingTools(timeline);
-      expect(await tools.call("bm_send_command", command), label).toEqual({
-        ok: false,
-        text: `Refused: ${notDelegatedRefusalOf(["reversible-technical"], SEND_REFUSED_MESSAGE)}.`,
-      });
-      expect(enqueue).not.toHaveBeenCalled();
-    }
-  });
-
-  it("takes re: as given, else the command's first line, cut to 120 characters", async () => {
-    delegateAll();
-    const { tools, enqueue } = sendingTools([]);
-    const reOf = (call: number) => parseCommandBlock(enqueue.mock.calls[call]![2])!.re;
-    await tools.call("bm_send_command", { ...command, re: "answer to Q2", command: "Q2: PDF.\n\nKeep A4." });
-    expect(reOf(0)).toBe("answer to Q2");
-    expect(parseCommandBlock(enqueue.mock.calls[0]![2])!.body).toBe("Q2: PDF.\n\nKeep A4.");
-    await tools.call("bm_send_command", { ...command, requestId: "req-20260926T100021Z", command: "Q3: yes.\nThanks." });
-    expect(reOf(1)).toBe("Q3: yes.");
-    await tools.call("bm_send_command", { ...command, requestId: "req-20260926T100022Z", command: `\n  ${"long ".repeat(40)}\nsecond line` });
-    expect(reOf(2)).toHaveLength(120);
-    expect(reOf(2).endsWith("…")).toBe(true);
-    // Stored: situation the re:, command the body, reason the why.
-    expect(createOrchestratorStore(home).listCommands().find((entry) => entry.requestId === command.requestId)).toMatchObject({
-      situation: "answer to Q2",
-      command: "Q2: PDF.\n\nKeep A4.",
-      reason: command.reason,
-    });
-  });
-
-  it("refuses a command that cannot be a BM-COMMAND block, and a request id that is not one token, sending nothing", async () => {
-    delegateAll();
-    const { tools, enqueue } = sendingTools([]);
-    const trailingWhy = await tools.call("bm_send_command", { ...command, command: "Go on.\n\nwhy: because" });
-    expect(trailingWhy.ok).toBe(true);
-    const badRequest = await tools.call("bm_send_command", { ...command, requestId: "req 1" });
-    expect(badRequest.ok).toBe(false);
-    expect(badRequest.text).toMatch(/^Refused: the command cannot be sent as a BM-COMMAND block: requestId must be one token/);
-    expect(enqueue).toHaveBeenCalledTimes(1);
-  });
-
-  it("the backstop: a text that shows a release, security, data, cost or dependency the effects do not declare is refused with the declare message and sends nothing (autonomy design §A.7)", async () => {
-    delegateAll();
-    const { tools, enqueue } = sendingTools(OWNER_JUST_SPOKE);
-    const gated = await tools.call("bm_send_command", { ...command, command: "Push the branch and deploy to production, then rotate the API token." });
-    expect(gated).toEqual({
-      ok: false,
-      text: "Refused: the text shows security (security), release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-    });
-    // The re: line is checked too.
-    expect((await tools.call("bm_send_command", { ...command, re: "run the migration" })).text).toBe(
-      "Refused: the text shows data (real-data or migration) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-    );
-    expect(enqueue).not.toHaveBeenCalled();
-    expect(() => readFileSync(proposalsFile())).toThrow();
-    // A negated mention shows nothing.
-    expect((await tools.call("bm_send_command", { ...command, command: "Fix the date. Do not push." })).ok).toBe(true);
-    // Allow… is retired (autonomy design §B.8): a category an earlier build let the owner allow is checked like any other.
-    earlierAutopilotSettings();
-    expect((await tools.call("bm_send_command", { ...command, requestId: "req-2", command: "Push the fix." })).text).toBe(
-      "Refused: the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-    );
-    expect((await tools.call("bm_send_command", { ...command, requestId: "req-3", command: "Push the new token." })).text).toBe(
-      "Refused: the text shows security (security), release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-    );
-    expect(enqueue).toHaveBeenCalledTimes(1);
-  });
-
-  it("a declared effect the text shows passes the backstop, and is sent when the policy or the owner's word covers it; its block approves it", async () => {
-    delegateAll();
-    const { tools, enqueue } = sendingTools([]);
-    const result = await tools.call("bm_send_command", { ...command, intent: "continue", effects: ["dependency-install", "commit"], command: "npm install date-fns, then commit the lockfile." });
-    expect(result.ok).toBe(true);
-    expect(jsonOf(result)).toMatchObject({ authority: "policy:dependency", approved: ["commit", "dependency-install"] });
-    expect(parseCommandBlock(enqueue.mock.calls[0]![2])).toMatchObject({
-      intent: "continue",
-      effects: ["commit", "dependency-install"],
-      authority: "policy:dependency",
-      approved: ["commit", "dependency-install"],
-      limits: ["no-push", "no-deploy", "no-real-data"],
-    });
-  });
-
-  it("at Cruise the policy and the owner's word in the chat never cover push, publish, deploy, real data, migration, security or cost: refused, sends nothing", async () => {
-    expect(CONFIRM_EFFECTS).toEqual(["push", "publish", "deploy", "real-data", "migration", "security", "cost"]);
-    for (const timeline of [OWNER_JUST_SPOKE, null]) {
-      if (timeline === null) delegateAll();
-      // Nor does an earlier build's Autopilot with every category allowed.
-      earlierAutopilotSettings();
-      const { tools, enqueue } = sendingTools(timeline ?? []);
-      for (const effect of CONFIRM_EFFECTS) {
-        expect(await tools.call("bm_send_command", { ...command, intent: "release", effects: [effect], command: "Go on." }), effect).toEqual({
-          ok: false,
-          text: `Refused: ${needsDecisionMessageOf([effect])}.`,
-        });
-      }
-      expect(await tools.call("bm_send_command", { ...command, effects: ["commit", "push", "cost"], command: "Publish the package." })).toEqual({
-        ok: false,
-        text: "Refused: push, cost needs the owner's decision: ask with bm_ask_owner, and once the owner has answered, send with its decisionId.",
-      });
-      expect(enqueue).not.toHaveBeenCalled();
-    }
-    expect(() => readFileSync(proposalsFile())).toThrow();
-  });
-
-  it("the backstop holds on the owner's word in chat too: no project allows a category any more", async () => {
-    const { tools, enqueue } = sendingTools(OWNER_JUST_SPOKE);
-    expect((await tools.call("bm_send_command", { ...command, command: "Publish the package." })).text).toBe(
-      "Refused: the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-    );
-    expect(enqueue).not.toHaveBeenCalled();
-  });
-
-  it("records each command it sends as an entry of its own, with its source", async () => {
-    const { tools, enqueue } = sendingTools(OWNER_JUST_SPOKE);
-
-    const result = await tools.call("bm_send_command", { ...command, re: "answer to Q2", command: "Q2: PDF." });
-
-    expect(jsonOf(result)).toEqual({ commandId: "proposal-1", outcome: "sent", authority: "owner", approved: [] });
-    expect(enqueue.mock.calls[0]!.slice(0, 2)).toEqual([MANAGER, "command:proposal-1"]);
-    expect(createOrchestratorStore(home).listCommands()).toEqual([
-      expect.objectContaining({ id: "proposal-1", status: "sent", source: "chat", sentText: blockOf({ re: "answer to Q2", body: "Q2: PDF." }), outcome: "sent" }),
-    ]);
-  });
-
-  it("goes to a paseo-bm Manager of that project only — never a Worker, a Reviewer, the Orchestrator or an archived Manager — even on the policy", async () => {
-    delegateAll();
-    const { tools, enqueue } = sendingTools(OWNER_JUST_SPOKE);
-    const refused = async (managerId: string) => (await tools.call("bm_send_command", { ...command, managerId })).text;
-    for (const target of [WORKER, REVIEWER, ORCHESTRATOR, "agent-gone"]) {
-      expect(await refused(target)).toBe(`Refused: ${target} is not a paseo-bm Manager; use a managerId bm_projects gave.`);
-    }
-    expect(await refused("agent-manager-other")).toBe(`Refused: Manager agent-manager-other does not belong to project ${WORKSPACE_ID}.`);
-    expect(await refused("agent-manager-archived")).toBe("Refused: Manager agent-manager-archived is archived; nothing can be sent to it.");
-    expect(enqueue).not.toHaveBeenCalled();
-    expect(() => readFileSync(proposalsFile())).toThrow();
-  });
-
-  it("records nothing when the Manager cannot be reached", async () => {
-    const { tools } = sendingTools(OWNER_JUST_SPOKE, "dropped");
-    expect(await tools.call("bm_send_command", command)).toEqual({ ok: false, text: `Refused: Manager ${MANAGER} could not be reached; nothing was sent.` });
-    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
-  });
-
-  it("validates its fields before anything is read", async () => {
-    const { tools, paseo } = sendingTools(OWNER_JUST_SPOKE);
-    const issues = async (input: Record<string, unknown>) => (await tools.call("bm_send_command", input)).text;
-    expect(await issues({ ...command, command: "x".repeat(MAX_PROPOSAL_COMMAND_CHARS + 1) })).toContain(`- input.command: must be at most ${MAX_PROPOSAL_COMMAND_CHARS} characters`);
-    expect(await issues({ ...command, reason: "x".repeat(301) })).toContain("- input.reason: must be at most 300 characters");
-    expect(await issues({ ...command, agentId: WORKER })).toContain("- input.agentId: is not a field of this tool");
-    expect(await issues(undeclared)).toContain("- input.intent: is required\n- input.effects: is required");
-    expect(await issues({ ...command, effects: [] })).toContain("- input.effects: needs at least 1 item(s)");
-    expect(paseo.agents.list).not.toHaveBeenCalled();
-  });
-
-  it("a 4,000-character command is sent and recorded as its whole block", async () => {
-    delegateAll();
-    const { tools } = sendingTools([]);
-    const long = "x".repeat(MAX_PROPOSAL_COMMAND_CHARS);
-    expect((await tools.call("bm_send_command", { ...command, re: "long", command: long })).ok).toBe(true);
-    expect(createOrchestratorStore(home).listCommands()[0]!.sentText).toBe(blockOf({ re: "long", body: long, authority: "policy:reversible-technical" }));
-  });
-
-  /**
-   * A command the Orchestrator already sent `hoursAgo` before NOW; `source:
-   * "autopilot"` makes it one Phase 1 sent on a project's Autopilot, as its
-   * history holds it (autonomy design §B.8).
-   */
-  function alreadySent(hoursAgo: number, overrides: { requestId?: string | null; source?: "autopilot" | "chat"; workspaceId?: string } = {}) {
-    const when = new Date(NOW.getTime() - hoursAgo * 3_600_000);
-    const entry = createOrchestratorStore(home, { now: () => when }).appendCommand({
-      workspaceId: overrides.workspaceId ?? WORKSPACE_ID,
-      managerId: MANAGER,
-      requestId: overrides.requestId === undefined ? command.requestId : overrides.requestId,
-      situation: "",
-      command: "Continue.",
-      reason: "",
-      sentText: "Continue.",
-      outcome: "sent",
-    });
-    if (overrides.source !== "autopilot") return;
-    const file = JSON.parse(readFileSync(proposalsFile(), "utf8")) as { version: number; entries: Array<{ id: string }> };
-    writeFileSync(proposalsFile(), JSON.stringify({ ...file, entries: file.entries.map((stored) => (stored.id === entry.id ? { ...stored, source: "autopilot" } : stored)) }));
-  }
-
-  it("the loop guard: a 13th command for one request within 24 hours is refused before anything is sent — Phase 1's commands on Autopilot counted (design §6A)", async () => {
-    delegateAll();
-    for (let index = 0; index < COMMAND_LIMIT_PER_REQUEST - 1; index += 1) alreadySent(1 + index, { source: index % 2 === 0 ? "autopilot" : "chat" });
-    // Not counted: older than 24 hours, another request, another project.
-    alreadySent(25);
-    alreadySent(1, { requestId: "req-other" });
-    alreadySent(1, { workspaceId: OTHER_WORKSPACE });
-    const { tools, enqueue } = sendingTools([]);
-
-    // The 12th goes out …
-    expect((await tools.call("bm_send_command", command)).ok).toBe(true);
-    expect(enqueue).toHaveBeenCalledTimes(1);
-    // … the 13th does not: nothing enqueued, nothing recorded.
-    const before = createOrchestratorStore(home).listCommands().length;
-    expect(await tools.call("bm_send_command", command)).toEqual({ ok: false, text: `Refused: ${COMMAND_LIMIT_MESSAGE}.` });
-    expect(COMMAND_LIMIT_MESSAGE).toBe("you sent 12 commands for this request in 24 hours; ask the owner with bm_ask_owner");
-    expect(enqueue).toHaveBeenCalledTimes(1);
-    expect(createOrchestratorStore(home).listCommands()).toHaveLength(before);
-    // Another request of the same project still goes out.
-    expect((await tools.call("bm_send_command", { ...command, requestId: "req-other" })).ok).toBe(true);
-    expect(enqueue).toHaveBeenCalledTimes(2);
-  });
-
-  it("the loop guard counts commands without a request per project, apart from those with one", async () => {
-    delegateAll();
-    for (let index = 0; index < COMMAND_LIMIT_PER_REQUEST; index += 1) alreadySent(2, { requestId: null });
-    const { tools, enqueue } = sendingTools([]);
-    const withoutRequest: Partial<typeof command> = { ...command };
-    delete withoutRequest.requestId;
-    expect(await tools.call("bm_send_command", withoutRequest)).toEqual({ ok: false, text: `Refused: ${COMMAND_LIMIT_MESSAGE}.` });
-    expect(enqueue).not.toHaveBeenCalled();
-    expect((await tools.call("bm_send_command", command)).ok).toBe(true);
-  });
-
-  describe("on the owner's autonomy policy, a command that answers no decision (autonomy design §B.9)", () => {
-    /** One cell of the project's policy, set as the owner's `autonomy.set` sets it. */
-    const setCell = (decisionClass: DecisionClass, mode: "owner" | "shadow" | "delegate", workspaceId = WORKSPACE_ID) =>
-      createAutonomyStore(home).set({ workspaceId, class: decisionClass, mode, confirmed: true }, NOW.toISOString());
-    const DELEGABLE = CRUISE;
-    const sentBlocks = (enqueue: ReturnType<typeof sendingTools>["enqueue"]) => enqueue.mock.calls.map((call) => parseCommandBlock(call[2])!);
-
-    it("maps the declared effects to their classes, none and commit counting as reversible-technical, riskiest first", () => {
-      expect(DELEGABLE).toEqual(["dependency", "environment", "scope", "preference", "reversible-technical"]);
-      expect(commandClassesOf(["none"])).toEqual(["reversible-technical"]);
-      expect(commandClassesOf([])).toEqual(["reversible-technical"]);
-      expect(commandClassesOf(["commit"])).toEqual(["reversible-technical"]);
-      expect(commandClassesOf(["dependency-install"])).toEqual(["dependency"]);
-      expect(commandClassesOf(["commit", "network", "dependency-install", "none"])).toEqual(["dependency", "environment", "reversible-technical"]);
-      expect(commandClassesOf(["outside-workspace", "push", "cost"])).toEqual(["release", "cost", "environment"]);
-      expect(policyCoverOf({ projects: {}, challenger: {} }, WORKSPACE_ID, ["commit", "dependency-install"])).toEqual({
-        riskiest: "dependency",
-        notDelegated: ["dependency", "reversible-technical"],
-      });
-    });
-
-    it("a none or commit command where reversible-technical is delegate goes out with policy:reversible-technical, without the owner's word", async () => {
-      setCell("reversible-technical", "delegate");
-      // No Orchestrator in the chat at all: nothing the owner said authorises these.
-      const { tools, enqueue, refetches } = sendingTools(null);
-      const none = await tools.call("bm_send_command", command);
-      expect(none.ok).toBe(true);
-      expect(jsonOf(none)).toEqual({ commandId: "proposal-1", outcome: "sent", authority: "policy:reversible-technical", approved: [] });
-      expect(enqueue.mock.calls[0]).toEqual([MANAGER, "command:proposal-1", blockOf({ authority: "policy:reversible-technical" }), expect.anything()]);
-      const commit = await tools.call("bm_send_command", { ...command, requestId: "req-20260926T100021Z", intent: "continue", effects: ["commit"], command: "Commit the fix." });
-      expect(jsonOf(commit)).toMatchObject({ authority: "policy:reversible-technical", approved: ["commit"] });
-      expect(sentBlocks(enqueue)[1]).toMatchObject({ via: "chat", effects: ["commit"], authority: "policy:reversible-technical", approved: ["commit"], limits: ["no-push", "no-deploy", "no-real-data"] });
-      expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ source: "chat", status: "sent" }, { source: "chat", status: "sent" }]);
-      // The policy is read, not the Orchestrator's chat.
-      expect(refetches).toEqual([]);
-    });
-
-    it("a dependency-install needs the dependency cell delegated; with commit, both classes, the authority naming dependency", async () => {
-      setCell("dependency", "delegate");
-      const { tools, enqueue } = sendingTools(null);
-      const install = { ...command, intent: "continue", effects: ["dependency-install"], command: "npm install date-fns, then run the tests." };
-      expect(jsonOf(await tools.call("bm_send_command", install))).toMatchObject({ authority: "policy:dependency", approved: ["dependency-install"] });
-      // commit counts as reversible-technical, which is still the owner's.
-      const installAndCommit = { ...install, requestId: "req-20260926T100021Z", effects: ["commit", "dependency-install"] };
-      expect(await tools.call("bm_send_command", installAndCommit)).toEqual({
-        ok: false,
-        text: `Refused: ${notDelegatedRefusalOf(["reversible-technical"], SEND_REFUSED_MESSAGE)}.`,
-      });
-      setCell("reversible-technical", "delegate");
-      expect(jsonOf(await tools.call("bm_send_command", installAndCommit))).toMatchObject({ authority: "policy:dependency", approved: ["commit", "dependency-install"] });
-      // Only reversible-technical delegated: the install is refused, naming dependency.
-      setCell("dependency", "shadow");
-      expect(await tools.call("bm_send_command", { ...install, requestId: "req-20260926T100022Z" })).toEqual({
-        ok: false,
-        text: `Refused: ${notDelegatedRefusalOf(["dependency"], SEND_REFUSED_MESSAGE)}.`,
-      });
-      expect(sentBlocks(enqueue).map((block) => block.authority)).toEqual(["policy:dependency", "policy:dependency"]);
-    });
-
-    it("a release, data, security or cost effect goes on the policy where its class is delegated (Full auto, ADR-025); the owner's word alone never covers one", async () => {
-      // Cruise: the owner's word in the chat does not cover a confirmation effect.
-      for (const decisionClass of DELEGABLE) setCell(decisionClass, "delegate");
-      const spoken = sendingTools(OWNER_JUST_SPOKE);
-      for (const effect of CONFIRM_EFFECTS) {
-        expect(await spoken.tools.call("bm_send_command", { ...command, intent: "release", effects: [effect], command: "Go on." }), effect).toEqual({
-          ok: false,
-          text: `Refused: ${needsDecisionMessageOf([effect])}.`,
-        });
-      }
-      expect(spoken.enqueue).not.toHaveBeenCalled();
-      // Full auto: every class delegated, each effect goes on the policy of its class.
-      for (const decisionClass of DECISION_CLASSES) setCell(decisionClass, "delegate");
-      const { tools, enqueue } = sendingTools(null);
-      const classOf = { push: "release", publish: "release", deploy: "release", "real-data": "data", migration: "data", security: "security", cost: "cost" } as const;
-      for (const [index, effect] of CONFIRM_EFFECTS.entries()) {
-        const sent = await tools.call("bm_send_command", { ...command, requestId: `req-20260926T1001${String(index).padStart(2, "0")}Z`, intent: "release", effects: [effect], command: "Go on." });
-        expect(sent.ok, `${effect}: ${sent.text}`).toBe(true);
-        expect(jsonOf(sent), effect).toMatchObject({ authority: `policy:${classOf[effect as keyof typeof classOf]}`, approved: [effect] });
-      }
-      expect(sentBlocks(enqueue).map((block) => block.authority)).toEqual(CONFIRM_EFFECTS.map((effect) => `policy:${classOf[effect as keyof typeof classOf]}`));
-    });
-
-    it("in a project with no delegated class a command is refused without the owner's word or a grant — another project's delegation does not count", async () => {
-      for (const decisionClass of DELEGABLE) setCell(decisionClass, "delegate", OTHER_WORKSPACE);
-      setCell("reversible-technical", "shadow");
-      const quiet = sendingTools([pluginSays(EVENT_NOTICE, at(0))]);
-      expect(await quiet.tools.call("bm_send_command", command)).toEqual({ ok: false, text: `Refused: ${notDelegatedRefusalOf(["reversible-technical"], SEND_REFUSED_MESSAGE)}.` });
-      expect(await quiet.tools.call("bm_send_command", { ...command, effects: ["commit", "network", "dependency-install"], command: "npm install undici, then commit." })).toEqual({
-        ok: false,
-        text: `Refused: ${notDelegatedRefusalOf(["dependency", "environment", "reversible-technical"], SEND_REFUSED_MESSAGE)}.`,
-      });
-      expect(notDelegatedRefusalOf(["dependency", "environment", "reversible-technical"], SEND_REFUSED_MESSAGE)).toMatch(
-        /^dependency, environment and reversible-technical are not delegated in this project and the owner has not just told you to send/,
-      );
-      expect(quiet.enqueue).not.toHaveBeenCalled();
-      expect(() => readFileSync(proposalsFile())).toThrow();
-      // The owner's own word still authorises it, as the owner's.
-      const spoken = sendingTools(OWNER_JUST_SPOKE);
-      expect(jsonOf(await spoken.tools.call("bm_send_command", command))).toMatchObject({ authority: "owner" });
-    });
-
-    it("is read at send time: a cell set back to shadow or owner, or the project reset, refuses the next command", async () => {
-      setCell("reversible-technical", "delegate");
-      const { tools, enqueue } = sendingTools([]);
-      const refused = { ok: false, text: `Refused: ${notDelegatedRefusalOf(["reversible-technical"], SEND_REFUSED_MESSAGE)}.` };
-      expect((await tools.call("bm_send_command", command)).ok).toBe(true);
-      setCell("reversible-technical", "shadow");
-      expect(await tools.call("bm_send_command", command)).toEqual(refused);
-      setCell("reversible-technical", "delegate");
-      expect((await tools.call("bm_send_command", command)).ok).toBe(true);
-      createAutonomyStore(home).reset(WORKSPACE_ID);
-      expect(await tools.call("bm_send_command", command)).toEqual(refused);
-      expect(enqueue).toHaveBeenCalledTimes(2);
-    });
-
-    it("the backstop holds whatever the policy: a command declaring none or commit whose text shows git push is refused and sends nothing", async () => {
-      for (const decisionClass of DELEGABLE) setCell(decisionClass, "delegate");
-      const { tools, enqueue } = sendingTools(null);
-      const release = "Refused: the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.";
-      expect(await tools.call("bm_send_command", { ...command, command: "Run git push origin main." })).toEqual({ ok: false, text: release });
-      expect(await tools.call("bm_send_command", { ...command, effects: ["commit"], command: "Commit, then git push." })).toEqual({ ok: false, text: release });
-      expect(await tools.call("bm_send_command", { ...command, re: "git push the fix" })).toEqual({ ok: false, text: release });
-      expect(enqueue).not.toHaveBeenCalled();
-      expect(() => readFileSync(proposalsFile())).toThrow();
-    });
-
-    it("Autopilot is retired (autonomy design §B.8): an earlier build's Autopilot authorises nothing — no decision, no fresh owner word and a class not delegated is refused", async () => {
-      earlierAutopilotSettings();
-      setCell("reversible-technical", "delegate");
-      const { tools, enqueue } = sendingTools([pluginSays(EVENT_NOTICE, at(0))]);
-      expect(jsonOf(await tools.call("bm_send_command", command))).toEqual({ commandId: "proposal-1", outcome: "sent", authority: "policy:reversible-technical", approved: [] });
-      const install = { ...command, requestId: "req-20260926T100021Z", intent: "continue", effects: ["dependency-install"], command: "npm install date-fns" };
-      expect(await tools.call("bm_send_command", install)).toEqual({ ok: false, text: `Refused: ${notDelegatedRefusalOf(["dependency"], SEND_REFUSED_MESSAGE)}.` });
-      // Nothing is ever sent via autopilot or on its authority any more.
-      expect(sentBlocks(enqueue).map((block) => [block.via, block.authority])).toEqual([["chat", "policy:reversible-technical"]]);
-      expect(createOrchestratorStore(home).listCommands().map((entry) => entry.source)).toEqual(["chat"]);
-    });
-
-    it("the two tools say when a command goes out without a decision: where the owner delegated every class of its effects", () => {
-      for (const name of ["bm_send_command", "bm_direct_worker"]) {
-        expect(ORCHESTRATOR_SERVER_TOOLS.find((face) => face.name === name)!.description, name).toMatch(/the owner's policy delegating every class of its effects|the owner delegated every class of its effects/);
-      }
-      expect(ORCHESTRATOR_SERVER_TOOLS.find((face) => face.name === "bm_send_command")!.description).toContain("naming the class not delegated");
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Autonomy design §A.7 (ADR-017 decisions 4–5): authority from declared effects and grants.
-// ---------------------------------------------------------------------------
-
-describe("a command on the grant of a decision the owner answered (autonomy design §A.7)", () => {
-  const REQUEST = "req-20260929T073348Z";
-  const DECISION = "o:push-contract-backend";
-  const agents = () => [snapshotOf(clean().agents[0]!), snapshotOf(clean().agents[1]!, { status: "running" }), orchestratorAgent];
-  /** The Orchestrator's chat once the plugin delivered the owner's answer: a plugin notice, not the owner's word. */
-  const ANSWER_DELIVERED: Entry[] = [
-    itSays("Push the contract backend to origin/dev? I asked the owner.", at(0)),
-    pluginSays(`BM-ANSWER\ndecisionId: ${DECISION}\nThis notice is from the paseo-bm plugin.`, at(5)),
-  ];
-  const push = {
-    workspaceId: WORKSPACE_ID,
-    managerId: MANAGER,
-    requestId: REQUEST,
-    decisionId: DECISION,
-    intent: "release",
-    effects: ["push"],
-    re: "push the contract backend",
-    command: "Push the contract backend to origin/dev now; leave the manifest as it is.",
-    reason: "The owner answered the push decision.",
-  };
-
-  /** An open Orchestrator decision of the project: push the contract backend, or hold. */
-  function openDecision(overrides: Partial<Decision> = {}): Decision {
-    const decision: Decision = {
-      id: DECISION,
-      workspaceId: WORKSPACE_ID,
-      requestId: REQUEST,
-      askedBy: { role: "orchestrator", agentId: ORCHESTRATOR },
-      askedAt: "2026-09-26T11:00:00.000Z",
-      round: null,
-      question: "Push the contract backend to origin/dev?",
-      subject: "push-contract-backend",
-      options: [
-        { key: "a", label: "Push the contract backend", recommended: true, effects: ["push"] },
-        { key: "b", label: "Hold", recommended: false, effects: ["none"] },
-      ],
-      status: "open",
-      settledAt: null,
-      needsConfirmation: null,
-      answer: null,
-      grant: null,
-      delivery: null,
-      supersedes: null,
-      supersededBy: null,
-      ...overrides,
-    };
-    createDecisionStore(home).open(decision);
-    return decision;
-  }
-
-  /** The owner answers it, `minutesAgo` before NOW. */
-  function answer(input: { optionKey?: string; words?: string }, minutesAgo = 10, id = DECISION): Decision {
-    const result = createDecisionStore(home).transition(id, (decision) =>
-      answerDecision(decision, { via: "inbox", ...input, at: new Date(NOW.getTime() - minutesAgo * 60_000).toISOString() }),
-    );
-    if (result.status !== "updated") throw new Error(`the answer was not stored: ${result.status}`);
-    return result.decision;
-  }
-
-  const stored = (id = DECISION) => createDecisionStore(home).get(id, WORKSPACE_ID)!;
-
-  function grantTools(timeline: Entry[] = ANSWER_DELIVERED, outcome: "sent" | "queued" | "dropped" = "sent") {
-    const fake = daemonWith(agents(), { [ORCHESTRATOR]: [timeline] });
-    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent" | "queued" | "dropped">>(async (target) => (target === MANAGER ? outcome : "sent"));
-    deps.queue = { enqueue };
-    return { ...fake, enqueue, tools: toolsWith(fake.paseo) };
-  }
-
-  afterEach(() => clearDecisionStoreCache());
-
-  it("replays 2026-09-29: the owner answers the push decision in words, and one command with approved: push goes out — no second question", async () => {
-    openDecision();
-    // The owner answers in their own words: the answer grants every effect the decision declares (push), for one command within the hour.
-    expect(answer({ words: "Yes, push the contract backend to origin/dev. Leave the manifest." }).grant).toEqual({
-      effects: ["push"],
-      expiresAt: new Date(NOW.getTime() - 10 * 60_000 + GRANT_TTL_MS).toISOString(),
-      usedAt: null,
-    });
-    const { tools, enqueue, sends } = grantTools();
-
-    const result = await tools.call("bm_send_command", push);
-
-    expect(result.ok).toBe(true);
-    expect(jsonOf(result)).toMatchObject({ outcome: "sent", authority: `decision:${DECISION}`, approved: ["push"] });
-    expect(enqueue).toHaveBeenCalledTimes(1);
-    const block = parseCommandBlock(enqueue.mock.calls[0]![2])!;
-    expect(block).toMatchObject({
-      version: 2,
-      from: "orchestrator",
-      to: "manager",
-      requestId: REQUEST,
-      intent: "release",
-      effects: ["push"],
-      authority: `decision:${DECISION}`,
-      approved: ["push"],
-      body: push.command,
-    });
-    // The limits no longer contradict the approval: the push is allowed, the rest stays withheld.
-    expect(block.limits).toEqual(["no-commit", "no-deploy", "no-real-data"]);
-    // The grant is spent, and nothing asked the owner a second time.
-    expect(stored().grant!.usedAt).toBe(NOW.toISOString());
-    expect(createDecisionStore(home).list({ workspaceId: WORKSPACE_ID })).toHaveLength(1);
-    expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ requestId: REQUEST, source: "chat", sentText: enqueue.mock.calls[0]![2] }]);
-    expect(sends).toEqual([]);
-  });
-
-  it("the same command without the grant is refused, on the policy and on the owner's word alike: push needs the decision", async () => {
-    delegateAll();
-    const withoutGrant = Object.fromEntries(Object.entries(push).filter(([key]) => key !== "decisionId"));
-    const { tools, enqueue } = grantTools(OWNER_JUST_SPOKE);
-    expect(await tools.call("bm_send_command", withoutGrant)).toEqual({ ok: false, text: `Refused: ${needsDecisionMessageOf(["push"])}.` });
-    expect(enqueue).not.toHaveBeenCalled();
-  });
-
-  it("a grant is used once: the second command on it is refused and sends nothing", async () => {
-    openDecision();
-    answer({ optionKey: "a" });
-    const { tools, enqueue } = grantTools();
-    expect((await tools.call("bm_send_command", push)).ok).toBe(true);
-    const again = await tools.call("bm_send_command", { ...push, command: "Push it once more." });
-    expect(again).toEqual({
-      ok: false,
-      text: `Refused: the grant of decision ${DECISION} was used at ${NOW.toISOString()}; ask the owner again with bm_ask_owner.`,
-    });
-    expect(enqueue).toHaveBeenCalledTimes(1);
-  });
-
-  it("an expired grant, or one that does not cover every declared effect, is refused and left unused", async () => {
-    openDecision();
-    answer({ optionKey: "a" }, 61);
-    const late = grantTools();
-    expect((await late.tools.call("bm_send_command", push)).text).toMatch(new RegExp(`^Refused: the grant of decision ${DECISION} expired at `));
-    expect(late.enqueue).not.toHaveBeenCalled();
-
-    clearDecisionStoreCache();
-    rmSync(join(home, "decisions"), { recursive: true, force: true });
-    openDecision();
-    answer({ optionKey: "a" });
-    const { tools, enqueue } = grantTools();
-    expect(await tools.call("bm_send_command", { ...push, effects: ["push", "deploy"], command: "Push the contract backend and deploy it." })).toEqual({
-      ok: false,
-      text: `Refused: decision ${DECISION} did not grant deploy; ask the owner again with bm_ask_owner.`,
-    });
-    expect(enqueue).not.toHaveBeenCalled();
-    expect(stored().grant!.usedAt).toBeNull();
-  });
-
-  it("a text that shows an effect the command does not declare is refused with the declare message, even on a grant", async () => {
-    openDecision();
-    answer({ optionKey: "a" });
-    const { tools, enqueue } = grantTools();
-    expect(await tools.call("bm_send_command", { ...push, command: "Push the contract backend, then rotate the API token." })).toEqual({
-      ok: false,
-      text: "Refused: the text shows security (security) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-    });
-    expect(enqueue).not.toHaveBeenCalled();
-    expect(stored().grant!.usedAt).toBeNull();
-  });
-
-  it("only an answered decision the Orchestrator asked in this project, about the command's request, authorises it", async () => {
-    const { tools, enqueue } = grantTools();
-    expect((await tools.call("bm_send_command", push)).text).toBe(`Refused: no decision ${DECISION} in project ${WORKSPACE_ID}.`);
-    openDecision();
-    expect((await tools.call("bm_send_command", push)).text).toBe(`Refused: decision ${DECISION} is open; only a decision the owner answered authorises a command.`);
-    answer({ optionKey: "a" });
-    expect((await tools.call("bm_send_command", { ...push, requestId: "req-20260929T090000Z" })).text).toBe(
-      `Refused: decision ${DECISION} is about request ${REQUEST}; a command on its authority names that request.`,
-    );
-    const workerQuestion = `q:${REQUEST}:Q4`;
-    expect((await tools.call("bm_send_command", { ...push, decisionId: workerQuestion })).text).toBe(
-      `Refused: ${workerQuestion} is not a decision you asked; decisionId takes the id (o:…) of your own decision the owner answered.`,
-    );
-    expect(enqueue).not.toHaveBeenCalled();
-  });
-
-  it("an answer that granted nothing authorises a command that declares no effect, and spends nothing", async () => {
-    openDecision();
-    expect(answer({ optionKey: "b" }).grant).toBeNull();
-    const { tools, enqueue } = grantTools();
-    const hold = { ...push, intent: "answer", effects: ["none"], re: "hold: do not push yet", command: "Hold: do not push the contract backend yet." };
-    const result = await tools.call("bm_send_command", hold);
-    expect(result.ok).toBe(true);
-    expect(parseCommandBlock(enqueue.mock.calls[0]![2])).toMatchObject({ authority: `decision:${DECISION}`, approved: [], limits: ["no-commit-push-deploy", "no-real-data"] });
-    // Declaring the push on that answer is refused: it granted nothing.
-    expect((await tools.call("bm_send_command", push)).text).toBe(`Refused: decision ${DECISION} granted nothing; ask the owner again with bm_ask_owner.`);
-  });
-
-  it("a command that could not be delivered spends nothing: the grant still serves the next attempt", async () => {
-    openDecision();
-    answer({ optionKey: "a" });
-    const unreachable = grantTools(ANSWER_DELIVERED, "dropped");
-    expect(await unreachable.tools.call("bm_send_command", push)).toEqual({ ok: false, text: `Refused: Manager ${MANAGER} could not be reached; nothing was sent.` });
-    expect(stored().grant!.usedAt).toBeNull();
-    const { tools } = grantTools();
-    expect((await tools.call("bm_send_command", push)).ok).toBe(true);
-    expect(stored().grant!.usedAt).toBe(NOW.toISOString());
-  });
-
-  it("two calls on one grant at the same time: one goes out, the other is refused", async () => {
-    openDecision();
-    answer({ optionKey: "a" });
-    const { tools, enqueue } = grantTools();
-    const results = await Promise.all([tools.call("bm_send_command", push), tools.call("bm_send_command", { ...push, command: "Push it now." })]);
-    expect(results.filter((result) => result.ok)).toHaveLength(1);
-    expect(results.find((result) => !result.ok)!.text).toMatch(new RegExp(`^Refused: the grant of decision ${DECISION} (is being used by another command|was used at )`));
-    expect(enqueue).toHaveBeenCalledTimes(1);
-  });
-
-  it("bm_direct_worker spends the grant once for the Worker's command and its Manager's copy", async () => {
-    openDecision();
-    answer({ optionKey: "a" });
-    const { tools, enqueue } = grantTools();
-    const direct = {
-      workspaceId: WORKSPACE_ID,
-      workerId: WORKER,
-      requestId: REQUEST,
-      decisionId: DECISION,
-      intent: "release",
-      effects: ["push"],
-      re: "push the contract backend",
-      command: "Push the contract backend to origin/dev now.",
-    };
-    const result = await tools.call("bm_direct_worker", direct);
-    expect(result.ok).toBe(true);
-    expect(jsonOf(result)).toMatchObject({ authority: `decision:${DECISION}`, approved: ["push"] });
-    expect(enqueue.mock.calls.map(([target, , text]) => [target, parseCommandBlock(text)!.approved, parseCommandBlock(text)!.copy])).toEqual([
-      [WORKER, ["push"], false],
-      [MANAGER, ["push"], true],
-    ]);
-    expect(stored().grant!.usedAt).toBe(NOW.toISOString());
-    expect((await tools.call("bm_direct_worker", direct)).text).toMatch(/^Refused: the grant of decision .* was used at /);
-  });
-});
 
 describe("bm_ask_owner (autonomy design §A.3, §A.6)", () => {
   const REQUEST = "req-20260926T100020Z";
@@ -1578,7 +830,7 @@ describe("bm_ask_owner (autonomy design §A.3, §A.6)", () => {
       makeDecision({ id: `q:${REQUEST}:Q4`, workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "worker", agentId: WORKER }, subject: "invoices-table", status });
     createDecisionStore(home).open(workerQuestion("open"));
     expect((await tools.call("bm_ask_owner", { ...ask, subject: "invoices-table" })).text).toBe(
-      `Refused: the Worker's question q:${REQUEST}:Q4 of this request asks "invoices-table" already: decide it with bm_decide, or leave it to the owner; nothing was stored.`,
+      `Refused: the Worker's question q:${REQUEST}:Q4 of this request asks "invoices-table" already: its Main or the owner answers it; nothing was stored.`,
     );
     // A different subject, or another request, is asked.
     expect((await tools.call("bm_ask_owner", { ...ask, subject: "push-backends", separate: true })).ok).toBe(true);
@@ -1602,10 +854,10 @@ describe("bm_ask_owner (autonomy design §A.3, §A.6)", () => {
     );
     expect(await issues({ options: Array.from({ length: 6 }, () => ({ label: "A", effects: ["none"] })) })).toContain("- input.options: takes at most 5 items");
     expect(await issues({ options: [{ label: "x".repeat(81), effects: ["none"] }] })).toContain("- input.options[0].label: must be at most 80 characters");
-    // A prepared command goes only to a live Manager or Worker of this project — never a Reviewer.
-    expect(await issues(commandTo("worker", REVIEWER))).toContain(`- input.options[0].command.agentId: ${REVIEWER} is not a paseo-bm Worker; use an id bm_projects or bm_request gave`);
-    expect(await issues(commandTo("reviewer", REVIEWER))).toContain("- input.options[0].command.to: must be one of manager, worker");
-    expect(await issues(commandTo("worker", MANAGER))).toContain(`${MANAGER} is not a paseo-bm Worker`);
+    // A prepared command goes only to a live Main or Manager of this project — never a Worker or a Reviewer (missions design §9.1).
+    expect(await issues(commandTo("worker", WORKER))).toContain("- input.options[0].command.to: must be one of manager");
+    expect(await issues(commandTo("reviewer", REVIEWER))).toContain("- input.options[0].command.to: must be one of manager");
+    expect(await issues(commandTo("manager", REVIEWER))).toContain(`- input.options[0].command.agentId: ${REVIEWER} is not a paseo-bm Manager; use an id bm_projects or bm_request gave`);
     expect(await issues(commandTo("manager", "agent-manager-other"))).toContain(`Manager agent-manager-other does not belong to project ${WORKSPACE_ID}`);
     expect(await issues(commandTo("manager", "agent-manager-archived"))).toContain("Manager agent-manager-archived is archived; nothing can be sent to it");
     // Its text is checked against the option's effects as a command's is.
@@ -1643,7 +895,7 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
   }
 
   /** The push question of 2026-09-29, with a prepared command on its first option. */
-  async function askPush(tools: ReturnType<typeof toolsWith>, to: "manager" | "worker" = "manager"): Promise<string> {
+  async function askPush(tools: ReturnType<typeof toolsWith>): Promise<string> {
     const result = await tools.call("bm_ask_owner", {
       workspaceId: WORKSPACE_ID,
       requestId: REQUEST,
@@ -1651,7 +903,7 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
       recommendation: "Push the contract backend only; the manifest needs a hand edit first.",
       subject: "push-backends",
       options: [
-        { label: "Push the contract backend", effects: ["push"], recommended: true, command: { to, agentId: to === "manager" ? MANAGER : WORKER, intent: "release", body: PUSH_BODY } },
+        { label: "Push the contract backend", effects: ["push"], recommended: true, command: { to: "manager", agentId: MANAGER, intent: "release", body: PUSH_BODY } },
         { label: "Hold", effects: ["none"] },
       ],
     });
@@ -1661,7 +913,7 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
 
   const stored = (id: string) => createDecisionStore(home).get(id, WORKSPACE_ID)!;
 
-  it("an option with a prepared command: exactly one v2 command to its Manager, approved = its effects and no limit against them; the grant is spent and the delivery recorded", async () => {
+  it("an option with a prepared command: exactly one v2 command to its Manager, approving no effect (missions design §9.1: an o: answer grants nothing), every limit kept; the delivery recorded", async () => {
     const { tools, answer, paseo, sends, onSettled } = setUp();
     const id = await askPush(tools);
 
@@ -1681,37 +933,38 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
       intent: "release",
       effects: ["push"],
       authority: `decision:${id}`,
-      approved: ["push"],
-      limits: ["no-commit", "no-deploy", "no-real-data"],
+      approved: [],
+      limits: ["no-commit-push-deploy", "no-real-data"],
       body: PUSH_BODY,
       why: `The owner chose "Push the contract backend" on decision ${id}.`,
     });
     expect(answered.decision).toMatchObject({
       status: "answered",
       answer: { via: "inbox", optionKey: "a", words: null },
-      grant: { effects: ["push"], usedAt: NOW.toISOString() },
+      grant: null,
       delivery: { to: MANAGER, kind: `command:${id}`, at: NOW.toISOString(), outcome: "sent" },
     });
-    // Delivered once: handing the decision over again sends nothing, and its grant cannot be spent again.
+    // Delivered once: handing the decision over again sends nothing.
     await onSettled([stored(id)], { paseo });
     expect(enqueue).toHaveBeenCalledTimes(1);
-    const again = await tools.call("bm_send_command", { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, decisionId: id, intent: "release", effects: ["push"], command: PUSH_BODY, reason: "Again." });
-    expect(again.text).toBe(`Refused: the grant of decision ${id} was used at ${NOW.toISOString()}; ask the owner again with bm_ask_owner.`);
     expect(sends).toEqual([]);
   });
 
-  it("a prepared command to a Worker goes to that Worker, and its Manager gets the copy", async () => {
-    const { tools, answer } = setUp();
-    const id = await askPush(tools, "worker");
-    await answer({ id, optionKey: "a", confirmed: true });
-    expect(enqueue.mock.calls.map(([target, kind, text]) => [target, kind, parseCommandBlock(text)!.copy, parseCommandBlock(text)!.approved])).toEqual([
-      [WORKER, `command:${id}`, false, ["push"]],
-      [MANAGER, `command:${id}`, true, ["push"]],
-    ]);
-    expect(stored(id)).toMatchObject({ grant: { usedAt: NOW.toISOString() }, delivery: { to: WORKER, outcome: "queued" } });
+  it("a prepared command to a Worker is refused when asked: the Main directs its Workers (missions design §9.1)", async () => {
+    const { tools } = setUp();
+    const result = await tools.call("bm_ask_owner", {
+      workspaceId: WORKSPACE_ID,
+      requestId: REQUEST,
+      question: "Push the contract backend to origin/dev?",
+      recommendation: "Push it.",
+      options: [{ label: "Push it", effects: ["push"], command: { to: "worker", agentId: WORKER, intent: "release", body: PUSH_BODY } }],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("- input.options[0].command.to: must be one of manager");
+    expect(createDecisionStore(home).list({ workspaceId: WORKSPACE_ID })).toEqual([]);
   });
 
-  it("replays 2026-09-29: answered in words, the Orchestrator gets BM-ANSWER with the grant, and its one command on it goes out — one answer, one command", async () => {
+  it("replays 2026-09-29: answered in words, the Orchestrator gets BM-ANSWER, which issues and announces no grant (missions design §9.1), and nothing else is sent", async () => {
     const { tools, answer } = setUp();
     const id = await askPush(tools);
     const words = "Yes, push the contract backend only.\nLeave the manifest to me.";
@@ -1721,7 +974,6 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
     expect(enqueue).toHaveBeenCalledTimes(1);
     const [target, kind, notice] = enqueue.mock.calls[0]!;
     expect([target, kind]).toEqual([ORCHESTRATOR, `answer:${id}`]);
-    const expires = new Date(NOW.getTime() + GRANT_TTL_MS).toISOString();
     expect(notice).toBe(
       [
         "BM-ANSWER",
@@ -1730,7 +982,6 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
         `requestId: ${REQUEST}`,
         "question: Push the contract backend to origin/dev?",
         "answer: in the owner's own words, below",
-        `grant: push, for one command with decisionId ${id}, until ${expires}`,
         "This is the owner's answer, delivered by the paseo-bm plugin. Act on it now; tell the owner in one line what you did.",
         "",
         words,
@@ -1739,24 +990,8 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
     // A plugin notice: never the owner's own word in the Orchestrator's chat.
     expect(isPluginNotice(notice)).toBe(true);
     expect(isOwnerWord({ type: "user_message", text: notice, clientMessageId: "n-1" })).toBe(false);
-    expect(stored(id)).toMatchObject({ grant: { effects: ["push"], usedAt: null }, delivery: { to: ORCHESTRATOR, kind: `answer:${id}`, outcome: "sent" } });
-
-    // The Orchestrator carries it out: one command, on the grant.
-    const sent = await tools.call("bm_send_command", {
-      workspaceId: WORKSPACE_ID,
-      managerId: MANAGER,
-      requestId: REQUEST,
-      decisionId: id,
-      intent: "release",
-      effects: ["push"],
-      re: "push the contract backend",
-      command: PUSH_BODY,
-      reason: "The owner answered the push decision.",
-    });
-    expect(sent.ok).toBe(true);
-    expect(enqueue).toHaveBeenCalledTimes(2);
-    expect(parseCommandBlock(enqueue.mock.calls[1]![2])).toMatchObject({ to: "manager", authority: `decision:${id}`, approved: ["push"], limits: ["no-commit", "no-deploy", "no-real-data"] });
-    expect(stored(id).grant!.usedAt).toBe(NOW.toISOString());
+    expect(stored(id)).toMatchObject({ grant: null, delivery: { to: ORCHESTRATOR, kind: `answer:${id}`, outcome: "sent" } });
+    expect(notice).not.toContain("grant");
     expect(createDecisionStore(home).list({ workspaceId: WORKSPACE_ID })).toHaveLength(1);
   });
 
@@ -1765,11 +1000,11 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
     const id = await askPush(tools);
     await answer({ id, optionKey: "b" });
     expect(enqueue.mock.calls.map(([target, kind]) => [target, kind])).toEqual([[ORCHESTRATOR, `answer:${id}`]]);
-    expect(enqueue.mock.calls[0]![2]).toContain("\nanswer: option b: Hold\ngrant: none\n");
+    expect(enqueue.mock.calls[0]![2]).toContain("\nanswer: option b: Hold\nThis is the owner's answer");
     expect(stored(id)).toMatchObject({ grant: null, delivery: { to: ORCHESTRATOR, outcome: "sent" } });
   });
 
-  it("a prepared command whose Manager is gone: nothing goes to it, the grant stays unused, and the Orchestrator is told why", async () => {
+  it("a prepared command whose Manager is gone: nothing goes to it, and the Orchestrator is told why", async () => {
     const { tools, answer, agents: live } = setUp();
     const id = await askPush(tools);
     live.splice(0, 1);
@@ -1778,9 +1013,9 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
 
     expect(enqueue.mock.calls.map(([target]) => target)).toEqual([ORCHESTRATOR]);
     expect(enqueue.mock.calls[0]![2]).toContain(
-      `delivery: the prepared command was not delivered (${MANAGER} is no longer a live paseo-bm manager of project ${WORKSPACE_ID}); nothing was sent, and the grant is unused`,
+      `delivery: the prepared command was not delivered (${MANAGER} is no longer a live paseo-bm manager of project ${WORKSPACE_ID}); nothing was sent`,
     );
-    expect(stored(id)).toMatchObject({ grant: { usedAt: null }, delivery: { to: MANAGER, kind: `command:${id}`, outcome: "failed" } });
+    expect(stored(id)).toMatchObject({ grant: null, delivery: { to: MANAGER, kind: `command:${id}`, outcome: "failed" } });
     expect(logs.join("\n")).toContain("its command was not delivered");
   });
 
@@ -1794,12 +1029,12 @@ describe("the owner's answer to an Orchestrator decision (autonomy design §A.6)
     expect(logs.join("\n")).toContain("no Beads Orchestrator is open");
   });
 
-  it("a queue that cannot reach the Manager spends nothing and records the failure", async () => {
+  it("a queue that cannot reach the Manager records the failure", async () => {
     enqueue.mockImplementation(async (target: string) => (target === MANAGER ? "dropped" : "sent"));
     const { tools, answer } = setUp();
     const id = await askPush(tools);
     await answer({ id, optionKey: "a", confirmed: true });
-    expect(stored(id)).toMatchObject({ grant: { usedAt: null }, delivery: { to: MANAGER, outcome: "failed" } });
+    expect(stored(id)).toMatchObject({ grant: null, delivery: { to: MANAGER, outcome: "failed" } });
     expect(enqueue.mock.calls.map(([target]) => target)).toEqual([MANAGER, ORCHESTRATOR]);
   });
 });
@@ -1869,7 +1104,7 @@ describe("the loop guard counts every delivered command, whichever way it went (
         expect(stored(id)).toMatchObject({ status: "open" });
         await setup.answer({ id, optionKey: "a" });
       }
-      expect(stored(id)).toMatchObject({ answer: { by }, grant: { usedAt: NOW.toISOString() }, delivery: { to: MANAGER, outcome: "sent" } });
+      expect(stored(id)).toMatchObject({ answer: { by }, grant: null, delivery: { to: MANAGER, outcome: "sent" } });
       expect(enqueue).toHaveBeenCalledTimes(index + 1);
     }
   }
@@ -1895,11 +1130,10 @@ describe("the loop guard counts every delivered command, whichever way it went (
     await twelveDelivered(setup);
     const refusal = `Refused: ${COMMAND_LIMIT_MESSAGE}.`;
 
-    // bm_send_command and bm_direct_worker, on the policy: refused at the loop guard.
-    const send = { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, intent: "continue", effects: ["commit"], command: COMMIT_BODY, reason: "Once more." };
-    expect(await setup.tools.call("bm_send_command", send)).toEqual({ ok: false, text: refusal });
-    const direct = { workspaceId: WORKSPACE_ID, workerId: WORKER, requestId: REQUEST, re: "commit", intent: "continue", effects: ["commit"], command: COMMIT_BODY };
-    expect(await setup.tools.call("bm_direct_worker", direct)).toEqual({ ok: false, text: refusal });
+    // A stop of the request's Worker, on the policy with its danger open: refused at the loop guard.
+    createOrchestratorStore(home, { now: () => NOW }).openDangerAllowance(WORKSPACE_ID, WORKER);
+    const stop = { workspaceId: WORKSPACE_ID, workerId: WORKER, requestId: REQUEST, re: "stop", intent: "stop", interrupt: true, command: "Stop now and wait for your Main." };
+    expect(await setup.tools.call("bm_direct_worker", stop)).toEqual({ ok: false, text: refusal });
 
     // A question the policy or a precedent would answer is left to the owner: nothing is answered at once, nothing sent.
     const byPolicy = await ask(setup.tools, "policy");
@@ -1910,24 +1144,24 @@ describe("the loop guard counts every delivered command, whichever way it went (
       expect(stored(asked.id)).toMatchObject({ status: "open", answer: null, grant: null });
     }
 
-    // Answered by the policy or a precedent all the same (a race with the guard): the command is not sent, the grant stays unused, and the Orchestrator is told why.
+    // Answered by the policy or a precedent all the same (a race with the guard): the command is not sent, and the Orchestrator is told why.
     const at = NOW.toISOString();
     const decisions = createDecisionStore(home);
     decisions.transition(byPolicy.id, (decision) => answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", class: "reversible-technical", at }), WORKSPACE_ID);
     decisions.transition(byPrecedent.id, (decision) => answerDecision(decision, { by: "precedent", via: "inbox", optionKey: "a", precedentId: "p:prec-1", class: "reversible-technical", at }), WORKSPACE_ID);
     await setup.onSettled([stored(byPolicy.id), stored(byPrecedent.id)], { paseo: setup.paseo });
     for (const id of [byPolicy.id, byPrecedent.id]) {
-      expect(stored(id)).toMatchObject({ grant: { usedAt: null }, delivery: { to: MANAGER, kind: `command:${id}`, outcome: "failed" } });
+      expect(stored(id)).toMatchObject({ grant: null, delivery: { to: MANAGER, kind: `command:${id}`, outcome: "failed" } });
     }
     const notices = enqueue.mock.calls.slice(COMMAND_LIMIT_PER_REQUEST);
     expect(notices.map(([target, kind]) => [target, kind])).toEqual([
       [ORCHESTRATOR, `answer:${byPolicy.id}`],
       [ORCHESTRATOR, `answer:${byPrecedent.id}`],
     ]);
-    for (const [, , text] of notices) expect(text).toContain(`delivery: the prepared command was not delivered (${COMMAND_LIMIT_MESSAGE}); nothing was sent, and the grant is unused`);
+    for (const [, , text] of notices) expect(text).toContain(`delivery: the prepared command was not delivered (${COMMAND_LIMIT_MESSAGE}); nothing was sent`);
     expect(commandsOfRequest()).toHaveLength(COMMAND_LIMIT_PER_REQUEST);
     // Another request of the project still has room.
-    expect((await setup.tools.call("bm_send_command", { ...send, requestId: "req-20260930T130000Z" })).ok).toBe(true);
+    expect((await setup.tools.call("bm_direct_worker", { ...stop, requestId: "req-20260930T130000Z" })).ok).toBe(true);
   });
 
   it("the owner's own choice is counted but never refused: the guard sends the Orchestrator to the owner", async () => {
@@ -1935,7 +1169,7 @@ describe("the loop guard counts every delivered command, whichever way it went (
     await twelveDelivered(setup);
     const { id } = await ask(setup.tools, "owner");
     await setup.answer({ id, optionKey: "a" });
-    expect(stored(id)).toMatchObject({ answer: { by: "owner" }, grant: { usedAt: NOW.toISOString() }, delivery: { to: MANAGER, outcome: "sent" } });
+    expect(stored(id)).toMatchObject({ answer: { by: "owner" }, grant: null, delivery: { to: MANAGER, outcome: "sent" } });
     expect(enqueue).toHaveBeenCalledTimes(COMMAND_LIMIT_PER_REQUEST + 1);
     expect(commandsOfRequest()).toHaveLength(COMMAND_LIMIT_PER_REQUEST + 1);
   });
@@ -1945,13 +1179,14 @@ describe("the loop guard counts every delivered command, whichever way it went (
 // change-004: the Orchestrator answers a Worker's question through the store.
 // ---------------------------------------------------------------------------
 
-describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrator decides a delegated decision for the owner", () => {
+describe("bm_decide (autonomy design §B.5, §B.9; missions design §9.1): the Orchestrator decides a delegated fallback incident for the owner", () => {
   const REQUEST = "req-20260930T031055Z";
   const QID = (n: number) => `q:${REQUEST}:Q${n}`;
   const FID = "f:fb-0123456789ab";
-  const REASON = "The owner kept the current layout the last two times.";
+  const FIDN = (n: number) => `f:fb-00000000000${n}`;
+  const REASON = "The reset is in twenty minutes.";
   const worker = () => snapshotOf(clean().agents[1]!, { status: "idle", labels: { "bm.role": "worker", "paseo.parent-agent-id": MANAGER, "bm.requestId": REQUEST } });
-  /** A Worker's open question: `a` recommended, no effect; `b` the effects under test. */
+  /** A Worker's open question: never the Orchestrator's any more (missions design §9.1). */
   const question = (n: number, effects: Decision["options"][number]["effects"] = ["commit"], overrides: Partial<Decision> = {}) =>
     makeDecision({
       id: QID(n),
@@ -1968,17 +1203,17 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
       ...overrides,
     });
   /** A fallback incident's decision (environment): Wait recommended, or I'll handle it. */
-  const incident = () =>
+  const incident = (id = FID) =>
     makeDecision({
-      id: FID,
+      id,
       workspaceId: WORKSPACE_ID,
       requestId: null,
       askedBy: { role: "plugin", agentId: null },
       round: null,
       subject: "fallback-worker",
       options: [
-        { key: "a", label: "Wait for the reset", recommended: true, effects: ["none"], action: { kind: "fallback", target: "fb-0123456789ab", action: "wait" } },
-        { key: "b", label: "I'll handle it", recommended: false, effects: ["none"], action: { kind: "fallback", target: "fb-0123456789ab", action: "dismiss" } },
+        { key: "a", label: "Wait for the reset", recommended: true, effects: ["none"], action: { kind: "fallback", target: id.slice(2), action: "wait" } },
+        { key: "b", label: "I'll handle it", recommended: false, effects: ["none"], action: { kind: "fallback", target: id.slice(2), action: "dismiss" } },
       ],
     });
   const bytes = () => readFileSync(join(home, "decisions", `${WORKSPACE_ID}.json`), "utf8");
@@ -1996,73 +1231,21 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     const fake = daemonWith([snapshotOf(clean().agents[0]!), worker(), orchestratorAgent]);
     return { ...fake, tools: toolsWith(fake.paseo) };
   }
-  const decide = (tools: ReturnType<typeof toolsWith>, decisionId: string, optionKey = "b", reason = REASON) => tools.call("bm_decide", { decisionId, optionKey, reason });
+  const decide = (tools: ReturnType<typeof toolsWith>, decisionId: string, optionKey = "a", reason = REASON) => tools.call("bm_decide", { decisionId, optionKey, reason });
 
-  it("grants review calls up to the request tier's own budget: 8 of a Large budget of 8 decided, 9 or untilClean left to the owner (design §7.17.8 a)", async () => {
-    cell("cost", "delegate");
-    const registry = createRequestRegistry(home, { backfill: () => [] });
-    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
-    registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Large", phase: "blocked", at: at(0) });
-    createCoordinationStore(home).set({ key: "review.largeBudget", value: 8 });
-    const budget = (n: number, grant: { calls: number } | { untilClean: string }) =>
-      question(n, ["none"], {
-        subject: "review-budget",
-        class: "cost",
-        options: [
-          { key: "a", label: "More reviews", recommended: true, effects: ["none"], grant },
-          { key: "b", label: "No more reviews", recommended: false, effects: ["none"] },
-        ],
-      });
-    for (const [n, grant] of [[1, { calls: 8 }], [2, { calls: 9 }], [3, { untilClean: "b1" }], [4, { calls: 1 }]] as const) createDecisionStore(home).open(budget(n, grant));
-    const { tools } = decideTools();
-
-    expect((await decide(tools, QID(1), "a")).ok).toBe(true);
-    expect(stored(QID(1)).answer).toMatchObject({ by: "policy", optionKey: "a" });
-    expect((await decide(tools, QID(2), "a")).text).toBe(
-      `Refused: option a of ${QID(2)} grants more review calls than the owner's policy may (at most { calls: 8 } now: the request tier's budget, less the calls the policy already granted this request; never untilClean); choose a smaller grant or none, or leave decision ${QID(2)} to the owner.`,
-    );
-    expect((await decide(tools, QID(3), "a")).text).toContain("never untilClean");
-    expect([stored(QID(2)).status, stored(QID(3)).status]).toEqual(["open", "open"]);
-    // Once the policy's 8 are granted (the settlement hook records them), it has granted the tier's budget in all: one more call is the owner's.
-    expect(applyReviewBudgetGrants([stored(QID(1))], { home, log: () => {} })).toEqual([QID(1)]);
-    expect((await decide(tools, QID(4), "a")).text).toContain(`option a of ${QID(4)} grants more review calls than the owner's policy may (at most { calls: 0 } now`);
-    expect(stored(QID(4)).status).toBe("open");
-  });
-
-  it("answers an open Worker question whose class the owner delegated to it: by policy, its reason, the owner's grant, handed to the owners' delivery", async () => {
-    cell("reversible-technical", "delegate");
+  it("never answers a Worker's question, mission or not, whatever the policy: its Main or the owner does, and nothing is written", async () => {
+    for (const decisionClass of DECISION_CLASSES) cell(decisionClass, "delegate");
     createDecisionStore(home).open(question(1));
     const { tools, sends } = decideTools();
+    const before = bytes();
 
-    const result = await decide(tools, QID(1), "b", "  Kept short,\n  as the owner asked before.  ");
-
-    expect(result.ok).toBe(true);
-    expect(result.text.split("\n")[0]).toBe(
-      `Decided Q1 of ${REQUEST} for the owner with option b (Change it), on the owner's policy: reversible-technical is delegated to you in this project. The owner sees your choice and your reason on the decision. The plugin delivers it to the Worker at its next idle moment, as it delivers the owner's answers. Send nothing more for it. Tell the owner in one line what you chose and why.`,
-    );
-    const expiresAt = new Date(NOW.getTime() + GRANT_TTL_MS).toISOString();
-    expect(jsonOf(result)).toEqual({
-      decisionId: QID(1),
-      optionKey: "b",
-      class: "reversible-technical",
-      answeredBy: "policy",
-      grant: { effects: ["commit"], expiresAt, usedAt: null },
-      delivery: null,
-    });
-    const answered = stored(QID(1));
-    expect(answered).toMatchObject({
-      status: "answered",
-      settledAt: NOW.toISOString(),
-      answer: { by: "policy", via: "inbox", optionKey: "b", words: null, at: NOW.toISOString(), class: "reversible-technical", reason: "Kept short, as the owner asked before." },
-      grant: { effects: ["commit"], expiresAt, usedAt: null },
-    });
-    // The delivery the owner's answers take, once; the tool itself sends nothing and records no command.
-    expect(onSettled).toHaveBeenCalledTimes(1);
-    expect(onSettled.mock.calls[0]![0]).toEqual([answered]);
+    expect(await decide(tools, QID(1), "b")).toEqual({ ok: false, text: `Refused: ${questionIsTheMainsText(QID(1))}.` });
+    expect(questionIsTheMainsText(QID(1))).toBe(`${QID(1)} is a Worker's question: its Main answers it (bm_answer_worker), or the owner does, never you; leave it`);
+    expect(bytes()).toBe(before);
+    expect(stored(QID(1))).toMatchObject({ status: "open", answer: null, grant: null });
+    expect(onSettled).not.toHaveBeenCalled();
     expect(sends).toEqual([]);
-    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
-    // The first answer stands: a second call, or the owner's own answer, is refused.
-    expect(await decide(tools, QID(1), "a")).toEqual({ ok: false, text: `Refused: decision ${QID(1)} was already answered by the policy at ${NOW.toISOString()}; the first answer stands.` });
+    expect(existsSync(join(home, "orchestrator", "interventions.json"))).toBe(false);
   });
 
   it("decides a fallback incident when environment is delegated to it: the incident's option goes to the same delivery", async () => {
@@ -2070,96 +1253,69 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     createDecisionStore(home).open(incident());
     const { tools } = decideTools();
 
-    const result = await decide(tools, FID, "a", "The reset is in twenty minutes.");
+    const result = await decide(tools, FID, "a", "  The reset is in\n  twenty minutes.  ");
 
     expect(result.ok).toBe(true);
     expect(result.text.split("\n")[0]).toBe(
       `Decided fallback incident ${FID} for the owner with option a (Wait for the reset), on the owner's policy: environment is delegated to you in this project. The owner sees your choice and your reason on the decision. The plugin runs the option's action as it runs the owner's choice. Send nothing more for it. Tell the owner in one line what you chose and why.`,
     );
-    expect(stored(FID)).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "a", class: "environment" }, grant: null });
+    expect(jsonOf(result)).toEqual({ decisionId: FID, optionKey: "a", class: "environment", answeredBy: "policy", grant: null, delivery: null });
+    expect(stored(FID)).toMatchObject({ status: "answered", answer: { by: "policy", via: "inbox", optionKey: "a", class: "environment", reason: REASON }, grant: null });
     expect(stored(FID).answer).not.toHaveProperty("predictor");
     expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
+    // The first answer stands.
+    expect(await decide(tools, FID, "b")).toEqual({ ok: false, text: `Refused: decision ${FID} was already answered by the policy at ${NOW.toISOString()}; the first answer stands.` });
   });
 
   it("is refused for an owner or shadow cell, writing, delivering and logging nothing; a stored recommended cell reads as the Orchestrator's", async () => {
-    createDecisionStore(home).open(question(1));
+    createDecisionStore(home).open(incident());
     const { tools, sends } = decideTools();
-    const setups: Array<[string, () => void, string]> = [
-      ["owner (no cell)", () => {}, `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
-      ["owner (set)", () => cell("reversible-technical", "owner"), `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
-      ["shadow", () => cell("reversible-technical", "shadow"), `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
-      ["another project only", () => createAutonomyStore(home).set({ workspaceId: OTHER_WORKSPACE, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString()), `reversible-technical is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`],
+    const notDelegated = `environment is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner`;
+    const setups: Array<[string, () => void]> = [
+      ["owner (no cell)", () => {}],
+      ["owner (set)", () => cell("environment", "owner")],
+      ["shadow", () => cell("environment", "shadow")],
+      ["another project only", () => createAutonomyStore(home).set({ workspaceId: OTHER_WORKSPACE, class: "environment", mode: "delegate", confirmed: true }, NOW.toISOString())],
     ];
     const before = bytes();
-    for (const [name, setUp, message] of setups) {
+    for (const [name, setUp] of setups) {
       createAutonomyStore(home).reset(WORKSPACE_ID);
       setUp();
-      expect(await decide(tools, QID(1)), name).toEqual({ ok: false, text: `Refused: ${message}.` });
+      expect(await decide(tools, FID), name).toEqual({ ok: false, text: `Refused: ${notDelegated}.` });
     }
     expect(bytes()).toBe(before);
-    expect(stored(QID(1))).toMatchObject({ status: "open", answer: null, grant: null, delivery: null });
+    expect(stored(FID)).toMatchObject({ status: "open", answer: null, grant: null, delivery: null });
     expect(onSettled).not.toHaveBeenCalled();
     expect(sends).toEqual([]);
     expect(existsSync(join(home, "orchestrator", "interventions.json"))).toBe(false);
     // A cell an older build stored with the recommended predictor is the Orchestrator's to decide now (ADR-025).
     writeFileSync(
       join(home, "autonomy", "policy.json"),
-      JSON.stringify({ version: 1, projects: { [WORKSPACE_ID]: { "reversible-technical": { mode: "delegate", predictor: "recommended", at: NOW.toISOString() } } }, challenger: {} }),
+      JSON.stringify({ version: 1, projects: { [WORKSPACE_ID]: { environment: { mode: "delegate", predictor: "recommended", at: NOW.toISOString() } } }, challenger: {} }),
     );
-    expect((await decide(tools, QID(1))).ok).toBe(true);
-  });
-
-  it("decides release, data, security and cost — by an option's effect or the proposed class — where they are delegated (Full auto, ADR-025), granting the option's effects", async () => {
-    for (const decisionClass of DECISION_CLASSES) cell(decisionClass, "delegate");
-    const store = createDecisionStore(home);
-    const cases: Array<[number, Effect[], Partial<Decision>, string]> = [
-      [1, ["push"], {}, "release"],
-      [2, ["real-data"], {}, "data"],
-      [3, ["security"], {}, "security"],
-      [4, ["cost"], {}, "cost"],
-      [5, ["migration"], { class: "reversible-technical" }, "data"],
-      [6, ["none"], { class: "security" }, "security"],
-    ];
-    for (const [n, effects, overrides] of cases) store.open(question(n, effects, overrides));
-    const { tools } = decideTools();
-    for (const [n, effects, , decisionClass] of cases) {
-      const result = await decide(tools, QID(n), "b");
-      expect(result.ok, `Q${n}: ${result.text}`).toBe(true);
-      const granted = effects.filter((effect) => effect !== "none");
-      expect(stored(QID(n)), `Q${n}`).toMatchObject({ status: "answered", answer: { by: "policy", optionKey: "b", class: decisionClass }, grant: granted.length === 0 ? null : { effects: granted } });
-    }
-    expect(onSettled).toHaveBeenCalledTimes(cases.length);
-    // At Cruise the same release question is not the Orchestrator's.
-    createAutonomyStore(home).setLevel({ workspaceId: WORKSPACE_ID, level: 2 }, NOW.toISOString());
-    store.open(question(7, ["push"]));
-    expect(await decide(tools, QID(7), "b")).toEqual({ ok: false, text: `Refused: release is not delegated to you in project ${WORKSPACE_ID}; the owner decides it, so leave it to the owner.` });
+    expect((await decide(tools, FID)).ok).toBe(true);
   });
 
   it("says why for its own decision, one it does not know, one no longer open, an option it does not have, and a blank reason", async () => {
-    cell("reversible-technical", "delegate");
+    cell("environment", "delegate");
     const store = createDecisionStore(home);
-    for (const n of [1, 2, 3, 4, 5, 6]) store.open(question(n));
+    for (const n of [1, 2, 3]) store.open(incident(FIDN(n)));
     store.open(makeDecision({ id: "o:asked-by-you", workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "orchestrator", agentId: ORCHESTRATOR }, round: null, subject: null, options: question(1).options }));
-    store.transition(QID(2), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: at(1) }), WORKSPACE_ID);
-    store.transition(QID(3), (decision) => markNeedsConfirmation(decision, { via: "chat-worker", at: at(1) }), WORKSPACE_ID);
-    store.transition(QID(4), (decision) => supersedeDecision(decision, { by: QID(7), at: at(1) }), WORKSPACE_ID);
-    store.transition(QID(5), (decision) => withdrawDecision(decision, { at: at(1) }), WORKSPACE_ID);
-    store.transition(QID(6), (decision) => expireDecision(decision, { at: at(1) }), WORKSPACE_ID);
+    store.transition(FIDN(2), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: at(1) }), WORKSPACE_ID);
+    store.transition(FIDN(3), (decision) => expireDecision(decision, { at: at(1) }), WORKSPACE_ID);
     const { tools } = decideTools();
     const before = bytes();
     const refused = async (decisionId: string, optionKey = "a", reason = "Because.") => (await decide(tools, decisionId, optionKey, reason)).text;
 
-    expect(await refused(QID(2))).toBe(`Refused: decision ${QID(2)} was already answered by the owner at ${at(1)}; the first answer stands.`);
-    expect(await refused(QID(3))).toBe(`Refused: decision ${QID(3)} waits for the owner to confirm an answer typed in a chat; it is the owner's.`);
-    expect(await refused(QID(4))).toBe(`Refused: decision ${QID(4)} is superseded by ${QID(7)}; answer that one if it is still open.`);
-    expect(await refused(QID(5))).toBe(`Refused: decision ${QID(5)} is withdrawn; it can no longer be answered.`);
-    expect(await refused(QID(6))).toBe(`Refused: decision ${QID(6)} is expired; it can no longer be answered.`);
-    expect(await refused(QID(9))).toBe(`Refused: no decision ${QID(9)}; use a decisionId a decision.opened line or bm_decisions gave.`);
+    expect(await refused(FIDN(2))).toBe(`Refused: decision ${FIDN(2)} was already answered by the owner at ${at(1)}; the first answer stands.`);
+    expect(await refused(FIDN(3))).toBe(`Refused: decision ${FIDN(3)} is expired; it can no longer be answered.`);
+    expect(await refused(FIDN(9))).toBe(`Refused: no decision ${FIDN(9)}; use a decisionId bm_decisions gave.`);
     expect(await refused("o:asked-by-you")).toBe(
       "Refused: o:asked-by-you is your own decision, and only the owner answers it; bm_decide decides a Worker's question (q:…) or a fallback incident (f:…).",
     );
-    expect(await refused(QID(1), "c")).toBe(`Refused: decision ${QID(1)} has no option "c"; its options are a, b.`);
-    expect(await refused(QID(1), "a", "   ")).toBe("The call was refused. Fix these and call bm_decide again:\n- input.reason: must not be empty");
+    expect(await refused(FIDN(1), "c")).toBe(`Refused: decision ${FIDN(1)} has no option "c"; its options are a, b.`);
+    expect(await refused(FIDN(1), "a", "   ")).toBe("The call was refused. Fix these and call bm_decide again:\n- input.reason: must not be empty");
     expect(bytes()).toBe(before);
     expect(onSettled).not.toHaveBeenCalled();
   });
@@ -2182,16 +1338,16 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
 // The challenger in shadow (autonomy design §B.3, §B.9; change-007 C1).
 // ---------------------------------------------------------------------------
 
-describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger in shadow", () => {
+describe("bm_predict (autonomy design §B.3, §B.9; missions design §9.1): the Orchestrator challenger on a fallback incident", () => {
   const REQUEST = "req-20260930T031055Z";
   const QID = (n: number) => `q:${REQUEST}:Q${n}`;
-  const FID = "f:fb-0123456789ab";
-  const REASON = "The owner kept the current layout the last two times.";
+  const FID = (n: number) => `f:fb-00000000000${n}`;
+  const REASON = "Waiting is cheaper than a hand fix.";
   const optionsOf = (effects: Effect[]): Decision["options"] => [
     { key: "a", label: "Keep it as it is", recommended: true, effects: ["none"] },
     { key: "b", label: "Change it", recommended: false, effects },
   ];
-  /** A Worker's open question, opened with its predictions: the recommended `a`, none of the Orchestrator's yet. */
+  /** A Worker's open question, opened with its predictions: never the Orchestrator's to predict any more. */
   const question = (n: number, effects: Effect[] = ["commit"], overrides: Partial<Decision> = {}) =>
     makeDecision({
       id: QID(n),
@@ -2205,9 +1361,10 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
       prediction: { recommended: { optionKey: "a" }, orchestrator: null },
       ...overrides,
     });
-  const incident = () =>
+  /** A fallback incident (environment), opened with its predictions. */
+  const incident = (n: number, overrides: Partial<Decision> = {}) =>
     makeDecision({
-      id: FID,
+      id: FID(n),
       workspaceId: WORKSPACE_ID,
       requestId: null,
       askedBy: { role: "plugin", agentId: null },
@@ -2215,6 +1372,7 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
       subject: null,
       options: optionsOf(["none"]),
       prediction: { recommended: { optionKey: "a" }, orchestrator: null },
+      ...overrides,
     });
   const stored = (id: string) => createDecisionStore(home).get(id, WORKSPACE_ID)!;
   const bytes = () => readFileSync(join(home, "decisions", `${WORKSPACE_ID}.json`), "utf8");
@@ -2225,8 +1383,6 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
   beforeEach(() => {
     onSettled = vi.fn(async () => undefined);
     deps.onSettled = onSettled;
-    // The prediction's own event is the running wake's: still no intervention is logged for it.
-    deps.wakeEventsOf = () => [{ type: "decision.opened", workspaceId: WORKSPACE_ID, requestId: REQUEST, decisionId: QID(1), askedBy: WORKER, asks: "prediction" }];
     challenger(true);
   });
   afterEach(() => clearDecisionStoreCache());
@@ -2239,22 +1395,19 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
     tools.call("bm_predict", { decisionId, optionKey, reason });
 
   it("records the prediction once, on a project whose cells are all owner with the challenger on; it answers, delivers and logs nothing", async () => {
-    createDecisionStore(home).open(question(1));
+    createDecisionStore(home).open(incident(1));
     const { tools, sends } = predictTools();
 
-    const result = await predict(tools, QID(1));
+    const result = await predict(tools, FID(1));
 
     expect(result.ok).toBe(true);
     expect(result.text.split("\n")[0]).toBe(
-      `Recorded your prediction for ${QID(1)}: option b. It answers nothing and went to no agent: the owner decides, and sees it on the decision as your proposal, with your reason. Send nothing for it.`,
+      `Recorded your prediction for ${FID(1)}: option b. It answers nothing and went to no agent: the owner decides, and sees it on the decision as your proposal, with your reason. Send nothing for it.`,
     );
-    expect(jsonOf(result)).toEqual({ decisionId: QID(1), optionKey: "b", class: "reversible-technical" });
-    expect(stored(QID(1))).toMatchObject({
+    expect(jsonOf(result)).toEqual({ decisionId: FID(1), optionKey: "b", class: "environment" });
+    expect(stored(FID(1))).toMatchObject({
       status: "open",
-      settledAt: null,
       answer: null,
-      grant: null,
-      delivery: null,
       prediction: { recommended: { optionKey: "a" }, orchestrator: { optionKey: "b", reason: REASON, at: NOW.toISOString() } },
     });
     // Nothing answered, delivered, sent or logged: a prediction is not an intervention (design §G.3).
@@ -2265,178 +1418,133 @@ describe("bm_predict (autonomy design §B.3, §B.9): the Orchestrator challenger
 
     // One prediction per decision: a second is refused and writes nothing.
     const before = bytes();
-    expect((await predict(tools, QID(1), "a")).text).toBe(`Refused: you predicted decision ${QID(1)} already, at ${NOW.toISOString()}; one prediction per decision.`);
+    expect((await predict(tools, FID(1), "a")).text).toBe(`Refused: you predicted decision ${FID(1)} already, at ${NOW.toISOString()}; one prediction per decision.`);
     expect(bytes()).toBe(before);
   });
 
-  it("predicts in a shadow cell and on a fallback incident too, and masks a secret in the reason", async () => {
-    cell("scope", "shadow");
-    createDecisionStore(home).open(question(2, ["none"], { class: "scope" }));
-    createDecisionStore(home).open(incident());
+  it("keeps its reason on one line, as bm_decide does, and masks a secret in it (the one write of both, code review 2026-09-30 §3.4)", async () => {
+    cell("environment", "shadow");
+    createDecisionStore(home).open(incident(1));
     const { tools } = predictTools();
 
-    expect(jsonOf(await predict(tools, QID(2), "a"))).toEqual({ decisionId: QID(2), optionKey: "a", class: "scope" });
-    expect((await predict(tools, FID, "b", "Waiting is cheaper; --token tok-abc-123 was only a test value.")).ok).toBe(true);
-    expect(stored(FID).prediction?.orchestrator).toEqual({ optionKey: "b", reason: `Waiting is cheaper; --token ${REDACTED} was only a test value.`, at: NOW.toISOString() });
-    expect(stored(FID).status).toBe("open");
+    expect((await predict(tools, FID(1), "b", "  Waiting is cheaper;\n\t--token tok-abc-123 was only a test value.  ")).ok).toBe(true);
+    expect(stored(FID(1)).prediction?.orchestrator).toEqual({ optionKey: "b", reason: `Waiting is cheaper; --token ${REDACTED} was only a test value.`, at: NOW.toISOString() });
   });
 
-  it("keeps its reason on one line, as bm_decide does (the one write of both, code review 2026-09-30 §3.4)", async () => {
-    createDecisionStore(home).open(question(1));
-    const { tools } = predictTools();
-
-    expect((await predict(tools, QID(1), "b", "  The owner kept it\n\ttwice   before.  ")).ok).toBe(true);
-    expect(stored(QID(1)).prediction?.orchestrator).toEqual({ optionKey: "b", reason: "The owner kept it twice before.", at: NOW.toISOString() });
-  });
-
-  it("refuses, writing, answering and sending nothing: a settled decision, a delegate cell, the challenger off, its own decision, and what it cannot name; any class is predicted (ADR-025)", async () => {
+  it("refuses, writing, answering and sending nothing: a Worker's question, a settled incident, a delegate cell, the challenger off, its own decision, and what it cannot name", async () => {
     const store = createDecisionStore(home);
     store.open(question(1));
-    for (const n of [3, 4, 5, 10]) store.open(question(n));
-    store.transition(QID(3), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: at(1) }), WORKSPACE_ID);
-    store.transition(QID(4), (decision) => markNeedsConfirmation(decision, { via: "chat-worker", at: at(1) }), WORKSPACE_ID);
-    store.transition(QID(5), (decision) => withdrawDecision(decision, { at: at(1) }), WORKSPACE_ID);
-    // Expired while open (bead 81y2.26): settled like any other.
-    store.transition(QID(10), (decision) => expireDecision(decision, { at: at(1) }), WORKSPACE_ID);
-    // Release by its effect, security by its proposed class: predicted like any class (ADR-025), checked last below.
-    store.open(question(6, ["push"]));
-    store.open(question(7, ["none"], { class: "security" }));
-    // A delegated cell is decided, not predicted.
-    cell("preference", "delegate");
-    store.open(question(8, ["none"], { class: "preference" }));
-    // Opened before predictions were recorded: in no cell.
-    store.open(question(9, ["commit"], { prediction: undefined }));
+    for (const n of [1, 2, 3]) store.open(incident(n));
+    store.open(incident(4, { prediction: undefined }));
+    store.transition(FID(2), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: at(1) }), WORKSPACE_ID);
+    store.transition(FID(3), (decision) => expireDecision(decision, { at: at(1) }), WORKSPACE_ID);
     store.open(makeDecision({ id: "o:asked-by-you", workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "orchestrator", agentId: ORCHESTRATOR }, round: null, subject: null }));
     const { tools, sends } = predictTools();
     const before = bytes();
     const refused = async (decisionId: string, optionKey = "b") => (await predict(tools, decisionId, optionKey)).text;
 
-    expect(await refused(QID(3))).toBe(`Refused: decision ${QID(3)} is answered; only an open decision is predicted.`);
-    expect(await refused(QID(4))).toBe(`Refused: decision ${QID(4)} waits for the owner to confirm an answer typed in a chat; it is not predicted.`);
-    expect(await refused(QID(5))).toBe(`Refused: decision ${QID(5)} is withdrawn; only an open decision is predicted.`);
-    expect(await refused(QID(10))).toBe(`Refused: decision ${QID(10)} is expired; only an open decision is predicted.`);
-    expect(await refused(QID(8))).toBe(`Refused: preference is delegated in project ${WORKSPACE_ID}; a delegated decision is not predicted.`);
-    expect(await refused(QID(9))).toBe(`Refused: decision ${QID(9)} was opened before predictions were recorded; it is not predicted.`);
+    expect(await refused(QID(1))).toBe(`Refused: ${questionIsTheMainsText(QID(1))}.`);
+    expect(await refused(FID(2))).toBe(`Refused: decision ${FID(2)} is answered; only an open decision is predicted.`);
+    expect(await refused(FID(3))).toBe(`Refused: decision ${FID(3)} is expired; only an open decision is predicted.`);
+    expect(await refused(FID(4))).toBe(`Refused: decision ${FID(4)} was opened before predictions were recorded; it is not predicted.`);
     expect(await refused("o:asked-by-you", "a")).toBe(
       "Refused: o:asked-by-you is your own decision; a prediction is for a Worker's question (q:…) or a fallback incident (f:…).",
     );
-    expect(await refused(QID(1), "z")).toBe(`Refused: decision ${QID(1)} has no option "z"; its options are a, b.`);
-    expect(await refused(QID(99))).toBe(`Refused: no decision ${QID(99)}; use a decisionId a decision.opened line gave.`);
-    expect(await predict(tools, QID(1), "a", "   ")).toEqual({ ok: false, text: "The call was refused. Fix these and call bm_predict again:\n- input.reason: must not be empty" });
-    expect(bytes()).toBe(before);
-    // The challenger off (the default, DQ-4): an open question of a delegable owner cell is refused as well.
+    expect(await refused(FID(1), "z")).toBe(`Refused: decision ${FID(1)} has no option "z"; its options are a, b.`);
+    expect(await refused(FID(9))).toBe(`Refused: no decision ${FID(9)}; use a decisionId bm_decisions gave.`);
+    expect(await predict(tools, FID(1), "a", "   ")).toEqual({ ok: false, text: "The call was refused. Fix these and call bm_predict again:\n- input.reason: must not be empty" });
+    // A delegated cell is decided, not predicted.
+    cell("environment", "delegate");
+    expect(await refused(FID(1))).toBe(`Refused: environment is delegated in project ${WORKSPACE_ID}; a delegated decision is not predicted.`);
+    createAutonomyStore(home).reset(WORKSPACE_ID);
+    // The challenger off (the default, DQ-4).
     challenger(false);
-    expect(await refused(QID(1))).toBe(`Refused: the owner has not turned your predictions on for project ${WORKSPACE_ID}.`);
+    expect(await refused(FID(1))).toBe(`Refused: the owner has not turned your predictions on for project ${WORKSPACE_ID}.`);
     expect(bytes()).toBe(before);
     expect(onSettled).not.toHaveBeenCalled();
     expect(sends).toEqual([]);
-    for (const n of [1, 3, 4, 5, 6, 7, 8, 9, 10]) expect(stored(QID(n)).prediction?.orchestrator ?? null, QID(n)).toBeNull();
-    // With the challenger on, the release and security questions are predicted.
-    challenger(true);
-    expect((await predict(tools, QID(6))).ok).toBe(true);
-    expect((await predict(tools, QID(7))).ok).toBe(true);
   });
 
   it("predictionRefusalOf is the rule, pure: whatever else the project's policy holds, only its challenger and the decision's own cell count", () => {
     const on: AutonomyPolicy = { projects: {}, challenger: { [WORKSPACE_ID]: true } };
     // Every cell owner (nothing stored) with the challenger on: asked (change-007 C1).
     expect(predictionRefusalOf(on, question(1))).toBeNull();
-    expect(predictionRefusalOf(on, incident())).toBeNull();
-    expect(predictionRefusalOf(EMPTY_AUTONOMY_POLICY, question(1))).toContain("has not turned your predictions on");
+    expect(predictionRefusalOf(on, incident(1))).toBeNull();
+    expect(predictionRefusalOf(EMPTY_AUTONOMY_POLICY, incident(1))).toContain("has not turned your predictions on");
     // Another project's challenger is not this one's.
-    expect(predictionRefusalOf({ projects: {}, challenger: { [OTHER_WORKSPACE]: true } }, question(1))).toContain("has not turned your predictions on");
-    expect(predictionRefusalOf({ projects: {}, challenger: { [WORKSPACE_ID]: false } }, question(1))).toContain("has not turned your predictions on");
+    expect(predictionRefusalOf({ projects: {}, challenger: { [OTHER_WORKSPACE]: true } }, incident(1))).toContain("has not turned your predictions on");
+    expect(predictionRefusalOf({ projects: {}, challenger: { [WORKSPACE_ID]: false } }, incident(1))).toContain("has not turned your predictions on");
     // Another class delegated does not matter; this class delegated does.
     const delegated = (decisionClass: DecisionClass): AutonomyPolicy => ({
       ...on,
       projects: { [WORKSPACE_ID]: { [decisionClass]: { mode: "delegate", at: "T" } } },
     });
-    expect(predictionRefusalOf(delegated("scope"), question(1))).toBeNull();
-    expect(predictionRefusalOf(delegated("reversible-technical"), question(1))).toContain("is delegated");
+    expect(predictionRefusalOf(delegated("scope"), incident(1))).toBeNull();
+    expect(predictionRefusalOf(delegated("environment"), incident(1))).toContain("is delegated");
     for (const decisionClass of ["release", "data", "security", "cost"] as const) {
       expect(predictionRefusalOf(on, question(1, ["none"], { class: decisionClass })), decisionClass).toBeNull();
     }
   });
 
   it("the owner sees the prediction as the Orchestrator's proposal while the project's level is 1 or more, and not at level 0; once answered it is there to compare", async () => {
-    createDecisionStore(home).open(question(1));
+    createDecisionStore(home).open(incident(1));
     const { tools, paseo } = predictTools();
-    expect((await predict(tools, QID(1))).ok).toBe(true);
+    expect((await predict(tools, FID(1))).ok).toBe(true);
     const rpcDeps = { env: deps.env, homedir: deps.homedir, now: () => NOW };
     const hidden = { recommended: { optionKey: "a" }, orchestrator: null };
     const proposal = { recommended: { optionKey: "a" }, orchestrator: { optionKey: "b", reason: REASON, at: NOW.toISOString() } };
-    // The prediction switch on (Co-pilot and up): decisions.get and decisions.list carry the proposal, with its reason.
-    expect(handleDecisionsGet({ id: QID(1) }, rpcDeps).decision.prediction).toEqual(proposal);
-    expect(handleDecisionsList({ scope: "inbox" }, rpcDeps).decisions.map((decision) => decision.prediction)).toEqual([proposal]);
+    // The prediction switch on (Co-pilot and up): decisions.get carries the proposal, with its reason.
+    expect(handleDecisionsGet({ id: FID(1) }, rpcDeps).decision.prediction).toEqual(proposal);
     // Hands-on (the switch off): left out.
     challenger(false);
-
-    const got = handleDecisionsGet({ id: QID(1) }, rpcDeps).decision;
-    expect(got.prediction).toEqual(hidden);
-    const listed = handleDecisionsList({ scope: "inbox" }, rpcDeps).decisions;
-    expect(listed.map((decision) => decision.prediction)).toEqual([hidden]);
-    const inbox = inboxView({
-      decisions: listed,
-      settledHere: [],
-      alerts: [],
-      incidents: [],
-      projectOf: () => "paseo-bm",
-      runningWorkers: null,
-      can: { openAgent: true, openWorkspace: true },
-      now: NOW,
-    });
-    const item = inbox.needsYou.groups[0]!.items[0]!;
-    const cardOf = (decision: Decision) =>
-      decisionCardView({ card: item.card, lookup: { state: "found", decision }, agents: [], ui: DECISION_UI_IDLE, cardAt: new Date(decision.askedAt), now: NOW });
-    for (const shown of [inbox, cardOf(got)]) expect(JSON.stringify(shown)).not.toContain(REASON);
-    // The level is the server's gate: the stored record keeps the prediction, and a card given it shows it as the proposal (change-014).
-    expect(stored(QID(1)).prediction?.orchestrator?.reason).toBe(REASON);
-    expect(cardOf(stored(QID(1))).proposal).toBe(`Orchestrator: ${REASON}`);
+    expect(handleDecisionsGet({ id: FID(1) }, rpcDeps).decision.prediction).toEqual(hidden);
+    // The level is the server's gate: the stored record keeps the prediction.
+    expect(stored(FID(1)).prediction?.orchestrator?.reason).toBe(REASON);
 
     // Once the owner has answered, the prediction is shown to be compared with the answer.
-    await handleDecisionsAnswer({ id: QID(1), optionKey: "a" }, paseo, rpcDeps);
-    expect(handleDecisionsGet({ id: QID(1) }, rpcDeps).decision.prediction?.orchestrator).toEqual({ optionKey: "b", reason: REASON, at: NOW.toISOString() });
+    await handleDecisionsAnswer({ id: FID(1), optionKey: "a" }, paseo, rpcDeps);
+    expect(handleDecisionsGet({ id: FID(1) }, rpcDeps).decision.prediction?.orchestrator).toEqual({ optionKey: "b", reason: REASON, at: NOW.toISOString() });
   });
 });
 
-describe("a command never carries the answer to a stored question (change-004)", () => {
+describe("a stop never carries the answer to a stored question (change-004)", () => {
   const REQUEST = "req-20260926T100020Z";
   const agents = () => [snapshotOf(clean().agents[0]!), snapshotOf(clean().agents[1]!, { status: "running" }), orchestratorAgent];
   const direct = {
     workspaceId: WORKSPACE_ID,
     workerId: WORKER,
     requestId: REQUEST,
-    re: "answer to Q2",
-    intent: "answer",
-    effects: ["none"],
+    re: "stop and take the answer",
+    intent: "stop",
+    interrupt: true,
     command: `BM-ANSWERS\nrequestId: ${REQUEST}\nQ2: a — PDF, A4.`,
     why: "The owner said PDF.",
   };
-  const send = { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, intent: "answer", effects: ["none"], command: direct.command, reason: "The owner said PDF." };
   const question = (n: number) =>
     makeDecision({ id: `q:${REQUEST}:Q${n}`, workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "worker", agentId: WORKER }, askedAt: at(0), subject: null });
   afterEach(() => clearDecisionStoreCache());
 
   function commandTools() {
     delegateAll();
+    createOrchestratorStore(home, { now: () => NOW }).openDangerAllowance(WORKSPACE_ID, WORKER);
     const fake = daemonWith(agents());
     const enqueue = vi.fn(async () => "queued" as const);
     deps.queue = { enqueue };
     return { ...fake, enqueue, tools: toolsWith(fake.paseo) };
   }
 
-  it("refuses a BM-ANSWERS naming an open stored question — answer it with bm_decide — on both tools, sending and recording nothing", async () => {
+  it("refuses a BM-ANSWERS naming an open stored question — its Main or the owner answers it — sending and recording nothing", async () => {
     createDecisionStore(home).open(question(2));
-    const { tools, enqueue } = commandTools();
-    const open = `Refused: Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2: answer it with bm_decide, not in a BM-ANSWERS block.`;
+    const { tools, enqueue, sends } = commandTools();
+    const open = `Refused: Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2: its Main or the owner answers it, never a BM-ANSWERS block of yours.`;
     expect(await tools.call("bm_direct_worker", direct)).toEqual({ ok: false, text: open });
-    expect(await tools.call("bm_send_command", send)).toEqual({ ok: false, text: open });
     // Without its own requestId line, the block is the command's request, or the Worker's.
     const bare = { ...direct, command: "BM-ANSWERS\nQ2: a — PDF, A4." };
     expect((await tools.call("bm_direct_worker", bare)).text).toBe(open);
-    const unscoped = { workspaceId: bare.workspaceId, workerId: bare.workerId, re: bare.re, intent: bare.intent, effects: bare.effects, command: bare.command, why: bare.why };
+    const unscoped = { workspaceId: bare.workspaceId, workerId: bare.workerId, re: bare.re, intent: bare.intent, interrupt: true, command: bare.command, why: bare.why };
     expect((await tools.call("bm_direct_worker", unscoped)).text).toBe(open);
     expect(enqueue).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
     expect(createOrchestratorStore(home).listCommands()).toEqual([]);
   });
 
@@ -2446,20 +1554,17 @@ describe("a command never carries the answer to a stored question (change-004)",
     store.open(question(3));
     store.transition(`q:${REQUEST}:Q2`, (decision) => storedOrchestratorAnswer(decision, { optionKey: "a", reason: "PDF.", at: at(1) }), WORKSPACE_ID);
     store.transition(`q:${REQUEST}:Q3`, (decision) => answerDecision(decision, { via: "inbox", optionKey: "c", at: at(1) }), WORKSPACE_ID);
-    const { tools, enqueue } = commandTools();
+    const { tools, sends } = commandTools();
 
-    expect((await tools.call("bm_direct_worker", direct)).text).toBe(
-      `Refused: Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2, already answered by the Orchestrator: the plugin delivers that answer itself, so send nothing for it.`,
-    );
     // Every stored question the block names is listed.
-    expect((await tools.call("bm_send_command", { ...send, command: `${direct.command}\nQ3: c — Hold.` })).text).toBe(
+    expect((await tools.call("bm_direct_worker", { ...direct, command: `${direct.command}\nQ3: c — Hold.` })).text).toBe(
       `Refused: Q2 of ${REQUEST} is the stored decision q:${REQUEST}:Q2, already answered by the Orchestrator: the plugin delivers that answer itself, so send nothing for it; Q3 of ${REQUEST} is the stored decision q:${REQUEST}:Q3, already answered by the owner: the plugin delivers that answer itself, so send nothing for it.`,
     );
-    expect(enqueue).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
 
     // Q5 has no stored decision: unchanged.
-    expect((await tools.call("bm_direct_worker", { ...direct, re: "answer to Q5", command: `BM-ANSWERS\nrequestId: ${REQUEST}\nQ5: PDF, A4.` })).ok).toBe(true);
-    expect(enqueue).toHaveBeenCalled();
+    expect((await tools.call("bm_direct_worker", { ...direct, command: `BM-ANSWERS\nrequestId: ${REQUEST}\nQ5: PDF, A4.` })).ok).toBe(true);
+    expect(sends.map(({ id }) => id)).toEqual([WORKER]);
   });
 
   it("storedAnswerRefusalOf says what became of a question the owner or the plugin closed", () => {
@@ -2486,7 +1591,7 @@ describe("firstLine", () => {
 // Design §6B.4 (ADR-016): bm_direct_worker, bm_repo, bm_note, bm_ask_owner options.
 // ---------------------------------------------------------------------------
 
-describe("bm_direct_worker (design §6B.4, ADR-016)", () => {
+describe("bm_direct_worker (design §6B.4, ADR-016; missions design §9.1): only a stop at once", () => {
   const agents = () => [
     snapshotOf(clean().agents[0]!),
     snapshotOf(clean().agents[1]!, { status: "running" }),
@@ -2497,120 +1602,130 @@ describe("bm_direct_worker (design §6B.4, ADR-016)", () => {
     { id: "agent-claude", provider: "claude", status: "idle", workspaceId: WORKSPACE_ID, labels: { "bm.role": "worker" } },
     orchestratorAgent,
   ];
-  const direct = {
+  const stop = {
     workspaceId: WORKSPACE_ID,
     workerId: WORKER,
     requestId: "req-20260926T100020Z",
-    re: "answer to Q2",
-    intent: "answer",
-    effects: ["none"],
-    command: "BM-ANSWERS\nrequestId: req-20260926T100020Z\nQ2: PDF, A4.",
-    why: "The owner said PDF.",
+    re: "stop at once",
+    intent: "stop",
+    interrupt: true,
+    command: "Stop now and wait for your Main; change nothing more.",
+    why: "Its danger signal is open.",
   };
-  /** The block a Worker gets for `direct` on the owner's policy (every delegable class delegated, `delegateAll`). */
+  /** The block a Worker gets for `stop` on the owner's policy (`delegateAll`). */
   const blockOf = (overrides: Partial<CommandInput> = {}) =>
     commandBlockOf({
       from: "orchestrator",
       via: "chat",
       to: "worker",
-      requestId: direct.requestId,
-      re: direct.re,
-      body: direct.command,
-      why: direct.why,
-      intent: "answer",
+      requestId: stop.requestId,
+      re: stop.re,
+      body: stop.command,
+      why: stop.why,
+      intent: "stop",
       authority: "policy:reversible-technical",
       ...overrides,
     });
+  const danger = (workerId = WORKER, now = NOW) => createOrchestratorStore(home, { now: () => now }).openDangerAllowance(WORKSPACE_ID, workerId);
 
-  function directTools(orchestratorTimeline: Entry[] = [], outcome: "sent" | "queued" | "dropped" = "queued") {
+  function directTools(orchestratorTimeline: Entry[] = [], outcome: "sent" | "queued" | "dropped" = "sent") {
     const fake = daemonWith(agents(), { [ORCHESTRATOR]: [orchestratorTimeline] });
-    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent" | "queued" | "dropped">>(async (target) =>
-      target === WORKER ? outcome : "sent",
-    );
+    const enqueue = vi.fn<(target: string, kind: string, text: string) => Promise<"sent" | "queued" | "dropped">>(async () => outcome);
     deps.queue = { enqueue };
     return { ...fake, enqueue, tools: toolsWith(fake.paseo) };
   }
 
-  it("on the owner's policy: queues the BM-COMMAND to the Worker and a copy: yes to its Manager, and records it to: worker", async () => {
+  it("with the Worker's danger signal open, on the owner's policy: sent at once to the Worker, a copy: yes to its Manager, recorded to: worker", async () => {
     delegateAll();
-    const { tools, enqueue, sends } = directTools();
+    danger();
+    const { tools, enqueue, sends, paseo } = directTools();
 
-    const result = await tools.call("bm_direct_worker", direct);
+    const result = await tools.call("bm_direct_worker", stop);
 
-    expect(result.ok).toBe(true);
-    expect(result.text.split("\n")[0]).toMatch(/^Queued\. The Worker is busy .* Its Manager agent-manager gets a copy\./);
-    expect(enqueue.mock.calls).toEqual([
-      [WORKER, "command:proposal-1", blockOf(), expect.anything()],
-      [MANAGER, "command:proposal-1", blockOf({ copy: true }), expect.anything()],
-    ]);
-    expect(parseCommandBlock(enqueue.mock.calls[1]![2])).toMatchObject({ to: "worker", copy: true, limits: ["no-commit-push-deploy", "no-real-data"] });
+    expect(result.ok, result.text).toBe(true);
+    expect(result.text.split("\n")[0]).toBe(
+      `Stopped: the Worker's running turn was replaced by your command. Its Main ${MANAGER} gets a copy. Tell the owner in one line what you stopped and why.`,
+    );
+    expect(paseo.agents.ref).toHaveBeenCalledWith(WORKER);
+    expect(sends).toEqual([{ id: WORKER, text: blockOf() }]);
+    expect(enqueue.mock.calls).toEqual([[MANAGER, "command:proposal-1", blockOf({ copy: true }), expect.anything()]]);
+    expect(parseCommandBlock(blockOf())).toMatchObject({ intent: "stop", effects: [], approved: [], limits: ["no-commit-push-deploy", "no-real-data"] });
     expect(jsonOf(result)).toEqual({
       commandId: "proposal-1",
-      outcome: "queued",
-      interrupted: false,
+      outcome: "sent",
+      interrupted: true,
       managerId: MANAGER,
       copy: "sent",
       authority: "policy:reversible-technical",
       approved: [],
     });
     expect(createOrchestratorStore(home).listCommands()).toEqual([
-      expect.objectContaining({
-        id: "proposal-1",
-        kind: "command",
-        to: "worker",
-        workerId: WORKER,
-        managerId: MANAGER,
-        requestId: direct.requestId,
-        situation: direct.re,
-        command: direct.command,
-        reason: direct.why,
-        source: "chat",
-        sentText: blockOf(),
-        outcome: "queued",
-      }),
+      expect.objectContaining({ id: "proposal-1", kind: "command", to: "worker", workerId: WORKER, managerId: MANAGER, requestId: stop.requestId, situation: stop.re, command: stop.command, sentText: blockOf(), outcome: "sent" }),
     ]);
-    // Nothing is sent directly without an interrupt: the queue does it.
-    expect(sends).toEqual([]);
   });
 
-  it("right after the owner's own message it goes out via chat; without either it is refused and sends nothing", async () => {
-    const { tools, enqueue } = directTools(OWNER_JUST_SPOKE);
-    expect(jsonOf(await tools.call("bm_direct_worker", direct))).toMatchObject({ authority: "owner" });
-    expect(parseCommandBlock(enqueue.mock.calls[0]![2])).toMatchObject({ via: "chat", authority: "owner" });
+  it("refuses anything but a stop at once — another intent, an effect, or interrupt false — and a stop while no danger signal or stop step is open; sending nothing", async () => {
+    delegateAll();
+    const { tools, enqueue, sends } = directTools();
+    expect(await tools.call("bm_direct_worker", { ...stop, interrupt: false })).toEqual({ ok: false, text: `Refused: ${STOP_ONLY_MESSAGE}.` });
+    const redirect = await tools.call("bm_direct_worker", { ...stop, intent: "redirect", effects: ["none"] });
+    expect(redirect.ok).toBe(false);
+    expect(redirect.text).toContain("- input.intent: must be one of stop");
+    expect(redirect.text).toContain("- input.effects: is not a field of this tool");
+    // No allowance; an allowance of another Worker, or one that expired, does not count.
+    expect(await tools.call("bm_direct_worker", stop)).toEqual({ ok: false, text: `Refused: ${STOP_NOT_OPEN_MESSAGE}.` });
+    danger("agent-worker-orphan");
+    danger(WORKER, new Date(NOW.getTime() - 11 * 60_000));
+    expect(await tools.call("bm_direct_worker", stop)).toEqual({ ok: false, text: `Refused: ${STOP_NOT_OPEN_MESSAGE}.` });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(sends).toEqual([]);
+    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
+  });
+
+  it("right after the owner's own message it goes on the owner's word; without the policy or the word it is refused and sends nothing", async () => {
+    danger();
+    const { tools, sends } = directTools(OWNER_JUST_SPOKE);
+    expect(jsonOf(await tools.call("bm_direct_worker", stop))).toMatchObject({ authority: "owner" });
+    expect(parseCommandBlock(sends[0]!.text)).toMatchObject({ via: "chat", authority: "owner", intent: "stop" });
 
     const quiet = directTools([pluginSays(EVENT_NOTICE, at(0))]);
-    expect(await quiet.tools.call("bm_direct_worker", direct)).toEqual({
+    expect(await quiet.tools.call("bm_direct_worker", stop)).toEqual({
       ok: false,
       text: `Refused: ${notDelegatedRefusalOf(["reversible-technical"], DIRECT_REFUSED_MESSAGE)}.`,
     });
+    expect(DIRECT_REFUSED_MESSAGE).toBe("the owner has not just told you to stop it; ask the owner with bm_ask_owner, and once the owner has answered, stop it with that decisionId");
     expect(quiet.enqueue).not.toHaveBeenCalled();
     expect(quiet.sends).toEqual([]);
   });
 
-  it("on the owner's policy: a Worker command whose classes the owner delegated goes out with policy:<class>, its Manager gets the copy (autonomy design §B.9)", async () => {
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
-    const { tools, enqueue, refetches } = directTools([pluginSays(EVENT_NOTICE, at(0))]);
-    const result = await tools.call("bm_direct_worker", direct);
-    expect(jsonOf(result)).toMatchObject({ authority: "policy:reversible-technical", approved: [] });
-    expect(enqueue.mock.calls.map(([target, , text]) => [target, parseCommandBlock(text)])).toEqual([
-      [WORKER, expect.objectContaining({ to: "worker", copy: false, via: "chat", authority: "policy:reversible-technical" })],
-      [MANAGER, expect.objectContaining({ to: "worker", copy: true, via: "chat", authority: "policy:reversible-technical" })],
-    ]);
-    // The policy is the authority: the Orchestrator's chat is not read for the owner's word.
-    expect(refetches.map(({ id }) => id)).not.toContain(ORCHESTRATOR);
-    // A dependency install needs its own class delegated.
-    const install = { ...direct, requestId: "req-20260926T100021Z", intent: "continue", effects: ["dependency-install"], command: "npm install date-fns" };
-    expect(await tools.call("bm_direct_worker", install)).toEqual({
+  it("on the authority of an Orchestrator decision the owner answered (decisionId); an open one, or another's, is refused", async () => {
+    danger();
+    const asked = (id: string, overrides: Partial<Decision> = {}) =>
+      createDecisionStore(home).open(
+        makeDecision({ id, workspaceId: WORKSPACE_ID, requestId: stop.requestId, askedBy: { role: "orchestrator", agentId: ORCHESTRATOR }, round: null, subject: null, options: [{ key: "a", label: "Stop it", recommended: true, effects: ["none"] }], ...overrides }),
+      );
+    asked("o:stop-it");
+    asked("o:still-open");
+    createDecisionStore(home).transition("o:stop-it", (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: at(1) }), WORKSPACE_ID);
+    const { tools, sends } = directTools([pluginSays(EVENT_NOTICE, at(0))]);
+
+    expect(jsonOf(await tools.call("bm_direct_worker", { ...stop, decisionId: "o:stop-it" }))).toMatchObject({ authority: "decision:o:stop-it", approved: [] });
+    expect(await tools.call("bm_direct_worker", { ...stop, decisionId: "o:still-open" })).toEqual({
       ok: false,
-      text: `Refused: ${notDelegatedRefusalOf(["dependency"], DIRECT_REFUSED_MESSAGE)}.`,
+      text: "Refused: decision o:still-open is open; only a decision the owner answered authorises a command.",
     });
-    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(await tools.call("bm_direct_worker", { ...stop, decisionId: `q:${stop.requestId}:Q1` })).toEqual({
+      ok: false,
+      text: `Refused: q:${stop.requestId}:Q1 is not a decision you asked; decisionId takes the id (o:…) of your own decision the owner answered.`,
+    });
+    expect(sends.map(({ id }) => id)).toEqual([WORKER]);
+    clearDecisionStoreCache();
   });
 
   it("goes to a paseo-bm Worker of that project only — never a Reviewer, a Manager, an archived or another project's Worker", async () => {
     delegateAll();
     const { tools, enqueue, sends } = directTools();
-    const refused = async (workerId: string) => (await tools.call("bm_direct_worker", { ...direct, workerId })).text;
+    const refused = async (workerId: string) => (await tools.call("bm_direct_worker", { ...stop, workerId })).text;
     for (const target of [REVIEWER, MANAGER, ORCHESTRATOR, "agent-claude", "agent-gone"]) {
       expect(await refused(target)).toBe(`Refused: ${target} is not a paseo-bm Worker; use a Worker's id from bm_request (a Reviewer is never commanded directly).`);
     }
@@ -2620,119 +1735,62 @@ describe("bm_direct_worker (design §6B.4, ADR-016)", () => {
     expect(sends).toEqual([]);
   });
 
-  it("the backstop refuses an undeclared effect the text shows, and the policy a publish, sending nothing to the Worker or its Manager", async () => {
+  it("the backstop holds on a stop (autonomy design §B.8): one naming the push un-negated is refused even with the danger open; one whose stop word negates it passes", async () => {
     delegateAll();
-    const { tools, enqueue, sends } = directTools();
-    expect(await tools.call("bm_direct_worker", { ...direct, re: "ship it", command: "Run npm install left-pad and publish." })).toEqual({
-      ok: false,
-      text: "Refused: the text shows release (push, publish or deploy), dependency (dependency-install) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-    });
-    expect(await tools.call("bm_direct_worker", { ...direct, re: "ship it", effects: ["dependency-install", "publish"], command: "Run npm install left-pad and publish." })).toEqual({
-      ok: false,
-      text: `Refused: ${needsDecisionMessageOf(["publish"])}.`,
-    });
-    expect(enqueue).not.toHaveBeenCalled();
-    expect(sends).toEqual([]);
-    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
-  });
-
-  it("interrupt: refused unless the Worker's danger allowance is open; with it, sent at once to the Worker, and the Manager still gets its copy", async () => {
-    const store = createOrchestratorStore(home, { now: () => NOW });
-    delegateAll();
-    const { tools, enqueue, sends, paseo } = directTools();
-    const stop = { ...direct, re: "stop at once", command: "Stop. Do not push; wait for the owner.", interrupt: true };
-
-    expect(await tools.call("bm_direct_worker", stop)).toEqual({ ok: false, text: `Refused: ${INTERRUPT_REFUSED_MESSAGE}.` });
-    expect(sends).toEqual([]);
-    expect(enqueue).not.toHaveBeenCalled();
-    // An allowance of another Worker, or one that expired, does not count.
-    createOrchestratorStore(home, { now: () => new Date(NOW.getTime() - 11 * 60_000) }).openDangerAllowance(WORKSPACE_ID, WORKER);
-    store.openDangerAllowance(WORKSPACE_ID, "agent-worker-orphan");
-    expect((await tools.call("bm_direct_worker", stop)).ok).toBe(false);
-    expect(sends).toEqual([]);
-
-    store.openDangerAllowance(WORKSPACE_ID, WORKER);
-    const result = await tools.call("bm_direct_worker", stop);
-    expect(result.ok).toBe(true);
-    expect(result.text.split("\n")[0]).toMatch(/^Sent at once: the Worker's running turn was replaced/);
-    expect(paseo.agents.ref).toHaveBeenCalledWith(WORKER);
-    expect(sends).toEqual([{ id: WORKER, text: blockOf({ re: stop.re, body: stop.command }) }]);
-    expect(enqueue.mock.calls).toEqual([[MANAGER, expect.stringMatching(/^command:/), blockOf({ re: stop.re, body: stop.command, copy: true }), expect.anything()]]);
-    expect(jsonOf(result)).toMatchObject({ outcome: "sent", interrupted: true, copy: "sent" });
-  });
-
-  const RELEASE_UNDECLARED = "the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner";
-
-  describe("a stop of the Worker's open danger has no exemption any more (autonomy design §B.8)", () => {
-    /** The Orchestrator's stop the gate held in the coordination run of 2026-09-29 (F2), word for word. */
-    const f2Stop = {
-      ...direct,
+    earlierAutopilotSettings();
+    danger();
+    const { tools, sends } = directTools();
+    // The Orchestrator's stop the gate held in the coordination run of 2026-09-29 (F2), word for word.
+    const f2 = {
+      ...stop,
       re: "stop and report",
       command:
         "Stop what you are doing now: run no more git push and no more waits. Send your report: how many git push runs you made, what git said each time, which steps you didn't run, and confirm that nothing was changed or sent anywhere.",
-      why: "Owner's standing instruction for demo: on any worker signal, stop and report, even for commands the owner asked for.",
-      intent: "stop",
-      interrupt: true,
     };
-
-    it("the run's stop names the push un-negated: refused as release even while that Worker's danger allowance is open, sending nothing", async () => {
-      const store = createOrchestratorStore(home, { now: () => NOW });
-      delegateAll();
-      earlierAutopilotSettings();
-      store.openDangerAllowance(WORKSPACE_ID, WORKER);
-      const { tools, enqueue, sends } = directTools();
-      const refusal = { ok: false, text: `Refused: ${RELEASE_UNDECLARED}.` };
-      expect(await tools.call("bm_direct_worker", f2Stop)).toEqual(refusal);
-      expect(await tools.call("bm_direct_worker", { ...f2Stop, interrupt: false })).toEqual(refusal);
-      expect(enqueue).not.toHaveBeenCalled();
-      expect(sends).toEqual([]);
-      expect(createOrchestratorStore(home).listCommands()).toEqual([]);
+    expect(await tools.call("bm_direct_worker", f2)).toEqual({
+      ok: false,
+      text: "Refused: the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
     });
-
-    it("a stop whose stop word negates what it stops passes, at once while the allowance is open", async () => {
-      const store = createOrchestratorStore(home, { now: () => NOW });
-      delegateAll();
-      store.openDangerAllowance(WORKSPACE_ID, WORKER);
-      const { tools, enqueue, sends } = directTools();
-      const negated = { ...f2Stop, command: "Stop the git push runs and the waits now. Send your report: what git said each time, and which steps you did not run." };
-      const result = await tools.call("bm_direct_worker", negated);
-      expect(result.ok).toBe(true);
-      expect(sends).toEqual([{ id: WORKER, text: blockOf({ re: negated.re, body: negated.command, why: negated.why, intent: "stop" }) }]);
-      expect(enqueue.mock.calls.map(([target]) => target)).toEqual([MANAGER]);
-      // Any other category is checked as ever.
-      expect(await tools.call("bm_direct_worker", { ...direct, re: "stop", command: "Stop pushing; rotate the API token instead.", interrupt: true })).toEqual({
-        ok: false,
-        text: "Refused: the text shows security (security) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
-      });
+    expect(await tools.call("bm_direct_worker", { ...stop, command: "Stop pushing; rotate the API token instead." })).toEqual({
+      ok: false,
+      text: "Refused: the text shows security (security) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
     });
+    expect(sends).toEqual([]);
+    const negated = { ...f2, command: "Stop the git push runs and the waits now. Send your report: what git said each time, and which steps you did not run." };
+    expect((await tools.call("bm_direct_worker", negated)).ok).toBe(true);
+    expect(sends).toEqual([{ id: WORKER, text: blockOf({ re: negated.re, body: negated.command }) }]);
   });
 
   it("a Worker with no paseo-bm Manager gets it with no copy, recorded with managerId null", async () => {
     delegateAll();
+    danger("agent-worker-orphan");
     const { tools, enqueue } = directTools();
-    const result = await tools.call("bm_direct_worker", { ...direct, workerId: "agent-worker-orphan" });
-    expect(result.text).toContain("The Worker has no paseo-bm Manager, so no copy was sent.");
-    expect(enqueue.mock.calls.map(([target]) => target)).toEqual(["agent-worker-orphan"]);
+    const result = await tools.call("bm_direct_worker", { ...stop, workerId: "agent-worker-orphan" });
+    expect(result.text).toContain("The Worker has no paseo-bm Main or Manager, so no copy was sent.");
+    expect(enqueue).not.toHaveBeenCalled();
     expect(createOrchestratorStore(home).listCommands()[0]).toMatchObject({ to: "worker", workerId: "agent-worker-orphan", managerId: null });
   });
 
   it("a Worker that cannot be reached: nothing to its Manager, nothing recorded", async () => {
     delegateAll();
-    const { tools, enqueue } = directTools([], "dropped");
-    expect(await tools.call("bm_direct_worker", direct)).toEqual({ ok: false, text: `Refused: Worker ${WORKER} could not be reached; nothing was sent.` });
-    expect(enqueue).toHaveBeenCalledTimes(1);
+    danger();
+    const fake = directTools();
+    fake.handle(WORKER).send.mockRejectedValue(new Error("gone"));
+    expect(await fake.tools.call("bm_direct_worker", stop)).toEqual({ ok: false, text: `Refused: Worker ${WORKER} could not be reached (gone); nothing was sent.` });
+    expect(fake.enqueue).not.toHaveBeenCalled();
     expect(createOrchestratorStore(home).listCommands()).toEqual([]);
   });
 
-  it("shares the loop guard with bm_send_command: a 13th command for one request in 24 hours is refused", async () => {
+  it("shares the loop guard: a 13th command for one request in 24 hours is refused", async () => {
     delegateAll();
+    danger();
     const earlier = createOrchestratorStore(home, { now: () => new Date(NOW.getTime() - 3_600_000) });
     for (let index = 0; index < COMMAND_LIMIT_PER_REQUEST; index += 1) {
-      earlier.appendCommand({ workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: direct.requestId, situation: "", command: "Go on.", reason: "", sentText: "Go on.", outcome: "sent" });
+      earlier.appendCommand({ workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: stop.requestId, situation: "", command: "Go on.", reason: "", sentText: "Go on.", outcome: "sent" });
     }
-    const { tools, enqueue } = directTools();
-    expect(await tools.call("bm_direct_worker", direct)).toEqual({ ok: false, text: `Refused: ${COMMAND_LIMIT_MESSAGE}.` });
-    expect(enqueue).not.toHaveBeenCalled();
+    const { tools, sends } = directTools();
+    expect(await tools.call("bm_direct_worker", stop)).toEqual({ ok: false, text: `Refused: ${COMMAND_LIMIT_MESSAGE}.` });
+    expect(sends).toEqual([]);
   });
 });
 
@@ -2914,6 +1972,7 @@ describe("bm_repo (design §6B.4): read-only git inside the project's folder", (
 
 describe("the intervention log (autonomy design §G.3)", () => {
   const REQUEST = "req-20260926T100020Z";
+  const FID = "f:fb-0123456789ab";
   const logFile = () => join(home, "orchestrator", "interventions.json");
   const logged = (): Array<Record<string, unknown>> => {
     try {
@@ -2921,15 +1980,6 @@ describe("the intervention log (autonomy design §G.3)", () => {
     } catch {
       return [];
     }
-  };
-  const stalled = {
-    type: "request.stalled" as const,
-    workspaceId: WORKSPACE_ID,
-    requestKey: REQUEST,
-    managerId: MANAGER,
-    reason: "idle-unfinished" as const,
-    alertKey: `request-stalled:${WORKSPACE_ID}:${REQUEST}`,
-    since: at(0),
   };
   const signal = {
     type: "worker.signal" as const,
@@ -2941,14 +1991,14 @@ describe("the intervention log (autonomy design §G.3)", () => {
     alertKey: `danger:${WORKSPACE_ID}:${WORKER}`,
     since: at(1),
   };
-  const send = { workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, intent: "answer", effects: ["none"], command: "Carry on with the export.", reason: "It stalled." };
-  const direct = { workspaceId: WORKSPACE_ID, workerId: WORKER, requestId: REQUEST, re: "carry on", intent: "answer", effects: ["none"], command: "Carry on with the export.", why: "It stalled." };
+  const stop = { workspaceId: WORKSPACE_ID, workerId: WORKER, requestId: REQUEST, re: "stop now", intent: "stop", interrupt: true, command: "Stop now and wait for your Main.", why: "Its danger signal is open." };
   /** The events of the Orchestrator's running wake, as the event bus gives them. */
   let wake: unknown[];
 
   beforeEach(() => {
     wake = [];
     deps.wakeEventsOf = (orchestratorId) => (orchestratorId === ORCHESTRATOR ? (wake as never) : []);
+    createOrchestratorStore(home, { now: () => NOW }).openDangerAllowance(WORKSPACE_ID, WORKER);
   });
 
   function loggingTools(timeline: Entry[] = OWNER_JUST_SPOKE) {
@@ -2958,113 +2008,53 @@ describe("the intervention log (autonomy design §G.3)", () => {
     return { ...fake, tools: toolsWith(fake.paseo) };
   }
 
-  it("a command answering its wake's request.stalled is an unblock of that stall: pending, at the command's time, with the command's id", async () => {
-    wake = [stalled];
-    const result = await loggingTools().tools.call("bm_send_command", send);
-    expect(result.ok).toBe(true);
-    // The id the commands store records it under, and the tool hands out (bead 81y2.2).
-    expect(jsonOf(result)).toMatchObject({ commandId: "proposal-1" });
-    expect(createOrchestratorStore(home).listCommands().map((entry) => entry.id)).toEqual(["proposal-1"]);
-    expect(logged()).toEqual([
-      {
-        id: expect.any(String),
-        kind: "unblock",
-        workspaceId: WORKSPACE_ID,
-        requestId: REQUEST,
-        targetAgentId: MANAGER,
-        trigger: "request.stalled",
-        expected: "stall-clears",
-        windowMs: 15 * 60_000,
-        at: NOW.toISOString(),
-        outcome: "pending",
-        checkedAt: null,
-        alertKey: stalled.alertKey,
-        commandId: "proposal-1",
-      },
-    ]);
-  });
-
-  it("walks agents.list once per call: the target, the owner's word and the wake's Orchestrator read the same list (code review 2026-09-30 §4)", async () => {
-    wake = [stalled];
-    const { tools, paseo } = loggingTools();
-    expect((await tools.call("bm_send_command", send)).ok).toBe(true);
-    expect(paseo.agents.list).toHaveBeenCalledTimes(1);
-    expect((await tools.call("bm_direct_worker", direct)).ok).toBe(true);
-    expect(paseo.agents.list).toHaveBeenCalledTimes(2);
-    expect(logged()).toHaveLength(2);
-  });
-
-  it("a command on the owner's word that answers no event is a correction by the owner; one on neither is not logged", async () => {
-    expect((await loggingTools().tools.call("bm_send_command", send)).ok).toBe(true);
-    expect(logged()).toEqual([expect.objectContaining({ kind: "correct", trigger: "owner", targetAgentId: MANAGER, requestId: REQUEST })]);
-
-    delegateAll();
-    wake = [{ ...stalled, requestKey: "req-20260926T110000Z" }];
-    const quiet = loggingTools([pluginSays(EVENT_NOTICE, at(0))]);
-    expect((await quiet.tools.call("bm_send_command", send)).ok).toBe(true);
-    expect(logged()).toHaveLength(1);
-  });
-
-  it("bm_direct_worker on its Worker's signal is a correction; with interrupt, a stop", async () => {
+  it("a stop on its Worker's danger signal is a stop of that signal, with the command's id; agents.list is walked once per call (code review 2026-09-30 §4)", async () => {
     wake = [signal];
-    expect((await loggingTools().tools.call("bm_direct_worker", direct)).ok).toBe(true);
-    createOrchestratorStore(home, { now: () => NOW }).openDangerAllowance(WORKSPACE_ID, WORKER);
-    const stop = { ...direct, re: "stop now", command: "Stop now and wait for the owner.", interrupt: true };
-    expect((await loggingTools().tools.call("bm_direct_worker", stop)).ok).toBe(true);
+    const { tools, paseo } = loggingTools();
+    const result = await tools.call("bm_direct_worker", stop);
+    expect(result.ok, result.text).toBe(true);
+    expect(paseo.agents.list).toHaveBeenCalledTimes(1);
+    expect(jsonOf(result)).toMatchObject({ commandId: "proposal-1" });
     expect(logged()).toEqual([
-      expect.objectContaining({ kind: "correct", trigger: "worker.signal", signal: "danger", alertKey: signal.alertKey, targetAgentId: WORKER, expected: "signal-clears-or-checks-pass" }),
-      expect.objectContaining({ kind: "stop", trigger: "worker.signal", signal: "danger", targetAgentId: WORKER, expected: "turn-ends", windowMs: 2 * 60_000 }),
+      expect.objectContaining({ kind: "stop", trigger: "worker.signal", signal: "danger", targetAgentId: WORKER, expected: "turn-ends", windowMs: 2 * 60_000, commandId: "proposal-1" }),
     ]);
-    // Each carries the id of the command it is, as the commands store records it (bead 81y2.2).
-    const commandIds = createOrchestratorStore(home).listCommands().map((entry) => entry.id).reverse();
-    expect(commandIds).toHaveLength(2);
-    expect(logged().map((entry) => entry["commandId"])).toEqual(commandIds);
+  });
+
+  it("a stop on the owner's word that answers no event is the owner's stop", async () => {
+    expect((await loggingTools().tools.call("bm_direct_worker", stop)).ok).toBe(true);
+    expect(logged()).toEqual([expect.objectContaining({ kind: "stop", trigger: "owner", targetAgentId: WORKER, requestId: REQUEST })]);
   });
 
   it("bm_decide logs its answer as an answer intervention, triggered by its wake's decision.opened; a refusal logs nothing (autonomy design §G.3)", async () => {
-    const id = `q:${REQUEST}:Q1`;
-    const open = (n: number) =>
+    const incident = (id: string) =>
       createDecisionStore(home).open(
         makeDecision({
-          id: `q:${REQUEST}:Q${n}`,
+          id,
           workspaceId: WORKSPACE_ID,
-          requestId: REQUEST,
-          askedBy: { role: "worker", agentId: WORKER },
-          askedAt: at(0),
-          subject: null,
+          requestId: null,
+          askedBy: { role: "plugin", agentId: null },
+          round: null,
+          subject: "fallback-worker",
           options: [
-            { key: "a", label: "Keep it", recommended: true, effects: ["none"] },
-            { key: "b", label: "Change it", recommended: false, effects: ["commit"] },
+            { key: "a", label: "Wait for the reset", recommended: true, effects: ["none"], action: { kind: "fallback", target: id.slice(2), action: "wait" } },
+            { key: "b", label: "I'll handle it", recommended: false, effects: ["none"], action: { kind: "fallback", target: id.slice(2), action: "dismiss" } },
           ],
         }),
       );
-    open(1);
-    open(2);
+    incident(FID);
+    incident("f:fb-000000000002");
     // Not delegated yet: refused, nothing logged.
-    wake = [{ type: "decision.opened", workspaceId: WORKSPACE_ID, requestId: REQUEST, decisionId: id, askedBy: WORKER, asks: "decision" }];
-    expect((await loggingTools([]).tools.call("bm_decide", { decisionId: id, optionKey: "a", reason: "Nothing to change." })).ok).toBe(false);
+    wake = [{ type: "decision.opened", workspaceId: WORKSPACE_ID, requestId: null, decisionId: FID, askedBy: null, asks: "decision" }];
+    expect((await loggingTools([]).tools.call("bm_decide", { decisionId: FID, optionKey: "a", reason: "The reset is soon." })).ok).toBe(false);
     expect(logged()).toEqual([]);
 
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
-    expect((await loggingTools([]).tools.call("bm_decide", { decisionId: id, optionKey: "a", reason: "Nothing to change." })).ok).toBe(true);
-    // Q2 decided on its own look, outside a wake that carried it.
-    expect((await loggingTools([]).tools.call("bm_decide", { decisionId: `q:${REQUEST}:Q2`, optionKey: "a", reason: "Same as Q1." })).ok).toBe(true);
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "environment", mode: "delegate", confirmed: true }, NOW.toISOString());
+    expect((await loggingTools([]).tools.call("bm_decide", { decisionId: FID, optionKey: "a", reason: "The reset is soon." })).ok).toBe(true);
+    // The second decided on its own look, outside a wake that carried it.
+    expect((await loggingTools([]).tools.call("bm_decide", { decisionId: "f:fb-000000000002", optionKey: "a", reason: "Same reset." })).ok).toBe(true);
     expect(logged()).toEqual([
-      {
-        id: expect.any(String),
-        kind: "answer",
-        workspaceId: WORKSPACE_ID,
-        requestId: REQUEST,
-        targetAgentId: WORKER,
-        trigger: "decision.opened",
-        expected: expect.any(String),
-        windowMs: 10 * 60_000,
-        at: NOW.toISOString(),
-        outcome: "pending",
-        checkedAt: null,
-        decisionId: id,
-      },
-      expect.objectContaining({ kind: "answer", trigger: "orchestrator", decisionId: `q:${REQUEST}:Q2` }),
+      expect.objectContaining({ kind: "answer", workspaceId: WORKSPACE_ID, trigger: "decision.opened", decisionId: FID, at: NOW.toISOString(), outcome: "pending" }),
+      expect.objectContaining({ kind: "answer", trigger: "orchestrator", decisionId: "f:fb-000000000002" }),
     ]);
   });
 
@@ -3074,12 +2064,12 @@ describe("the intervention log (autonomy design §G.3)", () => {
     writeFileSync(logFile(), newer);
     const log = vi.fn();
     deps.log = log;
-    wake = [stalled];
-    const result = await loggingTools().tools.call("bm_send_command", send);
+    wake = [signal];
+    const result = await loggingTools().tools.call("bm_direct_worker", stop);
     expect(result.ok).toBe(true);
-    expect(jsonOf(result)).toMatchObject({ outcome: "queued" });
+    expect(jsonOf(result)).toMatchObject({ outcome: "sent" });
     expect(readFileSync(logFile(), "utf8")).toBe(newer);
-    expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[paseo-bm\] could not record the unblock intervention: /));
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[paseo-bm\] could not record the stop intervention: /));
   });
 });
 
@@ -3087,13 +2077,14 @@ describe("the intervention log (autonomy design §G.3)", () => {
 // Missions design §6 last row (WP-112): Mains live in the Missions home, their requests in repos.
 // ---------------------------------------------------------------------------
 
-describe("mission requests: the Orchestrator reaches the request's current Main (missions design §6, WP-112)", () => {
+describe("mission requests: the Orchestrator reaches the request's current Main (missions design §6, WP-112; §9.1, §9.4)", () => {
   const MISSIONS_HOME = "wks_missions";
   const REQUEST = "req-20260926T100020Z";
   const OLD_MAIN = "agent-main-old";
   const MAIN = "agent-main";
   const STRAY_MAIN = "agent-main-stray";
   const MISSION_WORKER = "agent-mission-worker";
+  const MISSION = "mis-0000000010";
 
   /** A mission (Main `OLD_MAIN`, then `MAIN`) whose roster holds `REQUEST` in the repo, and another with no request here (`STRAY_MAIN`). */
   function missions(): void {
@@ -3101,6 +2092,7 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     const store = createMissionStore(home, { now: () => NOW, newId: () => `mis-00000000${++next}0` });
     const made = store.create({ code: "EXP", name: "Export", goal: "Export invoices.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: OLD_MAIN });
     if (!made.ok) throw new Error(made.reasons.join("; "));
+    expect(made.mission.missionId).toBe(MISSION);
     expect(store.setMain(made.mission.missionId, MAIN, "replaced").ok).toBe(true);
     expect(createMissionRoster(home, { now: () => NOW }).add(made.mission.missionId, { requestId: REQUEST, workspaceId: WORKSPACE_ID, topic: "Export", workerId: MISSION_WORKER })).not.toBeNull();
     expect(store.create({ code: "OTHER", name: "Other", goal: "Other work.", repos: [OTHER_WORKSPACE], createdBy: "owner", mainId: STRAY_MAIN }).ok).toBe(true);
@@ -3113,14 +2105,16 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     {
       id: MISSION_WORKER,
       provider: "bm-worker",
-      status: "idle",
+      status: "running",
       workspaceId: WORKSPACE_ID,
       labels: { "bm.role": "worker", "paseo.parent-agent-id": OLD_MAIN, "bm.requestId": REQUEST },
       createdAt: at(1),
     },
     orchestratorAgent,
   ];
-  const command = { workspaceId: WORKSPACE_ID, requestId: REQUEST, intent: "answer", effects: ["none"], command: "Q2: PDF.", reason: "The owner said PDF." };
+  /** A family's state on the ladder (missions design §9.3). */
+  const family = (step: number, lastAction: FamilyState["lastAction"] = null): FamilyState => ({ step, since: at(0), figures: [], lastAction, mainTurnsAt: null });
+  const stop = { workspaceId: WORKSPACE_ID, workerId: MISSION_WORKER, re: "stop at once", intent: "stop", interrupt: true, command: "Stop now and wait for your Main.", why: "The governor's re-plan did not hold." };
 
   let enqueue: ReturnType<typeof vi.fn<(target: string, kind: string, text: string, paseo?: unknown) => Promise<"sent" | "queued" | "dropped">>>;
   beforeEach(() => {
@@ -3135,45 +2129,169 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     clearDecisionStoreCache();
   });
 
-  const tools = () => toolsWith(daemonWith(agents(), { [ORCHESTRATOR]: [[pluginSays(EVENT_NOTICE, at(0))]] }).paseo);
+  const daemon = () => daemonWith(agents(), { [ORCHESTRATOR]: [[pluginSays(EVENT_NOTICE, at(0))]] });
+  const tools = () => toolsWith(daemon().paseo);
 
-  it("bm_send_command to the request's Main in the home is accepted and delivered to it", async () => {
-    const result = await tools().call("bm_send_command", { ...command, managerId: MAIN });
+  it("bm_govern sends the mission's current Main a governor command with no effect and the figures it names, and records it in the journal and on the ladder", async () => {
+    createGovernorStore(home).put(MISSION, { mess: family(3), drift: family(1, { at: at(0), kind: "record", id: null }) });
+    const text = "Two of your Workers write src/export.ts: say which one owns it, or re-plan.";
 
-    expect(result.ok, result.text).toBe(true);
-    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
-    expect(createOrchestratorStore(home).listCommands()).toEqual([expect.objectContaining({ workspaceId: WORKSPACE_ID, managerId: MAIN, requestId: REQUEST })]);
-  });
-
-  it("a command named to an earlier Main of the mission goes to its current Main", async () => {
-    const result = await tools().call("bm_send_command", { ...command, managerId: OLD_MAIN });
+    const result = await tools().call("bm_govern", { missionId: MISSION, step: "nudge", text, figures: ["writersOnOneFile"] });
 
     expect(result.ok, result.text).toBe(true);
-    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
+    expect(result.text.split("\n")[0]).toBe(`Sent to ${MAIN}, the Main of mission EXP, as a BM-COMMAND on governor:nudge.`);
+    expect(enqueue.mock.calls.map(([target, kind]) => [target, kind])).toEqual([[MAIN, "command:proposal-1"]]);
+    const block = parseCommandBlock(enqueue.mock.calls[0]![2])!;
+    expect(block).toMatchObject({ from: "orchestrator", to: "manager", copy: false, requestId: null, re: "Governor: nudge, mission EXP", intent: "other", effects: [], authority: "governor:nudge", approved: [] });
+    expect(block.body.startsWith(text)).toBe(true);
+    expect(block.body).toContain("Figures:\n- writersOnOneFile 0 (threshold ≥ ");
+    expect(jsonOf(result)).toMatchObject({ commandId: "proposal-1", outcome: "sent", missionId: MISSION, mainId: MAIN });
+    expect(createOrchestratorStore(home).listCommands()).toEqual([expect.objectContaining({ id: "proposal-1", managerId: MAIN, requestId: null, missionId: MISSION })]);
+    expect(createMissionStore(home).journal(MISSION).at(-1)).toMatchObject({ kind: "governor", by: "orchestrator", text: `nudge: ${text}`, ref: "proposal-1" });
+    // Only the family of the named figure records it; a nudge leaves a family at step 3 where it is.
+    const ladder = createGovernorStore(home).ladder(MISSION);
+    expect(ladder.mess).toMatchObject({ step: 3, lastAction: { at: NOW.toISOString(), kind: "nudge", id: "proposal-1" } });
+    expect(ladder.drift).toEqual(family(1, { at: at(0), kind: "record", id: null }));
+    // Missions design §9.3: the step is in the intervention log (A-12), with the families it concerns.
+    expect(createInterventionStore(home).list()).toMatchObject([
+      { kind: "govern", step: "nudge", trigger: "governor", targetAgentId: MAIN, requestId: null, missionId: MISSION, families: ["mess"], commandId: "proposal-1", expected: "figures-clear", outcome: "pending" },
+    ]);
   });
 
-  it("a Main of a mission with no request in the project is refused, as is a Main for a project without any mission", async () => {
-    expect(await tools().call("bm_send_command", { ...command, managerId: STRAY_MAIN })).toEqual({
+  it("a re-plan takes a family at step 3 to the stop step: only then is the mission's Worker stopped without a danger signal, its Main copied", async () => {
+    createGovernorStore(home).put(MISSION, { overengineering: family(3) });
+    expect(await tools().call("bm_direct_worker", stop)).toEqual({ ok: false, text: `Refused: ${STOP_NOT_OPEN_MESSAGE}.` });
+
+    expect((await tools().call("bm_govern", { missionId: MISSION, step: "replan", text: "Your plan grew past its criteria: cut it back to D1 and D2." })).ok).toBe(true);
+    expect(createGovernorStore(home).ladder(MISSION).overengineering).toMatchObject({ step: 4, lastAction: { kind: "replan", id: "proposal-1" } });
+
+    const fake = daemon();
+    const stopped = await toolsWith(fake.paseo).call("bm_direct_worker", stop);
+    expect(stopped.ok, stopped.text).toBe(true);
+    expect(fake.sends.map(({ id }) => id)).toEqual([MISSION_WORKER]);
+    expect(enqueue.mock.calls.map(([target]) => target)).toEqual([MAIN, MAIN]);
+    expect(jsonOf(stopped)).toMatchObject({ managerId: MAIN, copy: "sent", interrupted: true });
+    // Missions design §9.3: the re-plan and the stop it opened, each in the intervention log with trigger governor.
+    expect(createInterventionStore(home).list()).toMatchObject([
+      { kind: "govern", step: "replan", trigger: "governor", targetAgentId: MAIN, missionId: MISSION, families: ["overengineering"], commandId: "proposal-1" },
+      { kind: "stop", trigger: "governor", targetAgentId: MISSION_WORKER, requestId: REQUEST, missionId: MISSION, families: ["overengineering"], commandId: (jsonOf(stopped) as { commandId: string }).commandId, expected: "turn-ends" },
+    ]);
+  });
+
+  it("bm_note with missionId keeps the note under the mission, which bm_missions returns; both ids, neither, or an unknown mission are refused (missions design §9.1)", async () => {
+    const noted = await tools().call("bm_note", { missionId: MISSION, text: "The owner wants one Worker per repo." });
+    expect(noted.ok, noted.text).toBe(true);
+    expect(jsonOf(noted)).toEqual({ missionId: MISSION, notes: 1, replaced: false });
+    expect(createOrchestratorStore(home).readNotes({ missionId: MISSION })).toMatchObject([{ text: "The owner wants one Worker per repo." }]);
+    expect(createOrchestratorStore(home).readNotes(WORKSPACE_ID)).toEqual([]);
+    const exp = (jsonOf(await tools().call("bm_missions", { missionId: MISSION })) as { missions: Array<Record<string, unknown>> }).missions[0]!;
+    expect(exp["notes"]).toEqual([{ at: NOW.toISOString(), text: "The owner wants one Worker per repo." }]);
+
+    expect(await tools().call("bm_note", { missionId: MISSION, workspaceId: WORKSPACE_ID, text: "x" })).toEqual({ ok: false, text: "Refused: give workspaceId or missionId, not both." });
+    expect(await tools().call("bm_note", { text: "x" })).toEqual({ ok: false, text: "Refused: give workspaceId (a project's note) or missionId (a mission's)." });
+    expect(await tools().call("bm_note", { missionId: "mis-0000000099", text: "x" })).toEqual({ ok: false, text: "Refused: no mission mis-0000000099; call bm_missions for their ids." });
+    expect(createOrchestratorStore(home).readNotes({ missionId: MISSION })).toHaveLength(1);
+  });
+
+  it("bm_govern refuses an unknown mission, an unknown figure, a mission with no Main, a text that shows an effect, and a 13th command for the mission in 24 hours, sending nothing", async () => {
+    expect(createMissionStore(home).create({ code: "NOMAIN", name: "No Main", goal: "Waits.", repos: [WORKSPACE_ID], createdBy: "owner" }).ok).toBe(true);
+    const lonely = createMissionStore(home).list().find((entry) => entry.code === "NOMAIN")!.missionId;
+    const govern = (input: Record<string, unknown>) => tools().call("bm_govern", { missionId: MISSION, step: "nudge", text: "Re-plan.", ...input });
+
+    expect(await govern({ missionId: "mis-0000000099" })).toEqual({ ok: false, text: "Refused: no mission mis-0000000099; use a missionId bm_missions gave." });
+    expect((await govern({ figures: ["writersOnOneFile", "vibes"] })).text).toContain("- input.figures: vibes is not a figure; the figures are writersOnOneFile, ");
+    expect(await govern({ missionId: lonely })).toEqual({ ok: false, text: "Refused: mission NOMAIN has no Main." });
+    expect(await govern({ text: "Push the export branch to origin now." })).toEqual({
       ok: false,
-      text: `Refused: Manager ${STRAY_MAIN} does not belong to project ${WORKSPACE_ID}.`,
+      text: "Refused: the text shows release (push, publish or deploy) that effects does not declare: declare the effect or ask the owner with bm_ask_owner.",
     });
-    expect(await tools().call("bm_send_command", { ...command, workspaceId: "wks_none", requestId: "req-20260926T100099Z", managerId: MAIN })).toEqual({
+    const earlier = createOrchestratorStore(home, { now: () => new Date(NOW.getTime() - 3_600_000) });
+    for (let index = 0; index < COMMAND_LIMIT_PER_REQUEST; index += 1) {
+      earlier.appendCommand({ workspaceId: MISSIONS_HOME, managerId: OLD_MAIN, requestId: null, situation: "", command: "Re-plan.", reason: "", sentText: "Re-plan.", outcome: "sent", missionId: MISSION });
+    }
+    expect(await govern({})).toEqual({ ok: false, text: `Refused: ${MISSION_COMMAND_LIMIT_MESSAGE}.` });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(createMissionStore(home).journal(MISSION).filter((entry) => entry.kind === "governor")).toEqual([]);
+  });
+
+  it("governedLadderOf: the named figures' families, else every family above step 0 (none for an arbitration); a nudge moves step 1 to 2, a re-plan step 3 to 4", () => {
+    const ladder = { mess: family(1), drift: family(3), stuck: family(0) };
+    const action = { at: NOW.toISOString(), id: "c-1", mainTurns: 7 };
+    const nudged = governedLadderOf(ladder, "nudge", [], action);
+    expect(nudged.mess).toEqual({ ...family(1), step: 2, lastAction: { at: action.at, kind: "nudge", id: "c-1" }, mainTurnsAt: 7 });
+    expect(nudged.drift).toEqual({ ...family(3), lastAction: { at: action.at, kind: "nudge", id: "c-1" } });
+    expect(nudged.stuck).toEqual(family(0));
+    const replanned = governedLadderOf(ladder, "replan", ["finishedSinceCriterion"], action);
+    expect(replanned.drift).toMatchObject({ step: GOVERNOR_STOP_STEP, lastAction: { kind: "replan" } });
+    expect(replanned.mess).toEqual(family(1));
+    expect(governedLadderOf(ladder, "arbitrate", [], action)).toEqual(ladder);
+  });
+
+  it("bm_missions reads each open mission: its charter, roster, figures against their thresholds, ladder and open m: cards", async () => {
+    createGovernorStore(home).put(MISSION, { mess: family(2, { at: at(0), kind: "nudge", id: "c-0" }) });
+    createMissionDecisionStore(home).open(
+      makeDecision({
+        id: `m:${MISSION}:1`,
+        workspaceId: MISSIONS_HOME,
+        requestId: null,
+        askedBy: { role: "plugin", agentId: MAIN },
+        round: null,
+        question: "Change the goal to: export invoices and credit notes?",
+        subject: null,
+        options: [
+          { key: "a", label: "Apply", recommended: true, effects: ["none"] },
+          { key: "b", label: "Keep as is", recommended: false, effects: ["none"] },
+        ],
+      }),
+    );
+
+    const answer = jsonOf(await tools().call("bm_missions", {})) as { missions: Array<Record<string, unknown>> };
+
+    expect(answer.missions.map((mission) => mission["code"]).sort()).toEqual(["EXP", "OTHER"]);
+    const exp = answer.missions.find((mission) => mission["code"] === "EXP")!;
+    expect(exp).toMatchObject({
+      missionId: MISSION,
+      name: "Export",
+      state: "open",
+      mainId: MAIN,
+      charter: { goal: "Export invoices.", repos: [WORKSPACE_ID], doneCriteria: [] },
+      roster: [{ requestId: REQUEST, workspaceId: WORKSPACE_ID, topic: "Export", state: "active", workerIds: [MISSION_WORKER] }],
+      ladder: { mess: { step: 2, since: at(0), lastAction: { at: at(0), kind: "nudge", id: "c-0" } } },
+      openCards: [{ decisionId: `m:${MISSION}:1`, question: "Change the goal to: export invoices and credit notes?", options: ["Apply", "Keep as is"] }],
+    });
+    const figures = exp["figures"] as { crossed: string[]; under: string[] };
+    expect([...figures.crossed, ...figures.under].some((line) => line.startsWith("writersOnOneFile 0 (threshold ≥"))).toBe(true);
+    // One mission by id; an unknown one is refused.
+    expect((jsonOf(await tools().call("bm_missions", { missionId: MISSION })) as { missions: unknown[] }).missions).toHaveLength(1);
+    expect(await tools().call("bm_missions", { missionId: "mis-0000000099" })).toEqual({
       ok: false,
-      text: `Refused: Manager ${MAIN} does not belong to project wks_none.`,
+      text: "Refused: no mission mis-0000000099; call bm_missions without missionId for their ids.",
     });
+  });
+
+  it("a prepared command of bm_ask_owner goes to a Main of the project only: a Main of a mission with no request here is refused", async () => {
+    const asked = await tools().call("bm_ask_owner", {
+      workspaceId: WORKSPACE_ID,
+      requestId: REQUEST,
+      question: "PDF or CSV?",
+      recommendation: "PDF.",
+      options: [{ label: "PDF", effects: ["none"], command: { to: "manager", agentId: STRAY_MAIN, intent: "answer", body: "Use PDF." } }],
+    });
+    expect(asked.text).toContain(`- input.options[0].command.agentId: Manager ${STRAY_MAIN} does not belong to project ${WORKSPACE_ID}`);
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it("bm_direct_worker copies the command to the Worker's request's current Main, not its archived creator", async () => {
-    const result = await tools().call("bm_direct_worker", { workspaceId: WORKSPACE_ID, workerId: MISSION_WORKER, re: "answer to Q2", intent: "answer", effects: ["none"], command: "Use PDF.", why: "The owner said PDF." });
+  it("bm_direct_worker copies a stop to the Worker's request's current Main, not its archived creator", async () => {
+    createOrchestratorStore(home, { now: () => NOW }).openDangerAllowance(WORKSPACE_ID, MISSION_WORKER);
+    const result = await tools().call("bm_direct_worker", stop);
 
     expect(result.ok, result.text).toBe(true);
-    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MISSION_WORKER, MAIN]);
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
     expect(jsonOf(result)).toMatchObject({ managerId: MAIN, copy: "sent" });
   });
 
   it("a prepared command to an earlier Main reaches the current Main once the owner chooses it", async () => {
-    const fake = daemonWith(agents(), { [ORCHESTRATOR]: [[pluginSays(EVENT_NOTICE, at(0))]] });
+    const fake = daemon();
     const onSettled = settledByKind({ orchestrator: createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW, queue: deps.queue, log: () => {} }) });
     const asked = await toolsWith(fake.paseo).call("bm_ask_owner", {
       workspaceId: WORKSPACE_ID,
@@ -3195,12 +2313,8 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     expect(createDecisionStore(home).get(id, WORKSPACE_ID)!.delivery).toMatchObject({ to: MAIN, outcome: "sent" });
   });
 
-  it("with no request, a command or prepared command named to an earlier Main reaches the current Main", async () => {
-    const sent = await tools().call("bm_send_command", { workspaceId: WORKSPACE_ID, intent: "answer", effects: ["none"], command: "Use PDF everywhere.", reason: "The owner said PDF.", managerId: OLD_MAIN });
-    expect(sent.ok, sent.text).toBe(true);
-    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
-
-    const fake = daemonWith(agents(), { [ORCHESTRATOR]: [[pluginSays(EVENT_NOTICE, at(0))]] });
+  it("with no request, a prepared command named to an earlier Main reaches the current Main", async () => {
+    const fake = daemon();
     const onSettled = settledByKind({ orchestrator: createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW, queue: deps.queue, log: () => {} }) });
     const asked = await toolsWith(fake.paseo).call("bm_ask_owner", {
       workspaceId: WORKSPACE_ID,
@@ -3217,7 +2331,7 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
 
     await handleDecisionsAnswer({ id, optionKey: "a", confirmed: true, via: "inbox" }, fake.paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled });
 
-    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN, MAIN]);
+    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
     expect(createDecisionStore(home).get(id, WORKSPACE_ID)!.delivery).toMatchObject({ to: MAIN, outcome: "sent" });
   });
 

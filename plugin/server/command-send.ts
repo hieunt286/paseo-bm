@@ -15,8 +15,11 @@
  *    for one request — or one project, without a request — in 24 hours,
  *    whichever way they went); an interrupt only while the Worker's danger
  *    allowance is open; a handoff (`coordination:handoff`, autonomy design
- *    §G.6) only while the owner's Settings → Coordination has handoff on. A
- *    refusal sends, records and spends nothing.
+ *    §G.6) only while the owner's Settings → Coordination has handoff on; a
+ *    governor command (`governor:<step>`, missions design §9.4) only to the
+ *    current Main of an open mission, its loop guard counted per mission
+ *    (`commandsSentForMission`: 12 in 24 hours). A refusal sends, records and
+ *    spends nothing.
  * 2. **The grant is claimed** (`claimGrant`), so two sends never spend one.
  * 3. **Delivered** through the notice queue (`command:<id>`, or the kind the
  *    caller names), or — an interrupt — sent at once. A target that cannot be
@@ -48,7 +51,8 @@ import { missionOfRequest } from "./orchestrator-tool-context";
 import { undeclaredCategoriesOf, undeclaredRefusalOf } from "../shared/decision-gate";
 import { useGrant, type Effect } from "../shared/decisions";
 import { isSentCommand, type Proposal } from "../shared/orchestrator";
-import { COORDINATION_HANDOFF_AUTHORITY, commandBlockOf, commandInputProblems, commandOf, type CommandInput } from "../shared/orchestrator-command";
+import { COORDINATION_HANDOFF_AUTHORITY, commandBlockOf, commandInputProblems, commandOf, isGovernorAuthority, type CommandInput } from "../shared/orchestrator-command";
+import { createMissionStore } from "./mission-store";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { errorText } from "./rpc-kit";
 import { timeOrZero } from "../shared/time";
@@ -59,6 +63,9 @@ export const COMMAND_LIMIT_PER_REQUEST = 12;
 export const COMMAND_LIMIT_WINDOW_HOURS = 24;
 /** Why a command was refused at the loop guard (design §6A). */
 export const COMMAND_LIMIT_MESSAGE = `you sent ${COMMAND_LIMIT_PER_REQUEST} commands for this request in ${COMMAND_LIMIT_WINDOW_HOURS} hours; ask the owner with bm_ask_owner`;
+
+/** Why a governor command was refused at the loop guard (missions design §9.4): 12 per mission in 24 hours. */
+export const MISSION_COMMAND_LIMIT_MESSAGE = `the governor sent ${COMMAND_LIMIT_PER_REQUEST} commands to this mission's Main in ${COMMAND_LIMIT_WINDOW_HOURS} hours; ask the owner with bm_ask_owner`;
 
 /** Why `bm_direct_worker` refused an interrupt (design §6B.4, ADR-016 decision 2). */
 export const INTERRUPT_REFUSED_MESSAGE =
@@ -88,6 +95,16 @@ export function commandsSentFor(
       entry.requestId === requestId &&
       timeOrZero(entry.settledAt ?? entry.at) > since,
   ).length;
+}
+
+/**
+ * How many governor commands the commands store holds for this mission in the
+ * 24 hours before `now` (missions design §9.4): the loop guard of a command to
+ * a Main counts per mission, whichever Main got it. Pure.
+ */
+export function commandsSentForMission(commands: readonly Proposal[], missionId: string, now: Date): number {
+  const since = now.getTime() - COMMAND_LIMIT_WINDOW_HOURS * 3_600_000;
+  return commands.filter((entry) => isSentCommand(entry) && entry.missionId === missionId && timeOrZero(entry.settledAt ?? entry.at) > since).length;
 }
 
 /** True when the loop guard has no room left for this request (or project) now. Reads only. */
@@ -187,6 +204,12 @@ export interface CommandSend {
   command: CommandInput;
   /** The Manager or Worker it goes to. */
   targetId: string;
+  /**
+   * A governor command's mission (missions design §9.4): the target must be
+   * its current Main, and the loop guard counts per mission. Required with a
+   * `governor:<step>` authority; ignored otherwise.
+   */
+  missionId?: string;
   /** A Worker's Manager, who gets the `copy: yes` block (`copyRecipientOf`); null for none. */
   copyTo: string | null;
   /** The decision whose grant the command spends once delivered; null when it spends none. */
@@ -195,6 +218,12 @@ export interface CommandSend {
   approved: readonly Effect[];
   /** Checks the text against its declared effects: every command the Orchestrator sends itself. */
   backstop: boolean;
+  /**
+   * The words the backstop reads when the plugin wrote part of the block
+   * itself — a mission's name or code, figure lines — so an owner's mission
+   * named "Billing" does not read as cost; `re:` and the body otherwise.
+   */
+  backstopText?: string;
   /** `refuse` for every command but the prepared command of the owner's own answer, which the loop guard counts and never refuses (`count`). */
   loopGuard: "refuse" | "count";
   /** Sends it at once, replacing the Worker's running turn; allowed only while its danger allowance is `open`. */
@@ -245,7 +274,19 @@ function delivered(outcome: string): outcome is "sent" | "queued" {
 }
 
 /** What the checks of a send read (`commandRefusalOf`). */
-export type CommandCheck = Pick<CommandSend, "home" | "now" | "workspaceId" | "command" | "backstop" | "loopGuard" | "interrupt" | "store" | "log">;
+export type CommandCheck = Pick<CommandSend, "home" | "now" | "workspaceId" | "command" | "backstop" | "backstopText" | "loopGuard" | "interrupt" | "store" | "log"> &
+  Partial<Pick<CommandSend, "targetId" | "missionId">>;
+
+/** Why a governor command cannot go to `targetId` (missions design §9.4): only the current Main of an open mission gets one. Reads only. */
+function governorTargetRefusalOf(home: string, missionId: string | undefined, targetId: string | undefined): string | null {
+  if (missionId === undefined) return "a governor command names its mission";
+  const mission = createMissionStore(home).get(missionId);
+  if (mission === null) return `unknown mission ${missionId}`;
+  if (mission.state !== "open") return `mission ${mission.code} is closed`;
+  if (mission.mainId === null) return `mission ${mission.code} has no Main`;
+  if (targetId !== undefined && targetId !== mission.mainId) return `${targetId} is not the current Main of mission ${mission.code}`;
+  return null;
+}
 
 /**
  * Why `spec` would be refused before anything leaves (the module comment's
@@ -260,12 +301,21 @@ export function commandRefusalOf(spec: CommandCheck): string | null {
   if (problems.length > 0) return `the command cannot be sent as a BM-COMMAND block: ${problems.join("; ")}`;
   // A handoff goes on the owner's Settings switch, read now: off, it sends nothing (change-008 C3).
   if (command.authority === COORDINATION_HANDOFF_AUTHORITY && !readCoordinationSettings({ home, log }).handoff.enabled) return HANDOFF_OFF_MESSAGE;
+  const governor = isGovernorAuthority(command.authority);
+  if (governor) {
+    const target = governorTargetRefusalOf(home, spec.missionId, spec.targetId);
+    if (target !== null) return target;
+  }
   if (spec.backstop) {
-    const undeclared = undeclaredCategoriesOf(`${command.re}\n${command.body}`, command.effects ?? []);
+    const undeclared = undeclaredCategoriesOf(spec.backstopText ?? `${command.re}\n${command.body}`, command.effects ?? []);
     if (undeclared.length > 0) return undeclaredRefusalOf(undeclared);
   }
   // The loop guard: an Orchestrator and a Manager answering each other stop here, before anything is sent.
-  if (spec.loopGuard === "refuse" && loopGuardFull(home, workspaceId, command.requestId ?? null, now, spec.store)) return COMMAND_LIMIT_MESSAGE;
+  if (governor) {
+    // Missions design §9.4: per mission, whichever Main got the commands.
+    const sent = commandsSentForMission(createOrchestratorStore(home, spec.store).listCommands(), spec.missionId!, now);
+    if (spec.loopGuard === "refuse" && sent >= COMMAND_LIMIT_PER_REQUEST) return MISSION_COMMAND_LIMIT_MESSAGE;
+  } else if (spec.loopGuard === "refuse" && loopGuardFull(home, workspaceId, command.requestId ?? null, now, spec.store)) return COMMAND_LIMIT_MESSAGE;
   if (spec.interrupt !== undefined && spec.interrupt.open !== true) return INTERRUPT_REFUSED_MESSAGE;
   return null;
 }
@@ -336,6 +386,7 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
       sentText: masked(text),
       outcome,
       ...(command.to === "worker" ? { to: "worker" as const, workerId: spec.targetId } : {}),
+      ...(isGovernorAuthority(command.authority) && spec.missionId !== undefined ? { missionId: spec.missionId } : {}),
     });
   } catch (error) {
     unrecorded = errorText(error);

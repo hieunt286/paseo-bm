@@ -20,7 +20,12 @@
  *   design §7.17.5), and lists a repo's Mains (`repoMainsOf`, missions
  *   design §6) among its `managers` beside the Managers living there.
  * - `bm_note` (§6B.4) keeps the Orchestrator's notes about a project, which
- *   `bm_projects` returns.
+ *   `bm_projects` returns, or — given `missionId` (missions design §9.1) —
+ *   about a mission, which `bm_missions` returns.
+ * - `bm_missions` (missions design §9.1) reads the missions the governor
+ *   watches: each with its charter, roster, figures (`governor-figures.ts`,
+ *   computed now against the owner's `governor.*` thresholds), ladder state
+ *   (`governor-store.ts`), open `m:` cards and the Orchestrator's notes.
  *
  * Nothing here sends to an agent.
  */
@@ -32,7 +37,14 @@ import type { DataHomeDeps } from "./data-home";
 import { readTimelinePages } from "./live-timeline";
 import { isPluginOrigin, originOf } from "../shared/message-origin";
 import { createAlertStore } from "./alert-store";
+import { readCoordinationSettings } from "./coordination-rpc";
 import { createDecisionStore } from "./decision-store";
+import { figureText, governorFiguresOf, readGovernorSnapshot } from "./governor-figures";
+import { createGovernorStore } from "./governor-store";
+import { createMissionDecisionStore } from "./mission-decisions";
+import { createMissionRoster } from "./mission-roster";
+import { createMissionStore, openSplitSuggestionsOf } from "./mission-store";
+import type { NotesOwner } from "./orchestrator-store";
 import { createPeerLinkStore, isLiveLink, linkViewsOf } from "./peer-links";
 import {
   MESSAGE_PAGES,
@@ -70,10 +82,10 @@ export function agentMessagesBoundedNote(returned: number, read: number): string
   return `Bounded: the ${returned} most recent of ${read} messages read, each at most 1,500 characters (truncated: true where cut). For up to 50 messages of 12,000 characters, call bm_agent_messages with detail: "full".`;
 }
 
-/** A project's notes as `bm_projects` hands them out, redacted; none when they cannot be read. */
-function notesOf(workspaceId: string, context: ToolContext): Array<{ at: string; text: string }> {
+/** A project's (or a mission's) notes as `bm_projects` (`bm_missions`) hands them out, redacted; none when they cannot be read. */
+function notesOf(owner: NotesOwner, context: ToolContext): Array<{ at: string; text: string }> {
   try {
-    return context.store.readNotes(workspaceId).map((note) => ({ at: note.at, text: redactText(note.text, context.env) }));
+    return context.store.readNotes(owner).map((note) => ({ at: note.at, text: redactText(note.text, context.env) }));
   } catch {
     return [];
   }
@@ -270,12 +282,109 @@ export async function bmAgentMessages(input: { agentId: string; limit?: number; 
   return bounded ? `${agentMessagesBoundedNote(returned.length, messages.length)}\n${answer}` : answer;
 }
 
-/** `bm_note` (design §6B.4): one note about a project, kept for later Orchestrators too; sends nothing. */
-export async function bmNote(input: { workspaceId: string; text: string; replace?: boolean }, context: ToolContext): Promise<ServerToolResult> {
+export interface NoteInput {
+  workspaceId?: string;
+  missionId?: string;
+  text: string;
+  replace?: boolean;
+}
+
+/**
+ * `bm_note` (design §6B.4; missions design §9.1): one note about a project, or
+ * about the mission `missionId` names, kept for later Orchestrators too;
+ * sends nothing.
+ */
+export async function bmNote(input: NoteInput, context: ToolContext): Promise<ServerToolResult> {
+  const replaced = input.replace === true;
+  if (input.missionId !== undefined) {
+    if (input.workspaceId !== undefined) refuse("give workspaceId or missionId, not both");
+    if (createMissionStore(context.home).get(input.missionId) === null) refuse(`no mission ${input.missionId}; call bm_missions for their ids`);
+    const notes = context.store.appendNote({ missionId: input.missionId }, input.text, { replace: replaced });
+    return { ok: true, text: `Noted. bm_missions returns this mission's notes, also to a new Orchestrator.\n${json({ missionId: input.missionId, notes: notes.length, replaced })}` };
+  }
+  if (input.workspaceId === undefined) refuse("give workspaceId (a project's note) or missionId (a mission's)");
   await requireProject(input.workspaceId, context);
-  const notes = context.store.appendNote(input.workspaceId, input.text, { replace: input.replace === true });
+  const notes = context.store.appendNote(input.workspaceId, input.text, { replace: replaced });
   return {
     ok: true,
-    text: `Noted. bm_projects returns this project's notes, also to a new Orchestrator.\n${json({ workspaceId: input.workspaceId, notes: notes.length, replaced: input.replace === true })}`,
+    text: `Noted. bm_projects returns this project's notes, also to a new Orchestrator.\n${json({ workspaceId: input.workspaceId, notes: notes.length, replaced })}`,
   };
+}
+
+/**
+ * `bm_missions` (missions design §9.1, §9.2, §9.3): the open missions (and
+ * the closed ones with `closed: true`), or the one `missionId` names, newest
+ * first — each with its charter, its roster (each request's repo, topic,
+ * state and Workers), its figures now (crossed first, each with its
+ * threshold), its ladder (each family's step, since when and its last
+ * action), its open `m:` cards and its open split suggestions (a Main's
+ * `bm_split_mission`, `openSplitSuggestionsOf`). Text is redacted. Read-only.
+ */
+export async function bmMissions(input: { missionId?: string; closed?: boolean }, context: ToolContext): Promise<string> {
+  const store = createMissionStore(context.home);
+  const entries = store
+    .list()
+    .filter((entry) => (input.missionId === undefined ? input.closed === true || entry.state === "open" : entry.missionId === input.missionId));
+  if (input.missionId !== undefined && entries.length === 0) refuse(`no mission ${input.missionId}; call bm_missions without missionId for their ids`);
+  const settings = readCoordinationSettings({ home: context.home });
+  const agents = entries.length === 0 ? [] : await bmAgentsOf(context.paseo);
+  const ladders = createGovernorStore(context.home).list();
+  const cards = createMissionDecisionStore(context.home);
+  const roster = createMissionRoster(context.home);
+  const text = (value: string) => redactText(value, context.env);
+  const missions = entries.flatMap((entry) => {
+    const mission = store.get(entry.missionId);
+    if (mission === null) return [];
+    const figures = governorFiguresOf(readGovernorSnapshot(context.home, mission, { now: context.now, agents, settings }), settings.governor);
+    return [
+      {
+        missionId: mission.missionId,
+        code: mission.code,
+        name: text(mission.name),
+        state: mission.state,
+        createdAt: mission.createdAt,
+        mainId: mission.mainId,
+        parentMissionId: mission.parentMissionId,
+        charter: {
+          goal: text(mission.charter.goal),
+          repos: mission.charter.repos,
+          nonGoals: mission.charter.nonGoals.map(text),
+          doneCriteria: mission.charter.doneCriteria.map((criterion) => ({ id: criterion.id, text: text(criterion.text), status: criterion.status, at: criterion.at })),
+          budget: mission.charter.budget,
+          confirmedAt: mission.charter.confirmedAt,
+        },
+        roster: roster.list(mission.missionId).map((request) => ({
+          requestId: request.requestId,
+          workspaceId: request.workspaceId,
+          topic: text(request.topic),
+          state: request.state,
+          workerIds: request.workerIds,
+        })),
+        figures: { crossed: figures.filter((figure) => figure.crossed).map(figureText), under: figures.filter((figure) => !figure.crossed).map(figureText) },
+        ladder: Object.fromEntries(
+          Object.entries(ladders[mission.missionId] ?? {}).map(([family, state]) => [family, { step: state.step, since: state.since, lastAction: state.lastAction }]),
+        ),
+        openCards: cards.list(mission.missionId, UNSETTLED_STATUSES).map((decision) => ({
+          decisionId: decision.id,
+          question: firstLine(decision.question, context.env),
+          options: decision.options.map((option) => text(option.label)),
+          at: decision.askedAt,
+        })),
+        // §9.6: what its Main suggested, on the owner's yes, as a new mission — bm_create_main's fields.
+        splitSuggestions: openSplitSuggestionsOf(context.home, mission.missionId).map((suggestion) => ({
+          at: suggestion.at,
+          by: suggestion.by,
+          code: suggestion.code,
+          name: text(suggestion.name),
+          goal: text(suggestion.goal),
+          repos: suggestion.repos,
+          requestIds: suggestion.requestIds,
+          reason: text(suggestion.reason),
+        })),
+        notes: notesOf({ missionId: mission.missionId }, context),
+      },
+    ];
+  });
+  missions.sort((a, b) => timeOrZero(b.createdAt) - timeOrZero(a.createdAt));
+  return json({ now: context.now.toISOString(), missions });
 }

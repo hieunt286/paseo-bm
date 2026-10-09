@@ -142,7 +142,7 @@ describe("orchestrator.open", () => {
     expect(request.title).toBe("Beads Orchestrator");
     expect(request.config.provider).toBe("bm-orchestrator/claude-opus-5-5");
     expect(request.prompt).toBe(ORCHESTRATOR_FIRST_PROMPT);
-    for (const tool of ["bm_projects", "bm_request", "bm_agent_messages", "bm_decisions", "bm_send_command", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note"]) {
+    for (const tool of ["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_decisions", "bm_govern", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note"]) {
       expect(request.prompt).toContain(tool);
     }
     expect(request.prompt).toMatch(/wait for the user/);

@@ -46,16 +46,16 @@ import { createDecisionMaterialiser } from "./server/decision-materialiser";
 import { createQuestionDecisionDelivery } from "./server/decision-delivery";
 import { registerOrchestratorRpcs } from "./server/orchestrator-rpc";
 import { createStallWatcher } from "./server/stall-watcher";
+import { createConflictWatch } from "./server/governor-conflicts";
+import { createGovernor, type GovernorPaseo } from "./server/governor-store";
 import { createOrchestratorTools } from "./server/orchestrator-tools";
 import { createInterruptionWatch } from "./server/interruption-watch";
 import { createOrchestratorDecisionDelivery } from "./server/orchestrator-decisions";
 import { createOverrideDelivery } from "./server/override-delivery";
-import { createEventBus } from "./server/event-bus";
+import { actsNoted, createEventBus } from "./server/event-bus";
 import { createCompactionRunner } from "./server/compaction";
 import { createHandoffRunner } from "./server/handoff";
 import { createWritersWatch } from "./server/writers-watch";
-import type { DashboardPaseo } from "./server/paseo-directory";
-import { unverifiedFinishesOf } from "./server/request-trace";
 import { raiseInboxAlert } from "./server/alert-store";
 import { rolePairingAlertOf } from "./server/role-pairing";
 import { createOutdatedAgentsPass, registerOutdatedAgents } from "./server/outdated-agents";
@@ -174,30 +174,44 @@ export default function contribute(server: PluginServerContext): () => void {
   // Reviewer at once — allowed, or held as the owner's decision h:<agentId>:<requestId>. It scans the
   // pending requests at the first Paseo handle of the run and at every Worker pass (events are not replayed).
   const actionBoundary = createActionBoundary();
+  // Missions design §9.2, §9.3: the governor's figures and its ladder's code steps, for every open
+  // mission each minute (beside the stall pass) and for a mission at each recorded turn of its agents.
+  const governor = createGovernor();
+  // Missions design §9.6: conflicts between missions (charters, writers, links) wake the governor as mission.conflict.
+  const conflicts = createConflictWatch();
   // Design §7.17.7: each minute, before the stall pass, the hook bindings of Managers the owner opened are recovered.
   const stallWatcher = createStallWatcher({
     bus: eventBus,
     beforeWorkerPass: (handle) => actionBoundary.scan(handle),
-    beforePass: (handle) => recoverHookBindings(handle, { home: dataHome(), bindings: agentTools.bindings }),
+    beforePass: async (handle) => {
+      try {
+        await recoverHookBindings(handle, { home: dataHome(), bindings: agentTools.bindings });
+      } finally {
+        // Missions design §9.7: the governor's mission.signal, mission.review and mission.scope wake the Orchestrator.
+        await eventBus.governed(await governor.pass(handle), handle);
+        await eventBus.publish(conflicts.pass(), handle);
+      }
+    },
   });
   // The agents' block-building tools (ADR-010): one endpoint, given to every bm-* agent created from now on.
   // A decision the Orchestrator decides for the owner (bm_decide, autonomy design §B.5) takes the delivery
   // the owner's answers take: the settlement hook below, read when a call comes, long after this line.
   const agentTools = startAgentTools({
-    orchestrator: createOrchestratorTools({
+    // Missions design §9.7 (M-26): the Orchestrator's act tools mark the wake they answer as acted.
+    orchestrator: actsNoted(createOrchestratorTools({
       onSettled: (decisions, context) => onDecisionsSettled(decisions, context),
       // Autonomy design §G.3: a command or answer is logged against the events of the wake that sent it.
       wakeEventsOf: (orchestratorId) => eventBus.wakeEventsOf(orchestratorId),
-      // Autonomy design §G.5: bm_compact hands its compaction to the runner the turn ends below advance.
-      compaction: compactions,
-      // Autonomy design §G.6: bm_handoff hands its handoff to the runner the turn ends below advance.
-      handoff: handoffs,
-    }),
+      // Missions design §9.6: bm_create_main binds the new Main to its own tool path.
+      missions: missionDeps,
+    }), eventBus),
     // Design §16.6: a bound Worker's bm_questions opens decisions outside a recorded turn; the policy's
     // decision.opened events go to the Orchestrator as a fallback incident's do.
     onDecisionsOpened: (opened, paseo) => eventBus.decisionsOpened(opened, paseo),
     // Missions design §4: a Main's bm_answer_worker answers take the delivery the owner's answers take.
     onDecisionsSettled: (decisions, context) => onDecisionsSettled(decisions, context),
+    // Missions design §9.6, §9.7: a Main's bm_split_mission wakes the governor as mission.split.
+    onMissionSplit: (events, paseo) => eventBus.publish(events, paseo),
   });
   // Orchestrator design §8: the `orchestrator.*` RPCs. An Orchestrator created
   // before the endpoint's stored secret was made has an old URL (§5.1).
@@ -381,7 +395,7 @@ export default function contribute(server: PluginServerContext): () => void {
     applyReviewBudgetGrants(decisions);
     return deliverSettled(decisions, context);
   };
-  registerDecisionRpcs(server, { onSettled: onDecisionsSettled });
+  registerDecisionRpcs(server, { onSettled: onDecisionsSettled, missions: missionDeps });
   // Change-014 outcome 3 (Ask back): the owner asks the asker of an open q:/o: decision; the BM-ASK
   // notice goes through the notice queue, the asker replies with bm_reply (or BM-REPLY in its chat).
   registerDecisionAskRpcs(server);
@@ -454,10 +468,12 @@ export default function contribute(server: PluginServerContext): () => void {
     onRecorded: async (event, { location, paseo, record }) => {
       // Orchestrator design §6B.3: a Worker's signals (and their alerts) hold for its turn only.
       stallWatcher.workerTurnEnded(event?.agent);
-      const materialised = await materialiseDecisions(event, { location, paseo, record });
+      await materialiseDecisions(event, { location, paseo, record });
       coordinationGuard.afterCheck(interventionCheck.run());
       // Alerts need no Paseo handle; the events go with the bus's last one when this turn brought none.
-      const writersObserved = writersWatch.turnRecorded(record, location, typeof event?.agent?.cwd === "string" ? event.agent.cwd : null);
+      const collisions = writersWatch.turnRecorded(record, location, typeof event?.agent?.cwd === "string" ? event.agent.cwd : null);
+      // Missions design §9.6: a collision between Workers of two missions is a mission.conflict too.
+      const writersObserved = [...collisions, ...conflicts.writersCollided(collisions)];
       interruptions.turnRecorded(record, paseo);
       if (paseo === undefined) {
         if (writersObserved.length > 0) await eventBus.publish(writersObserved);
@@ -470,15 +486,13 @@ export default function contribute(server: PluginServerContext): () => void {
       await compactions.turnRecorded(event, record, paseo);
       // Autonomy design §G.6: this turn may be a pending handoff's next step; before the events, which read it.
       await handoffs.turnRecorded(event, record, paseo);
-      // Autonomy design §A.8: a new Worker question the policy asks the Orchestrator to
-      // decide or predict (§B.9, per cell) or a finished step of a project in the
-      // policy's scope is an event for the Orchestrator, batched with the rest. A finish is read from
-      // the Manager's turn or the Worker's own (its bm_report or relayed block, design §7.17.8 i).
-      // Autonomy design §C.3: a finished report that leaves its request finished-unverified
-      // (read from the request's records, now written) is an event too, and says so.
-      const isUnverified = await unverifiedFinishesOf({ location, paseo: paseo as DashboardPaseo }, record);
-      await eventBus.turnRecorded(record, materialised?.opened ?? [], paseo, isUnverified);
+      // Missions design §9.1: decisions opened and finished requests wake nothing any more; a finish
+      // (the Manager's turn or the Worker's own, design §7.17.8 i) only counts toward advice.
+      await eventBus.turnRecorded(record, [], paseo);
       if (writersObserved.length > 0) await eventBus.publish(writersObserved, paseo);
+      const governed = await governor.turnRecorded(record, paseo as GovernorPaseo);
+      // Missions design §9.7: a recomputation at a mission's turn may wake the Orchestrator too.
+      await eventBus.governed(governed === null ? [] : [governed], paseo);
       return outcome;
     },
   });

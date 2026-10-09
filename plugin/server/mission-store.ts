@@ -56,13 +56,16 @@ export const MAX_CONTRACT_TITLE = 200;
 export const MAX_CONTRACT_SOURCE = 300;
 /** Not bounded by §2.1: as long as a criterion. */
 export const MAX_SPLIT_REASON = 500;
+/** A split suggestion's bounds (`bm_split_mission`, §9.6): as `bm_create_main`'s. */
+export const MAX_SPLIT_REPOS = 20;
+export const MAX_SPLIT_REQUESTS = 50;
 /** The newest journal lines kept (§2.2). */
 export const MAX_JOURNAL_LINES = 5_000;
 export const MAX_JOURNAL_TEXT = 500;
 
 export const MISSION_CREATORS = ["owner", "orchestrator", "legacy"] as const;
 export const MAIN_CHANGE_REASONS = ["created", "replaced", "fallback", "handoff", "owner"] as const;
-export const JOURNAL_KINDS = ["charter", "plan", "criterion", "contract", "worker", "link", "decision", "main", "governor", "note"] as const;
+export const JOURNAL_KINDS = ["charter", "plan", "criterion", "contract", "worker", "link", "decision", "main", "governor", "note", "split-suggested"] as const;
 export type JournalKind = (typeof JOURNAL_KINDS)[number];
 
 const isoOrNull = z.string().nullable();
@@ -133,12 +136,26 @@ const indexEntrySchema = z.object({
 
 export type MissionIndexEntry = z.infer<typeof indexEntrySchema>;
 
+/** What a `split-suggested` line carries (§9.6): the fields `bm_create_main` takes, bar the source mission. */
+const splitSuggestionSchema = z.object({
+  code: z.string(),
+  name: z.string(),
+  goal: z.string(),
+  repos: z.array(z.string()),
+  requestIds: z.array(z.string()),
+  reason: z.string(),
+});
+
+export type SplitSuggestionFields = z.infer<typeof splitSuggestionSchema>;
+
 const journalSchema = z.object({
   at: z.string(),
   kind: z.enum(JOURNAL_KINDS),
   by: z.string().min(1),
   text: z.string(),
   ref: z.string().optional(),
+  /** Only on a `split-suggested` line. */
+  split: splitSuggestionSchema.optional(),
 });
 
 export type JournalEntry = z.infer<typeof journalSchema>;
@@ -184,6 +201,18 @@ export function boundedMission(mission: Mission, env: NodeJS.ProcessEnv = proces
   };
 }
 
+/** A split suggestion masked and kept to its bounds. Pure but for `env`. */
+function boundedSplit(split: SplitSuggestionFields, env: NodeJS.ProcessEnv): SplitSuggestionFields {
+  return {
+    code: split.code,
+    name: bounded(split.name, MAX_MISSION_NAME, env),
+    goal: bounded(split.goal, MAX_MISSION_GOAL, env),
+    repos: split.repos.slice(0, MAX_SPLIT_REPOS),
+    requestIds: split.requestIds.slice(0, MAX_SPLIT_REQUESTS),
+    reason: bounded(split.reason, MAX_SPLIT_REASON, env),
+  };
+}
+
 /** The index entry of a mission. Pure. */
 export function indexEntryOf(mission: Mission): MissionIndexEntry {
   const { missionId, code, name, state, mainId } = mission;
@@ -209,6 +238,8 @@ export interface NewJournalEntry {
   by: string;
   text: string;
   ref?: string;
+  /** A `split-suggested` line's suggestion; masked and bounded like a mission's fields. */
+  split?: SplitSuggestionFields;
 }
 
 export interface MissionStoreDeps {
@@ -451,6 +482,7 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
         by: entry.by,
         text: bounded(entry.text.replace(/\s+/g, " ").trim(), MAX_JOURNAL_TEXT, env),
         ...(entry.ref === undefined ? {} : { ref: entry.ref }),
+        ...(entry.split === undefined ? {} : { split: boundedSplit(entry.split, env) }),
       });
       const path = journalPath(missionId);
       ensureDataDir(home, dir, UNWRITABLE);
@@ -481,4 +513,37 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
       }
     },
   };
+}
+
+/** A Main's suggestion that work belongs to a new mission (§9.6), as its journal line keeps it. */
+export interface SplitSuggestion extends SplitSuggestionFields {
+  at: string;
+  /** The Main that suggested it: its agent id (the line's `ref`). */
+  by: string;
+}
+
+/**
+ * The open split suggestions of mission `missionId` (`bm_split_mission`,
+ * §9.6): its `split-suggested` journal lines whose code no mission has taken
+ * since — no open mission holds it, and no mission was created with it at or
+ * after the suggestion. None for a closed or missing mission. Never throws.
+ */
+export function openSplitSuggestionsOf(home: string, missionId: string): SplitSuggestion[] {
+  try {
+    const store = createMissionStore(home);
+    if (store.get(missionId)?.state !== "open") return [];
+    const index = store.list();
+    const taken = (code: string, at: string): boolean =>
+      index.some((entry) => {
+        if (entry.code !== code) return false;
+        if (entry.state === "open") return true;
+        const created = store.get(entry.missionId)?.createdAt;
+        return created !== undefined && Date.parse(created) >= Date.parse(at);
+      });
+    return store
+      .journal(missionId, MAX_JOURNAL_LINES)
+      .flatMap((line) => (line.kind === "split-suggested" && line.split !== undefined && !taken(line.split.code, line.at) ? [{ ...line.split, at: line.at, by: line.ref ?? line.by }] : []));
+  } catch {
+    return [];
+  }
 }

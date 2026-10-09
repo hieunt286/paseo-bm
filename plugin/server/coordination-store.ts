@@ -4,7 +4,8 @@
  * `{ version: 1, advice: { everyFinished }, compact: { enabled,
  * managerTokensPerTurn, workerTokensPerTurn, contextShare, maxPerAgent },
  * handoff: { enabled, requestTokens, maxPerRequest }, review: { smallBudget,
- * mediumBudget, largeBudget }, guard: { compact, handoff } }`
+ * mediumBudget, largeBudget }, governor: { <the governor's thresholds and
+ * window, missions design §9.2, §9.3> }, guard: { compact, handoff } }`
  * (`shared/coordination.ts`). The owner's two RPCs over it,
  * `coordination.settings` and `coordination.set`, are in `coordination-rpc.ts`
  * (code review 2026-09-30 §3.2).

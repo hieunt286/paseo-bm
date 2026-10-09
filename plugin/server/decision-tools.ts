@@ -21,7 +21,7 @@ import { createDecisionStore, type DecisionFilter } from "./decision-store";
 import { DECISIONS_TOOL_LIMIT, MANAGER_SERVER_TOOLS, schemaIssues, type DecisionsToolStatus, type ToolFace } from "../shared/bm-tools";
 import { UNSETTLED_STATUSES, decisionClassOf, type Decision, type DecisionStatus, type PreparedAction } from "../shared/decisions";
 import { preparedChangeTextOf } from "../shared/prepared-changes";
-import { missionChangeLinesOf } from "../shared/mission-change";
+import { missionChangeLinesOf, missionSplitLinesOf } from "../shared/mission-change";
 import { timeOrZero } from "../shared/time";
 import { fixThese } from "./tool-kit";
 
@@ -67,6 +67,11 @@ function actionLineOf(action: PreparedAction | undefined): string | null {
     case "mission-change":
       // Missions design §4.1: applied by the plugin on the owner's tap only.
       return `the plugin changes mission ${action.missionId}: ${missionChangeLinesOf(action.change).join("; ")}, only when the owner chooses it`;
+    case "mission-split":
+      // Missions design §9.6: the plugin creates the new mission and its Main on the owner's tap only.
+      return `the plugin splits mission ${action.missionId}: ${missionSplitLinesOf(action.split).join("; ")}, only when the owner chooses it`;
+    case "arbitration":
+      return `the plugin sets the goal of mission ${action.missionId} as arbitration ${action.arbitrationId} leaves it, only when the owner chooses it`;
     default:
       // Autonomy design §G.4: a change of the owner's settings, applied only on the owner's own answer.
       return `${action.kind}: the plugin ${preparedChangeTextOf(action)}, only when the owner chooses it`;

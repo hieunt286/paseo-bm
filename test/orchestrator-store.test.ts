@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  MISSION_NOTES_DIR_NAME,
   NOTES_DIR_NAME,
   ORCHESTRATOR_DIR_NAME,
   COMMAND_LOG_LIMIT,
@@ -495,6 +496,19 @@ describe("notes/<workspaceId>.json (design §6B.4 bm_note)", () => {
     expect(modeOf(join(orchestratorDir(), NOTES_DIR_NAME))).toBe(0o700);
     expect(modeOf(notesFile())).toBe(0o600);
     expect(JSON.parse(readFileSync(notesFile(), "utf8"))).toEqual({ version: 1, entries: s.readNotes(WS) });
+  });
+
+  it("keeps a mission's notes apart, in notes/missions/<missionId>.json (missions design §9.1), and refuses an id that is not a mission's", () => {
+    const s = store();
+    const mission = { missionId: "mis-0000000010" };
+    s.appendNote(WS, "A project note.");
+    expect(s.appendNote(mission, "Watch the drift.")).toEqual([{ at: new Date(T0).toISOString(), text: "Watch the drift." }]);
+    expect(s.readNotes(mission).map((note) => note.text)).toEqual(["Watch the drift."]);
+    expect(s.readNotes(WS).map((note) => note.text)).toEqual(["A project note."]);
+    expect(JSON.parse(readFileSync(join(orchestratorDir(), NOTES_DIR_NAME, MISSION_NOTES_DIR_NAME, "mis-0000000010.json"), "utf8"))).toEqual({ version: 1, entries: s.readNotes(mission) });
+    expect(s.appendNote(mission, "Fresh.", { replace: true }).map((note) => note.text)).toEqual(["Fresh."]);
+    expect(() => s.appendNote({ missionId: "../x" }, "escape")).toThrow();
+    expect(() => s.readNotes({ missionId: "wks_1" })).toThrow();
   });
 
   it(`keeps the ${MAX_NOTES} newest, and replace empties first`, () => {

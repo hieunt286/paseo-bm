@@ -1212,7 +1212,8 @@ describe("A-6 from the decision store (Phase 1)", () => {
 
   it("authorised: a command on a decision's authority whose grant was used and covers its effects", () => {
     const answeredAt = at(6);
-    const asked = answered(orchestratorDecision("o:push", at(5), ["push"]), answeredAt, { optionKey: "a" });
+    // As an earlier build stored it: since missions design §9.1 an o: answer grants nothing, but a stored grant still reads.
+    const asked: Decision = { ...answered(orchestratorDecision("o:push", at(5), ["push"]), answeredAt, { optionKey: "a" }), grant: { effects: ["push"], expiresAt: at(50), usedAt: null } };
     const spent = useGrant(asked, { effects: ["push"], at: at(6, 30) });
     if (!spent.ok) throw new Error(spent.message);
     const command = commandBlockOf({

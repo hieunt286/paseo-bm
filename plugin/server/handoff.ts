@@ -1,13 +1,19 @@
 /**
- * Handoff on the Orchestrator's request (autonomy design §G.6; PRD REQ-135;
- * ADR-021; change-008 C3; bead `7gxw.11`): the sequence the plugin runs once
- * `bm_handoff` accepted a handoff (`orchestrator-coordination-tools.ts`), kept
- * in `handoff-store.ts` so a reload continues it. The Manager creates the
- * successor: the plugin never creates a Worker (the role pairing, §A.10).
+ * Handoff run by the plugin itself (missions design §9.5; autonomy design
+ * §G.6; PRD REQ-135, REQ-195; ADR-021; change-008 C3; bead `7gxw.11`): the
+ * sequence a handoff takes once it starts, kept in `handoff-store.ts` so a
+ * reload continues it. No model asks for it and the Orchestrator is not woken.
  *
+ * 0. **The start** (`turnRecorded`): a recorded turn of the newest Worker of
+ *    an unfinished request whose tokens read since it started, or since its
+ *    last handoff, reach `handoff.requestTokens` (`handoffCrossingOf`) starts
+ *    one, while handoff is on, the request is below `handoff.maxPerRequest`,
+ *    none of it is pending, its Manager — a request of a mission: the
+ *    mission's current Main (`missionManagerOf`), else the Worker's parent —
+ *    is live, and its commands are below the loop guard. It is logged as a
+ *    `handoff` intervention with trigger `threshold.crossed`.
  * 1. **The safe point.** The outgoing Worker's turn that just ended (the
- *    collector's `onRecorded`, or its newest one when `bm_handoff` is called)
- *    closed a bead with evidence (a successful `br close`, or a report naming
+ *    collector's `onRecorded`, the start's own included) closed a bead with evidence (a successful `br close`, or a report naming
  *    closed beads), reported `beads-done` or `bead-implemented`, or came
  *    after a review verdict of its own Reviewer (`handoffSafePointIn`). At its
  *    idle moment — nothing else queued for it — the plugin asks for its note.
@@ -51,7 +57,9 @@
  * itself (`create-worker.ts`): `parent` = the Manager, the labels
  * `bm_create_worker` sets plus `bm.handoffFrom`, a bound token, and the
  * `BM-BRIEF worker` line before the brief; the registry appends it to the
- * request's `workerIds` and keeps its `managerId`. The Manager then gets the
+ * request's `workerIds` and keeps its `managerId`; a request of a mission
+ * (missions design §3.3, §9.5) has it created in the request's repo under
+ * the mission's Main and added to the roster. The Manager then gets the
  * `BM-COMMAND intent: handoff` through the same pipeline — checked first, so
  * a refusal creates nothing, and counted by the loop guard — but only as
  * information: which Worker replaced which, nothing asked
@@ -72,6 +80,16 @@
  * the agent list), with the registry entry and the Manager's information;
  * with none within `CREATING_WAIT_MS` it ends `dropped`, `no-successor`.
  *
+ * **A Main's handoff** (missions design §9.5, §3.4): a recorded turn of an
+ * open mission's Main that crosses its context threshold (`contextCrossingOf`,
+ * the Manager's compaction figures) when it can no longer be compacted —
+ * compaction off for its provider, or `compact.maxPerAgent` reached, and no
+ * compaction of it pending — gets a successor while handoff is on: created
+ * as `mission.ensure`'s replacement is (`handOverMain`: the home, the brief
+ * of §3.5 with one line saying whom it takes over from and why), then §3.4's
+ * steps through `replaceMain` (reason `handoff`). The mission and its
+ * requests are kept; nothing is archived. Once per Main per run.
+ *
  * The owner's Settings switch stops it at once: every step reads
  * `handoff.enabled` first and drops the handoff when it is off.
  *
@@ -80,7 +98,8 @@
 import { join } from "node:path";
 import { parseReports } from "../shared/bm-report";
 import type { ParsedReport, TraceRecord } from "../shared/contracts";
-import { HANDOFF_BRIEF_MARKER, holdsHandoffBrief, requestFinishedOf } from "../shared/handoff";
+import { compactionOnFor, handoffCrossingOf, type ThresholdCrossing } from "../shared/coordination";
+import { HANDOFF_BRIEF_MARKER, holdsHandoffBrief, requestFinishedOf, requestTokensReadOf } from "../shared/handoff";
 import {
   COORDINATION_HANDOFF_AUTHORITY,
   HANDOFF_INTENT,
@@ -94,28 +113,38 @@ import { timeOrNull } from "../shared/time";
 import { createBindingStore, creationMayExist, liveBindingOf, type AgentBinder } from "./agent-bindings";
 import { listAllAgents, parentOf, roleOfProvider } from "./agent-role";
 import { redactText, sliceLastTurn } from "./collector";
-import { COMMAND_LIMIT_MESSAGE, HANDOFF_OFF_MESSAGE, commandRefusalOf, sendCommand } from "./command-send";
+import { COMMAND_LIMIT_MESSAGE, HANDOFF_OFF_MESSAGE, commandRefusalOf, loopGuardFull, sendCommand } from "./command-send";
+import { contextCrossingOf, crossingWordsOf, turnProviderOf } from "./compaction";
+import { createCompactionStore, pendingCompactionOf, sentCompactionsOf } from "./compaction-store";
 import { createPluginWorker, workerProfileOf, workerTitleOf, type WorkerCreationPaseo } from "./create-worker";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
 import { workerHandoverFacts } from "./fallback-handover";
 import {
+  MAX_HANDOFF_REASON_CHARS,
   NOTE_WAIT_MS,
   createHandoffStore,
   endedHandoff,
+  handoffsDoneOf,
   isPendingHandoffState,
+  lastHandoffAtOf,
+  pendingHandoffOf,
   type HandoffEnding,
   type HandoffEntry,
   type HandoffStore,
 } from "./handoff-store";
 import { HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, briefLineOf } from "./notices";
+import { recordIntervention } from "./intervention-store";
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff } from "./manager";
+import { createMissionRoster, missionManagerOf } from "./mission-roster";
+import { createMissionStore } from "./mission-store";
+import { handOverMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
 import { createRequestRegistry } from "./request-registry";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { PEER_RULES } from "./peer-links";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import type { OrchestratorStoreDeps } from "./orchestrator-store";
-import { setAgentLabels, type CliResult } from "./paseo-cli";
+import { setAgentLabels, type CliResult, type PaseoCliDeps } from "./paseo-cli";
 import { GIT_READ_ONLY_PREFIX, runGit, type GitRunner } from "./repo-tool";
 import { asRecord, nonEmpty } from "./role-choices";
 import { errorText } from "./rpc-kit";
@@ -204,39 +233,9 @@ export function handoffSafePointIn(record: TraceRecord, items: readonly unknown[
   );
 }
 
-/** The newest timeline items of an agent, oldest first: one page from the tail; none when it cannot be read. */
-async function tailItemsOf(paseo: unknown, agentId: string): Promise<unknown[]> {
-  try {
-    const ref = (paseo as { agents?: { ref?: (id: string) => { timeline?: { refetch?: (options: Record<string, unknown>) => Promise<unknown> } } } } | null)
-      ?.agents?.ref?.(agentId);
-    const payload = (await ref?.timeline?.refetch?.({ direction: "tail", limit: 200 })) as { entries?: Array<{ item?: unknown }> } | undefined;
-    return (payload?.entries ?? []).map((entry) => entry.item).filter((item) => item !== undefined && item !== null);
-  } catch {
-    return [];
-  }
-}
-
 /** Whether another notice is queued for `agentId`: its own note request, held from an earlier moment, does not count. */
 function othersQueued(queue: Pick<NoticeQueue, "pending">, agentId: string): boolean {
   return queue.pending(agentId).some((notice) => !notice.kind.startsWith(`${NOTE_BATCH_NAME}:`));
-}
-
-/**
- * Whether the outgoing Worker is at its idle moment after a safe point now:
- * not running, nothing queued for it, and its newest recorded turn ended at a
- * safe point (`handoffSafePointIn`, with one page of its timeline). Never throws.
- */
-export async function handoffSafeNow(
-  worker: { id: string; status: string },
-  paseo: unknown,
-  records: readonly TraceRecord[],
-  queue: Pick<NoticeQueue, "pending"> = noticeQueue,
-): Promise<boolean> {
-  if (worker.status === "running" || worker.status === "initializing") return false;
-  if (othersQueued(queue, worker.id)) return false;
-  const newest = records.filter((record) => record.agentId === worker.id).sort((a, b) => endOf(a) - endOf(b)).at(-1);
-  if (newest === undefined) return false;
-  return handoffSafePointIn(newest, await tailItemsOf(paseo, worker.id), records);
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +252,7 @@ export function noteRequestOf(entry: Pick<HandoffEntry, "requestId">, options: {
   const what = `call bm_report for ${entry.requestId} with the phase and facts of your last report and handoffNote — what you tried and what is next, at most 1,500 characters`;
   return [
     HANDOFF_NOTICE_MARKER,
-    `From the paseo-bm plugin, not the owner: the Orchestrator hands request ${entry.requestId} over to a new Worker, who starts from a brief the plugin builds from its records.`,
+    `From the paseo-bm plugin, not the owner: request ${entry.requestId} grew past the owner's handoff threshold, so the plugin hands it over to a new Worker, who starts from a brief the plugin builds from its records.`,
     options.bound === true
       ? `Write your handoff note now: ${what}. The tool stores the note and delivers the report; send nothing else.`
       : `Write your handoff note now: ${what} — and post the block it returns as your reply here; do not send it to your Manager.`,
@@ -444,7 +443,7 @@ async function gitFacts(folder: string | null, git: GitRunner, budget: number): 
 /** The last paragraph of the brief: what the successor does with it (design §G.6 steps 4–5). */
 export function briefClosingOf(workerId: string): string {
   return [
-    `You take this request over from Worker ${workerId}: the Orchestrator handed it over so the work goes on in a fresh context.`,
+    `You take this request over from Worker ${workerId}: paseo-bm handed it over so the work goes on in a fresh context.`,
     "Work from this brief and the repository, not from memory: read `git status` and `git diff` first — every change there belongs to the request, so never revert it — and go on from the note.",
     "An answered question above is settled: never ask it again.",
     "Nothing counts as done until you prove it again: run each check after your last edit before a report says it passes.",
@@ -507,7 +506,7 @@ export async function handoffBriefOf(entry: HandoffEntry, deps: BriefDeps): Prom
   const lists = (scale: number): string[] => {
     const max = (chars: number) => Math.max(40, Math.round(chars * scale));
     return [
-      `reason: (the Orchestrator's, at ${entry.requestedAt}; the facts above are newer) ${text(entry.reason, max(300))}`,
+      `reason: (at ${entry.requestedAt}; the facts above are newer) ${text(entry.reason, max(300))}`,
       `request: ${text(original, max(700))}`,
       later.length === 0 ? "ownerSaid: nothing more" : `ownerSaid: ${later.map((message) => clipLine(message.text, max(200))).join(" | ")}`,
       `blockers: ${text(latest?.blockers, max(200))}`,
@@ -542,7 +541,7 @@ export async function handoffBriefOf(entry: HandoffEntry, deps: BriefDeps): Prom
 /** What the Manager is told before the brief (manager.md, the handoff rule). */
 export function handoffHeaderOf(entry: Pick<HandoffEntry, "id" | "requestId" | "workerId">): string {
   return [
-    `Handoff ${entry.id}: the Orchestrator hands request ${entry.requestId} over from Worker ${entry.workerId} to a new Worker, as your handoff rule says.`,
+    `Handoff ${entry.id}: request ${entry.requestId} grew past the owner's handoff threshold, so paseo-bm hands it over from Worker ${entry.workerId} to a new Worker, as your handoff rule says.`,
     `Create it with create_agent — labels bm.role = worker, bm.requestId = ${entry.requestId}, ${HANDOFF_FROM_LABEL} = ${entry.workerId} — and as its first message the brief below, verbatim, from its ${HANDOFF_BRIEF_MARKER} line to its end.`,
     `Then tell Worker ${entry.workerId} it is replaced by the new id and must stay idle, and tell the owner in one line.`,
   ].join(" ");
@@ -580,7 +579,7 @@ export function handoffCommandOf(entry: Pick<HandoffEntry, "id" | "requestId" | 
  */
 export function handoffInfoOf(entry: Pick<HandoffEntry, "id" | "requestId" | "workerId">, successorId: string): string {
   return [
-    `Handoff ${entry.id}, for your information: the Orchestrator handed request ${entry.requestId} over from Worker ${entry.workerId} to Worker ${successorId}, which paseo-bm created under you from a brief of the records.`,
+    `Handoff ${entry.id}, for your information: request ${entry.requestId} grew past the owner's handoff threshold, so paseo-bm handed it over from Worker ${entry.workerId} to Worker ${successorId}, which it created under you from a brief of the records.`,
     `Worker ${entry.workerId} is replaced and was told to stay idle; Worker ${successorId} works on the request and reports to you from now on.`,
     "Nothing is asked of you: create no Worker and send neither Worker anything for this handoff.",
   ].join(" ");
@@ -597,6 +596,14 @@ export function handoffInfoCommandOf(entry: Pick<HandoffEntry, "id" | "requestId
     re: shorten(`Request ${entry.requestId} was handed over to Worker ${successorId}`, MAX_COMMAND_RE_CHARS),
     body: handoffInfoOf(entry, successorId),
   };
+}
+
+/**
+ * The line a Main's successor gets after its brief (missions design §9.5):
+ * whom it takes the mission over from, and why.
+ */
+export function mainHandoffLineOf(oldMainId: string, crossing: ThresholdCrossing): string {
+  return `You take this mission over from Main ${oldMainId}: ${crossingWordsOf(crossing)}, so paseo-bm handed the mission over to you in a fresh context. Its chat keeps the earlier conversation; start from the mission's records above.`;
 }
 
 /** The ending of a handoff whose command the send's checks refused. */
@@ -631,6 +638,10 @@ export interface HandoffRunnerDeps extends DataHomeDeps {
    * created unbound.
    */
   binder?: () => AgentBinder;
+  /** How the Paseo CLI is found and run when a Main is handed over (its labels and title); the default otherwise. */
+  cli?: PaseoCliDeps;
+  /** A successor Main's system prompt (missions design §9.5); `currentInstructions` with its Runtime facts by default. */
+  readMainInstructions?: MissionsHomeDeps["readInstructions"];
 }
 
 /** The fields of the `agent.created` event's agent the successor check reads. */
@@ -643,14 +654,10 @@ export interface CreatedAgent {
 
 export interface HandoffRunner {
   /**
-   * Right after `bm_handoff` recorded `entry`: asks for the note now when
-   * `safe` says the Worker is at its idle moment after a safe point, else
-   * leaves it waiting for one. Never rejects.
-   */
-  begin(entry: HandoffEntry, paseo: unknown, safe: boolean): Promise<"asked" | "queued" | "waiting">;
-  /**
-   * One recorded turn (the collector's `onRecorded`): each pending handoff
-   * takes its next step — the note request at the outgoing Worker's safe
+   * One recorded turn (the collector's `onRecorded`): a Worker's turn
+   * crossing its request's threshold starts a handoff, a Main's past its
+   * context threshold hands the mission over (missions design §9.5); then
+   * each pending handoff takes its next step — the note request at the outgoing Worker's safe
    * point, the brief once its note came (or did not in time), the command at
    * the Manager's idle moment. Never rejects.
    */
@@ -662,7 +669,7 @@ export interface HandoffRunner {
    * Returns the completed entry, or null. Never rejects.
    */
   agentCreated(agent: CreatedAgent, paseo: unknown): Promise<HandoffEntry | null>;
-  /** The notice queue it sends through (`handoffSafeNow` reads what is queued). */
+  /** The notice queue it sends through. */
   readonly queue: Pick<NoticeQueue, "pending">;
 }
 
@@ -727,12 +734,11 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
       return now().getTime() - enqueuedAt <= NOTE_SEND_MS;
     };
 
-  async function askNote(entry: HandoffEntry, paseo: unknown): Promise<"asked" | "queued" | "waiting"> {
+  async function askNote(entry: HandoffEntry, paseo: unknown): Promise<void> {
     const home = homeOf();
     const bound = home !== null && isBound(home, entry.workerId);
     const item: BatchItem = { key: entry.id, line: noteRequestOf(entry, { bound }), isCurrent: currentAt(entry.id, now().getTime()) };
-    const [outcome] = await queue.enqueueBatch(entry.workerId, noteBatch, [item], paseo as NoticePaseo | undefined);
-    return outcome === "sent" ? "asked" : outcome === "queued" ? "queued" : "waiting";
+    await queue.enqueueBatch(entry.workerId, noteBatch, [item], paseo as NoticePaseo | undefined);
   }
 
   /** The brief from the stores and the note (or none), kept with the entry: `briefed`. */
@@ -850,6 +856,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
   async function finishCreated(home: string, entry: HandoffEntry, successorId: string, paseo: unknown): Promise<HandoffEntry | null> {
     try {
       createRequestRegistry(home, { log }).register(entry.workspaceId, entry.requestId, { source: "agent-typed", managerId: entry.managerId, workerId: successorId });
+      if (entry.missionId !== null) createMissionRoster(home).add(entry.missionId, { requestId: entry.requestId, workspaceId: entry.workspaceId, topic: "", workerId: successorId });
     } catch (error) {
       log(`[paseo-bm] could not add Worker ${successorId} to request ${entry.requestId}: ${errorText(error)}`);
     }
@@ -959,6 +966,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
             title: workerTitleOf(requestOfBrief(entry.brief) ?? ""),
             model: profile.model,
             labels: { [HANDOFF_FROM_LABEL]: entry.workerId },
+            // Missions design §3.3: a request of a mission has its Worker created in the request's repo, under its Main.
+            ...(entry.missionId === null ? {} : { missionId: entry.missionId }),
           },
           { binder: deps.binder?.(), log },
         ));
@@ -978,18 +987,72 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     }
   }
 
+  /**
+   * A Worker's turn crossing its request's handoff threshold (missions design
+   * §9.5; step 0 of the module comment): a `waiting` handoff, logged as a
+   * `handoff` intervention with trigger `threshold.crossed`.
+   */
+  async function startWorker(home: string, store: HandoffStore, record: TraceRecord, paseo: unknown): Promise<void> {
+    const { requestId, workspaceId } = record;
+    if (requestId === null) return;
+    const settings = readCoordinationSettings({ home, log });
+    if (!settings.handoff.enabled) return;
+    const entries = store.list();
+    // A Worker already handed over is no longer its request's.
+    if (pendingHandoffOf(entries, requestId, now()) !== null || entries.some((entry) => entry.workerId === record.agentId && entry.successorId !== null)) return;
+    if (handoffsDoneOf(entries, requestId).length >= settings.handoff.maxPerRequest) return;
+    const records = recordsOf(home, workspaceId);
+    if (requestFinishedOf(records, requestId)) return;
+    const crossing = handoffCrossingOf(requestTokensReadOf(records, requestId, lastHandoffAtOf(entries, requestId)), settings);
+    if (crossing === null) return;
+    const managerId = missionManagerOf(home, requestId) ?? record.parentAgentId;
+    const manager = managerId === null ? null : await snapshotOf(paseo, managerId);
+    if (managerId === null || manager === null || nonEmpty(manager["archivedAt"]) !== null) return;
+    if (loopGuardFull(home, workspaceId, requestId, now(), deps.store)) return;
+    const intervention = recordIntervention(home, { kind: "handoff", workspaceId, requestId, targetAgentId: record.agentId, trigger: "threshold.crossed" }, { now, log });
+    store.add({ workspaceId, requestId, workerId: record.agentId, managerId, interventionId: intervention?.id ?? null, reason: shorten(crossingWordsOf(crossing), MAX_HANDOFF_REASON_CHARS) });
+  }
+
+  /** Mains this run began to hand over: each once. */
+  const mainsHandedOver = new Set<string>();
+
+  /**
+   * A Main's turn crossing its context threshold once it can no longer be
+   * compacted (missions design §9.5, §3.4): its successor through
+   * `handOverMain`. Nothing while handoff is off, for an agent that is no
+   * open mission's Main, or while a compaction of it is pending or possible.
+   */
+  async function handOverMainOf(home: string, record: TraceRecord, paseo: unknown): Promise<void> {
+    if (mainsHandedOver.has(record.agentId)) return;
+    const settings = readCoordinationSettings({ home, log });
+    const crossing = settings.handoff.enabled ? contextCrossingOf(record, settings) : null;
+    if (crossing === null) return;
+    const missions = createMissionStore(home);
+    const listed = missions.list().find((candidate) => candidate.state === "open" && candidate.mainId === record.agentId);
+    const mission = listed === undefined ? null : missions.get(listed.missionId);
+    if (mission === null) return;
+    const compactions = createCompactionStore(home, { now }).list();
+    if (pendingCompactionOf(compactions, record.agentId, now()) !== null) return;
+    if (compactionOnFor(settings, turnProviderOf(record)) && sentCompactionsOf(compactions, record.agentId) < settings.compact.maxPerAgent) return;
+    mainsHandedOver.add(record.agentId);
+    try {
+      const successor = await handOverMain(mission, paseo as MissionsPaseo, mainHandoffLineOf(record.agentId, crossing), {
+        home,
+        now,
+        log,
+        ...(deps.binder === undefined ? {} : { binder: deps.binder }),
+        ...(deps.cli === undefined ? {} : { cli: deps.cli }),
+        ...(deps.readMainInstructions === undefined ? {} : { readInstructions: deps.readMainInstructions }),
+        ...(typeof (queue as Partial<NoticeQueue>).retarget === "function" ? { queue: queue as NoticeQueue } : {}),
+      });
+      log(`[paseo-bm] Main ${record.agentId} of mission ${mission.code} was handed over to ${successor}: ${crossingWordsOf(crossing)}.`);
+    } catch (error) {
+      log(`[paseo-bm] Main ${record.agentId} of mission ${mission.code} could not be handed over: ${errorText(error)}`);
+    }
+  }
+
   return {
     queue,
-
-    async begin(entry, paseo, safe) {
-      try {
-        if (!safe) return "waiting";
-        return await askNote(entry, paseo);
-      } catch (error) {
-        log(`[paseo-bm] could not start handoff ${entry.id}: ${errorText(error)}`);
-        return "waiting";
-      }
-    },
 
     async turnRecorded(event, record, paseo) {
       try {
@@ -1004,6 +1067,9 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
           await reconcileCreating(home, entry, paseo);
         }
         store.expire();
+        // Missions design §9.5: the owner's thresholds start a handoff, a Worker's or a Main's, with no model.
+        if (record?.role === "worker") await startWorker(home, store, record, paseo);
+        else if (record?.role === "manager") await handOverMainOf(home, record, paseo);
         // `commanded` waits for the Manager's successor, `creating` for the plugin's own: neither is advanced here.
         const pending = store.list().filter((entry) => isPendingHandoffState(entry.state) && entry.state !== "commanded" && entry.state !== "creating");
         if (pending.length === 0) return;

@@ -668,7 +668,7 @@ Settled by Claude under the owner's delegation ([change-003](../archive/plans/pa
 
 *Re-checked at the Phase 6 start against Phase 5 as built and the Phase 4 live check and its fixes ([change-012](../archive/plans/paseo-bm-plan-autonomy-change-012-phase6-start.md)). The phase also holds the programme's end: the combined field period (bead `i8fc.6`, change-006), open since 2026-10-01, and the programme evaluation (`i8fc.5`, evaluation design §6–§7), not run yet. The programme was released in 0.5.0 before both closed, by the owner's decision (0.5.0 release notes).*
 
-- **F.1 Collision detection first:** a `writers-observed` signal — two agents of one workspace with edit/write evidence on the same file in overlapping turns — as an Inbox alert and an event; measured in the replay.
+- **F.1 Collision detection first:** a `writers-observed` signal — two agents of one workspace with edit/write evidence on the same file in overlapping turns — as an Inbox alert and an event; measured in the replay. Since 2026-10-09 a file a shell command writes (an output redirection or `tee`, such as `cat > f <<EOF`) counts as written too (`shellWrittenPathsOf`, missions design §17).
 - **F.2 Admission:** a candidate specialist (security reviewer, independent tester, read-only scout, design committee of two model families, per-Worker worktrees, a cheaper model for a role) is written as a one-page spec — the error class it catches, the replay/suite evidence that the class is missed today, its token budget, its evaluation scenario — and enters as a change-delta of the Phase 6 plan only when the owner accepts the evidence.
 
 - **F.3 Decided when the plan was converted (2026-09-30)** ([change-003](../archive/plans/paseo-bm-plan-autonomy-change-003-decisions-at-conversion.md)).
@@ -1008,3 +1008,4 @@ Rows up to 2026-10-02 are archived in [paseo-bm-autonomy-revision-history-to-202
 | 2026-10-03 | Claude (owner's delegation) | §D.2 *Answering*: Claude's `AskUserQuestion` is denied for every Manager, Worker and Reviewer, boundary on or off, with the role's channel — the one request answered outside the boundary's scope (ADR-027, amended 2026-10-03) |
 | 2026-10-05 | hieu.nt10 (owner decisions; written by Codex) | §A.12 and DQ-3: live Inbox count on the sidebar; daily cached and manually refreshable npm version checks; update indicators on Settings and the sidebar; the version endpoint is the narrow network exception. |
 | 2026-10-09 | Claude (owner's delegation) | ADR-028 as built: pointer lines in §A.3, §A.8, §B.5, §G.4 and §G.6 to base design §7.17.8 |
+| 2026-10-09 | Claude (owner's delegation) | §F.1: files written by a shell command (redirection, `tee`) count as written, found in the missions governor acceptance run (missions design §17) |

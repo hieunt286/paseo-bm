@@ -319,6 +319,16 @@ describe("answering", () => {
     expect(ok(answerDecision(plain, { via: "inbox", words: "Go on.", at: AT })).grant).toBeNull();
   });
 
+  it("grants nothing on an answer to an Orchestrator's o: decision, or the owner's override of one, whatever its options declare (missions design §9.1)", () => {
+    const asked = makeDecision({ id: "o:push-1", requestId: null, askedBy: { role: "orchestrator", agentId: null }, round: null });
+    expect(ok(answerDecision(asked, { via: "inbox", optionKey: "a", at: AT })).grant).toBeNull();
+    expect(ok(answerDecision(asked, { via: "chat-card", words: "Push it.", at: AT })).grant).toBeNull();
+    const override = makeDecision({ id: "r:push-1", requestId: null, askedBy: { role: "plugin", agentId: null }, round: null, supersedes: "o:push-1" });
+    expect(ok(answerDecision(override, { via: "inbox", optionKey: "a", at: AT })).grant).toBeNull();
+    // A Worker's question still grants what the owner chose.
+    expect(ok(answerDecision(makeDecision(), { via: "inbox", optionKey: "a", at: AT })).grant?.effects).toEqual(["push"]);
+  });
+
   it("answers a decision that needs confirmation and clears the mark", () => {
     const decision = ok(answerDecision(inStatus("needs-confirmation"), { via: "inbox", optionKey: "a", at: AT }));
     expect(decision.status).toBe("answered");

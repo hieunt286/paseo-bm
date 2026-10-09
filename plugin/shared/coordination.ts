@@ -8,7 +8,8 @@ import type { TokenCoverage } from "./eval-metrics/tokens";
  * often it advises (`advice.everyFinished`); Phase 3 adds the compaction and
  * handoff fields to the same file (bead `7gxw.9`, change-008 C2), and the
  * review budget per tier (bead `7gxw.12`, change-008 C6), each with its own
- * member in `coordinationChangeSchema`.
+ * member in `coordinationChangeSchema`; Missions Phase 2 adds the governor's
+ * thresholds, `governor.*` (missions design §9.2, §9.3).
  *
  * Kept in `<data folder>/coordination/settings.json`
  * (`server/coordination-store.ts`) and read and set by the owner's RPCs
@@ -78,6 +79,58 @@ export const REVIEW_MEDIUM_BUDGET: CoordinationBounds = { min: 2, max: 8, defaul
 /** `review.largeBudget`: the review calls of a Large request. */
 export const REVIEW_LARGE_BUDGET: CoordinationBounds = { min: 2, max: 8, default: 4, whole: true };
 
+// ── Missions Phase 2: the governor's thresholds (missions design §9.2, §9.3) ──
+// The defaults are the design's table. Each figure crosses at its threshold
+// as `governorFiguresOf` (`server/governor-figures.ts`) compares it: "2
+// Workers on one file" and "1 dropped delivery" are reached (≥), "> 3" and
+// "> 15" are passed (>). The bounds are bounds, not advice.
+
+/**
+ * The governor's settings, `governor.<name>`: each figure's threshold, the
+ * age of a card that counts as stuck, the budget share that crosses, and the
+ * window after a nudge before a re-plan is due (30 minutes and 5 more Main
+ * turns).
+ */
+export const GOVERNOR_BOUNDS = {
+  /** mess: live Workers of one mission writing one file in 24 hours, reached. */
+  writersPerFile: { min: 2, max: 10, default: 2, whole: true },
+  /** mess: live Workers of one mission in one repo, passed (or above `charter.budget.workers`). */
+  workersPerRepo: { min: 1, max: 20, default: 3, whole: true },
+  /** mess: re-asks of one question subject in a request, reached. */
+  reAsks: { min: 1, max: 10, default: 2, whole: true },
+  /** mess: dropped deliveries of the mission in 24 hours, reached. */
+  dropped: { min: 1, max: 50, default: 1, whole: true },
+  /** overengineering: process documents written per done criterion, passed. */
+  processDocsPerCriterion: { min: 1, max: 50, default: 3, whole: true },
+  /** overengineering: beads created per finished request, passed. */
+  beadsPerRequest: { min: 1, max: 200, default: 15, whole: true },
+  /** overengineering: requests whose tier was raised after `received`, reached. */
+  tierRaised: { min: 1, max: 50, default: 2, whole: true },
+  /** overengineering: requests with their review budget exhausted, reached. */
+  reviewExhausted: { min: 1, max: 50, default: 2, whole: true },
+  /** overengineering: open owner approvals of the mission, passed. */
+  openApprovals: { min: 1, max: 100, default: 8, whole: true },
+  /** drift: the Main's turns since a done criterion last changed state, passed. */
+  mainTurnsSinceCriterion: { min: 5, max: 1_000, default: 40, whole: true },
+  /** drift: finished requests since a done criterion last changed state, passed. */
+  finishedSinceCriterion: { min: 1, max: 100, default: 6, whole: true },
+  /** drift: requests or links in repos outside the charter, reached. */
+  outsideCharter: { min: 1, max: 50, default: 1, whole: true },
+  /** stuck: an open card older than this many hours counts. */
+  cardAgeHours: { min: 1, max: 168, default: 24, whole: true },
+  /** budget: the share of a `charter.budget` field used, in percent, reached. */
+  budgetPercent: { min: 50, max: 200, default: 100, whole: true },
+  /** The ladder (§9.3): minutes after a nudge before a re-plan is due … */
+  windowMinutes: { min: 5, max: 1_440, default: 30, whole: true },
+  /** … and the Main's turns after it, both. */
+  windowTurns: { min: 1, max: 100, default: 5, whole: true },
+} as const satisfies Record<string, CoordinationBounds>;
+export type GovernorSetting = keyof typeof GOVERNOR_BOUNDS;
+/** Every governor setting, in the order of the design's table. */
+export const GOVERNOR_SETTINGS = Object.keys(GOVERNOR_BOUNDS) as GovernorSetting[];
+export type GovernorKey = `governor.${GovernorSetting}`;
+export type GovernorSettings = Readonly<Record<GovernorSetting, number>>;
+
 /**
  * The providers the compaction spike passed (§G.5 Verified, bead `7gxw.8`):
  * Claude with a focus, Codex and OpenCode with a bare `/compact`. None needs
@@ -137,12 +190,17 @@ export const switchGuardSchema = z.object({
 });
 export type SwitchGuard = z.infer<typeof switchGuardSchema>;
 
+const governorSchema = z.object(
+  Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [name, boundedSchema(GOVERNOR_BOUNDS[name])])) as Record<GovernorSetting, z.ZodNumber>,
+);
+
 /** Every setting, each in its bounds. */
 export const coordinationSettingsSchema = z.object({
   advice: z.object({ everyFinished: adviceEveryFinishedSchema }),
   compact: compactSchema,
   handoff: handoffSchema,
   review: reviewSchema,
+  governor: governorSchema,
   guard: z.object({ compact: switchGuardSchema, handoff: switchGuardSchema }),
 });
 export type CoordinationSettings = z.infer<typeof coordinationSettingsSchema>;
@@ -169,6 +227,7 @@ export const DEFAULT_COORDINATION_SETTINGS: CoordinationSettings = {
     mediumBudget: REVIEW_MEDIUM_BUDGET.default,
     largeBudget: REVIEW_LARGE_BUDGET.default,
   },
+  governor: Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [name, GOVERNOR_BOUNDS[name].default])) as Record<GovernorSetting, number>,
   guard: { compact: NO_GUARD, handoff: NO_GUARD },
 };
 
@@ -189,6 +248,7 @@ export const coordinationChangeSchema = z.discriminatedUnion("key", [
   z.object({ key: z.literal("review.smallBudget"), value: reviewSchema.shape.smallBudget }),
   z.object({ key: z.literal("review.mediumBudget"), value: reviewSchema.shape.mediumBudget }),
   z.object({ key: z.literal("review.largeBudget"), value: reviewSchema.shape.largeBudget }),
+  ...GOVERNOR_SETTINGS.map((name) => z.object({ key: z.literal(`governor.${name}` as GovernorKey), value: boundedSchema(GOVERNOR_BOUNDS[name]) as z.ZodNumber })),
 ]);
 export type CoordinationChange = z.infer<typeof coordinationChangeSchema>;
 export type CoordinationKey = CoordinationChange["key"];
@@ -207,7 +267,19 @@ export const COORDINATION_KEYS: readonly CoordinationKey[] = [
   "review.smallBudget",
   "review.mediumBudget",
   "review.largeBudget",
+  // Missions Phase 2: the governor's thresholds come last (missions design §9.2).
+  ...GOVERNOR_SETTINGS.map((name): GovernorKey => `governor.${name}`),
 ];
+
+/** True for a `governor.<name>` key. */
+export function isGovernorKey(key: unknown): key is GovernorKey {
+  return typeof key === "string" && key.startsWith("governor.") && (GOVERNOR_SETTINGS as readonly string[]).includes(key.slice("governor.".length));
+}
+
+/** The setting a `governor.<name>` key names. */
+export function governorSettingOf(key: GovernorKey): GovernorSetting {
+  return key.slice("governor.".length) as GovernorSetting;
+}
 
 /** The keys whose value is a number, with their bounds. */
 export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, "compact.enabled" | "handoff.enabled">, CoordinationBounds>> = {
@@ -221,6 +293,7 @@ export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, "comp
   "review.smallBudget": REVIEW_SMALL_BUDGET,
   "review.mediumBudget": REVIEW_MEDIUM_BUDGET,
   "review.largeBudget": REVIEW_LARGE_BUDGET,
+  ...(Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [`governor.${name}`, GOVERNOR_BOUNDS[name]])) as Record<GovernorKey, CoordinationBounds>),
 };
 
 function isCoordinationKey(key: unknown): key is CoordinationKey {
@@ -279,6 +352,7 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
   const compact = objectOf(root?.["compact"]);
   const handoff = objectOf(root?.["handoff"]);
   const review = objectOf(root?.["review"]);
+  const governor = objectOf(root?.["governor"]);
   const guard = objectOf(root?.["guard"]);
   const shape = { compact: compactSchema.shape, handoff: handoffSchema.shape, review: reviewSchema.shape };
   const compactEnabled = valueOr(shape.compact.enabled, compact?.["enabled"], defaults.compact.enabled);
@@ -302,6 +376,9 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
       mediumBudget: valueOr(shape.review.mediumBudget, review?.["mediumBudget"], defaults.review.mediumBudget),
       largeBudget: valueOr(shape.review.largeBudget, review?.["largeBudget"], defaults.review.largeBudget),
     },
+    governor: Object.fromEntries(
+      GOVERNOR_SETTINGS.map((name) => [name, valueOr(governorSchema.shape[name], governor?.[name], defaults.governor[name])]),
+    ) as Record<GovernorSetting, number>,
     guard: { compact: switchGuardOf(guard?.["compact"], compactEnabled), handoff: switchGuardOf(guard?.["handoff"], handoffEnabled) },
   };
 }
@@ -347,6 +424,8 @@ export function applyCoordinationChange(settings: CoordinationSettings, change: 
       return { ...settings, review: { ...settings.review, mediumBudget: change.value } };
     case "review.largeBudget":
       return { ...settings, review: { ...settings.review, largeBudget: change.value } };
+    default:
+      return { ...settings, governor: { ...settings.governor, [governorSettingOf(change.key)]: change.value } };
   }
 }
 

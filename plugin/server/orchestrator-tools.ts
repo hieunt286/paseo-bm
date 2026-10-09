@@ -6,23 +6,29 @@
  * §4). The tools live in:
  *
  * - `orchestrator-read-tools.ts`: `bm_projects`, `bm_request`,
- *   `bm_agent_messages` (§5.2), which only read; `bm_note` (§6B.4), the
- *   record the Orchestrator keeps of a project. The workflow assessment's
- *   tool is retired (autonomy design §B.9).
- * - `command-authority.ts`: `bm_send_command` (§6A, §6B.1, ADR-015) and
- *   `bm_direct_worker` (§6B.4, ADR-016), and the authority a command goes on
- *   (autonomy design §A.7, §B.9); both send through the one pipeline,
- *   `command-send.ts`.
- * - `orchestrator-decide-tools.ts`: `bm_ask_owner`, `bm_decisions`,
- *   `bm_decide` and `bm_predict` (autonomy design §A.3, §A.6, §A.9, §B.3,
- *   §B.5, §B.9).
+ *   `bm_agent_messages` (§5.2) and `bm_missions` (missions design §9.1),
+ *   which only read; `bm_note` (§6B.4), the record the Orchestrator keeps of
+ *   a project. The workflow assessment's tool is retired (autonomy design
+ *   §B.9).
+ * - `command-authority.ts`: `bm_govern` (missions design §9.4), a governor
+ *   command to a mission's current Main, and `bm_direct_worker` (§6B.4,
+ *   ADR-016), narrowed to stopping a Worker at once (missions design §9.1);
+ *   both send through the one pipeline, `command-send.ts`. `bm_send_command`
+ *   is retired: `bm_govern` replaced it.
+ * - `governor-tools.ts`: `bm_arbitrate` and `bm_create_main` (missions
+ *   design §9.6), the governor's call between two missions and its split of
+ *   one; a split without the source mission's `split` cell is the owner's
+ *   `m:` card.
+ * - `orchestrator-decide-tools.ts`: `bm_ask_owner` (prepared commands to a
+ *   Main only), `bm_decisions`, and `bm_decide` and `bm_predict` for a
+ *   fallback incident only — a Worker's question is its Main's or the
+ *   owner's (autonomy design §A.3, §A.6, §A.9, §B.3, §B.5, §B.9; missions
+ *   design §9.1).
  * - `repo-tool.ts`: `bm_repo` (§6B.4), read-only `git` in the project's folder.
  * - `orchestrator-findings.ts`: `bm_findings` (autonomy design §G.4), a
  *   project's measured findings for advice, read-only.
- * - `orchestrator-coordination-tools.ts`: `bm_compact` (autonomy design
- *   §G.5), a Manager's or a Worker's compaction, and `bm_handoff` (§G.6), a
- *   Worker's request handed to a successor its Manager creates, within the
- *   owner's Settings.
+ * - `bm_compact` and `bm_handoff` are retired from the model (missions
+ *   design §9.5): code runs compaction and handoff by itself.
  * - `orchestrator-why.ts`: `bm_why` (autonomy design §E.2), the chain behind
  *   a bead, a changed file or a decision, from `links.ts`, read-only.
  * - `decision-ask.ts`: `bm_reply` (change-014 outcome 3, Ask back), the
@@ -31,13 +37,10 @@
  * - `orchestrator-tool-context.ts`: what they share — the call's context, the
  *   refusal, the paseo-bm agents and projects a tool may name.
  *
- * Only `bm_send_command`, `bm_direct_worker`, `bm_compact` and `bm_handoff`
- * reach a working agent — a Manager, or a Worker and its Manager; `bm_compact`
- * sends only the provider's `/compact` and the plugin's `BM-STATE` brief, to
- * the Manager or Worker it names; `bm_handoff` only the `BM-HANDOFF` note
- * request to the Worker it names and, later, the handoff `BM-COMMAND` to that
- * Worker's Manager, which creates the successor. Nothing here sends
- * to a Reviewer, creates, stops or archives, or writes to a repository.
+ * Only `bm_govern`, `bm_arbitrate` (through `bm_govern`) and
+ * `bm_direct_worker` reach a working agent — a Main, or a Worker (a stop) and
+ * its Main; only `bm_create_main` creates one, a Main. Nothing here sends to
+ * a Reviewer, archives, or writes to a repository.
  *
  * The endpoint is plain HTTP, so there is no hook or RPC context to take a
  * Paseo handle from. The creation hook hands one over (`usePaseo`) every time
@@ -48,7 +51,7 @@
  * Nothing here throws to the endpoint: a failure is a tool error the agent
  * reads.
  */
-import { bmDirectWorker, bmSendCommand, type CommandToolDeps, type DirectInput, type SendInput } from "./command-authority";
+import { bmDirectWorker, bmGovern, type CommandToolDeps, type DirectInput, type GovernInput } from "./command-authority";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
 import type { DecisionsQuery } from "./decision-tools";
 import {
@@ -60,9 +63,9 @@ import {
   type DecideInput,
   type DecideToolDeps,
 } from "./orchestrator-decide-tools";
-import { bmCompact, bmHandoff, type CompactInput, type CoordinationToolDeps, type HandoffInput } from "./orchestrator-coordination-tools";
 import { bmFindings } from "./orchestrator-findings";
-import { bmAgentMessages, bmNote, bmProjects, bmRequest } from "./orchestrator-read-tools";
+import { bmArbitrate, bmCreateMain, type ArbitrateInput, type CreateMainInput, type GovernorToolDeps } from "./governor-tools";
+import { bmAgentMessages, bmMissions, bmNote, bmProjects, bmRequest, type NoteInput } from "./orchestrator-read-tools";
 import { bmWhy, type WhyInput } from "./orchestrator-why";
 import { replyToDecision } from "./decision-ask";
 import { createOrchestratorStore } from "./orchestrator-store";
@@ -80,7 +83,7 @@ import { DashboardError } from "../shared/contracts";
 import { errorText } from "./rpc-kit";
 import { fixThese } from "./tool-kit";
 
-export interface OrchestratorToolsDeps extends DataHomeDeps, CommandToolDeps, DecideToolDeps, RepoToolDeps, Pick<CoordinationToolDeps, "compaction" | "handoff"> {
+export interface OrchestratorToolsDeps extends DataHomeDeps, CommandToolDeps, DecideToolDeps, RepoToolDeps, GovernorToolDeps {
   now?: () => Date;
   /** Secrets to mask; the process's own by default. */
   redactEnv?: NodeJS.ProcessEnv;
@@ -141,8 +144,14 @@ export function createOrchestratorTools(deps: OrchestratorToolsDeps = {}): Orche
         return { ok: true, text: await bmRequest(input as { workspaceId: string; requestId: string; detail?: ReadDetail }, context, deps) };
       case "bm_agent_messages":
         return { ok: true, text: await bmAgentMessages(input as { agentId: string; limit?: number; detail?: ReadDetail }, context) };
-      case "bm_send_command":
-        return bmSendCommand(input as SendInput, context, deps);
+      case "bm_missions":
+        return { ok: true, text: await bmMissions(input as { missionId?: string; closed?: boolean }, context) };
+      case "bm_govern":
+        return bmGovern(input as GovernInput, context, deps);
+      case "bm_arbitrate":
+        return bmArbitrate(input as ArbitrateInput, context, deps);
+      case "bm_create_main":
+        return bmCreateMain(input as CreateMainInput, context, deps);
       case "bm_decisions":
         return bmDecisions(input as DecisionsQuery, context);
       case "bm_ask_owner":
@@ -157,10 +166,6 @@ export function createOrchestratorTools(deps: OrchestratorToolsDeps = {}): Orche
         return bmRepo(input as RepoInput, context, deps);
       case "bm_findings":
         return bmFindings(input as { workspaceId: string }, context, deps.log);
-      case "bm_compact":
-        return bmCompact(input as CompactInput, context, deps);
-      case "bm_handoff":
-        return bmHandoff(input as HandoffInput, context, deps);
       case "bm_why":
         return bmWhy(input as WhyInput, context, deps);
       case "bm_reply":
@@ -173,7 +178,7 @@ export function createOrchestratorTools(deps: OrchestratorToolsDeps = {}): Orche
           ...(deps.log === undefined ? {} : { log: deps.log }),
         });
       default:
-        return bmNote(input as { workspaceId: string; text: string; replace?: boolean }, context);
+        return bmNote(input as NoteInput, context);
     }
   };
 

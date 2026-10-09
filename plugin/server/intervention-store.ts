@@ -19,12 +19,17 @@
  *   logged; `bm_ask_owner` records an `advice` (`interventionOfAdvice`, design
  *   §G.4) for a decision it leaves open for the owner that carries a prepared
  *   change of the owner's settings, or that is about a whole project in the
- *   wake of that project's `advice.due`; `bm_compact` records a `compact`
- *   and `bm_handoff` a `handoff` (`orchestrator-coordination-tools.ts`,
- *   design §G.5, §G.6).
+ *   wake of that project's `advice.due`; a compaction the plugin
+ *   starts records a `compact` and a Worker's handoff a `handoff`, trigger
+ *   `threshold.crossed` (`compaction.ts`, `handoff.ts`; missions design §9.5);
+ *   the governor's steps 2–4 (missions design §9.3), trigger `governor`: its
+ *   nudge (`governor-store.ts`) and `bm_govern`'s re-plan and arbitration
+ *   record a `govern` with its `step`, mission and the families it concerns
+ *   (`interventionOfGovern`), and a `bm_direct_worker` stop that only the
+ *   stop step allowed a `stop` (`command-authority.ts`).
  * - **The check** (`checkInterventions`): each pending entry is judged from
  *   the stores (`outcomeOf`) — the decision store, the Inbox alerts, the
- *   trace records, the compactions, the handoffs. `met` as soon as the stores show the expected outcome
+ *   trace records, the compactions, the handoffs, the governor's ladder. `met` as soon as the stores show the expected outcome
  *   within the window; `missed` once they show it did not come within it;
  *   `unknown` when, the window over, they cannot tell. A pass runs on
  *   `agent.turn_ended`, throttled like the outdated-agents pass
@@ -68,12 +73,14 @@ import {
   type InterventionTrigger,
 } from "../shared/interventions";
 import type { WorkerSignal } from "../shared/orchestrator";
+import type { GovernorStep } from "../shared/orchestrator-command";
 import { createAlertStore } from "./alert-store";
 import { createCompactionStore, staleEndingOf, type CompactionEntry } from "./compaction-store";
 import { capBy, createJsonFileStore, entriesOf } from "./data-files";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
 import { createDecisionStore } from "./decision-store";
 import type { BmEvent, RequestStalledEvent, WorkerSignalEvent } from "./event-bus";
+import { createGovernorStore, type MissionLadder } from "./governor-store";
 import { createHandoffStore, isPendingHandoffState, staleEndingOf as staleHandoffEndingOf, type HandoffEntry } from "./handoff-store";
 import { ORCHESTRATOR_DIR_NAME } from "./orchestrator-store";
 import { readRecords, type TraceStoreLocation } from "./trace-store";
@@ -101,6 +108,9 @@ export interface InterventionInput {
   alertKey?: string;
   signal?: WorkerSignal;
   commandId?: string;
+  missionId?: string;
+  step?: GovernorStep;
+  families?: string[];
 }
 
 export interface InterventionStore {
@@ -150,6 +160,9 @@ export function createInterventionStore(home: string, deps: InterventionStoreDep
         ...(input.alertKey === undefined ? {} : { alertKey: input.alertKey }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+        ...(input.missionId === undefined ? {} : { missionId: input.missionId }),
+        ...(input.step === undefined ? {} : { step: input.step }),
+        ...(input.families === undefined ? {} : { families: input.families }),
       });
       file.update(({ entries }) => ({ entries: [...entries, entry] }));
       return entry;
@@ -286,6 +299,32 @@ export function interventionOfAdvice(
   };
 }
 
+/**
+ * The `govern` a governor step to a mission's Main is (missions design §9.3):
+ * trigger `governor`, the Main its target, the delivered command's id, and
+ * the families of the ladder it concerns. Pure.
+ */
+export function interventionOfGovern(input: {
+  workspaceId: string;
+  missionId: string;
+  mainId: string | null;
+  step: GovernorStep;
+  families: readonly string[];
+  commandId: string;
+}): InterventionInput {
+  return {
+    kind: "govern",
+    workspaceId: input.workspaceId,
+    requestId: null,
+    targetAgentId: input.mainId,
+    trigger: "governor",
+    commandId: input.commandId,
+    missionId: input.missionId,
+    step: input.step,
+    families: [...input.families],
+  };
+}
+
 export interface RecordInterventionDeps extends InterventionStoreDeps {
   /** Where a failed write is reported; `console.warn` by default. */
   log?: (message: string) => void;
@@ -325,6 +364,8 @@ export interface InterventionEvidence {
   compaction?: CompactionEntry | null;
   /** A `handoff`'s handoff (`handoff-store.ts`, by its `interventionId`); null when the store has none. */
   handoff?: HandoffEntry | null;
+  /** A `govern`'s mission ladder now (`governor-store.ts`). */
+  ladder?: MissionLadder;
 }
 
 /** The kinds whose check reads the trace records. */
@@ -456,6 +497,22 @@ function adviceOutcome(evidence: InterventionEvidence, w: Window): InterventionO
   return "missed";
 }
 
+/**
+ * `govern`: every family it concerns is back under its thresholds (the
+ * ladder reset it to step 0) within the window. A family still above 0 once
+ * the window is over, or reset only after it, is a miss; without a family or
+ * a ladder to read, the check cannot tell.
+ */
+function governOutcome(entry: InterventionEntry, evidence: InterventionEvidence, w: Window): InterventionOutcome {
+  const families = entry.families ?? [];
+  const ladder = evidence.ladder;
+  if (families.length === 0 || ladder === undefined) return w.over ? "unknown" : "pending";
+  const states = families.map((family) => ladder[family as keyof MissionLadder]);
+  if (states.some((state) => state !== undefined && state.step > 0)) return w.over ? "missed" : "pending";
+  const resets = states.map((state) => (state?.lastAction?.kind === "reset" ? timeOrNull(state.lastAction.at) : null));
+  return resets.some((at) => at !== null && at > w.end) ? "missed" : "met";
+}
+
 /** One measured turn of an agent: when it ended, and its tokens read (`turnTokensOf`). */
 interface MeasuredTurn {
   end: number;
@@ -585,6 +642,8 @@ export function outcomeOf(entry: InterventionEntry, evidence: InterventionEviden
       return compactOutcome(entry, evidence, at, nowMs);
     case "handoff":
       return handoffOutcome(entry, evidence, at, nowMs);
+    case "govern":
+      return governOutcome(entry, evidence, w);
   }
 }
 
@@ -631,6 +690,12 @@ export function checkInterventions(home: string, deps: CheckInterventionsDeps = 
     if (handoffs === null) handoffs = attempt(() => createHandoffStore(home).list());
     return handoffs === undefined ? undefined : (handoffs.find((handoff) => handoff.interventionId === id) ?? null);
   };
+  // Read once, and only when a `govern` is pending.
+  let ladders: Record<string, MissionLadder> | undefined | null = null;
+  const ladderEvidenceOf = (missionId: string): { ladder?: MissionLadder } => {
+    if (ladders === null) ladders = attempt(() => createGovernorStore(home).list());
+    return ladders === undefined ? {} : { ladder: ladders[missionId] ?? {} };
+  };
   const at = now();
   const outcomes: Array<{ id: string; outcome: Exclude<InterventionOutcome, "pending"> }> = [];
   for (const entry of pending) {
@@ -641,6 +706,7 @@ export function checkInterventions(home: string, deps: CheckInterventionsDeps = 
       ...(READS_RECORDS.has(entry.kind) ? { records: recordsOf(entry.workspaceId) } : {}),
       ...(entry.kind === "compact" ? { compaction: compactionOf(entry.id) } : {}),
       ...(entry.kind === "handoff" ? { handoff: handoffOf(entry.id) } : {}),
+      ...(entry.kind === "govern" && entry.missionId !== undefined ? ladderEvidenceOf(entry.missionId) : {}),
     };
     const outcome = outcomeOf(entry, evidence, at);
     if (outcome !== "pending") outcomes.push({ id: entry.id, outcome });

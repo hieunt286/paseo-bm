@@ -80,3 +80,54 @@ export function missionChangeLinesOf(change: MissionChange): string[] {
   if (change.close === true) lines.push("close the mission");
   return lines;
 }
+
+/**
+ * A split on the owner's card (missions design §9.6): the governor's
+ * `bm_create_main` without the source mission's `split` cell. The plugin
+ * creates the new mission and its Main on the owner's tap
+ * (`server/governor-tools.ts` `applyGovernorDecision`), never any agent.
+ */
+export const missionSplitSchema = z.object({
+  name: z.string().min(1).max(80),
+  code: z.string().regex(MISSION_CHANGE_CODE_PATTERN),
+  goal: z.string().min(1).max(4_000),
+  /** Workspace ids. */
+  repos: z.array(z.string().min(1)).min(1).max(20),
+  requestIds: z.array(z.string().regex(/^req-\d{8}T\d{6}Z$/)).max(50),
+  reason: z.string().min(1).max(500),
+});
+export type MissionSplit = z.infer<typeof missionSplitSchema>;
+
+/** The prepared action a split card's "apply" option carries; `missionId` is the source mission. */
+export const missionSplitActionSchema = z.object({ kind: z.literal("mission-split"), missionId: missionIdSchema, split: missionSplitSchema });
+export type MissionSplitAction = z.infer<typeof missionSplitActionSchema>;
+
+/**
+ * An arbitration that changes the losing mission's goal (missions design
+ * §9.6): `missionId` is that mission, `arbitrationId` the call
+ * (`orchestrator/arbitrations.json`), `goal` its goal as the call leaves it.
+ */
+export const arbitrationActionSchema = z.object({
+  kind: z.literal("arbitration"),
+  missionId: missionIdSchema,
+  arbitrationId: z.string().regex(/^arb-[0-9a-f]{10}$/),
+  goal: z.string().min(1).max(4_000),
+});
+export type ArbitrationAction = z.infer<typeof arbitrationActionSchema>;
+
+/** The prepared actions of `m:` cards: applied by the plugin on the owner's tap only, kept out of `PREPARED_CHANGE_KINDS` so `bm_ask_owner` cannot offer one. */
+export const MISSION_ACTION_KINDS = ["mission-change", "mission-split", "arbitration"] as const;
+
+/** True for the kind of an `m:` card's prepared action. Pure. */
+export function isMissionActionKind(kind: string | undefined): boolean {
+  return kind !== undefined && (MISSION_ACTION_KINDS as readonly string[]).includes(kind);
+}
+
+/** What applying a split does, for the owner's card. Pure. */
+export function missionSplitLinesOf(split: MissionSplit): string[] {
+  return [
+    `create mission ${split.code} ${quote(split.name, 80)} with its own Main, goal ${quote(split.goal, 300)}, repos ${split.repos.join(", ")}`,
+    split.requestIds.length === 0 ? "move no request" : `move the requests ${split.requestIds.join(", ")} to it`,
+    `because ${quote(split.reason, 300)}`,
+  ];
+}

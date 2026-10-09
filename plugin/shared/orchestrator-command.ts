@@ -17,7 +17,7 @@
  * re: <subject, one line, ≤ 120>
  * intent: answer | continue | redirect | stop | release | handoff | other
  * effects: <effects, comma-separated, in EFFECTS order> | none
- * authority: owner | decision:<decision id> | policy:<class> | coordination:handoff
+ * authority: owner | decision:<decision id> | policy:<class> | coordination:handoff | governor:<step>
  * approved: <the effects the authority covers> | none
  * limits: <derived>               (only when from: orchestrator)
  *
@@ -46,6 +46,13 @@
  * the reader refuse any other shape; the send refuses it while handoff is off
  * (`server/command-send.ts`). Only `bm_handoff` writes one: the intents the
  * Orchestrator declares itself are `DECLARED_COMMAND_INTENTS`.
+ *
+ * A governor command (missions design §9.3, §9.4) is structural the same way:
+ * `authority: governor:nudge | governor:replan | governor:arbitrate`, from the
+ * Orchestrator to a Main (no copy), `effects: none`, `approved: none`, any
+ * intent but `handoff`. The builder and the reader refuse any other shape;
+ * the send delivers it only to the mission's current Main and counts its loop
+ * guard per mission (`server/command-send.ts`).
  *
  * `commandBlockOf` writes it and `parseCommandBlock` reads it back; for any
  * input the builder accepts, `parseCommandBlock(commandBlockOf(input))` equals
@@ -125,7 +132,12 @@ export type DeclaredCommandIntent = Exclude<CommandIntent, typeof HANDOFF_INTENT
  * `policy:<class>`, the riskiest class of the command's effects, every one of
  * which the owner delegated for the project (§B.9).
  */
-export type CommandAuthority = "owner" | `decision:${string}` | `policy:${DecisionClass}` | typeof COORDINATION_HANDOFF_AUTHORITY;
+export type CommandAuthority =
+  | "owner"
+  | `decision:${string}`
+  | `policy:${DecisionClass}`
+  | typeof COORDINATION_HANDOFF_AUTHORITY
+  | `${typeof GOVERNOR_AUTHORITY_PREFIX}${GovernorStep}`;
 
 /**
  * The authority of a handoff (autonomy design §G.6, change-008 C3): the
@@ -134,6 +146,22 @@ export type CommandAuthority = "owner" | `decision:${string}` | `policy:${Decisi
  * grant, the policy, the owner's word, §B.8) covers one.
  */
 export const COORDINATION_HANDOFF_AUTHORITY = "coordination:handoff";
+
+/** The governor's steps that send a command to a Main (missions design §9.3, §9.4). */
+export const GOVERNOR_STEPS = ["nudge", "replan", "arbitrate"] as const;
+export type GovernorStep = (typeof GOVERNOR_STEPS)[number];
+/** What `authority:` writes before a governor step. */
+export const GOVERNOR_AUTHORITY_PREFIX = "governor:";
+
+/** `governor:<step>`. */
+export function governorAuthorityOf(step: GovernorStep): CommandAuthority {
+  return `${GOVERNOR_AUTHORITY_PREFIX}${step}`;
+}
+
+/** True for a `governor:<step>` authority of a step this build knows. */
+export function isGovernorAuthority(value: unknown): value is `${typeof GOVERNOR_AUTHORITY_PREFIX}${GovernorStep}` {
+  return typeof value === "string" && value.startsWith(GOVERNOR_AUTHORITY_PREFIX) && (GOVERNOR_STEPS as readonly string[]).includes(value.slice(GOVERNOR_AUTHORITY_PREFIX.length));
+}
 
 /** Every authority a stored block may carry: what this build writes, and the retired `autopilot`. */
 export type ReadCommandAuthority = CommandAuthority | typeof RETIRED_AUTOPILOT;
@@ -227,7 +255,7 @@ export function policyClassOfAuthority(authority: string | null): DecisionClass 
 
 /** True when `value` is an authority this build writes on a block. */
 export function isCommandAuthority(value: unknown): value is CommandAuthority {
-  if (value === "owner" || value === COORDINATION_HANDOFF_AUTHORITY) return true;
+  if (value === "owner" || value === COORDINATION_HANDOFF_AUTHORITY || isGovernorAuthority(value)) return true;
   if (typeof value !== "string") return false;
   if (policyClassOfAuthority(value) !== null) return true;
   const id = decisionIdOfAuthority(value);
@@ -387,8 +415,10 @@ export function commandInputProblems(input: CommandInput): string[] {
   const authority = input.authority ?? "owner";
   if (!isCommandAuthority(authority)) {
     problems.push(
-      `authority must be owner, ${DECISION_AUTHORITY_PREFIX}<decision id of at most ${MAX_COMMAND_DECISION_ID_CHARS} characters>, ${COORDINATION_HANDOFF_AUTHORITY} (a handoff only) or ${POLICY_AUTHORITY_PREFIX}<one of ${DECISION_CLASSES.join(", ")}>`,
+      `authority must be owner, ${DECISION_AUTHORITY_PREFIX}<decision id of at most ${MAX_COMMAND_DECISION_ID_CHARS} characters>, ${COORDINATION_HANDOFF_AUTHORITY} (a handoff only), ${GOVERNOR_AUTHORITY_PREFIX}<one of ${GOVERNOR_STEPS.join(", ")}> (the governor only) or ${POLICY_AUTHORITY_PREFIX}<one of ${DECISION_CLASSES.join(", ")}>`,
     );
+  } else if (isGovernorAuthority(authority)) {
+    problems.push(...governorShapeProblems({ from: input.from, to: input.to, copy: input.copy === true, intent: input.intent ?? "other", effects: realEffects(effects.filter(isEffect)), approved: realEffects(approved.filter(isEffect)) }));
   } else if (authority === COORDINATION_HANDOFF_AUTHORITY || input.intent === HANDOFF_INTENT) {
     problems.push(...handoffShapeProblems({ from: input.from, to: input.to, copy: input.copy === true, intent: input.intent ?? "other", authority, effects: realEffects(effects.filter(isEffect)), approved: realEffects(approved.filter(isEffect)) }));
   } else if (input.from === "owner" && authority !== "owner") {
@@ -419,6 +449,19 @@ function handoffShapeProblems(command: {
   if (command.intent !== HANDOFF_INTENT) problems.push(`authority ${COORDINATION_HANDOFF_AUTHORITY} covers only intent ${HANDOFF_INTENT}`);
   if (command.from !== "orchestrator" || command.to !== "manager" || command.copy) problems.push(`a handoff goes from the Orchestrator to a Manager`);
   if (command.effects.length > 0 || command.approved.length > 0) problems.push("a handoff declares and approves no effect");
+  return problems;
+}
+
+/**
+ * What is wrong with a governor command's shape (missions design §9.4): from
+ * the Orchestrator to a Main (no copy), declaring and approving no effect,
+ * any intent but `handoff`. Empty when it is right.
+ */
+function governorShapeProblems(command: { from: string; to: string; copy: boolean; intent: string; effects: readonly Effect[]; approved: readonly Effect[] }): string[] {
+  const problems: string[] = [];
+  if (command.from !== "orchestrator" || command.to !== "manager" || command.copy) problems.push("a governor command goes from the Orchestrator to a Main");
+  if (command.effects.length > 0 || command.approved.length > 0) problems.push("a governor command declares and approves no effect");
+  if (command.intent === HANDOFF_INTENT) problems.push(`intent ${HANDOFF_INTENT} goes only on authority ${COORDINATION_HANDOFF_AUTHORITY}`);
   return problems;
 }
 
@@ -546,6 +589,7 @@ export function parseCommandBlock(text: unknown): CommandBlock | null {
     if (approved.some((effect) => !effects.includes(effect))) return null;
     if (from === "owner" && authority !== "owner") return null;
     if (handoffShapeProblems({ from, to, copy, intent, authority, effects, approved }).length > 0) return null;
+    if (isGovernorAuthority(authority) && governorShapeProblems({ from, to, copy, intent, effects, approved }).length > 0) return null;
     // Phase 1 history: a block on Autopilot's authority left via Autopilot.
     if (authority === RETIRED_AUTOPILOT && via !== RETIRED_AUTOPILOT) return null;
     if (limits.some((limit) => effectsWithheldBy(limit).some((effect) => approved.includes(effect)))) return null;

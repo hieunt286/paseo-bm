@@ -2,7 +2,34 @@
  * The event bus to the Beads Orchestrator (autonomy design §A.8, REQ-115 b).
  *
  * Replaces earlier builds' one-notice-per-situation wake-ups (autonomy design
- * §A.14) with typed events, delivered in batches:
+ * §A.14) with typed events, delivered in batches.
+ *
+ * **The governor's wakes** (missions design §9.7, §9.1; REQ-195). Only these
+ * wake the Orchestrator (`wakesGovernor`):
+ *
+ * | Event | Wakes it when | Settled (dropped before delivery) when |
+ * |---|---|---|
+ * | `mission.signal` | a family of the governor's ladder came due for step 3, re-plan (`governor-store.ts`, `missionSignalEventsOf`) | the governor reset the family meanwhile (its figures back under their thresholds) |
+ * | `mission.conflict` | always; published by the conflict detection (§9.6) | one of its missions closed |
+ * | `mission.scope` | an active request, or a live link one asked, of a mission is in a repo outside its charter, the mission's `scope-repo` cell is not delegated and no `m:` card asked to add that repo `governor.windowMinutes` after this run first saw it (`outsideCharterOf`) | the repo joined the charter, `scope-repo` was delegated, a card asked for it, or the mission closed |
+ * | `mission.review` | the mission's finished requests (roster) reached a next multiple of 10, or a budget field's figure reached 50 % or 100 % (`reviewMarksOf`), between two of the governor's recomputations in this run — a mark already passed when the run first saw the mission raises nothing | the mission closed |
+ * | `mission.split` | its Main, on the owner's yes, suggested that work belongs to a new mission (`bm_split_mission`, `mission-split.ts`); one per mission and code | a mission took the code, or the source mission closed (`openSplitSuggestionsOf`) |
+ * | `worker.signal` `danger` | always, in the policy's scope (below) | its alert is cleared |
+ *
+ * - **One wake per mission per 15 minutes** (`MISSION_WAKE_MS`), `danger`
+ *   excepted: a mission event within 15 minutes of the last publish that
+ *   queued one of that mission's is held in memory, and goes with the first
+ *   publish after the window (the governor's pass publishes each minute,
+ *   `governed`). Events of one mission published together are one wake.
+ * - **Retired as wakes** (§9.1): every other event below. Their sources still
+ *   build them where other code reads them — the advice count
+ *   (`advice-store.ts`), the stall and writers alerts, the pure builders —
+ *   but `publish` skips them, before it looks for an Orchestrator.
+ * - **Whether a wake acted** (M-26): an act tool the Orchestrator called with
+ *   success in a wake's turn (`WAKE_ACT_TOOLS`, `actsNoted`) marks it; the
+ *   wake record gets its event types and, at its end, `acted`.
+ *
+ * Until the governor, these woke it too:
  *
  * | Event | Source | Settled (dropped before delivery) when |
  * |---|---|---|
@@ -96,33 +123,33 @@
  *
  * Nothing here throws into the plugin: a failure is one log line.
  */
-import { join } from "node:path";
-import { TRACES_DIR_NAME, resolveDataHome } from "./data-home";
+import { resolveDataHome } from "./data-home";
 import { createAdviceStore } from "./advice-store";
 import { createAlertStore } from "./alert-store";
 import { currentPolicy } from "./autonomy-store";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { usageOfSnapshot, type CollectorPaseo } from "./collector";
-import { createCompactionStore, pendingCompactionOf, sentCompactionsOf } from "./compaction-store";
 import { compactCrossingOf, compactionOnFor, handoffCrossingOf, type CoordinationRole, type CoordinationSettings, type ThresholdFigure } from "../shared/coordination";
-import { requestFinishedOf, requestTokensReadOf } from "../shared/handoff";
-import { createHandoffStore, handoffsDoneOf, lastHandoffAtOf, pendingHandoffOf } from "./handoff-store";
-import { readRecords } from "./trace-store";
 import { turnTokensOf } from "../shared/eval-metrics/tokens";
-import { createDecisionStore } from "./decision-store";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticeQueue } from "./notice-queue";
 import { EVENTS_NOTICE_MARKER } from "./notices";
 import { wakeableOrchestrator, type OrchestratorAgentDeps, type OrchestratorAgentPaseo, type OrchestratorAgentSnapshot } from "./orchestrator-agent";
 import { createOrchestratorStore } from "./orchestrator-store";
-import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, missionQuestionRefusalOf, predictionRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../shared/autonomy";
+import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, predictionRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../shared/autonomy";
 import type { Decision } from "../shared/decisions";
 import { namesFailingChecks } from "../shared/interventions";
 import type { WakeUsage, WorkerSignal } from "../shared/orchestrator";
 import type { ParsedReport, TraceRecord } from "../shared/contracts";
 import { isPluginHome } from "./plugin-homes";
-import { missionManagerOf, requestIndexOf } from "./mission-roster";
+import { createMissionRoster, missionManagerOf, requestIndexOf } from "./mission-roster";
+// Types only: governor-figures.ts reaches this module back through review-tools.ts (a load cycle).
+import type { GovernorFamily, GovernorFigure, GovernorFigureId } from "./governor-figures";
+import type { GovernorOutcome } from "./governor-store";
+import { createMissionStore, openSplitSuggestionsOf, type Mission } from "./mission-store";
+import { createMissionAutonomyStore } from "./mission-autonomy-store";
+import { createMissionDecisionStore } from "./mission-decisions";
+import { createPeerLinkStore, isLiveLink } from "./peer-links";
 import { errorText } from "./rpc-kit";
-import { timeOrNull } from "../shared/time";
 
 /** Why a request stalled (design §A.8): nobody ran for 5 minutes, or the review went over its budget. */
 export const STALL_REASONS = ["idle-unfinished", "review-over-budget"] as const;
@@ -253,7 +280,110 @@ export interface WritersObservedEvent {
   at: string;
 }
 
-export type BmEvent = DecisionOpenedEvent | RequestFinishedEvent | RequestStalledEvent | WorkerSignalEvent | AdviceDueEvent | ThresholdCrossedEvent | WritersObservedEvent;
+/** A family of a mission's ladder came due for step 3, re-plan (missions design §9.3, §9.7). */
+export interface MissionSignalEvent {
+  type: "mission.signal";
+  missionId: string;
+  family: GovernorFamily;
+  /** The family's crossed figures, with their thresholds. */
+  figures: GovernorFigure[];
+  step: 3;
+  /** When the step came due: one event per climb. */
+  at: string;
+}
+
+/** Two missions want one area (missions design §9.6); the detection publishes it. */
+export interface MissionConflictEvent {
+  type: "mission.conflict";
+  /** The missions, each once. */
+  missions: string[];
+  /** The repo of the area. */
+  workspaceId: string;
+  /** The area: a folder or file pattern in that repo. */
+  area: string;
+  /** What shows it, one short line. */
+  evidence: string;
+}
+
+/** A request or a link of a mission in a repo outside its charter, that its Main may not add and has not asked to (missions design §9.7). */
+export interface MissionScopeEvent {
+  type: "mission.scope";
+  missionId: string;
+  /** The repo outside the charter. */
+  workspaceId: string;
+  /** The request in that repo, or the request that asked the link. */
+  requestId: string | null;
+  /** The link into that repo; null for a request. */
+  linkId: string | null;
+}
+
+/** Why a mission's review is due (missions design §9.7). */
+export const MISSION_REVIEW_REASONS = ["finished-10", "budget-50", "budget-100"] as const;
+export type MissionReviewReason = (typeof MISSION_REVIEW_REASONS)[number];
+
+/** A mission reached a review mark (missions design §9.7). */
+export interface MissionReviewEvent {
+  type: "mission.review";
+  missionId: string;
+  reason: MissionReviewReason;
+  /** `finished-10`: the finished requests; `budget-*`: the budget field's percent. */
+  value: number;
+  /** The budget figure of a `budget-*` review; null for `finished-10`. */
+  figure: GovernorFigureId | null;
+}
+
+/** A Main suggested, on the owner's yes, that work belongs to a new mission (missions design §9.6): the fields `bm_create_main` takes. */
+export interface MissionSplitEvent {
+  type: "mission.split";
+  /** The source mission: the suggesting Main's. */
+  missionId: string;
+  code: string;
+  name: string;
+  goal: string;
+  /** Workspace ids. */
+  repos: string[];
+  /** Requests of the source mission's roster that go with it. */
+  requestIds: string[];
+  reason: string;
+  /** When the Main suggested it (its journal line). */
+  at: string;
+}
+
+export type MissionEvent = MissionSignalEvent | MissionConflictEvent | MissionScopeEvent | MissionReviewEvent | MissionSplitEvent;
+
+export type BmEvent =
+  | DecisionOpenedEvent
+  | RequestFinishedEvent
+  | RequestStalledEvent
+  | WorkerSignalEvent
+  | AdviceDueEvent
+  | ThresholdCrossedEvent
+  | WritersObservedEvent
+  | MissionEvent;
+
+/** True for an event of the governor's missions (§9.7). */
+export function isMissionEvent(event: BmEvent): event is MissionEvent {
+  return event.type.startsWith("mission.");
+}
+
+/**
+ * Whether an event wakes the Orchestrator (missions design §9.7): a mission
+ * event, or a `danger` signal. Every other is retired as a wake (§9.1).
+ */
+export function wakesGovernor(event: BmEvent): boolean {
+  return isMissionEvent(event) || (event.type === "worker.signal" && event.signal === "danger");
+}
+
+/** The missions an event's wake counts against (§9.7): none for a `danger` signal and the retired events. */
+export function missionsOfEvent(event: BmEvent): string[] {
+  if (!isMissionEvent(event)) return [];
+  return event.type === "mission.conflict" ? [...new Set(event.missions)] : [event.missionId];
+}
+
+/** The project an event names, or null (a mission's own event). */
+function workspaceOfEvent(event: BmEvent): string | null {
+  return "workspaceId" in event ? event.workspaceId : null;
+}
 
 /** The dedupe key of an event: one delivery per key. */
 export function eventKeyOf(event: BmEvent): string {
@@ -272,6 +402,16 @@ export function eventKeyOf(event: BmEvent): string {
       return `threshold.crossed:${event.kind}:${event.kind === "handoff" ? event.requestId : event.agentId}#${event.cycle}`;
     case "writers.observed":
       return `writers.observed:${event.workspaceId}:${event.file}:${event.writers.map((writer) => `${writer.agentId}@${writer.startedAt}`).join("+")}`;
+    case "mission.signal":
+      return `mission.signal:${event.missionId}:${event.family}@${event.at}`;
+    case "mission.conflict":
+      return `mission.conflict:${[...new Set(event.missions)].sort().join("+")}:${event.workspaceId}:${event.area}`;
+    case "mission.scope":
+      return `mission.scope:${event.missionId}:${event.workspaceId}:${event.linkId ?? event.requestId ?? "none"}`;
+    case "mission.review":
+      return `mission.review:${event.missionId}:${event.reason}:${event.figure ?? event.value}`;
+    case "mission.split":
+      return `mission.split:${event.missionId}:${event.code}`;
   }
 }
 
@@ -291,7 +431,7 @@ function crossingWords(event: Pick<ThresholdCrossedEvent, "figure" | "value" | "
 
 /** One short line per event: what happened, and the ids to look up (design §A.8). */
 export function eventLineOf(event: BmEvent): string {
-  const project = `project ${event.workspaceId}`;
+  const project = `project ${workspaceOfEvent(event) ?? "none"}`;
   switch (event.type) {
     case "decision.opened": {
       const opened = `- decision.opened — ${project}, request ${event.requestId ?? "none"}, decision ${event.decisionId}${
@@ -331,6 +471,20 @@ export function eventLineOf(event: BmEvent): string {
       const [first, second] = event.writers.map((writer) => `${WRITER_ROLE_WORDS[writer.role]} ${writer.agentId} (request ${writer.requestId ?? "not known"})`);
       return `- writers.observed — ${project}, file ${event.file}: ${first} and ${second} wrote it in overlapping turns, at ${event.at}. Check the file with bm_repo; if one change may have undone the other, tell that request's Manager with bm_send_command. Otherwise keep a note with bm_note.`;
     }
+    case "mission.signal":
+      return `- mission.signal ${event.family} — mission ${event.missionId}, step 3: the Main was nudged and these still hold after the window: ${event.figures.map(figureWords).join("; ")}. Read the mission with bm_missions and send its Main bm_govern with step "replan"; on real risk, ask the owner with bm_ask_owner or stop a Worker with bm_direct_worker.`;
+    case "mission.conflict":
+      return `- mission.conflict — missions ${event.missions.join(" and ")}, ${project}, area ${event.area}: ${event.evidence}. Read both with bm_missions and give the area one owner with bm_arbitrate.`;
+    case "mission.scope":
+      return `- mission.scope — mission ${event.missionId}, ${project} is outside its charter (${event.linkId === null ? `request ${event.requestId ?? "not known"}` : `link ${event.linkId} of request ${event.requestId ?? "not known"}`}); its Main may not add the repo and has not asked the owner. Read the mission with bm_missions; tell its Main with bm_govern, or ask the owner with bm_ask_owner.`;
+    case "mission.review":
+      return `- mission.review ${event.reason} — mission ${event.missionId}, ${
+        event.figure === null ? `${event.value} requests finished` : `${event.figure} at ${event.value} %`
+      }. Read it with bm_missions against its charter; act with bm_govern or bm_ask_owner where it drifted, else keep a note with bm_note.`;
+    case "mission.split":
+      return `- mission.split — mission ${event.missionId}: its Main, on the owner's yes, suggests the new mission ${event.code} "${event.name}" (repos ${event.repos.join(", ") || "none"}; ${
+        event.requestIds.length === 0 ? "no request" : `requests ${event.requestIds.join(", ")}`
+      }): ${event.reason.slice(0, 300).replace(/[.\s]+$/, "")}. Read it with bm_missions (its splitSuggestions) and decide: bm_create_main with its fields, or tell the Main why not with bm_govern.`;
   }
 }
 
@@ -564,6 +718,120 @@ export function finishedRequestKeysOf(record: TraceRecord | null | undefined): {
   return { workspaceId: record.workspaceId, keys, at };
 }
 
+// ---------------------------------------------------------------------------
+// The governor's events (missions design §9.7).
+// ---------------------------------------------------------------------------
+
+/** The figures of one family (`governor-figures.ts` `familyFiguresOf`). Pure. */
+const familyFigures = (figures: readonly GovernorFigure[], family: GovernorFamily): GovernorFigure[] => figures.filter((entry) => entry.family === family);
+
+/** One figure in words, as the nudge words it (`governor-figures.ts` `figureText`): `stalled 1 (threshold ≥ 1; req-…)`. Pure. */
+const figureWords = (entry: GovernorFigure): string => `${entry.id} ${entry.value} (threshold ${entry.op === ">=" ? "≥" : ">"} ${entry.threshold}${entry.detail === null ? "" : `; ${entry.detail}`})`;
+
+/** At most one wake per mission in this long, `danger` excepted (§9.7). */
+export const MISSION_WAKE_MS = 15 * 60_000;
+
+/** A review every this many finished requests of a mission (§9.7). */
+export const REVIEW_EVERY_FINISHED = 10;
+
+/** `mission.signal` for each family of a recomputation that came due for step 3 (`replan-due`), with its crossed figures. Pure. */
+export function missionSignalEventsOf(outcome: Pick<GovernorOutcome, "missionId" | "figures" | "actions">, at: Date): MissionSignalEvent[] {
+  return outcome.actions
+    .filter((action) => action.action === "replan-due")
+    .map((action) => ({
+      type: "mission.signal",
+      missionId: outcome.missionId,
+      family: action.family,
+      figures: familyFigures(outcome.figures, action.family).filter((entry) => entry.crossed),
+      step: 3,
+      at: at.toISOString(),
+    }));
+}
+
+/** A mission's review marks: its finished requests in tens, and each budget figure's 0, 1 (≥ 50 %) or 2 (≥ 100 %). Pure. */
+export interface ReviewMarks {
+  finished: number;
+  budgets: Partial<Record<GovernorFigureId, number>>;
+}
+
+/** The marks of a mission now: `finished` requests and its budget figures (the `budget` family). Pure. */
+export function reviewMarksOf(finished: number, figures: readonly GovernorFigure[]): ReviewMarks {
+  const budgets: ReviewMarks["budgets"] = {};
+  for (const entry of familyFigures(figures, "budget")) budgets[entry.id] = entry.value >= 100 ? 2 : entry.value >= 50 ? 1 : 0;
+  return { finished: Math.floor(finished / REVIEW_EVERY_FINISHED), budgets };
+}
+
+/**
+ * `mission.review` for each mark `now` passed since `before` (§9.7): a next
+ * ten of finished requests, a budget figure at 50 % or 100 % (one event, the
+ * higher, when it passed both). None without `before`: a mark the run found
+ * passed is not a new one. Pure.
+ */
+export function missionReviewEventsOf(missionId: string, before: ReviewMarks | undefined, now: ReviewMarks, finished: number, figures: readonly GovernorFigure[]): MissionReviewEvent[] {
+  if (before === undefined) return [];
+  const events: MissionReviewEvent[] = [];
+  if (now.finished > before.finished) events.push({ type: "mission.review", missionId, reason: "finished-10", value: finished, figure: null });
+  for (const entry of familyFigures(figures, "budget")) {
+    const mark = now.budgets[entry.id] ?? 0;
+    if (mark > (before.budgets[entry.id] ?? 0)) events.push({ type: "mission.review", missionId, reason: mark === 2 ? "budget-100" : "budget-50", value: entry.value, figure: entry.id });
+  }
+  return events;
+}
+
+/**
+ * The active requests of a mission, and the live links they asked, in repos
+ * outside its charter (§9.7 `mission.scope`): none while the charter names no
+ * repo, the mission is closed, its `scope-repo` cell is delegated (its Main
+ * adds the repo itself), or for a repo an `m:` card of the mission asked to
+ * add. Reads the stores; throws only what they throw.
+ */
+export function outsideCharterOf(home: string, mission: Pick<Mission, "missionId" | "state" | "charter">): MissionScopeEvent[] {
+  const repos = new Set(mission.charter.repos);
+  if (mission.state !== "open" || repos.size === 0 || createMissionAutonomyStore(home).isDelegated(mission.missionId, "scope-repo")) return [];
+  const roster = createMissionRoster(home).list(mission.missionId);
+  const requestIds = new Set(roster.map((entry) => entry.requestId));
+  const found: MissionScopeEvent[] = [
+    ...roster
+      .filter((entry) => entry.state === "active" && !repos.has(entry.workspaceId))
+      .map((entry): MissionScopeEvent => ({ type: "mission.scope", missionId: mission.missionId, workspaceId: entry.workspaceId, requestId: entry.requestId, linkId: null })),
+    ...createPeerLinkStore(home)
+      .list()
+      .filter((link) => isLiveLink(link) && link.from.requestId !== null && requestIds.has(link.from.requestId) && !repos.has(link.to.workspaceId))
+      .map((link): MissionScopeEvent => ({ type: "mission.scope", missionId: mission.missionId, workspaceId: link.to.workspaceId, requestId: link.from.requestId, linkId: link.linkId })),
+  ];
+  if (found.length === 0) return [];
+  const asked = new Set(
+    createMissionDecisionStore(home)
+      .list(mission.missionId)
+      .flatMap((decision) => decision.options.flatMap((option) => (option.action?.kind === "mission-change" ? (option.action.change.addRepos ?? []) : []))),
+  );
+  return found.filter((event) => !asked.has(event.workspaceId));
+}
+
+/**
+ * The tools whose successful call in a wake's turn is an action (M-26).
+ * `bm_direct_worker` counts with `intent: "stop"` only.
+ */
+export const WAKE_ACT_TOOLS = ["bm_govern", "bm_arbitrate", "bm_create_main", "bm_direct_worker", "bm_ask_owner", "bm_note"] as const;
+
+/** Whether a call of `name` with `input` is an act (M-26). Pure. */
+export function isWakeAct(name: string, input: unknown): boolean {
+  if (!(WAKE_ACT_TOOLS as readonly string[]).includes(name)) return false;
+  return name !== "bm_direct_worker" || (input as { intent?: unknown } | null | undefined)?.intent === "stop";
+}
+
+/** `tools`, with each successful act noted on the bus (`EventBus.toolCalled`): what the wake record's `acted` reads. */
+export function actsNoted<T extends { call(name: string, input: unknown): Promise<{ ok: boolean }> }>(tools: T, bus: Pick<EventBus, "toolCalled">): T {
+  return {
+    ...tools,
+    async call(name: string, input: unknown) {
+      const result = await tools.call(name, input);
+      if (result.ok) bus.toolCalled(name, input);
+      return result;
+    },
+  };
+}
+
 /**
  * The batch the notice queue merges the events into. A bus adds its own
  * `onSent`, which records the wake.
@@ -597,12 +865,14 @@ function scopeOfPolicy(policy: AutonomyPolicy, home: string): Set<string> {
 }
 
 /**
- * Whether an event may reach the Orchestrator: `decision.opened` keeps its own
- * filter (change-007 C1), `advice.due` its cadence (design §G.4) and
- * `threshold.crossed` the owner's Settings (design §G.7); the others need
- * their project in `scope`.
+ * Whether an event may reach the Orchestrator: a mission event always
+ * (missions design §9.7), `decision.opened` keeps its own filter (change-007
+ * C1), `advice.due` its cadence (design §G.4) and `threshold.crossed` the
+ * owner's Settings (design §G.7); the others need their project in `scope`.
+ * Whether it wakes the Orchestrator at all is `wakesGovernor`'s.
  */
 export function isInEventScope(event: BmEvent, scope: ReadonlySet<string>): boolean {
+  if (isMissionEvent(event)) return true;
   return event.type === "decision.opened" || event.type === "advice.due" || event.type === "threshold.crossed" || scope.has(event.workspaceId);
 }
 
@@ -625,24 +895,24 @@ export interface PublishResult {
   status: "done" | "none" | "no-paseo" | "no-data-folder" | "no-orchestrator" | "failed";
   /** Event keys queued or sent to the Orchestrator. */
   published: string[];
-  /** Event keys left out: not in the policy's scope, or already published. */
+  /** Event keys left out: retired as wakes, not in the policy's scope, already published, or held for their mission's window. */
   skipped: string[];
 }
 
 export interface EventBus {
   /** Keeps the handle a hook or RPC context brought; anything that is not one is ignored. */
   usePaseo(paseo: unknown): void;
-  /** Publishes events to the Orchestrator (in the policy's scope, `isInEventScope`). Never rejects. */
+  /**
+   * Publishes events to the Orchestrator: those that wake it (`wakesGovernor`),
+   * in the policy's scope (`isInEventScope`), once per key, a mission's at
+   * most once per `MISSION_WAKE_MS` (held until then). Never rejects.
+   */
   publish(events: readonly BmEvent[], paseo?: unknown, found?: OrchestratorAgentSnapshot | null): Promise<PublishResult>;
   /**
-   * One recorded turn (the collector's `onRecorded`): `decision.opened` for
-   * the Worker questions it opened, by the owner's policy per cell
-   * (`decisionOpenedEventsOf`), `request.finished` for its `finished` reports
-   * (`isUnverified` tells a finished-unverified one, design §C.3),
-   * `advice.due` when its finished requests bring the project's count to
-   * the advice cadence (design §G.4), and `threshold.crossed` when a Manager's
-   * or a Worker's turn crosses its compaction threshold (design §G.7) — one
-   * publish, so they reach the Orchestrator together. Never rejects.
+   * One recorded turn (the collector's `onRecorded`). Its `decision.opened`,
+   * `request.finished`, `advice.due` and `threshold.crossed` are retired as
+   * wakes (missions design §9.1): only its finished requests still count
+   * toward the project's advice (design §G.4, `advice-store.ts`). Never rejects.
    */
   turnRecorded(
     record: TraceRecord | null | undefined,
@@ -650,16 +920,19 @@ export interface EventBus {
     paseo?: unknown,
     isUnverified?: (report: ParsedReport) => boolean,
   ): Promise<PublishResult>;
-  /**
-   * Decisions opened outside a recorded turn — a fallback incident's (`f:`,
-   * `fallback-rpc.ts`): their `decision.opened`, by the same per-cell rule.
-   * Never rejects.
-   */
+  /** Decisions opened outside a recorded turn: `decision.opened` is retired as a wake (§9.1), so nothing is published. Never rejects. */
   decisionsOpened(opened: readonly Decision[], paseo?: unknown): Promise<PublishResult>;
-  /** A Worker's turn ended: its `failing`, `heavy` and `outside` events are settled. */
+  /** A Worker's turn ended. Nothing to settle since its non-alert signals no longer wake (§9.1); kept for the stall pass that calls it. */
   workerTurnEnded(workerId: string): void;
-  /** True while this non-alert Worker-signal key is open (published in the Worker's current turn). */
-  isSignalOpen(key: string): boolean;
+  /**
+   * The governor's recomputations (`governor-store.ts`; each minute and at
+   * each recorded turn of a mission's agents): their `mission.signal`,
+   * `mission.review` and `mission.scope` (§9.7), published with any event a
+   * mission's window held. Never rejects.
+   */
+  governed(outcomes: readonly GovernorOutcome[], paseo?: unknown): Promise<PublishResult>;
+  /** The Orchestrator called `name` with success: an act (`isWakeAct`) marks each Orchestrator's running wake as acted (M-26). */
+  toolCalled(name: string, input: unknown): void;
   /**
    * The events of that Orchestrator's oldest open wake — the one whose turn is
    * running — oldest first; none outside a wake (design §G.3: which event a
@@ -679,6 +952,7 @@ const result = (status: PublishResult["status"], skipped: string[] = []): Publis
 export function createEventBus(deps: EventBusDeps = {}): EventBus {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const queue = deps.queue ?? noticeQueue;
+  const now = deps.now ?? (() => new Date());
   let lastPaseo: OrchestratorAgentPaseo | null = null;
   /** Keys published in this run, oldest first. */
   const published = new Set<string>();
@@ -687,8 +961,8 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
   /**
    * The turn without the finishes already read in the other role's turns: a
    * Worker's report sent to its Manager by hand is one finish in both records,
-   * raised and counted once (REQ-183 i). Repeats in one role's turns keep the
-   * event keys' and the advice count's own dedupe.
+   * counted once (REQ-183 i). Repeats in one role's turns keep the advice
+   * count's own dedupe.
    */
   const unseenFinishesOf = (record: TraceRecord | null | undefined): TraceRecord | null | undefined => {
     if (!readsFinishes(record)) return record;
@@ -705,10 +979,18 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     });
     return { ...record, reports };
   };
-  /** Open non-alert Worker-signal keys → their Worker. */
-  const openSignals = new Map<string, string>();
   /** Published keys → their project, until the wake that carried them is recorded (A-7). */
   const workspaceOfKey = new Map<string, string>();
+  /** Each mission's last publish that queued one of its events (§9.7), in ms. */
+  const missionWokenAt = new Map<string, number>();
+  /** Mission events held for their mission's window, by key; they go with the first publish after it. */
+  const held = new Map<string, BmEvent>();
+  /** Each mission's review marks at its last recomputation in this run (`reviewMarksOf`). */
+  const reviewMarks = new Map<string, ReviewMarks>();
+  /** `mission.scope` keys → when this run first saw them, in ms. */
+  const outsideSince = new Map<string, number>();
+  /** `<missionId>:<family>` → when the governor last reset that family (§9.3), in ms: a `mission.signal` before it is settled. */
+  const familyResetAt = new Map<string, number>();
 
   const homeOf = (): string | null => {
     try {
@@ -729,14 +1011,14 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     }
   };
 
-  /** A `BM-EVENTS` message went out: one wake of that Orchestrator (A-7). */
-  const recordWake = (targetId: string, keys: readonly string[]): void => {
+  /** A `BM-EVENTS` message went out: one wake of that Orchestrator (A-7), with its event types (§9.7). */
+  const recordWake = (targetId: string, keys: readonly string[], events: readonly BmEvent[]): void => {
     const workspaceIds = keys.map((key) => workspaceOfKey.get(key)).filter((id): id is string => id !== undefined);
     for (const key of keys) workspaceOfKey.delete(key);
     const home = homeOf();
     if (home === null || keys.length === 0) return;
     try {
-      createOrchestratorStore(home, { now: deps.now }).appendWake({ orchestratorId: targetId, workspaceIds, events: keys.length });
+      createOrchestratorStore(home, { now: deps.now }).appendWake({ orchestratorId: targetId, workspaceIds, events: keys.length, eventTypes: events.map((event) => event.type) });
     } catch (error) {
       log(`[paseo-bm] could not record the Orchestrator's wake: ${errorText(error)}`);
     }
@@ -744,14 +1026,15 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
 
   /**
    * That Orchestrator's turn after a `BM-EVENTS` message ended: its oldest open
-   * wake ends now (A-7), with that turn's tokens (change-007 C6).
+   * wake ends now (A-7), with that turn's tokens (change-007 C6) and whether
+   * it acted (M-26; unknown for a wake a reload forgot).
    */
-  const endWake = async (targetId: string, paseo?: unknown): Promise<void> => {
+  const endWake = async (targetId: string, paseo: unknown, acted: boolean | undefined): Promise<void> => {
     const home = homeOf();
     if (home === null) return;
     const usage = await closingTurnUsage(targetId, paseo);
     try {
-      createOrchestratorStore(home, { now: deps.now }).endWake(targetId, usage);
+      createOrchestratorStore(home, { now: deps.now }).endWake(targetId, usage, acted);
     } catch (error) {
       log(`[paseo-bm] could not record the end of the Orchestrator's wake: ${errorText(error)}`);
     }
@@ -759,82 +1042,72 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
 
   /** Published keys → their event until the wake that carried them went out, then each Orchestrator's open wakes, oldest first (§G.3). */
   const eventOfKey = new Map<string, BmEvent>();
-  const openWakes = new Map<string, BmEvent[][]>();
+  const openWakes = new Map<string, Array<{ events: BmEvent[]; acted: boolean }>>();
 
   const batch: NoticeBatch = {
     ...EVENTS_BATCH,
     onSent: (targetId, keys) => {
-      openWakes.set(targetId, [...(openWakes.get(targetId) ?? []), keys.flatMap((key) => eventOfKey.get(key) ?? [])]);
+      const events = keys.flatMap((key) => eventOfKey.get(key) ?? []);
+      openWakes.set(targetId, [...(openWakes.get(targetId) ?? []), { events, acted: false }]);
       for (const key of keys) eventOfKey.delete(key);
-      recordWake(targetId, keys);
+      recordWake(targetId, keys, events);
     },
     onTurnEnded: (targetId, paseo) => {
       const open = openWakes.get(targetId);
-      open?.shift();
+      const ended = open?.shift();
       if (open?.length === 0) openWakes.delete(targetId);
-      return endWake(targetId, paseo);
+      return endWake(targetId, paseo, ended?.acted);
     },
   };
+
+  /** Whether a mission is open in the data folder `home`. */
+  const isOpenMission = (home: string, missionId: string): boolean => createMissionStore(home).get(missionId)?.state === "open";
 
   /**
    * Whether the event's subject still needs the Orchestrator: read
    * synchronously at the idle moment, the owner's policy once per check.
+   * Only the events that wake it are ever queued (`wakesGovernor`).
    */
   const isCurrentOf =
-    (event: BmEvent, key: string, home: string) =>
+    (event: BmEvent, home: string) =>
     (): boolean => {
-      const policy = eventPolicyOf(home, log);
-      if (!isInEventScope(event, scopeOfPolicy(policy, home))) return false;
       switch (event.type) {
-        case "decision.opened": {
-          const decision = createDecisionStore(home, { log }).get(event.decisionId, event.workspaceId);
-          if (decision === null) return false;
-          // Dropped once it may no longer be asked: settled, its cell changed meanwhile (a
-          // reset, a new level), the challenger turned off, or the Orchestrator predicted it already.
-          return (event.asks === "decision" ? decideRefusalOf(policy, decision) : predictionRefusalOf(policy, decision)) === null;
-        }
-        case "request.finished":
-          return true;
-        case "request.stalled":
-          return createAlertStore(home).isOpen(event.alertKey);
         case "worker.signal":
-          return event.alertKey === null ? openSignals.has(key) : createAlertStore(home).isOpen(event.alertKey);
-        case "advice.due":
-          // Dropped once the owner turned advice off.
-          return readCoordinationSettings({ home, log }).advice.everyFinished > 0;
-        case "threshold.crossed": {
-          if (event.kind === "handoff") {
-            // Dropped once the owner turned handoff off, or the request was handed over (or a handoff
-            // of it was requested) or finished meanwhile.
-            if (!readCoordinationSettings({ home, log }).handoff.enabled || event.requestId === null) return false;
-            const handoffs = createHandoffStore(home).list();
-            if (handoffsDoneOf(handoffs, event.requestId).length !== event.cycle) return false;
-            if (pendingHandoffOf(handoffs, event.requestId, deps.now?.() ?? new Date()) !== null) return false;
-            return !requestFinishedOf(readRecords({ tracesDir: join(home, TRACES_DIR_NAME) }, event.workspaceId).records, event.requestId);
-          }
-          // Dropped once the owner turned compaction off, or the agent compacted (its own, the owner's
-          // or the plugin's) or a compaction of it was requested meanwhile.
-          if (!readCoordinationSettings({ home, log }).compact.enabled) return false;
-          if ((compactedAt.get(event.agentId) ?? Number.NEGATIVE_INFINITY) >= (timeOrNull(event.at) ?? Number.POSITIVE_INFINITY)) return false;
-          const compactions = createCompactionStore(home).list();
-          return sentCompactionsOf(compactions, event.agentId) === event.cycle && pendingCompactionOf(compactions, event.agentId, deps.now?.() ?? new Date()) === null;
+          if (!isInEventScope(event, scopeOfPolicy(eventPolicyOf(home, log), home))) return false;
+          return event.alertKey !== null && createAlertStore(home).isOpen(event.alertKey);
+        case "mission.signal":
+          // Dropped once the governor reset the family (its figures back under their thresholds) before delivery.
+          return (familyResetAt.get(`${event.missionId}:${event.family}`) ?? Number.NEGATIVE_INFINITY) < (Date.parse(event.at) || 0);
+        case "mission.conflict":
+          return event.missions.every((missionId) => isOpenMission(home, missionId));
+        case "mission.scope": {
+          const mission = createMissionStore(home).get(event.missionId);
+          return mission !== null && outsideCharterOf(home, mission).some((found) => eventKeyOf(found) === eventKeyOf(event));
         }
-        case "writers.observed":
-          // Dropped once its file's alert was cleared: the later of the two requests finished (design §F.3).
-          return createAlertStore(home).isOpen(event.alertKey);
+        case "mission.review":
+          return isOpenMission(home, event.missionId);
+        case "mission.split":
+          // Dropped once a mission took the code, or the source mission closed (§9.6).
+          return openSplitSuggestionsOf(home, event.missionId).some((suggestion) => suggestion.code === event.code);
+        default:
+          return false;
       }
     };
 
   async function publish(events: readonly BmEvent[], paseo?: unknown, found?: OrchestratorAgentSnapshot | null): Promise<PublishResult> {
     try {
       if (isPaseo(paseo)) lastPaseo = paseo;
-      if (events.length === 0) return result("none");
+      if (events.length === 0 && held.size === 0) return result("none");
+      // Missions design §9.1: only the governor's events wake the Orchestrator; the rest are skipped before anything is read.
+      const skipped = events.filter((event) => !wakesGovernor(event)).map(eventKeyOf);
+      const waking = [...held.values(), ...events.filter(wakesGovernor)];
+      held.clear();
+      if (waking.length === 0) return result("none", skipped);
       const home = homeOf();
-      if (home === null) return result("no-data-folder");
+      if (home === null) return result("no-data-folder", skipped);
       const scope = eventScopeOf(home, log);
-      const skipped: string[] = [];
       const fresh: Array<{ event: BmEvent; key: string }> = [];
-      for (const event of events) {
+      for (const event of waking) {
         const key = eventKeyOf(event);
         if (published.has(key) || fresh.some((entry) => entry.key === key) || !isInEventScope(event, scope)) skipped.push(key);
         else fresh.push({ event, key });
@@ -842,21 +1115,39 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       if (fresh.length === 0) return result("none", skipped);
       const handle = lastPaseo;
       if (handle === null) return result("no-paseo", skipped);
+      // §9.7: a mission woken within its window waits; the events of one mission that go now go together.
+      const at = now().getTime();
+      const goingFor = new Set<string>();
+      const due: typeof fresh = [];
+      const hold = new Map<string, BmEvent>();
+      for (const entry of fresh) {
+        const missions = missionsOfEvent(entry.event);
+        if (missions.some((missionId) => !goingFor.has(missionId) && at - (missionWokenAt.get(missionId) ?? Number.NEGATIVE_INFINITY) < MISSION_WAKE_MS)) {
+          hold.set(entry.key, entry.event);
+          skipped.push(entry.key);
+          continue;
+        }
+        for (const missionId of missions) goingFor.add(missionId);
+        due.push(entry);
+      }
+      for (const [key, event] of hold) held.set(key, event);
+      if (due.length === 0) return result("none", skipped);
       const orchestrator = await wakeableOrchestrator(handle, { ...deps, log }, found);
       if (orchestrator === null) return result("no-orchestrator", skipped);
-      const items: BatchItem[] = fresh.map(({ event, key }) => {
+      const items: BatchItem[] = due.map(({ event, key }) => {
         remember(key);
-        workspaceOfKey.set(key, event.workspaceId);
+        const workspaceId = workspaceOfEvent(event);
+        if (workspaceId !== null) workspaceOfKey.set(key, workspaceId);
         eventOfKey.set(key, event);
-        if (event.type === "worker.signal" && event.alertKey === null) openSignals.set(key, event.workerId);
-        return { key, line: eventLineOf(event), isCurrent: isCurrentOf(event, key, home) };
+        return { key, line: eventLineOf(event), isCurrent: isCurrentOf(event, home) };
       });
       const outcomes = await queue.enqueueBatch(orchestrator.id, batch, items, handle as never);
       const done: PublishResult = { status: "done", published: [], skipped };
       outcomes.forEach((outcome, index) => {
-        const key = fresh[index]!.key;
-        if (outcome === "sent" || outcome === "queued") done.published.push(key);
-        else skipped.push(key);
+        const { event, key } = due[index]!;
+        if (outcome !== "sent" && outcome !== "queued") return void skipped.push(key);
+        done.published.push(key);
+        for (const missionId of missionsOfEvent(event)) missionWokenAt.set(missionId, at);
       });
       return done;
     } catch (error) {
@@ -865,103 +1156,53 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     }
   }
 
-  /** `decision.opened` for new decisions: the policy decides which ask the Orchestrator something (§B.9); read only when one opened. */
-  const openedEventsOf = (opened: readonly Decision[]): DecisionOpenedEvent[] => {
-    const home = opened.length === 0 ? null : homeOf();
-    if (home === null) return decisionOpenedEventsOf(opened);
-    // Missions design §8: a Worker's question of a mission request is its Main's, never asked of the Orchestrator.
-    const missionOf = (decision: Decision) => (decision.requestId === null ? null : (requestIndexOf(home, decision.requestId)?.missionId ?? null));
-    return decisionOpenedEventsOf(
-      opened.filter((decision) => missionQuestionRefusalOf(decision, missionOf(decision)) === null),
-      eventPolicyOf(home, log),
-    );
-  };
-
   /**
    * Counts the finished requests of a recorded Manager's or Worker's turn
-   * toward its project's advice (design §G.4): `advice.due` when the count reaches the cadence,
-   * which starts the count again in the same write. Nothing with advice off.
-   * Never throws: a store failure is one log line and no event.
+   * toward its project's advice (design §G.4), which starts the count again
+   * when it reaches the cadence. Nothing with advice off. Its `advice.due` is
+   * retired as a wake (§9.1). Never throws: a store failure is one log line.
    */
-  const adviceDueOf = (record: TraceRecord | null | undefined): AdviceDueEvent[] => {
+  const countAdvice = (record: TraceRecord | null | undefined): void => {
     const finished = finishedRequestKeysOf(record);
     const home = finished === null ? null : homeOf();
-    if (finished === null || home === null) return [];
+    if (finished === null || home === null) return;
     const everyFinished = readCoordinationSettings({ home, log }).advice.everyFinished;
-    if (everyFinished === 0) return [];
+    if (everyFinished === 0) return;
     try {
-      const counted = createAdviceStore(home).count(finished.workspaceId, finished.keys, everyFinished, finished.at);
-      return counted.due ? [{ type: "advice.due", workspaceId: finished.workspaceId, finished: counted.finished, at: finished.at }] : [];
+      createAdviceStore(home).count(finished.workspaceId, finished.keys, everyFinished, finished.at);
     } catch (error) {
       log(`[paseo-bm] could not count the finished requests toward the advice: ${errorText(error)}`);
-      return [];
     }
   };
 
-  /** Each agent's newest recorded compaction in this run, whoever started it: a crossing before it is dropped at delivery. */
-  const compactedAt = new Map<string, number>();
-
   /**
-   * The `threshold.crossed` of a recorded turn (design §G.7,
-   * `compactCrossedEventOf`), with the owner's Settings and the agent's
-   * compactions read from the data folder. Never throws: a store that cannot
-   * be read is one log line and no event.
+   * The governor's events of one recomputation (§9.7): `mission.signal` for
+   * a family due for step 3, `mission.review` for a mark passed since the
+   * last one, `mission.scope` for work outside the charter first seen
+   * `governor.windowMinutes` ago. Never throws: a store failure is one log
+   * line and no event of that mission.
    */
-  const thresholdCrossedOf = (record: TraceRecord | null | undefined): ThresholdCrossedEvent[] => [...compactCrossedOf(record), ...handoffCrossedOf(record)];
-
-  /**
-   * The `handoff` kind of a recorded Worker turn (design §G.6, §G.7,
-   * `handoffCrossedEventOf`): its request's tokens read since it started or
-   * since its last handoff, with the owner's Settings and the request's
-   * handoffs read from the data folder. Read only while handoff is on. Never
-   * throws: a store that cannot be read is one log line and no event.
-   */
-  const handoffCrossedOf = (record: TraceRecord | null | undefined): ThresholdCrossedEvent[] => {
-    if (record === null || record === undefined || record.role !== "worker" || record.requestId === null) return [];
-    const home = homeOf();
-    if (home === null) return [];
+  const missionEventsOf = (home: string, outcome: GovernorOutcome, at: Date): BmEvent[] => {
+    for (const action of outcome.actions) if (action.action === "reset") familyResetAt.set(`${outcome.missionId}:${action.family}`, at.getTime());
     try {
-      const settings = readCoordinationSettings({ home, log });
-      if (!settings.handoff.enabled) return [];
-      const requestId = record.requestId;
-      const handoffs = createHandoffStore(home).list();
-      const records = readRecords({ tracesDir: join(home, TRACES_DIR_NAME) }, record.workspaceId).records;
-      const event = handoffCrossedEventOf(record, settings, {
-        tokensRead: requestTokensReadOf(records, requestId, lastHandoffAtOf(handoffs, requestId)),
-        handoffs: handoffsDoneOf(handoffs, requestId).length,
-        pending: pendingHandoffOf(handoffs, requestId, deps.now?.() ?? new Date()) !== null,
-        finished: requestFinishedOf(records, requestId),
+      const mission = createMissionStore(home).get(outcome.missionId);
+      if (mission === null || mission.state !== "open") return [];
+      const finished = createMissionRoster(home)
+        .list(mission.missionId)
+        .filter((entry) => entry.state === "finished").length;
+      const marks = reviewMarksOf(finished, outcome.figures);
+      const reviews = missionReviewEventsOf(mission.missionId, reviewMarks.get(mission.missionId), marks, finished, outcome.figures);
+      reviewMarks.set(mission.missionId, marks);
+      const windowMs = readCoordinationSettings({ home, log }).governor.windowMinutes * 60_000;
+      const outside = outsideCharterOf(home, mission).filter((event) => {
+        const key = eventKeyOf(event);
+        const since = outsideSince.get(key) ?? at.getTime();
+        outsideSince.set(key, since);
+        return at.getTime() - since >= windowMs;
       });
-      return event === null ? [] : [event];
+      return [...missionSignalEventsOf(outcome, at), ...reviews, ...outside];
     } catch (error) {
-      log(`[paseo-bm] could not check a turn against the handoff threshold: ${errorText(error)}`);
-      return [];
-    }
-  };
-
-  /** The `compact` kind of a recorded turn (`compactCrossedEventOf`). */
-  const compactCrossedOf = (record: TraceRecord | null | undefined): ThresholdCrossedEvent[] => {
-    if (record === null || record === undefined || (record.role !== "manager" && record.role !== "worker")) return [];
-    const compaction = record.evidence.find((evidence) => evidence.kind === "compaction");
-    if (compaction !== undefined) {
-      const at = timeOrNull(compaction.at) ?? timeOrNull(record.endedAt) ?? timeOrNull(record.at);
-      if (at !== null) compactedAt.set(record.agentId, Math.max(at, compactedAt.get(record.agentId) ?? at));
-      return [];
-    }
-    const home = homeOf();
-    if (home === null) return [];
-    try {
-      const settings = readCoordinationSettings({ home, log });
-      // The compactions are read only for a turn that crosses at all: most turns do not.
-      if (compactCrossedEventOf(record, settings, { compactions: 0, pending: false }) === null) return [];
-      const compactions = createCompactionStore(home).list();
-      const event = compactCrossedEventOf(record, settings, {
-        compactions: sentCompactionsOf(compactions, record.agentId),
-        pending: pendingCompactionOf(compactions, record.agentId, deps.now?.() ?? new Date()) !== null,
-      });
-      return event === null ? [] : [event];
-    } catch (error) {
-      log(`[paseo-bm] could not check a turn against the compaction threshold: ${errorText(error)}`);
+      log(`[paseo-bm] could not read the governor's events of mission ${outcome.missionId}: ${errorText(error)}`);
       return [];
     }
   };
@@ -971,17 +1212,23 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       if (isPaseo(paseo)) lastPaseo = paseo;
     },
     publish,
-    turnRecorded(record, opened, paseo, isUnverified) {
-      const finished = unseenFinishesOf(record);
-      return publish([...openedEventsOf(opened), ...requestFinishedEventsOf(finished, isUnverified, (requestId) => finishPlaceOf(homeOf(), requestId)), ...adviceDueOf(finished), ...thresholdCrossedOf(record)], paseo);
+    turnRecorded(record, _opened, paseo) {
+      countAdvice(unseenFinishesOf(record));
+      return publish([], paseo);
     },
-    decisionsOpened(opened, paseo) {
-      return publish(openedEventsOf(opened), paseo);
+    decisionsOpened(_opened, paseo) {
+      return publish([], paseo);
     },
-    workerTurnEnded(workerId) {
-      for (const [key, worker] of openSignals) if (worker === workerId) openSignals.delete(key);
+    workerTurnEnded() {},
+    governed(outcomes, paseo) {
+      const home = outcomes.length === 0 ? null : homeOf();
+      const at = now();
+      return publish(home === null ? [] : outcomes.flatMap((outcome) => missionEventsOf(home, outcome, at)), paseo);
     },
-    isSignalOpen: (key) => openSignals.has(key),
-    wakeEventsOf: (orchestratorId) => openWakes.get(orchestratorId)?.[0] ?? [],
+    toolCalled(name, input) {
+      if (!isWakeAct(name, input)) return;
+      for (const open of openWakes.values()) if (open[0] !== undefined) open[0].acted = true;
+    },
+    wakeEventsOf: (orchestratorId) => openWakes.get(orchestratorId)?.[0]?.events ?? [],
   };
 }

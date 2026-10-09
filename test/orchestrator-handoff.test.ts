@@ -6,6 +6,8 @@ import { createBindingStore, type AgentBinder, type BindingStore } from "../plug
 import { binderOf } from "../plugin/server/agent-tools";
 import { COMMAND_LIMIT_PER_REQUEST, HANDOFF_OFF_MESSAGE, commandsSentFor, sendCommand } from "../plugin/server/command-send";
 import { createRequestRegistry } from "../plugin/server/request-registry";
+import { createMissionRoster } from "../plugin/server/mission-roster";
+import { createMissionStore } from "../plugin/server/mission-store";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { outboxBlocksOf } from "../plugin/server/collector";
 import type { OutboxRecord } from "../plugin/server/outbox";
@@ -34,7 +36,6 @@ import { createInterventionStore } from "../plugin/server/intervention-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
-import { createOrchestratorTools, type OrchestratorTools } from "../plugin/server/orchestrator-tools";
 import type { CliResult } from "../plugin/server/paseo-cli";
 import { checkRolePairing } from "../plugin/server/role-pairing";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
@@ -52,9 +53,10 @@ import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, msg, report, turn } from "./fi
 import { bindAgent } from "./helpers/bindings";
 
 /**
- * Handoff through the Manager (autonomy design §G.6; PRD REQ-135; change-008
- * C3; bead `7gxw.11`): `bm_handoff`'s refusals, one per rule, each writing
- * nothing; the whole sequence with the one fake of `test/helpers/fake-paseo.ts`
+ * Handoff through the Manager (missions design §9.5; autonomy design §G.6;
+ * PRD REQ-135, REQ-195; change-008 C3; bead `7gxw.11`): a Worker's turn
+ * crossing its request's threshold starts it, and every rule that starts
+ * nothing writes nothing; the whole sequence with the one fake of `test/helpers/fake-paseo.ts`
  * — the note asked at the Worker's idle moment after a safe point, the brief
  * built, masked and bounded, the `BM-COMMAND` to the Manager, the successor the
  * Manager creates labelled `bm.handoffFrom`, the outgoing Worker labelled
@@ -236,94 +238,99 @@ function runnerOf(binder?: () => AgentBinder): HandoffRunner {
   });
 }
 
-function toolsOf(fake: FakePaseo<unknown>, runner: HandoffRunner = runnerOf()): OrchestratorTools {
-  const tools = createOrchestratorTools({
-    env: { PASEO_BM_HOME: home },
-    homedir: () => root,
-    now: () => clock,
-    redactEnv: { PASEO_PASSWORD: SECRET },
-    handoff: runner,
-    queue,
-    log: (line) => logs.push(line),
-  });
-  tools.usePaseo(fake.paseo);
-  return tools;
+/**
+ * A Worker's stored turn handed to the runner as the collector's `onRecorded`
+ * does — by default the heavy turn of `heavyRequest`, which closed a bead:
+ * crossing the threshold, it starts the handoff (missions design §9.5).
+ */
+async function start(fake: FakePaseo<unknown>, runner: HandoffRunner = runnerOf(), record: TraceRecord = heavyRequest()[1]!): Promise<HandoffRunner> {
+  await runner.turnRecorded({ agent: { id: record.agentId }, timeline: [] }, record, fake.paseo);
+  return runner;
 }
 
-const handoff = (tools: OrchestratorTools, workerId = WORKER, reason = "Its request read 160M tokens.") => tools.call("bm_handoff", { workerId, reason });
+/** The reason a crossing at 160M tokens keeps, and its command's `why:`. */
+const CROSSED = "its request read 160,000,000 tokens (threshold 150,000,000)";
 
-describe("bm_handoff refuses, writing nothing (design §G.6 The tool)", () => {
+describe("the start: a Worker's turn crossing its request's threshold, else nothing written (missions design §9.5, autonomy design §G.6)", () => {
   const nothingWritten = () => {
     expect(existsSync(join(home, HANDOFFS_DIR_NAME))).toBe(false);
     expect(interventions()).toEqual([]);
   };
 
-  it("when handoff is off", async () => {
+  it("starts nothing when handoff is off", async () => {
     createCoordinationStore(home).set({ key: "handoff.enabled", value: false });
     await store(...heavyRequest());
     const fake = daemon();
-    expect(await handoff(toolsOf(fake))).toEqual({ ok: false, text: "Refused: handoff is off in the owner's Settings → Coordination; only the owner turns it on." });
+    await start(fake);
     nothingWritten();
     expect(fake.sends).toEqual([]);
   });
 
-  it("when the target is not the live Worker of an unfinished request", async () => {
+  it("starts nothing for a turn of no request, a Reviewer's or a Manager's turn, or a Worker already handed over", async () => {
     await store(...heavyRequest());
-    const tools = toolsOf(daemon());
-    expect((await handoff(tools, REVIEWER)).text).toBe(`Refused: ${REVIEWER} is not a paseo-bm Worker; use a Worker's id from bm_request or bm_projects.`);
-    expect((await handoff(tools, MANAGER)).text).toBe(`Refused: ${MANAGER} is not a paseo-bm Worker; use a Worker's id from bm_request or bm_projects.`);
-    expect((await handoff(toolsOf(daemon({ workerArchived: true })))).text).toBe(`Refused: Worker ${WORKER} is archived; nothing is handed over from it.`);
-    expect((await handoff(toolsOf(daemon({ workerLabels: { "bm.role": "worker", "paseo.parent-agent-id": MANAGER } })))).text).toBe(
-      `Refused: Worker ${WORKER} carries no request (bm.requestId); only the Worker of a request is handed over.`,
-    );
-    const replaced = daemon({ workerLabels: { "bm.role": "worker", "bm.requestId": REQUEST, "paseo.parent-agent-id": MANAGER, [REPLACED_BY_LABEL]: "agent-next" } });
-    expect((await handoff(toolsOf(replaced))).text).toBe(`Refused: Worker ${WORKER} was already replaced by agent-next; hand over its successor instead.`);
+    const fake = daemon();
+    const runner = runnerOf();
+    await start(fake, runner, workerTurn(11, { requestId: null }));
+    await start(fake, runner, workerTurn(11, { agentId: REVIEWER, role: "reviewer", parentAgentId: WORKER }));
+    await start(fake, runner, turn({ workspaceId: WORKSPACE_ID, agentId: MANAGER, role: "manager", requestId: REQUEST, endedAt: iso(T0 + 11 * MIN), at: iso(T0 + 11 * MIN), usage: usageOf(160_000_000) }));
     nothingWritten();
+    // The Worker a done handoff replaced: its turns start nothing, whatever its request read since.
+    const done = handoffs().add({ workspaceId: WORKSPACE_ID, requestId: REQUEST, workerId: WORKER, managerId: MANAGER, interventionId: null, reason: "" });
+    handoffs().update(done.id, (entry) => ({ ...entry, state: "done", successorId: "agent-next", successorAt: iso(T0 + 5 * MIN), endedAt: iso(T0 + 5 * MIN) }));
+    await start(fake, runner);
+    expect(handoffs().list()).toHaveLength(1);
+    expect(interventions()).toEqual([]);
+    expect(fake.sends).toEqual([]);
   });
 
-  it("when its request is finished, or it has no live Manager to create the successor", async () => {
+  it("starts nothing when its request is finished, or it has no live Manager", async () => {
     await store(...heavyRequest());
-    expect((await handoff(toolsOf(daemon({ managerArchived: true })))).text).toBe(`Refused: Worker ${WORKER} has no live Manager in its project to create its successor.`);
+    await start(daemon({ managerArchived: true }));
+    nothingWritten();
     await store(workerTurn(12, { reports: [report({ agentId: MANAGER, at: iso(T0 + 12 * MIN), requestId: REQUEST, phase: "finished" })] }));
-    expect((await handoff(toolsOf(daemon()))).text).toBe(`Refused: request ${REQUEST} is finished; only an unfinished request is handed over.`);
+    await start(daemon());
     nothingWritten();
   });
 
-  it("below its threshold, since it started and since its last handoff", async () => {
+  it("starts nothing below its threshold, since it started and since its last handoff", async () => {
+    const fake = daemon();
     await store(workerTurn(10, { usage: usageOf(40_000_000) }));
-    const tools = toolsOf(daemon());
-    expect((await handoff(tools)).text).toBe(`Refused: request ${REQUEST} is below its threshold: since it started it read 40,000,000 tokens (threshold 150,000,000).`);
+    await start(fake, runnerOf(), workerTurn(10, { usage: usageOf(40_000_000) }));
     nothingWritten();
     // A handoff done at minute 20: only the turns after it count again.
     await store(workerTurn(11, { usage: usageOf(160_000_000) }), workerTurn(25, { usage: usageOf(5_000_000) }, "agent-successor"));
     const done = handoffs().add({ workspaceId: WORKSPACE_ID, requestId: REQUEST, workerId: "agent-before", managerId: MANAGER, interventionId: null, reason: "" });
     handoffs().update(done.id, (entry) => ({ ...entry, state: "done", successorId: WORKER, successorAt: iso(T0 + 20 * MIN), endedAt: iso(T0 + 20 * MIN) }));
-    expect((await handoff(tools)).text).toBe(
-      `Refused: request ${REQUEST} is below its threshold: since its last handoff (${iso(T0 + 20 * MIN)}) it read 5,000,000 tokens (threshold 150,000,000).`,
-    );
+    await start(fake, runnerOf(), workerTurn(25, { usage: usageOf(5_000_000) }, "agent-successor"));
+    expect(handoffs().list()).toHaveLength(1);
     expect(interventions()).toEqual([]);
   });
 
-  it("while a handoff of the request is pending, at handoff.maxPerRequest, and at the loop guard", async () => {
+  it("starts one while a handoff of the request is pending, none at handoff.maxPerRequest, and none at the loop guard", async () => {
     createCoordinationStore(home).set({ key: "handoff.maxPerRequest", value: 1 });
     await store(...heavyRequest());
     const fake = daemon({ worker: "running" });
-    const tools = toolsOf(fake);
-    expect((await handoff(tools)).ok).toBe(true);
+    const runner = runnerOf();
+    await start(fake, runner);
     const written = { handoffs: handoffs().list(), interventions: interventions() };
-    expect((await handoff(tools)).text).toBe(`Refused: a handoff of request ${REQUEST} is already pending, requested at ${clock.toISOString()}.`);
+    expect(written.handoffs).toMatchObject([{ workerId: WORKER, managerId: MANAGER, reason: CROSSED }]);
+    await start(fake, runner);
+    expect(handoffs().list()).toEqual(written.handoffs);
     // It completed: one handoff so far, the owner's limit of 1.
     handoffs().update(written.handoffs[0]!.id, (entry) => ({ ...entry, state: "done", successorId: "agent-next", successorAt: clock.toISOString(), endedAt: clock.toISOString() }));
-    expect((await handoff(tools)).text).toBe(`Refused: request ${REQUEST} was handed over 1 times, the owner's limit per request (handoff.maxPerRequest).`);
+    const done = handoffs().list();
+    await store(workerTurn(40, { usage: usageOf(160_000_000) }, "agent-next"));
+    await start(fake, runner, workerTurn(40, { usage: usageOf(160_000_000) }, "agent-next"));
+    expect(handoffs().list()).toEqual(done);
     expect(interventions()).toEqual(written.interventions);
     // The loop guard: 12 commands for the request in 24 hours.
     createCoordinationStore(home).set({ key: "handoff.maxPerRequest", value: 5 });
-    await store(workerTurn(40, { usage: usageOf(160_000_000) }));
     const orchestrator = createOrchestratorStore(home, { now: () => clock });
     for (let n = 0; n < COMMAND_LIMIT_PER_REQUEST; n += 1) {
       orchestrator.appendCommand({ id: `c${n}`, workspaceId: WORKSPACE_ID, managerId: MANAGER, requestId: REQUEST, situation: "s", command: "c", reason: "r", sentText: "BM-COMMAND", outcome: "sent" });
     }
-    expect((await handoff(tools)).text).toBe(`Refused: the commands for request ${REQUEST} reached the loop guard; ask the owner with bm_ask_owner.`);
+    await start(fake, runner, workerTurn(40, { usage: usageOf(160_000_000) }, "agent-next"));
+    expect(handoffs().list()).toEqual(done);
     expect(fake.sends).toEqual([]);
   });
 });
@@ -332,18 +339,15 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
   it("asks the idle Worker for its note after a safe point, builds the brief, commands the Manager, and links the successor it creates", async () => {
     await store(...heavyRequest());
     const fake = daemon();
-    const runner = runnerOf();
-    const tools = toolsOf(fake, runner);
-
-    // Accepted: logged as a handoff, the note asked at once (the Worker is idle after closing a bead).
-    const accepted = await handoff(tools);
-    expect(accepted).toMatchObject({ ok: true, text: expect.stringContaining(`Worker ${WORKER} was idle after a safe point: it was asked for its handoff note now.`) });
-    expect(accepted.text).toContain(`Handoff ${handoffs().list()[0]!.id} of request ${REQUEST} accepted: its request read 160,000,000 tokens since it started (threshold 150,000,000).`);
+    // The heavy turn that closed a bead ends: the handoff starts by itself, logged as one, and the note is asked at once.
+    const runner = await start(fake);
     expect(fake.sends).toEqual([{ id: WORKER, text: noteRequestOf({ requestId: REQUEST }) }]);
     expect(isPluginNotice(fake.sends[0]!.text)).toBe(true);
     const [asked] = handoffs().list();
-    expect(asked).toMatchObject({ workerId: WORKER, managerId: MANAGER, requestId: REQUEST, state: "noting", noteAskedAt: clock.toISOString(), reason: "Its request read 160M tokens." });
-    expect(interventions()).toMatchObject([{ id: asked!.interventionId, kind: "handoff", targetAgentId: WORKER, requestId: REQUEST, trigger: "orchestrator", expected: "successor-progresses" }]);
+    expect(asked).toMatchObject({ workerId: WORKER, managerId: MANAGER, requestId: REQUEST, state: "noting", noteAskedAt: clock.toISOString(), reason: CROSSED });
+    expect(interventions()).toMatchObject([{ id: asked!.interventionId, kind: "handoff", targetAgentId: WORKER, requestId: REQUEST, trigger: "threshold.crossed", expected: "successor-progresses" }]);
+    // No model asked for it: nothing reached the Orchestrator.
+    expect(fake.sends.filter((sent) => sent.id === ORCHESTRATOR)).toEqual([]);
 
     // The note turn: the Worker posts bm_report's block with its handoffNote in its own chat.
     clock = new Date(T0 + 32 * MIN);
@@ -355,7 +359,7 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
     // The command: to the Manager only, intent handoff on coordination:handoff, the brief in its body.
     expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MANAGER]);
     const block = parseCommandBlock(fake.sends[1]!.text)!;
-    expect(block).toMatchObject({ from: "orchestrator", to: "manager", requestId: REQUEST, intent: "handoff", authority: COORDINATION_HANDOFF_AUTHORITY, effects: [], approved: [], why: "Its request read 160M tokens." });
+    expect(block).toMatchObject({ from: "orchestrator", to: "manager", requestId: REQUEST, intent: "handoff", authority: COORDINATION_HANDOFF_AUTHORITY, effects: [], approved: [], why: CROSSED });
     expect(block.limits).toEqual(["no-commit-push-deploy", "no-real-data"]);
     expect(block.body).toContain(`${HANDOFF_FROM_LABEL} = ${WORKER}`);
     const [briefed] = handoffs().list();
@@ -419,8 +423,7 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
   it("a successor the label names but another agent created, or of another request, completes nothing", async () => {
     await store(...heavyRequest());
     const fake = daemon();
-    const runner = runnerOf();
-    await handoff(toolsOf(fake, runner));
+    const runner = await start(fake);
     const [entry] = handoffs().list();
     handoffs().update(entry!.id, (current) => ({ ...current, state: "commanded", commandSentAt: clock.toISOString(), brief: "b" }));
     const stranger = await fake.api.workspaces.ref(WORKSPACE_ID).agents.create({ config: { provider: "bm-worker" }, parent: REVIEWER, labels: { [HANDOFF_FROM_LABEL]: WORKER } });
@@ -436,9 +439,9 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
   it("a running Worker waits; a turn without a safe point asks nothing; its next safe turn does", async () => {
     await store(workerTurn(10, { usage: usageOf(160_000_000) }));
     const fake = daemon({ worker: "running" });
-    const runner = runnerOf();
-    const accepted = await handoff(toolsOf(fake, runner));
-    expect(accepted.text).toContain(`It waits for Worker ${WORKER}'s next safe point (a bead closed, beads-done or a review verdict) and idle moment`);
+    // The crossing turn closed no bead: the handoff starts and waits for a safe point.
+    const runner = await start(fake, runnerOf(), workerTurn(10, { usage: usageOf(160_000_000) }));
+    expect(handoffs().list()).toMatchObject([{ state: "waiting", noteAskedAt: null }]);
     expect(fake.sends).toEqual([]);
     fake.byId(WORKER)!.status = "idle";
     // A turn that only worked on: no safe point, nothing asked.
@@ -455,8 +458,7 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
   it("goes on without the note: its note turn carried none, or 10 minutes passed at any recorded turn; a busy Manager waits", async () => {
     await store(...heavyRequest());
     const fake = daemon({ manager: "running" });
-    const runner = runnerOf();
-    await handoff(toolsOf(fake, runner));
+    const runner = await start(fake);
     // Ten minutes and a second on, another agent's turn ends: the brief is built without a note; the Manager is busy, so it waits.
     clock = new Date(T0 + 30 * MIN + NOTE_WAIT_MS + 1_000);
     await runner.turnRecorded({ agent: { id: REVIEWER }, timeline: [] }, turn({ agentId: REVIEWER, role: "reviewer", endedAt: clock.toISOString(), at: clock.toISOString() }), fake.paseo);
@@ -473,8 +475,7 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
   it("a turn that began before the note request is not its answer: the handoff keeps waiting for the note", async () => {
     await store(...heavyRequest());
     const fake = daemon();
-    const runner = runnerOf();
-    await handoff(toolsOf(fake, runner));
+    const runner = await start(fake);
     // A turn of the Worker that started ten minutes before the request went out and ends now.
     clock = new Date(T0 + 31 * MIN);
     await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(31, { startedAt: iso(T0 + 20 * MIN) }), fake.paseo);
@@ -485,8 +486,7 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
   it("a canceled note turn without the note is no answer: the handoff keeps waiting for the note until its bound", async () => {
     await store(...heavyRequest());
     const fake = daemon();
-    const runner = runnerOf();
-    await handoff(toolsOf(fake, runner));
+    const runner = await start(fake);
     clock = new Date(T0 + 32 * MIN);
     await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(32, { startedAt: iso(T0 + 31 * MIN), outcome: "canceled" }), fake.paseo);
     expect(handoffs().list()[0]).toMatchObject({ state: "noting", brief: null });
@@ -500,8 +500,9 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
   it("the owner's switch stops it at once: a pending handoff ends at its next step, and the send refuses a handoff while off", async () => {
     await store(...heavyRequest());
     const fake = daemon({ worker: "running" });
-    const runner = runnerOf();
-    await handoff(toolsOf(fake, runner));
+    // Started at its crossing turn; the note request is held while the Worker runs.
+    const runner = await start(fake);
+    expect(handoffs().list()[0]).toMatchObject({ state: "waiting" });
     createCoordinationStore(home).set({ key: "handoff.enabled", value: false });
     fake.byId(WORKER)!.status = "idle";
     await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, heavyRequest()[1]!, fake.paseo);
@@ -621,8 +622,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
         return new Promise<void>(() => {});
       },
     });
-    const first = runnerOf(() => binderOf(ROLE_URL, bindings, () => {}));
-    await handoff(toolsOf(fake, first));
+    const first = await start(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})));
     clock = new Date(T0 + 32 * MIN);
     fake.byId(WORKER)!.status = "idle";
     void first.turnRecorded({ agent: { id: WORKER }, timeline: [] }, noteTurn(), fake.paseo);
@@ -633,7 +633,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
 
   /** The handoff accepted, the note asked, and the note turn recorded: the step where the successor is made. */
   async function upToTheBrief(fake: FakePaseo<unknown>, runner: HandoffRunner, between: () => void = () => {}): Promise<void> {
-    await handoff(toolsOf(fake, runner));
+    await start(fake, runner);
     between();
     clock = new Date(T0 + 32 * MIN);
     const posted = `BM-REPORT\nrequestId: ${REQUEST}\nphase: beads-done\ntier: Large (changed: no)\nfilesChanged: src/invoice/date.ts\nbeadsCreated: none\nbeadsUpdated: none\nbeadsClosed: bm-d1\nbeadsReady: bm-d2\nreviewFindingsOpen: none\nbuildAndTests: \`npm test\` pass\nskillsUsed: none\ndecided: none\nblockers: none\nhandoffNote: Parsing is done; next, bm-d2.`;
@@ -725,8 +725,7 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
     bindManager(bindings);
     createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
     const fake = boundDaemon(bindings);
-    const runner = runnerOf(() => binderOf(ROLE_URL, bindings, () => {}));
-    await handoff(toolsOf(fake, runner));
+    const runner = await start(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})));
     clock = new Date(T0 + 32 * MIN);
     fake.byId(WORKER)!.status = "idle";
     // The same turn end delivered twice, concurrently (and a third while the creation runs).
@@ -861,6 +860,37 @@ describe("a bound Manager: the plugin creates the successor, the Manager is info
     expect(parseCommandBlock(fake.sends[1]!.text)!.body).toContain(`${HANDOFF_FROM_LABEL} = ${WORKER}`);
     expect(handoffs().list()[0]).toMatchObject({ state: "commanded", successorId: null });
   });
+
+  it("a request of a mission: the successor is created in the request's repo under the mission's current Main and joins the roster (missions design §9.5)", async () => {
+    const MAIN = "agent-main";
+    await store(...heavyRequest());
+    const bindings = createBindingStore(home);
+    const created = createMissionStore(home).create({ code: "INV", name: "Invoices", goal: "", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MAIN });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+    const missionId = created.mission.missionId;
+    bindAgent(bindings, MAIN, { role: "manager", workspaceId: "wks-home", missionId });
+    createMissionRoster(home).add(missionId, { requestId: REQUEST, workspaceId: WORKSPACE_ID, topic: "Invoice dates", workerId: WORKER });
+    // The Main was replaced since the Worker was created: its parent label still names the old one, the registry the current one.
+    createRequestRegistry(home).register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MAIN, workerId: WORKER });
+    createRequestRegistry(home).reassignManager(WORKSPACE_ID, REQUEST, MAIN);
+    const fake = boundDaemon(bindings);
+    fake.agents.push({ id: MAIN, provider: "bm-manager", status: "idle", workspaceId: "wks-home", labels: { "bm.role": "manager", "bm.missionId": missionId }, createdAt: iso(T0), archivedAt: null });
+    await upToTheBrief(fake, runnerOf(() => binderOf(ROLE_URL, bindings, () => {})));
+
+    const [entry] = handoffs().list();
+    expect(entry).toMatchObject({ managerId: MAIN, missionId, state: "done", successorId: "created-1" });
+    // Created through the repo's workspace, under the Main, with no cwd of its own (Paseo places it in the repo).
+    expect(fake.creates).toHaveLength(1);
+    expect(fake.creates[0]!.options).toMatchObject({ parent: MAIN, labels: { "bm.requestId": REQUEST, [HANDOFF_FROM_LABEL]: WORKER } });
+    expect(fake.creates[0]!.options.cwd).toBeUndefined();
+    expect(bindings.bindingOfAgent("created-1")).toMatchObject({ role: "worker", state: "bound", parentId: MAIN, missionId });
+    expect(createMissionRoster(home).get(missionId, REQUEST)).toMatchObject({ workerIds: [WORKER, "created-1"], state: "active" });
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)).toMatchObject({ managerId: MAIN, workerIds: [WORKER, "created-1"] });
+    // The Main is told in one notice — the informational command — and the outgoing Worker gets its BM-REPLACED.
+    expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER, MAIN, WORKER]);
+    expect(parseCommandBlock(fake.sends[1]!.text)!.body).toBe(handoffInfoOf(entry!, "created-1"));
+    expect(createMissionStore(home).get(missionId)).toMatchObject({ mainId: MAIN, state: "open" });
+  });
 });
 
 describe("the note request follows the outgoing Worker's binding (design §16.7)", () => {
@@ -873,14 +903,14 @@ describe("the note request follows the outgoing Worker's binding (design §16.7)
     await store(...heavyRequest());
     bindWorker();
     const fake = daemon();
-    expect((await handoff(toolsOf(fake))).ok).toBe(true);
+    await start(fake);
     expect(fake.sends).toEqual([{ id: WORKER, text: noteRequestOf({ requestId: REQUEST }, { bound: true }) }]);
   });
 
   it("an unbound Worker is asked to post the block", async () => {
     await store(...heavyRequest());
     const fake = daemon();
-    expect((await handoff(toolsOf(fake))).ok).toBe(true);
+    await start(fake);
     expect(fake.sends).toEqual([{ id: WORKER, text: noteRequestOf({ requestId: REQUEST }) }]);
   });
 });
@@ -994,7 +1024,7 @@ describe("the brief keeps the newest facts and the open questions (design §7.17
     expect(brief.length).toBeLessThanOrEqual(HANDOFF_BRIEF_MAX_CHARS);
     expect(labels.slice(0, 12)).toEqual(["BM-H", "role:", "requestId:", "managerAgentId:", "replaces:", "lastReport:", "tier:", "reviewCalls:", "branch:", "diffStat:", "note:", "reason:"]);
     expect(brief).toContain(`lastReport: bead-implemented at ${iso(T0 + 20 * MIN)} (30 min before this brief)`);
-    expect(brief).toContain(`reason: (the Orchestrator's, at ${added.requestedAt}; the facts above are newer) Past 151M tokens after M1-M2, still M3-M5.`);
+    expect(brief).toContain(`reason: (at ${added.requestedAt}; the facts above are newer) Past 151M tokens after M1-M2, still M3-M5.`);
     expect(brief).toContain("note: M3 and M4 are done; M5 is next.");
     const closed = lines.find((line) => line.startsWith("beadsClosed: "))!;
     expect(closed).toMatch(/^beadsClosed: \+\d+ earlier, .*esm-independence-vfz\.39, esm-independence-vfz\.40$/);

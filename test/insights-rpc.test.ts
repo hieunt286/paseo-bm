@@ -243,7 +243,7 @@ describe("insights.summary: A-12 from the intervention log (autonomy design §G.
     );
     const all = handleInsightsSummary({ window: "all" }, deps);
     expect(insightsSummaryRpc.output.parse(all)).toEqual(all);
-    expect(all.interventions.map((row) => row.kind)).toEqual(["answer", "unblock", "correct", "stop", "compact", "handoff", "advice"]);
+    expect(all.interventions.map((row) => row.kind)).toEqual(["answer", "unblock", "correct", "stop", "compact", "handoff", "advice", "govern"]);
     expect(all.interventions[0]).toEqual({ kind: "answer", recorded: 4, met: 2, missed: 1, unknown: 1, pending: 0, share: 2 / 3 });
     expect(handleInsightsSummary({ window: "all", workspaceId: WS_B }, deps).interventions[0]).toMatchObject({ recorded: 1, unknown: 1, share: null });
     expect(handleInsightsSummary({ window: "7d" }, deps).interventions[0]).toMatchObject({ recorded: 3, met: 1, missed: 1, share: 0.5 });

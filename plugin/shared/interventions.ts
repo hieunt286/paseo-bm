@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { workerSignalSchema } from "./orchestrator";
+import { GOVERNOR_STEPS } from "./orchestrator-command";
 
 /**
  * The coordination intervention log (autonomy design §G.3, REQ-127, ADR-021):
@@ -8,7 +9,9 @@ import { workerSignalSchema } from "./orchestrator";
  * `eval-metrics.ts`) and Insights read one definition.
  *
  * An entry is one intervention of the Orchestrator — an answer, an unblock, a
- * correction, a stop; later a compaction, a handoff, advice — with what
+ * correction, a stop; later a compaction, a handoff, advice, and the
+ * governor's steps 2–4 (missions design §9.3: a nudge, a re-plan or an
+ * arbitration to a mission's Main, `govern`; a stop on its stop step) — with what
  * triggered it, whom it targeted, the outcome expected of it and the window
  * that outcome is checked over, then the outcome the check settled. Ids,
  * times and enums only: never a command, a reason or any other text.
@@ -18,8 +21,8 @@ import { workerSignalSchema } from "./orchestrator";
 
 const MINUTE_MS = 60_000;
 
-/** The kinds, in the order of design §G.3's table. */
-export const INTERVENTION_KINDS = ["answer", "unblock", "correct", "stop", "compact", "handoff", "advice"] as const;
+/** The kinds, in the order of design §G.3's table; then `govern` (missions design §9.3). */
+export const INTERVENTION_KINDS = ["answer", "unblock", "correct", "stop", "compact", "handoff", "advice", "govern"] as const;
 export const interventionKindSchema = z.enum(INTERVENTION_KINDS);
 export type InterventionKind = z.infer<typeof interventionKindSchema>;
 
@@ -33,10 +36,12 @@ export type InterventionOutcome = z.infer<typeof interventionOutcomeSchema>;
  * (`decision.opened`, `request.stalled`, `worker.signal`, `advice.due` from
  * the advice bead, and `threshold.crossed` from Phase 3, design §G.7), the
  * owner's word in the Orchestrator's chat (`owner`), or the Orchestrator's
- * own initiative with no event of its wake behind it (`orchestrator`).
+ * own initiative with no event of its wake behind it (`orchestrator`), or the
+ * governor's ladder (`governor`, missions design §9.3: a family's figures
+ * crossed; a nudge, a re-plan, an arbitration, a stop on the stop step).
  * Additive: the store stays `version: 1`.
  */
-export const INTERVENTION_TRIGGERS = ["decision.opened", "request.stalled", "worker.signal", "advice.due", "threshold.crossed", "owner", "orchestrator"] as const;
+export const INTERVENTION_TRIGGERS = ["decision.opened", "request.stalled", "worker.signal", "advice.due", "threshold.crossed", "owner", "orchestrator", "governor"] as const;
 export const interventionTriggerSchema = z.enum(INTERVENTION_TRIGGERS);
 export type InterventionTrigger = z.infer<typeof interventionTriggerSchema>;
 
@@ -49,6 +54,7 @@ export const EXPECTED_OUTCOMES = [
   "tokens-per-turn-down",
   "successor-progresses",
   "owner-answers",
+  "figures-clear",
 ] as const;
 export const expectedOutcomeSchema = z.enum(EXPECTED_OUTCOMES);
 export type ExpectedOutcome = z.infer<typeof expectedOutcomeSchema>;
@@ -61,6 +67,7 @@ export const EXPECTED_OUTCOME_OF: Readonly<Record<InterventionKind, ExpectedOutc
   compact: "tokens-per-turn-down",
   handoff: "successor-progresses",
   advice: "owner-answers",
+  govern: "figures-clear",
 };
 
 /**
@@ -76,6 +83,8 @@ export const INTERVENTION_WINDOW_MS: Readonly<Record<InterventionKind, number>> 
   compact: 60 * MINUTE_MS,
   handoff: 60 * MINUTE_MS,
   advice: 7 * 24 * 60 * MINUTE_MS,
+  // The governor's default window (`governor.windowMinutes`): it checks again then (missions design §9.3).
+  govern: 30 * MINUTE_MS,
 };
 
 /**
@@ -112,8 +121,11 @@ export const HANDOFF_OUTCOME = { turns: 3, share: 0.5 } as const;
  * `permission-waiting` or `danger` signal of a `correct`); `signal` the
  * Worker signal a `correct` or `stop` answered; `commandId` the delivered
  * command it is (`unblock`, `correct`, `stop`), under the id the commands
- * store (`proposals.json`) records it with. `checkedAt` is when the check
- * settled it, null while `pending`.
+ * store (`proposals.json`) records it with (and `govern`); `missionId`,
+ * `step` and `families` a governor step's mission, its step (`govern`) and
+ * the families of the ladder it concerns, whose figures a `govern` expects
+ * back under their thresholds. `checkedAt` is when the check settled it,
+ * null while `pending`.
  */
 export const interventionEntrySchema = z.object({
   id: z.string().min(1),
@@ -131,6 +143,9 @@ export const interventionEntrySchema = z.object({
   alertKey: z.string().min(1).optional(),
   signal: workerSignalSchema.optional(),
   commandId: z.string().min(1).optional(),
+  missionId: z.string().min(1).optional(),
+  step: z.enum(GOVERNOR_STEPS).optional(),
+  families: z.array(z.string().min(1)).optional(),
 });
 export type InterventionEntry = z.infer<typeof interventionEntrySchema>;
 

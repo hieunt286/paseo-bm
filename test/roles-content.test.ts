@@ -166,10 +166,9 @@ describe("budgets (design §A.11)", () => {
 });
 
 describe("retired mechanisms stay retired (ADR-017, design §A.14)", () => {
-  it("says what replaced Autopilot (autonomy design §B.8): the owner's word, a class the owner delegated, and the policy's scope for events", () => {
-    keys(O, "the owner's word covers what it covers", "owner's own latest message", "covers any effect but");
-    keys(O, "a delegated class covers its own effects", "class the owner delegated", "covers its own");
-    keys(O, "events beyond decisions come only where the policy shadows or delegates a class", "policy shadows or delegates a class");
+  it("says what replaced Autopilot and the grants (autonomy design §B.8, missions design §9.1): no effect of its own, and a stop on the owner's word, a delegated class or an answered decision", () => {
+    keys(OR, "its commands carry no effect, and no answer grants one", "yours carry none", "no answer grants one");
+    keys(OR, "a stop goes on the owner's word, a class the owner delegated, or an answered decision", "A stop goes on the", "owner's own latest message", "class the owner delegated", "decision the owner answered");
   });
 
   it("the Manager never sends answers or questions to a Worker, and a Worker never expects a Manager's facts", () => {
@@ -660,7 +659,7 @@ describe("bound role files and the unbound hand path (ADR-027 decisions 8–9)",
     for (const name of ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory"]) verbatim(W, `\`${name}\``);
     for (const name of ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]) verbatim(M, `\`${name}\``);
     // Missions design §4, §11: a Main's own tools.
-    for (const name of ["bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission"]) verbatim(M, `\`${name}\``);
+    for (const name of ["bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission"]) verbatim(M, `\`${name}\``);
   });
 
   it("names every tool a bound Manager or Worker lists, so none is left untaught", () => {
@@ -686,7 +685,14 @@ describe("bound role files and the unbound hand path (ADR-027 decisions 8–9)",
   });
 });
 
-describe("orchestrator.md — decides what reaches it, verifies, declares effects, asks with prepared actions", () => {
+/**
+ * Missions design §9, §11 (ADR-029, ADR-030, bead bm-missions-9qc3.23): the
+ * Orchestrator's file is the governor's — it governs the process of missions
+ * through their Mains, reads the figures and the charter first, acts on the
+ * ladder's re-plan and stop steps, arbitrates and splits; it never briefs,
+ * corrects or answers a Worker, and decides no Worker's question.
+ */
+describe("orchestrator.md — the governor: reads the figures and the charter, acts through Mains, asks with prepared commands", () => {
   it("keeps three limits: changes nothing, acts within the owner's authority, only what its tools show", () => {
     rule(OR, "changes nothing", /YOU CHANGE NOTHING YOURSELF/);
     rule(OR, "provider tools are not for this job", /your provider's own shell and file tools are not for this job/);
@@ -696,115 +702,121 @@ describe("orchestrator.md — decides what reaches it, verifies, declares effect
     rule(OR, "never guesses", /you NEVER guess/);
   });
 
-  it("names the effects only an answered decision's grant covers, exactly as the plugin does (design §A.7)", () => {
-    const owed = OR.slice(OR.indexOf("covers any effect but"), OR.indexOf("which need the grant"));
+  it("carries no effect, and names the effects only the owner's answers to a Worker's questions and the repo's boundary allow (§8 point 4, §9.1)", () => {
+    keys(OR, "its commands carry none and no answer grants one", "yours carry none", "no answer grants one");
+    const owed = OR.slice(OR.indexOf("A Worker's effects"), OR.indexOf("come only from"));
     for (const effect of CONFIRM_EFFECTS) expect(owed, effect).toContain(effect);
-    rule(OR, "the grant of an answered decision", /need the grant of a decision the owner answered/);
+    rule(OR, "a Worker's effects come from the owner and the boundary", /come only from the owner's answers to its own questions and its repo's action boundary/);
+    // Bead .28: an o: answer grants nothing; the options' effects are information.
+    expect(orchestratorFace("bm_ask_owner").description).toContain("the effects it involves (information for the owner: no answer grants them)");
+    keys(O, "an option's effects are information, never a grant", "its effects", "information, never a grant");
+    expect(O, "no grant left in the role").not.toMatch(/with its grant|grant of a decision|passing its `decisionId`/);
   });
 
-  it("points at its tools' own descriptions instead of listing them, and names no tool it is not served", () => {
+  it("names every tool it is served and no other, and points at their descriptions", () => {
     // Bead 81y2.24: the hand-kept list had drifted (bm_predict missing, bm_assessment still there).
     keys(O, "the tools describe themselves", "`bm_` tool's own description", "what it refuses");
     const served = toolFacesFor("orchestrator").map((face) => face.name);
     for (const face of toolFacesFor("orchestrator")) expect(face.description.length, face.name).toBeGreaterThan(40);
-    const named = [...orchestrator.matchAll(/`(bm_[a-z_]+)`/g)].map((match) => match[1]!);
+    const named = new Set([...orchestrator.matchAll(/`(bm_[a-z_]+)`/g)].map((match) => match[1]!));
     for (const name of named) expect(served, name).toContain(name);
+    for (const name of served) expect(named.has(name), `${name} served but not named`).toBe(true);
+    // The governor's retired tools (§9.1) are named nowhere, backticked or not.
+    expect(O).not.toMatch(/bm_send_command|bm_compact|bm_handoff|bm_questions|bm_ask_project|bm_peer_reply/);
     // What the descriptions do not say: how much to read, verify first, what to note, and without tools.
     rule(O, "summaries by default, full on demand", /`detail: "full"` only when (one|a summary) does not answer/);
     rule(O, "verifies a claim with bm_repo", /check a claim with (it|`bm_repo`) before acting on it/);
     // Autonomy design §E.2 (bead 3e5v.3): one line on when to read a chain with bm_why.
     keys(O, "reads why with bm_why before acting on it", "before acting on a claim about why", "`bm_why`");
-    rule(O, "keeps notes", /one short note per decision, preference or standing instruction/);
+    // Bead .28: a note is kept by mission or by project.
+    keys(O, "keeps one note per decision or standing instruction, by mission or project", "one short note per decision, preference or standing", "instruction", "`bm_note`", "by mission or by project");
+    expect(orchestratorFace("bm_note").description).toContain("Give workspaceId or missionId, not both.");
     rule(O, "without its tools: try once, then one line and stop", /Without (them|the tools), say\s+so in one line and stop—but only after you attempted the named tool once/);
     keys(O, "a tool is unavailable only after discovery or transport fails", "tool-discovery or transport error", "Input validation", "policy refusal", "proves it is callable", "Never infer that a tool is missing", "because you have not called it yet");
   });
 
-  it("knows what reaches it: the owner's messages, BM-EVENTS lines and BM-ANSWER notices", () => {
+  it("governs the process through the Mains, after reading the figures and the charter", () => {
+    keys(O, "governs the PROCESS of missions; each Main runs its work", "**Main** that runs its work", "govern the PROCESS of the missions");
+    keys(O, "reads the figures and the charter first, with bm_missions", "Read the figures and the charter before you act", "`bm_missions`", "charter", "figures against the owner's thresholds", "ladder");
+    keys(O, "the plugin records and nudges; the model acts from the re-plan", "nudges the Main itself", "from the re-plan");
+    keys(O, "the work is the Main's", "against the charter", "the work is the Main's to run");
+    keys(O, "speaks through the Main with bm_govern: the figures and the charter line, one command per situation", "through its Main with `bm_govern`", "name the figures", "charter line", "one command per situation");
+    rule(O, "the Main's language", /in the language of the Main's chat with the owner/);
+    rule(O, "only a stop to a Worker, nothing to a Reviewer", /Only a stop goes to a Worker, and no command to a Reviewer/);
+    // Missions design §9.4: bm_send_command is replaced by bm_govern, whose command approves nothing.
+    expect(orchestratorFace("bm_govern").description).toMatch(/with no effect: it approves nothing, and the Main decides how/);
+    expect(orchestratorFace("bm_govern").description).toContain("Never to a Worker: its Main directs it.");
+    // Part of the authority limit: a refusal is final, and never worked around.
+    rule(OR, "a refusal sent nothing", /A refusal means nothing was sent/);
+    rule(OR, "never reword", /never reword to get through/);
+  });
+
+  it("knows what reaches it: the governor's events, as their lines name them (§9.7)", () => {
     rule(O, "BM-EVENTS is never the owner's word", /\*\*`BM-EVENTS`\*\* is the plugin's, never the owner's word/);
     rule(O, "looks before it acts, and does not reply to nothing", /Look before you act; nothing to do: do not reply/);
-    const events: BmEvent[] = [
-      { type: "decision.opened", workspaceId: "w", requestId: "r", decisionId: "q:r:Q1", askedBy: null, asks: "decision" },
-      { type: "request.finished", workspaceId: "w", requestId: "r", managerId: "m", at: "t" },
-      { type: "request.stalled", workspaceId: "w", requestKey: "r", managerId: null, reason: "idle-unfinished", since: "t" },
-      { type: "worker.signal", workspaceId: "w", workerId: "x", requestKey: "r", signal: "stuck", since: "t" },
-      { type: "advice.due", workspaceId: "w", finished: 5, at: "t" },
-      { type: "threshold.crossed", workspaceId: "w", requestId: "r", agentId: "x", role: "worker", kind: "compact", figure: "tokensPerTurn", value: 6, threshold: 5, at: "t", cycle: 0 },
-      {
-        type: "writers.observed",
-        workspaceId: "w",
-        file: "src/a.js",
-        writers: [
-          { agentId: "x", role: "worker", requestId: "r", startedAt: "t0" },
-          { agentId: "y", role: "worker", requestId: null, startedAt: "t1" },
-        ],
-        alertKey: "writers-observed:w:src/a.js",
-        at: "t",
-      },
-    ] as BmEvent[];
+    const figure = { id: "writersOnOneFile", family: "mess", value: 3, threshold: 2 };
+    const events = [
+      { type: "mission.signal", missionId: "m1", family: "mess", figures: [figure], step: 3, at: "t" },
+      { type: "mission.conflict", missions: ["m1", "m2"], workspaceId: "w", area: "src", evidence: "both wrote src/a.ts" },
+      { type: "mission.scope", missionId: "m1", workspaceId: "w", requestId: "r", linkId: null },
+      { type: "mission.review", missionId: "m1", reason: "finished-10", value: 10, figure: null },
+      { type: "mission.split", missionId: "m1", code: "REF", name: "Refunds", goal: "Refunds.", repos: ["w"], requestIds: [], reason: "Another goal.", at: "t" },
+      { type: "worker.signal", workspaceId: "w", workerId: "x", requestKey: "r", signal: "danger", turnStart: "t0", alertKey: "a", since: "t", interruptUntil: "t2" },
+    ] as unknown as BmEvent[];
+    const served = toolFacesFor("orchestrator").map((face) => face.name);
     for (const event of events) {
-      expect(eventLineOf(event)).toContain(event.type);
+      const line = eventLineOf(event);
+      expect(line).toContain(event.type);
       expect(orchestrator, event.type).toContain(`\`${event.type}\``);
+      // Each tool an event line names is served and named by the role file.
+      for (const [, tool] of line.matchAll(/\b(bm_[a-z_]+)/g)) {
+        expect(served, `${event.type}: ${tool}`).toContain(tool);
+        expect(orchestrator, `${event.type}: ${tool}`).toContain(`\`${tool}\``);
+      }
     }
-    // Design §F.1 (bead i8fc.1): two agents on one file is detection only; the Orchestrator checks it and tells the Manager.
-    keys(O, "writers.observed: check the file with bm_repo, tell its Manager when one change may have undone the other", "`writers.observed`", "`bm_repo`", "undone the other", "tell its Manager");
-    // Design §16.8: an off-tool Reviewer raises the `off-tool-review` signal.
-    for (const signal of ["stuck", "permission", "danger", "failing", "heavy", "outside", "off-tool-review"]) expect(O, signal).toContain(`\`${signal}\``);
-    keys(O, "danger: stopped unless the owner asked for it", "`danger`", "unless the owner asked for it", "`bm_direct_worker`");
-    // When it may interrupt is the line's and the tool's to say (bead 81y2.24).
+    // The wakes retired by §9.1 are named nowhere: they feed the figures.
+    expect(O).not.toMatch(/decision\.opened|request\.finished|request\.stalled|advice\.due|threshold\.crossed|writers\.observed/);
+    for (const signal of ["stuck", "permission", "failing", "heavy", "outside", "off-tool-review"]) expect(O, signal).not.toContain(`\`${signal}\``);
+    // §9.3 step 3: the re-plan with the figures and the charter line; step 4: escalate with a prepared command.
+    keys(O, "mission.signal: bm_govern replan with the figures and the charter line", "`mission.signal`", "re-plan due", "`bm_govern` step `replan`", "figures", "charter line");
+    keys(O, "drift persisting after the re-plan: bm_ask_owner with a prepared command to the Main", "drift persists after your re-plan", "`bm_ask_owner`", "prepared command to the Main");
+    // §9.6: arbitration names the owner of the area and a reason; a goal change is the losing mission's card.
+    keys(O, "mission.conflict: read both, bm_arbitrate with a reason, a goal change is the owner's card", "`mission.conflict`", "read both missions", "`bm_arbitrate`", "reason both Mains read", "losing", "goal", "owner's card");
+    keys(O, "mission.scope: read, then govern or ask", "`mission.scope`", "outside the charter", "`bm_govern`", "`bm_ask_owner`");
+    keys(O, "mission.review: read against the charter, then govern, ask or note", "`mission.review`", "against its charter", "`bm_govern`", "`bm_ask_owner`", "`bm_note`");
+    // §9.1: bm_direct_worker is narrowed to a stop, on a danger signal or the governor's stop step, evidence first.
+    keys(O, "reads a danger signal's evidence first", "`danger`", "read its evidence first");
+    keys(O, "stops a Worker only on danger or a governor stop step, after its evidence, unless the owner asked for it", "`bm_direct_worker` only on a `danger` signal or a governor", "stop step", "after reading its evidence", "unless the owner asked for it");
     const danger = eventLineOf({ type: "worker.signal", workspaceId: "w", workerId: "x", requestKey: "r", signal: "danger", since: "t", interruptUntil: "t2" } as BmEvent);
     expect(danger).toContain("You may interrupt this Worker until t2 (bm_direct_worker with interrupt: true).");
-    expect(orchestratorFace("bm_direct_worker").description).toContain("allowed only while a danger signal of that Worker is open");
-    // Design §B.5, §B.3, §B.9 (beads t9lm.11, t9lm.7): a decision.opened asks the Orchestrator to decide only where the
-    // owner delegated its class to it, or to predict where the challenger is on. Its line says which and with which tool
-    // (bead 81y2.24); the role points at it.
-    keys(O, "a decision.opened is decided or predicted as its line says", "`decision.opened`", "decide or predict it", "as its line says");
-    keys(O, "a decision reaches it only to decide or predict", "a decision only to decide or predict it");
-    // Design §G.4 (bead t9lm.25): advice reaches it for every project, whatever the policy; the bullet says what to do.
-    keys(O, "advice for every project", "advice for every project");
-    keys(O, "advice.due: the findings, one decision per finding worth acting on with its change, else a note", "`advice.due`", "`bm_findings`", "`bm_ask_owner`", "worth acting on", "change on an option", "`bm_note`");
-    keys(O, "the owner may ask for advice anytime", "ask for advice anytime");
-    // Bead 7gxw.12: §G.4's review.budget is a coordination.set on a review-budget key, not a kind of its own.
-    keys(O, "a review budget is a coordination.set on its tier's key", "review budget", "`coordination.set`", "`review.*Budget` key");
-    // Design §G.5, §G.7 (bead 7gxw.10): a crossed threshold, in any project, is compacted with bm_compact when worth it, else a note;
-    // its line names the tool, and the tool's own description says what it refuses and how it runs.
-    keys(O, "threshold.crossed: bm_compact when worth it, else a note", "`threshold.crossed`", "in any project", "`bm_compact` when that is worth it", "a note with `bm_note`");
-    const crossed = eventLineOf({ type: "threshold.crossed", workspaceId: "w", requestId: null, agentId: "m", role: "manager", kind: "compact", figure: "contextShare", value: 0.62, threshold: 0.5, at: "t", cycle: 1 });
-    expect(crossed).toBe(
-      "- threshold.crossed compact — project w, Manager m, request none, at t: its context filled 62 % of its window (threshold 50 %). If a compaction is worth it, request it with bm_compact; the plugin runs it at that agent's next safe point. Otherwise keep a note with bm_note.",
-    );
-    for (const part of ["never inside a running turn", "never a Reviewer, never you", "a Worker's next step is a handoff", "BM-STATE brief", "Refused, changing nothing, when compaction is off"]) {
-      expect(orchestratorFace("bm_compact").description, part).toContain(part);
-    }
-    // Design §G.6, §G.7 (bead 7gxw.11): its handoff kind is handed to a new Worker with bm_handoff when worth it; the line
-    // names the tool, and the tool's description says what it refuses and how the Manager creates the successor.
-    keys(O, "threshold.crossed handoff: bm_handoff when worth it", "A `handoff` line", "new Worker with `bm_handoff` when that is worth it");
-    const handedOver = eventLineOf({ type: "threshold.crossed", workspaceId: "w", requestId: "r", agentId: "x", role: "worker", kind: "handoff", figure: "requestTokens", value: 160_000_000, threshold: 150_000_000, at: "t", cycle: 0 });
-    expect(handedOver).toContain("If a handoff to a new Worker is worth it, request it with bm_handoff");
-    for (const part of [
-      "Refused, changing nothing, when handoff is off",
-      "sends the Worker's Manager a BM-COMMAND to create the successor",
-      "the old Worker stays idle and is never archived",
-      "the successor proves its work again",
-      "Logged as a handoff intervention",
-    ]) {
-      expect(orchestratorFace("bm_handoff").description, part).toContain(part);
-    }
-    const advice = eventLineOf({ type: "advice.due", workspaceId: "w", finished: 5, at: "t" });
-    expect(advice).toBe(
-      "- advice.due — project w, 5 requests finished since the last advice. Read its figures with bm_findings; for each finding worth acting on, ask the owner with bm_ask_owner, one option carrying the prepared change. With none worth it, keep a note with bm_note.",
-    );
-    // What a change may be, and that only the owner's answer applies it, is the tool's own description (bead 81y2.24).
-    expect(orchestratorFace("bm_ask_owner").description).toContain("the plugin applies it only when the owner picks it — never on a precedent's, the policy's or your answer");
-    expect(orchestratorFace("bm_findings").description).toContain("Figures and short labels only, at most 4,000 characters");
-    const decision = eventLineOf({ type: "decision.opened", workspaceId: "w", requestId: "r", decisionId: "q:r:Q1", askedBy: null, asks: "decision" });
-    expect(decision).toMatch(/A decision is asked: the owner's policy delegates its class to you\. Read it with bm_decisions and choose the option the owner would, with bm_decide and your reason in one line\.$/);
-    const prediction = eventLineOf({ type: "decision.opened", workspaceId: "w", requestId: "r", decisionId: "q:r:Q1", askedBy: null, asks: "prediction" });
-    expect(prediction).toMatch(/A prediction is asked: read it with bm_decisions and give the option you expect the owner to choose with bm_predict, with your reason in one line\. The owner sees it as your proposal and decides: answer nothing\.$/);
-    expect(orchestratorFace("bm_predict").description).toContain("sees your option and reason on the decision as your proposal");
+    expect(orchestratorFace("bm_direct_worker").description).toContain("only while a danger signal of that Worker is open or a family of its mission stands at step 4");
+    // §9.6: a split runs on the mission's split level, else it is the owner's card.
+    keys(O, "splits a mission holding two goals with bm_create_main, by its split level, else the owner's card", "two goals", "`bm_create_main`", "`split` level delegated", "owner's card");
+    // §9.6: a Main's suggestion, on the owner's yes: read it, split when truly another goal in a free area, else tell the Main why.
+    keys(O, "mission.split: read it, bm_create_main for truly another goal in a free area, else bm_govern the Main with why", "`mission.split`", "`bm_missions`", "truly another goal", "area free", "`bm_create_main`", "its fields", "Main why", "`bm_govern`");
+  });
+
+  it("never briefs, corrects or answers a Worker, decides no Worker's question, and carries no words between projects or missions", () => {
+    keys(O, "a Worker is its Main's", "never brief, correct or answer a Worker", "never", "decide a Worker's question", "its Main or the owner");
+    keys(O, "never carries words between projects or missions", "ask each other through their own links", "never carry words between", "projects or missions", "command no agent to wait for you");
+    keys(O, "a review budget is the Worker's question", "review budget a", "request needs", "Worker's question", "never ask the owner");
+    // §9.1: bm_decide and bm_predict are for fallback incidents only.
+    keys(O, "only a fallback incident is its to decide or predict", "fallback incident (`f:`", "`bm_decide`", "delegated to you", "`bm_predict`");
+    expect(orchestratorFace("bm_decide").description).toContain("a Worker's question (q:…) is its Main's or the owner's");
+    expect(orchestratorFace("bm_predict").description).toContain("sees your option and reason on the incident as your proposal");
     expect(O, "no answer to a stored question in a command").not.toMatch(/answer with `bm_direct_worker`|intent `answer`, a `BM-ANSWERS` block/);
-    rule(O, "BM-ANSWER carries a grant", /\*\*`BM-ANSWER`\*\* is the owner's answer to one of your decisions, with its grant/);
-    rule(O, "carries the answer out with one command passing its decisionId", /carry it out as it says, with one command passing its `decisionId`/);
-    // The notice itself names the grant, the decisionId it is spent with, and to act now.
+  });
+
+  it("asks the owner with prepared commands to a Main, naming a class; acts on BM-ANSWER and replies to BM-ASK", () => {
+    keys(O, "options with effects and a prepared command to a Main", "two to five options", "its effects", "a prepared command to a Main");
+    keys(O, "names the class (design §B.1)", "`bm_ask_owner`", "authority does not cover", "naming its", "`class`");
+    // One open decision per request, and the replaced id only when the tool names it (bead 81y2.24): the tool says so,
+    // and RULES 3 ("you NEVER guess", pinned above) keeps the Orchestrator from claiming a replacement it did not see.
+    expect(orchestratorFace("bm_ask_owner").description).toContain("One open question per request: a new one replaces your open question of the same request (the answer names the replaced id) unless separate: true.");
+    expect(orchestratorFace("bm_ask_owner").description).toContain("the command to a Main (never a Worker: the Main directs its Workers)");
+    rule(O, "BM-ANSWER is acted on as it says", /\*\*`BM-ANSWER`\*\* is the owner's answer to one of your decisions: act on it as it says/);
+    keys(O, "a BM-ASK is replied once with bm_reply", "`BM-ASK`", "reply once with", "`bm_reply`");
+    // The notice names no grant, even one an earlier build stored (missions design §9.1: an o: answer grants nothing), and says to act now.
     const answered = {
       id: "o:w:1",
       workspaceId: "w",
@@ -816,30 +828,14 @@ describe("orchestrator.md — decides what reaches it, verifies, declares effect
       grant: { effects: ["push"], expiresAt: "2026-09-30T01:00:00.000Z", usedAt: null },
     } as unknown as Decision;
     const notice = answerNoticeOf(answered);
-    expect(notice).toContain("grant: push, for one command with decisionId o:w:1, until 2026-09-30T01:00:00.000Z");
+    expect(notice).not.toContain("grant");
     expect(notice).toContain("Act on it now");
-  });
-
-  it("writes commands as the owner would, never to a Reviewer, and never rewords around a refusal", () => {
-    rule(O, "the Manager's language", /in the language of that Manager's chat with the owner/);
-    rule(O, "never a Reviewer", /never to a Reviewer/);
-    // Part of the authority limit: a refusal is final, and never worked around.
-    rule(OR, "a refusal sent nothing", /A refusal means nothing was sent/);
-    rule(OR, "never reword", /never reword to get through/);
-    // Design §B.9: without a decision, a command goes out on the Orchestrator's own only where the owner delegated its
-    // classes — RULES 2 ("a class the owner delegated covers its own", pinned above) and the tool's own description.
-    expect(orchestratorFace("bm_send_command").description).toMatch(/Without a decision it goes out on your own only where the owner delegated every class of its effects/);
-    // A Worker's question is answered through the decision store, never in a command (change-004): the role keeps
-    // `bm_direct_worker` narrower than its description, to corrections only.
-    rule(O, "direct commands only correct", /`bm_direct_worker` only for a correction/);
-  });
-
-  it("asks the owner with prepared actions, proposing a class, and leaves the rest to bm_ask_owner's description", () => {
-    keys(O, "options with effects and a prepared command", "two to five options", "its effects", "a prepared command");
-    keys(O, "names the class it proposes (design §B.1)", "`bm_ask_owner`", "authority does not cover", "proposing its `class`");
-    // One open decision per request, and the replaced id only when the tool names it (bead 81y2.24): the tool says so,
-    // and RULES 3 ("you NEVER guess", pinned above) keeps the Orchestrator from claiming a replacement it did not see.
-    expect(orchestratorFace("bm_ask_owner").description).toContain("One open question per request: a new one replaces your open question of the same request (the answer names the replaced id) unless separate: true.");
+    // Design §G.4: advice when the owner asks — the findings, a change on an option, else a note.
+    keys(O, "the owner may ask for advice anytime: findings, a change on an option, else a note", "ask for advice anytime", "`bm_findings`", "worth acting on", "change on an option");
+    // Bead 7gxw.12: §G.4's review.budget is a coordination.set on a review-budget key, not a kind of its own.
+    keys(O, "a review budget is a coordination.set on its tier's key", "review budget", "`coordination.set`", "`review.*Budget`", "key");
+    expect(orchestratorFace("bm_ask_owner").description).toContain("the plugin applies it only when the owner picks it — never on a precedent's, the policy's or your answer");
+    expect(orchestratorFace("bm_findings").description).toContain("Figures and short labels only, at most 4,000 characters");
   });
 
   it("answers the owner as Situation / Done / Needs you, and the owner's word wins", () => {
@@ -876,7 +872,7 @@ describe("peer links and the owner-turn noise (design §7.17.8–9, REQ-176 c, R
   });
 
   it("the Orchestrator leaves projects to their links, review budgets to the Worker, and reads a danger signal first", () => {
-    keys(O, "never carries words between projects", "peer links", "never carry words between projects", "command no agent to wait for you");
+    keys(O, "never carries words between projects", "ask each other through their own links", "never carry words between projects", "command no agent to wait for you");
     keys(O, "a review budget is the Worker's question", "review budget a request needs", "Worker's question", "never ask the owner");
     keys(O, "reads a danger signal before a stop", "`danger`", "read its evidence first", "`bm_direct_worker`");
   });
@@ -896,6 +892,9 @@ describe("missions — the Main's file and the Worker's side (missions design §
     keys(M, "reads with bm_mission, keeps with bm_mission_update", "`bm_mission`", "`bm_mission_update`", "the plan", "done criterion", "evidence", "contract");
     keys(M, "a sensitive change becomes the owner's m: card, said in one line", "the owner's `m:`", "card", "one line");
     keys(M, "what is left comes from the done criteria", "\"What is left\"", "open done criteria");
+    // §9.6: work outside the goal is asked as a new mission; on the owner's yes the governor gets it, never the owner a chore.
+    keys(M, "new work outside the goal: ask if it is a new mission; on yes bm_split_mission; the governor creates it, not the owner", "outside its goal", "ask the owner", "new mission", "on yes", "`bm_split_mission`", "governor creates it, not the owner");
+    expect(M).not.toMatch(/create (it|the mission) (yourself|themselves)|in a new chat/);
     keys(M, "reads repos with bm_repo and curates memory with bm_memory", "`bm_repo`", "`bm_memory`", "with its source", "remove what no longer holds");
   });
 

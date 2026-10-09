@@ -99,7 +99,9 @@ import { createDeliveringTools, type DeliveringTools } from "./deliver-tools";
 import { createReviewTools } from "./review-tools";
 import { createPeerTools, type PeerTools } from "./peer-tools";
 import { createMissionTools } from "./mission-tools";
+import { createMissionSplitTools } from "./mission-split";
 import type { OnDecisionsSettled } from "./decision-rpc";
+import type { MissionSplitEvent } from "./event-bus";
 import { createMemoryTools } from "./memory-tools";
 import { currentTurnStartOf } from "./collector";
 import { BUILDER_SEND_LINES } from "./role-instructions";
@@ -609,6 +611,8 @@ export interface StartOptions {
   onDecisionsOpened?: (opened: readonly Decision[], paseo: unknown) => unknown;
   /** Where a Main's `bm_answer_worker` answers go (missions design §4): the delivery the owner's answers take. */
   onDecisionsSettled?: OnDecisionsSettled;
+  /** Where a Main's `bm_split_mission` suggestion goes (missions design §9.6): its `mission.split` event, to the event bus. */
+  onMissionSplit?: (events: readonly MissionSplitEvent[], paseo: unknown) => unknown;
   /** The per-agent bindings; the data folder's `ui/agent-bindings.json` by default (design §16.5). */
   bindings?: BindingStore | null;
   /** The clock that stamps a new secret's `secretSince`; tests only. */
@@ -735,7 +739,11 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
             turnStartOf: currentTurnStartOf,
             ...(options.onDecisionsSettled === undefined ? {} : { onSettled: options.onDecisionsSettled }),
           })),
-      memory.manager,
+      // Missions design §9.6: the Main's bm_split_mission, published to the governor as mission.split.
+      joinServerTools(
+        memory.manager,
+        createMissionSplitTools({ paseo: () => paseoHandle, home: () => home, log, ...(options.onMissionSplit === undefined ? {} : { publish: options.onMissionSplit }) }),
+      ),
     ),
   );
   const worker = joinServerTools(
