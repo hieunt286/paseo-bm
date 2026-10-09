@@ -36,6 +36,7 @@ import { handleChatPeers } from "../plugin/server/chat-rpc";
 import { fallbackNotice } from "../plugin/server/fallback-rpc";
 import { answerNoticeOf } from "../plugin/server/orchestrator-decisions";
 import { stateBriefOf } from "../plugin/server/compaction";
+import { peerAskText, peerMessageText, peerReplyText } from "../plugin/server/peer-tools";
 import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { DashboardError, TRACE_STORE_SCHEMA_VERSION, type ChatPeer, type FallbackIncident, type TraceVerification } from "../plugin/shared/contracts";
 import { answerDecision, confirmDecision, expireDecision, markNeedsConfirmation, supersedeDecision, withdrawDecision, type Decision } from "../plugin/shared/decisions";
@@ -307,6 +308,25 @@ describe("outbox deliveries (design §16.7)", () => {
     expect(missing).toMatchObject({ type: "notice", requestId: REQ, gist: "Batch b2", notice: { what: "The Reviewer ended its turn without a verdict", tone: "warning" } });
     expect(delivered(`BM-DELIVERY report ${RECORD}\nnothing here`)![0]).toMatchObject({ type: "notice", notice: { marker: "BM-DELIVERY", what: "A report" } });
     for (const c of [message!, missing!]) expect(chatCardSchema.parse(c)).toEqual(c);
+  });
+
+  it("draw the three peer deliveries as notice lines from the other project, with no request id (design §7.17.4)", () => {
+    const OTHER = "req-20261008T101500Z";
+    const from = { workspaceId: "ws-api", requestId: OTHER, role: "worker" as const, agentId: "w-api" };
+    const link = { linkId: "pl-0123456789ab", kind: "question" as const, from } as Parameters<typeof peerAskText>[0]["link"];
+    const ask = peerAskText({ link, title: 'api "core"', text: "Which **endpoint** serves contacts?\nWe need the schema.", context: [{ fact: "v2 exists", source: "README" }] });
+    const reply = peerReplyText({ linkId: "pl-0123456789ab", title: "web", workspaceId: "ws-web", requestId: OTHER, phase: "blocked", body: "summary: waiting on design\nblockers: the owner" });
+    const message = peerMessageText({ linkId: "pl-0123456789ab", title: "web", workspaceId: "ws-web", role: "manager", agentId: "m-web", text: "\nNo schema yet.\n", closed: true });
+    const [peer] = delivered(`BM-DELIVERY peer ${RECORD}\n${ask}`)!;
+    const [answer] = delivered(`BM-DELIVERY peer-reply ${RECORD}\n${reply}`)!;
+    const [note] = delivered(`BM-DELIVERY peer-message ${RECORD}\n${message}`)!;
+    const notice = { marker: "BM-DELIVERY", tone: "muted", project: null };
+    expect(peer).toMatchObject({ type: "notice", direction: "received", requestId: null, gist: "Which endpoint serves contacts?", notice: { ...notice, what: 'From project api "core"' } });
+    expect(answer).toMatchObject({ type: "notice", requestId: null, gist: "summary: waiting on design", notice: { ...notice, what: `Reply from project web (blocked) · request ${OTHER}` } });
+    expect(note).toMatchObject({ type: "notice", requestId: null, gist: "No schema yet.", notice: { ...notice, what: "Message from project web" } });
+    for (const c of [peer!, answer!, note!]) expect(chatCardSchema.parse(c)).toEqual(c);
+    // A body without its from line still draws the line, never the raw text.
+    expect(delivered(`BM-DELIVERY peer-message ${RECORD}\n> hi`)![0]).toMatchObject({ requestId: null, gist: "hi", notice: { what: "Message from project ?" } });
   });
 
   it("leave the answers delivery (BM-DELIVERY answers) a notice, as before", () => {

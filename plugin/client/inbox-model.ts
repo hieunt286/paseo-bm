@@ -243,6 +243,8 @@ function projectName(workspaceId: string | null, projectOf: InboxInput["projectO
 /** What each alert kind means to the owner, its colour, and what it opens. */
 export const ALERT_WORDS: Readonly<Record<AlertKind, { what: string; tone: Tone; opens: "agent" | "project" | null; agentWord: string }>> = {
   "request-stalled": { what: "A request stopped moving", tone: "warning", opens: "project", agentWord: "" },
+  // Design §7.17.5: the asking request's project; the links and why are in the detail.
+  "peer-unanswered": { what: "Another project has not answered an ask", tone: "warning", opens: "project", agentWord: "" },
   "permission-waiting": { what: "A Worker is waiting for a permission", tone: "warning", opens: "agent", agentWord: "Worker" },
   danger: { what: "A Worker ran a risky command", tone: "danger", opens: "agent", agentWord: "Worker" },
   stuck: { what: "A Worker looks stuck", tone: "warning", opens: "agent", agentWord: "Worker" },

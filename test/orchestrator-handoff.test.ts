@@ -12,11 +12,12 @@ import type { OutboxRecord } from "../plugin/server/outbox";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
-import { clearDecisionStoreCache } from "../plugin/server/decision-store";
 import {
   HANDOFF_BRIEF_MAX_CHARS,
   HANDOFF_FROM_LABEL,
+  PEER_RULES,
   REPLACED_BY_LABEL,
+  briefClosingOf,
   createHandoffRunner,
   handoffBriefOf,
   handoffCommandOf,
@@ -24,6 +25,7 @@ import {
   handoffSafePointIn,
   noteIn,
   noteRequestOf,
+  peerBlockOf,
   replacedNoticeOf,
   type HandoffRunner,
 } from "../plugin/server/handoff";
@@ -41,7 +43,10 @@ import type { Evidence, TraceRecord, Usage } from "../plugin/shared/contracts";
 import { requestFinishOf } from "../plugin/shared/evidence";
 import { HANDOFF_BRIEF_MARKER, holdsHandoffBrief } from "../plugin/shared/handoff";
 import { HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, isPluginNotice } from "../plugin/shared/notices";
-import { COORDINATION_HANDOFF_AUTHORITY, parseCommandBlock } from "../plugin/shared/orchestrator-command";
+import { COORDINATION_HANDOFF_AUTHORITY, MAX_COMMAND_BODY_CHARS, parseCommandBlock } from "../plugin/shared/orchestrator-command";
+import { answerDecision } from "../plugin/shared/decisions";
+import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
+import { makeDecision } from "./helpers/decisions";
 import { fakePaseo, type FakeCreateRequest, type FakePaseo, type FakePaseoOptions } from "./helpers/fake-paseo";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, msg, report, turn } from "./fixtures/orchestrator-traces";
 import { bindAgent } from "./helpers/bindings";
@@ -475,6 +480,21 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
     await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(31, { startedAt: iso(T0 + 20 * MIN) }), fake.paseo);
     expect(handoffs().list()[0]).toMatchObject({ state: "noting", brief: null });
     expect(fake.sends.map((sent) => sent.id)).toEqual([WORKER]);
+  });
+
+  it("a canceled note turn without the note is no answer: the handoff keeps waiting for the note until its bound", async () => {
+    await store(...heavyRequest());
+    const fake = daemon();
+    const runner = runnerOf();
+    await handoff(toolsOf(fake, runner));
+    clock = new Date(T0 + 32 * MIN);
+    await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(32, { startedAt: iso(T0 + 31 * MIN), outcome: "canceled" }), fake.paseo);
+    expect(handoffs().list()[0]).toMatchObject({ state: "noting", brief: null });
+    // Its next turn carries the note.
+    clock = new Date(T0 + 34 * MIN);
+    const posted = `BM-REPORT\nrequestId: ${REQUEST}\nphase: beads-done\ntier: Large\nhandoffNote: Next: bm-d2.`;
+    await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(34, { startedAt: iso(T0 + 33 * MIN), reports: parseReports(posted, { agentId: WORKER, at: iso(T0 + 34 * MIN) }) }), fake.paseo);
+    expect(handoffs().list()[0]).toMatchObject({ state: "commanded", note: "Next: bm-d2." });
   });
 
   it("the owner's switch stops it at once: a pending handoff ends at its next step, and the send refuses a handoff while off", async () => {
@@ -923,16 +943,88 @@ describe("the pieces", () => {
     expect(noteIn(workerTurn(32, { reports }), toolItems, REQUEST)).toBe("Next: bm-d2.");
   });
 
-  it("the brief is bounded: a long note is cut first, and the closing paragraph always stays", async () => {
-    await store(...heavyRequest("x ".repeat(3_000)));
+  it("the brief is bounded: the lists shrink before the note, nothing is cut mid-word, and the closing paragraph always stays", async () => {
+    await store(...heavyRequest(Array.from({ length: 900 }, (_, n) => `w${String(n).padStart(4, "0")}`).join(" ")));
     const added = handoffs().add({ workspaceId: WORKSPACE_ID, requestId: REQUEST, workerId: WORKER, managerId: MANAGER, interventionId: null, reason: "r" });
-    const entry = { ...added, note: "n".repeat(1_500) };
+    const note = Array.from({ length: 300 }, (_, n) => `n${String(n).padStart(3, "0")}`).join(" ");
+    const entry = { ...added, note };
     const brief = await handoffBriefOf(entry, { paseo: daemon().paseo, location: location(), git });
     expect(brief.length).toBeLessThanOrEqual(HANDOFF_BRIEF_MAX_CHARS);
-    expect(brief).toContain("Send `received` to `managerAgentId` now.");
+    expect(brief).toContain(`note: ${note}`);
+    expect(brief.match(/\bw\d+/g)!.every((word) => word.length === 5)).toBe(true);
+    expect(brief).toMatch(/^request: w0000 .* w\d{4}…$/m);
+    expect(brief.endsWith(briefClosingOf(WORKER))).toBe(true);
     expect(holdsHandoffBrief(brief)).toBe(true);
     // It fits the command's body beside the Manager's instructions.
     expect(parseCommandBlock(`BM-COMMAND\nfrom: orchestrator\nvia: chat\nto: manager\nrequestId: ${REQUEST}\nre: x\nintent: handoff\neffects: none\nauthority: coordination:handoff\napproved: none\n\n${handoffCommandOf(entry, brief).body}`)).not.toBeNull();
+  });
+
+  it("the command bounds an over-long brief at a word's end and keeps its closing paragraph", () => {
+    const entry = { id: "h1", requestId: REQUEST, workerId: WORKER, reason: "r" };
+    const closing = briefClosingOf(WORKER);
+    const body = handoffCommandOf(entry, `${HANDOFF_BRIEF_MARKER} h1\nrequest: ${"word ".repeat(1_500)}\n\n${closing}`).body;
+    expect(body.length).toBeLessThanOrEqual(MAX_COMMAND_BODY_CHARS);
+    expect(body.endsWith(`word\n…\n\n${closing}`)).toBe(true);
+  });
+});
+
+describe("the brief keeps the newest facts and the open questions (design §7.17.8 h)", () => {
+  /** Question `Qn` of the request, open or answered with option c. */
+  function question(n: number, open: boolean): void {
+    const decision = makeDecision({ id: `q:${REQUEST}:Q${n}`, workspaceId: WORKSPACE_ID, requestId: REQUEST, question: `Question number ${n} about the plan?` });
+    createDecisionStore(home).open(decision);
+    if (open) return;
+    const result = answerDecision(decision, { via: "inbox", optionKey: "c", words: null, at: iso(T0 + n * MIN) });
+    if (!result.ok) throw new Error(result.message);
+    createDecisionStore(home).transition(result.decision.id, () => ({ ok: true, decision: result.decision }), WORKSPACE_ID);
+  }
+
+  it("fixed short facts first, then the lists; the newest beads kept with +n earlier; open questions first, newest answered, +n earlier; the reason labelled with its time", async () => {
+    const beads = Array.from({ length: 40 }, (_, n) => `esm-independence-vfz.${n + 1}`);
+    await store(
+      ...heavyRequest(),
+      workerTurn(20, { reports: [report({ agentId: WORKER, at: iso(T0 + 20 * MIN), requestId: REQUEST, phase: "bead-implemented", beadsClosed: beads, beadsCreated: beads })] }),
+    );
+    for (let n = 1; n <= 30; n += 1) question(n, n === 9 || n === 10 || n === 11);
+    const added = handoffs().add({ workspaceId: WORKSPACE_ID, requestId: REQUEST, workerId: WORKER, managerId: MANAGER, interventionId: null, reason: "Past 151M tokens after M1-M2, still M3-M5." });
+    const entry = { ...added, note: "M3 and M4 are done; M5 is next." };
+    const brief = await handoffBriefOf(entry, { paseo: daemon().paseo, location: location(), git, now: () => new Date(T0 + 50 * MIN) });
+    const lines = brief.split("\n");
+    const labels = lines.map((line) => /^[\w.+-]+:/.exec(line)?.[0] ?? line.slice(0, 4));
+    expect(brief.length).toBeLessThanOrEqual(HANDOFF_BRIEF_MAX_CHARS);
+    expect(labels.slice(0, 12)).toEqual(["BM-H", "role:", "requestId:", "managerAgentId:", "replaces:", "lastReport:", "tier:", "reviewCalls:", "branch:", "diffStat:", "note:", "reason:"]);
+    expect(brief).toContain(`lastReport: bead-implemented at ${iso(T0 + 20 * MIN)} (30 min before this brief)`);
+    expect(brief).toContain(`reason: (the Orchestrator's, at ${added.requestedAt}; the facts above are newer) Past 151M tokens after M1-M2, still M3-M5.`);
+    expect(brief).toContain("note: M3 and M4 are done; M5 is next.");
+    const closed = lines.find((line) => line.startsWith("beadsClosed: "))!;
+    expect(closed).toMatch(/^beadsClosed: \+\d+ earlier, .*esm-independence-vfz\.39, esm-independence-vfz\.40$/);
+    expect(closed).not.toContain("vfz.1,");
+    const asked = lines.slice(lines.indexOf("questions:") + 1).filter((line) => line.startsWith("- Q") || line.startsWith("+"));
+    expect(asked.slice(0, 3).map((line) => line.split(":")[0])).toEqual(["- Q9", "- Q10", "- Q11"]);
+    expect(asked.slice(0, 3).every((line) => line.endsWith(" → open"))).toBe(true);
+    expect(asked[3]!.startsWith("- Q30: ")).toBe(true);
+    expect(asked.at(-1)).toMatch(/^\+\d+ earlier \(bm_decisions\)$/);
+    expect(brief.endsWith(briefClosingOf(WORKER))).toBe(true);
+  });
+
+  it("open questions are always kept, every one, even when the answered ones all give way", async () => {
+    await store(...heavyRequest());
+    for (let n = 1; n <= 12; n += 1) question(n, n <= 8);
+    const added = handoffs().add({ workspaceId: WORKSPACE_ID, requestId: REQUEST, workerId: WORKER, managerId: MANAGER, interventionId: null, reason: "r" });
+    const brief = await handoffBriefOf({ ...added, note: "x ".repeat(750) }, { paseo: daemon().paseo, location: location(), git });
+    expect(brief.length).toBeLessThanOrEqual(HANDOFF_BRIEF_MAX_CHARS);
+    for (let n = 1; n <= 8; n += 1) expect(brief).toMatch(new RegExp(`^- Q${n}: .* → open$`, "m"));
+  });
+
+  it("a request carrying a peer link keeps its peer: and peerAsk: block and both rules in the successor's brief", async () => {
+    const block = [`peer: lnk-1 from project "frontend" (wks-front), request req-20261001T000000Z`, "peerAsk:", "> Add GET /invoices/:id/pdf, please.", "> We need it by Friday."];
+    await store(...heavyRequest(), workerTurn(5, { sent: [msg(WORKER, iso(T0 + 4 * MIN), [`BM-BRIEF worker requestId: ${REQUEST}`, "role: worker", `requestId: ${REQUEST}`, `managerAgentId: ${MANAGER}`, ...block, "request: Serve the PDF endpoint."].join("\n"))] }));
+    const added = handoffs().add({ workspaceId: WORKSPACE_ID, requestId: REQUEST, workerId: WORKER, managerId: MANAGER, interventionId: null, reason: "r" });
+    const brief = await handoffBriefOf(added, { paseo: daemon().paseo, location: location(), git });
+    expect(brief).toContain([`managerAgentId: ${MANAGER}`, ...block, ...PEER_RULES, `replaces: ${WORKER}`].join("\n"));
+    // A successor's successor: the block is read again from the handoff brief, the rules once.
+    expect(peerBlockOf([brief])).toEqual([...block, ...PEER_RULES]);
+    expect(peerBlockOf(["request: no link here"])).toEqual([]);
   });
 });
 

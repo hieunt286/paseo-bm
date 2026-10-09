@@ -12,8 +12,11 @@ import { inboxQueryKeys } from "./inbox";
 import { useUpdateStatus } from "./update-status";
 
 type CustomSidebarClient = PluginClientContext & {
-  /** Added after the legacy static `addSidebarItem` API. */
-  addSidebarFooterItem?: (contribution: { id: string; Component: ComponentType<PluginHostProps> }) => () => void;
+  /**
+   * Added after the legacy static `addSidebarItem` API. Paseo 0.11 throws
+   * without a non-blank `title`, and the throw fails the plugin's whole client.
+   */
+  addSidebarFooterItem?: (contribution: { id: string; title: string; Component: ComponentType<PluginHostProps> }) => () => void;
 };
 
 export function BeadsManagerSidebarItem({ theme, onOpen }: PluginHostProps & { onOpen: () => void }) {
@@ -57,7 +60,7 @@ export function registerBeadsManagerSidebarItem(client: PluginClientContext): ()
   const custom = (client as CustomSidebarClient).addSidebarFooterItem;
   if (typeof custom === "function") {
     const SidebarItem = (props: PluginHostProps) => <BeadsManagerSidebarItem {...props} onOpen={() => client.openSurface(LAUNCHER_SURFACE_ID)} />;
-    return custom.call(client, { id: LAUNCHER_SURFACE_ID, Component: SidebarItem });
+    return custom.call(client, { id: LAUNCHER_SURFACE_ID, title: "Beads Manager", Component: SidebarItem });
   }
   return client.addSidebarItem({
     id: LAUNCHER_SURFACE_ID,

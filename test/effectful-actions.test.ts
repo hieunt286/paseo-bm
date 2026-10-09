@@ -100,6 +100,71 @@ describe("the effectful actions", () => {
     expect(effectfulCommandOf("rm -rf $OUT build", null, WORKSPACE_DIRECTORY)).toEqual({ action: null, rmNotJudged: true, scratchRm: false });
     expect(effectfulCommandOf("rm -rf build", null, null)).toEqual({ action: null, rmNotJudged: true, scratchRm: false });
   });
+
+  it("reads the SQL a command runs, not the SQL a here-document only writes (design §7.17.8 f)", () => {
+    const actionOf = (command: string) => effectfulCommandOf(command, null, WORKSPACE_DIRECTORY).action;
+    // Written into a file: text.
+    expect(actionOf("cat > migrations/down.sql <<EOF\nDROP TABLE invoices;\nTRUNCATE invoices;\nDELETE FROM invoices;\nEOF")).toBeNull();
+    expect(actionOf("cat > A.tsx <<'EOF'\n<div className=\"truncate\">\n<p className=\"truncate text-sm\">x</p>\nEOF")).toBeNull();
+    // The field trace: a stdin script that writes rollback migrations, naming no driver.
+    expect(actionOf("python3 - <<'EOF'\nfrom pathlib import Path\nPath('down.sql').write_text('DROP TABLE invoices;')\nEOF")).toBeNull();
+    // Fed to a database client: SQL that runs, read case-insensitively.
+    expect(actionOf("psql <<EOF\nDROP TABLE invoices;\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("cat <<EOF | psql app\ntruncate invoices;\nEOF")).toBe("TRUNCATE");
+    expect(actionOf("sqlite3 app.db <<-SQL\n\tdelete from invoices;\n\tSQL")).toBe("DELETE FROM without WHERE");
+    // An interpreter's stdin script that imports a driver, by word or import.
+    expect(actionOf("python - <<EOF\nimport psycopg\nconn.execute('DROP TABLE invoices')\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("node - <<'EOF'\nconst { Client } = require(\"pg\");\nawait client.query(\"truncate invoices\");\nEOF")).toBe("TRUNCATE");
+    // A driver name inside another word is not a driver.
+    expect(actionOf("node - <<'EOF'\nconst pgUrl = 'x'; write('DROP TABLE invoices');\nEOF")).toBeNull();
+    // A shell's stdin body is read as a command line.
+    expect(actionOf("bash -s <<'EOF'\npsql -c \"drop table invoices\"\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("bash <<'EOF'\ncat > down.sql <<SQL\nDROP TABLE invoices;\nSQL\nEOF")).toBeNull();
+    // A body whose file a client then runs on the same line.
+    expect(actionOf("cat > down.sql <<EOF && psql -f down.sql\nDROP TABLE invoices;\nEOF")).toBe("DROP TABLE/DATABASE");
+    // The SQL outside a body keeps its reading.
+    expect(actionOf("cat > down.sql <<EOF\nselect 1;\nEOF\npsql -c \"DROP TABLE invoices\"")).toBe("DROP TABLE/DATABASE");
+  });
+
+  it("reads a here-document body as SQL that runs unless its head only writes it to files or is a driverless stdin script (default deny)", () => {
+    const actionOf = (command: string) => effectfulCommandOf(command, null, WORKSPACE_DIRECTORY).action;
+    // Exempt: pure file sinks, and stdin scripts naming no driver.
+    expect(actionOf("cat > V2__down.sql <<EOF\nDROP TABLE x;\nEOF")).toBeNull();
+    expect(actionOf("cat >> down.sql <<'EOF'\nDROP TABLE x;\nEOF")).toBeNull();
+    expect(actionOf("tee a.sql b.sql <<EOF > /dev/null\nDROP TABLE x;\nEOF")).toBeNull();
+    expect(actionOf("cat > A.tsx <<EOF\n<div className=\"truncate\">\nEOF")).toBeNull();
+    expect(actionOf("python3 - <<'EOF'\nopen('V2__down.sql', 'w').write('DROP TABLE x;')\nEOF")).toBeNull();
+    // A sink whose output another command consumes is not exempt.
+    expect(actionOf("tee down.sql <<EOF | bash\npsql -c 'DROP TABLE x'\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("tee down.sql <<EOF | some-tool\nDROP TABLE x;\nEOF")).toBe("DROP TABLE/DATABASE");
+    // Remote, container and shell wrappers: the body is read as commands.
+    expect(actionOf('ssh db1 <<EOF\npsql -c "DROP TABLE users"\nEOF')).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("docker exec -i pg bash <<EOF\npsql -U app <<SQL\nDROP TABLE users;\nSQL\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("kubectl exec -i pod -- sh <<EOF\nmysql -e 'DROP DATABASE prod'\nEOF")).toBe("DROP TABLE/DATABASE");
+    // Any other head: the body is SQL that runs.
+    expect(actionOf("python3 manage.py shell <<EOF\nfrom django.db import connection\nconnection.cursor().execute('DROP TABLE users')\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("python3 manage.py dbshell <<EOF\nDROP TABLE users;\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("npx prisma db execute --stdin <<EOF\nDROP TABLE users;\nEOF")).toBe("DROP TABLE/DATABASE");
+    // A stdin script naming a driver runs its SQL.
+    expect(actionOf("node <<EOF\nconst mysql = require('mysql2');\nawait conn.query('DROP TABLE users');\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("node <<EOF\nconst Database = require('better-sqlite3');\nnew Database('app.db').exec('DROP TABLE users');\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("python3 - <<EOF\nimport pymysql\nc.execute('DROP TABLE users')\nEOF")).toBe("DROP TABLE/DATABASE");
+    expect(actionOf("python3 - <<EOF\nimport asyncpg\nawait conn.execute('DROP TABLE users')\nEOF")).toBe("DROP TABLE/DATABASE");
+  });
+
+  it("outside a database client a bare truncate is TRUNCATE TABLE or an upper-case TRUNCATE <name>", () => {
+    const actionOf = (command: string) => effectfulCommandOf(command, null, WORKSPACE_DIRECTORY).action;
+    expect(actionOf("TRUNCATE TABLE invoices")).toBe("TRUNCATE");
+    expect(actionOf(`echo "truncate table invoices" | some-tool`)).toBe("TRUNCATE");
+    expect(actionOf(`echo "TRUNCATE invoices" | some-tool`)).toBe("TRUNCATE");
+    expect(actionOf(`psql -c "truncate users"`)).toBe("TRUNCATE");
+    expect(actionOf(`docker compose exec db psql -U app -c "truncate users"`)).toBe("TRUNCATE");
+    expect(actionOf(`bq query "truncate users"`)).toBe("TRUNCATE");
+    expect(actionOf(`clickhouse-client --query "truncate users"`)).toBe("TRUNCATE");
+    expect(actionOf(`sed -i 's/flex/flex truncate text-sm/' src/A.tsx`)).toBeNull();
+    expect(actionOf(`grep -rn 'className="truncate w-full"' src`)).toBeNull();
+    expect(actionOf("truncate -s 0 app.log")).toBeNull();
+  });
 });
 
 // ── The action boundary's classes (autonomy design §D.2, change-009 C4–C5) ──

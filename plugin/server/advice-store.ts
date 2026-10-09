@@ -12,7 +12,7 @@
  * and times only.
  *
  * - **Counted at the source** (`count`): each `finished` report of a recorded
- *   Manager turn (`event-bus.ts` `finishedRequestKeysOf`). When the count
+ *   Manager or Worker turn (`event-bus.ts` `finishedRequestKeysOf`). When the count
  *   reaches the cadence, it is due: the entry is reset in the same write, so
  *   one count gives one `advice.due`, whatever becomes of it (an event with no
  *   Orchestrator to wake is not queued, as every event).

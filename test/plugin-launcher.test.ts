@@ -258,8 +258,9 @@ describe("client entry registrations", () => {
   });
 
   it("uses Paseo's custom footer item when available and keeps the legacy item as fallback", () => {
-    const addSidebarFooterItem = vi.fn((item: { id: string; Component: unknown }) => {
-      void item;
+    // Paseo 0.11.1's check: `t.title.trim()` throws without a title, failing the whole plugin.
+    const addSidebarFooterItem = vi.fn((item: { id: string; title: string; Component: unknown }) => {
+      if (!item.title.trim()) throw new Error(`Sidebar item ${item.id} has no title`);
       return vi.fn();
     });
     const addSidebarItem = vi.fn(() => vi.fn());
@@ -267,7 +268,7 @@ describe("client entry registrations", () => {
     registerBeadsManagerSidebarItem({ addSidebarFooterItem, addSidebarItem, openSurface } as never);
 
     expect(addSidebarFooterItem).toHaveBeenCalledOnce();
-    expect(addSidebarFooterItem.mock.calls[0]![0]).toMatchObject({ id: LAUNCHER_SURFACE_ID });
+    expect(addSidebarFooterItem.mock.calls[0]![0]).toMatchObject({ id: LAUNCHER_SURFACE_ID, title: "Beads Manager" });
     expect(addSidebarFooterItem.mock.calls[0]![0].Component).not.toBe(BeadsManagerSidebarItem);
     expect(addSidebarItem).not.toHaveBeenCalled();
   });

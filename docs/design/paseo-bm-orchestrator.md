@@ -228,6 +228,8 @@ Cards v2 (`CHAT_CARD_VERSION` 2, autonomy design §A.12 as built; `client/chat-c
 
 ### 6B.3 Live watch of running Workers
 
+*Since 2026-10-09 (ADR-028; [base design §7.17.8](./paseo-bm.md) (f)):* the `danger` signal reads here-document bodies default-deny — a body written to a file (`cat >`, `tee`) or a driverless stdin script is not SQL that runs; one fed to a database client, a wrapper (`ssh`, `docker`, `kubectl`, a shell) or a script naming a driver is. The role file has the Orchestrator read a danger signal's evidence before a stop, never carry words between projects (they ask each other through peer links, base design §7.17), and leave review budgets to the Worker.
+
 `server/worker-watch.ts`, on the stall pass's timer (§6), for the running Workers of **every** project — the Inbox alerts cost no model call — with the events and the interrupt allowance only for a project in the owner's policy scope (a class `shadow` or `delegate`; autonomy design §A.8):
 
 - A pass every **2 minutes** (non-overlapping; the 60-second stall pass is unchanged) reads, for each running `bm-worker` (at most 5 per pass, the newest; the oldest dropped), the tail of its timeline since its turn started (`readTimelinePages`, ≤ 300 entries), plus its snapshot.
@@ -381,3 +383,4 @@ Rows up to 2026-10-02 are archived in [paseo-bm-orchestrator-revision-history-to
 |---|---|---|
 | 2026-10-04 | Codex (owner request) | Require a real tool-call failure before a fresh Orchestrator may report a named `bm_` tool unavailable |
 | 2026-10-02 | Claude (owner request) | Documentation restructure: earlier rows moved to the archive; stale, retired and duplicated content condensed to the current state (section numbers and REQ ids kept) |
+| 2026-10-09 | Claude (owner's delegation) | §6B.3: the danger signal's here-document reading and the role file's peer-link and review-budget lines (ADR-028) |

@@ -16,7 +16,11 @@
  *   tool around it: a fresh `requestId` from the request registry (§16.4) with
  *   the caller as its `managerId`, then the Worker with its `BM-BRIEF` first
  *   prompt (`workerBriefOf`). The handoff successor (`handoff.ts`) uses the
- *   same creation with the stored brief.
+ *   same creation with the stored brief. With `peerLink` (design §7.17.3) the
+ *   new request takes an `open` link of the caller's workspace, and the brief
+ *   carries the other project's ask in its own `peer:` / `peerAsk:` block —
+ *   never as the owner's request — with the two `PEER_RULES`; only a Worker
+ *   that will be bound may take one.
  *
  * The caller's identity, workspace and folder come from its binding and its
  * own snapshot, never from what the agent typed. A refusal is one line per
@@ -26,9 +30,12 @@
  */
 import { NO_BINDER, createBound, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
+import { TOOL_PROVIDERS } from "./agent-tools";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
+import { createPeerLinkStore, type PeerLink } from "./peer-links";
+import { peerBriefOf, titleIn } from "./peer-tools";
 import { createRequestRegistry } from "./request-registry";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
 import { creationProjectOf, modeFactsOf } from "./role-instructions";
@@ -73,6 +80,8 @@ export interface ContextFact {
 export interface CreateWorkerInput {
   request: string;
   context: ContextFact[];
+  /** An open peer link the new request takes (§7.17.3). */
+  peerLink?: string;
 }
 
 /** One line: a newline inside a value would end it. */
@@ -81,10 +90,11 @@ const oneLine = (text: string): string => text.replace(/\s*\r?\n\s*/g, " ").trim
 /**
  * The first prompt of a Worker created by `bm_create_worker` (design §16.6):
  * the `BM-BRIEF` line, the request verbatim in a quoted block, the request id,
- * the repository and its `.beads/`, the scope rule, the Manager's id, then
- * `Context:` with each fact and its source. Pure.
+ * the repository and its `.beads/`, the scope rule, the Manager's id, a taken
+ * link's `peer` lines (`peerBriefOf`; the request is then the Manager's own
+ * words), then `Context:` with each fact and its source. Pure.
  */
-export function workerBriefOf(input: { requestId: string; request: string; cwd: string; managerId: string; context: readonly ContextFact[] }): string {
+export function workerBriefOf(input: { requestId: string; request: string; cwd: string; managerId: string; context: readonly ContextFact[]; peer?: readonly string[] }): string {
   const quoted = input.request
     .replace(/\r\n/g, "\n")
     .split("\n")
@@ -93,13 +103,14 @@ export function workerBriefOf(input: { requestId: string; request: string; cwd: 
   const repository = input.cwd.replace(/\/+$/, "");
   return [
     briefLineOf("worker", input.requestId),
-    "The owner's request, verbatim:",
+    input.peer === undefined ? "The owner's request, verbatim:" : "Your Manager's words:",
     quoted,
     "",
     `requestId: ${input.requestId}`,
     `repository: ${repository} (beads in ${repository}/.beads/)`,
     SCOPE_LINE,
     `managerAgentId: ${input.managerId}`,
+    ...(input.peer ?? []),
     "Context:",
     ...(input.context.length === 0 ? ["- none"] : input.context.map((entry) => `- ${oneLine(entry.fact)} (source: ${oneLine(entry.source)})`)),
   ].join("\n");
@@ -200,6 +211,18 @@ export async function folderOfAgent(paseo: unknown, agentId: string, workspaceId
   }
 }
 
+/** The link `linkId` when it is `open` and asks `workspaceId` (§7.17.3), else why it cannot be taken. Never throws. */
+export function openLinkOf(home: string, linkId: string, workspaceId: string): PeerLink | string {
+  const link = createPeerLinkStore(home).get(linkId);
+  return link !== null && link.state === "open" && link.to.workspaceId === workspaceId
+    ? link
+    : `link ${linkId} is not an open ask of this project (bm_peers lists them).`;
+}
+
+/** Why a Worker that is not bound cannot take `linkId`. */
+export const unboundPeerReason = (linkId: string): string =>
+  `a Worker without paseo-bm's tools could neither report forPeer nor answer link ${linkId}; answer it with bm_peer_reply.`;
+
 // ---------------------------------------------------------------------------
 // bm_create_worker.
 // ---------------------------------------------------------------------------
@@ -233,7 +256,7 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     const input = given !== null && typeof given === "object" && !Array.isArray(given) ? Object.fromEntries(Object.entries(given).filter(([key]) => key !== "size")) : given;
     const issues = schemaIssues(face.inputSchema, input);
     if (issues.length > 0) return fixThese(CREATE_WORKER_TOOL, issues);
-    const { request, context } = input as unknown as CreateWorkerInput;
+    const { request, context, peerLink } = input as unknown as CreateWorkerInput;
     const home = deps.home();
     const paseo = deps.paseo();
     if (paseo === null || paseo === undefined) return refused(NO_PASEO_MESSAGE);
@@ -244,6 +267,15 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     // The Manager's own folder, read from Paseo — never a folder the agent typed.
     const cwd = await folderOfAgent(paseo, managerId, caller.workspaceId);
     if (cwd === null) return refused(`paseo-bm could not read your folder from Paseo; try again in a moment. Nothing was created.`);
+    // A link is taken only by a Worker that will be bound: it alone reports forPeer and answers the link.
+    let peer: string[] | undefined;
+    if (peerLink !== undefined) {
+      const link = openLinkOf(home, peerLink, caller.workspaceId);
+      if (typeof link === "string") return refused(`${link} Nothing was created.`);
+      const base = (await aliasBases(paseo))[WORKER_PROFILE_ID] ?? null;
+      if ((deps.binder?.() ?? NO_BINDER) === NO_BINDER || base === null || !TOOL_PROVIDERS.includes(base)) return refused(`${unboundPeerReason(peerLink)} Nothing was created.`);
+      peer = peerBriefOf(link, titleIn(await listedWorkspaces(paseo as DashboardPaseo), link.from.workspaceId));
+    }
 
     // The request id, registered before anything is created: once generated, it is never reused.
     let requestId: string;
@@ -255,7 +287,7 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
 
     let workerId: string;
     try {
-      const prompt = workerBriefOf({ requestId, request, cwd, managerId, context });
+      const prompt = workerBriefOf({ requestId, request, cwd, managerId, context, ...(peer === undefined ? {} : { peer }) });
       ({ workerId } = await createPluginWorker(
         paseo as WorkerCreationPaseo,
         { workspaceId: caller.workspaceId, requestId, managerId, cwd, prompt, title: workerTitleOf(request), model: profile.model },
@@ -274,7 +306,16 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     } catch (error) {
       log(`[paseo-bm] could not add Worker ${workerId} to request ${requestId}: ${reasonOf(error)}`);
     }
-    return { ok: true, text: JSON.stringify({ workerId, requestId }) };
+    if (peerLink === undefined) return { ok: true, text: JSON.stringify({ workerId, requestId }) };
+    let taken: string[] = [];
+    try {
+      const result = createPeerLinkStore(home).takeLink(peerLink, { workspaceId: caller.workspaceId, requestId, workerId, managerId });
+      if (!result.ok) taken = result.reasons;
+    } catch (error) {
+      taken = [reasonOf(error)];
+    }
+    if (taken.length > 0) log(`[paseo-bm] request ${requestId} could not take link ${peerLink}: ${taken.join("; ")}`);
+    return { ok: true, text: JSON.stringify({ workerId, requestId, ...(taken.length > 0 ? { peerLinkNotTaken: taken.join("; ") } : {}) }) };
   };
 
   return actingTools(faces, { [CREATE_WORKER_TOOL]: run }, "Nothing was created");

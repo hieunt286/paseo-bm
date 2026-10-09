@@ -42,9 +42,10 @@ afterEach(() => {
 });
 
 describe("the alerts file", () => {
-  it("names the twelve kinds of the design", () => {
+  it("names the thirteen kinds of the design", () => {
     expect(ALERT_KINDS).toEqual([
       "request-stalled",
+      "peer-unanswered",
       "permission-waiting",
       "danger",
       "stuck",
@@ -60,6 +61,8 @@ describe("the alerts file", () => {
     // Compaction or handoff switched off below A-12's target (§G.3, §G.7): one per mechanism, for every project.
     expect(alertKeyOf("coordination-off", null, "compact")).toBe("coordination-off:-:compact");
     expect(alertKeyOf("stuck", WS, "agent-w")).toBe(`stuck:${WS}:agent-w`);
+    // Design §7.17.5: another project leaves an ask unanswered, keyed by the asking request; its links in the detail.
+    expect(alertKeyOf("peer-unanswered", WS, "req-20261009T100000Z")).toBe(`peer-unanswered:${WS}:req-20261009T100000Z`);
     // Design §16.8: an off-tool Reviewer, keyed by the Reviewer; its Worker and request are in the detail.
     expect(alertKeyOf("off-tool-reviewer", WS, "agent-r")).toBe(`off-tool-reviewer:${WS}:agent-r`);
     expect(ALERT_KINDS.indexOf("off-tool-reviewer")).toBe(ALERT_KINDS.indexOf("delivery-dropped") + 1);

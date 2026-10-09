@@ -18,6 +18,7 @@ import { markCleanedUpThisRun, rolePaseoToolsPolicy } from "../plugin/server/set
 import contribute, { readManagerInstructions } from "../plugin/index.server";
 import { managerEnsureRpc, type FallbackIncident } from "../plugin/shared/contracts";
 import { createAlertStore } from "../plugin/server/alert-store";
+import { unboundManagerAlertOf } from "../plugin/server/outdated-agents";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
 import { fakePaseo } from "./helpers/fake-paseo";
@@ -1064,6 +1065,17 @@ describe("manager.ensure { replaceOutdated } — a Manager on older instructions
     expect(result).toMatchObject({ agentId: "mgr-1", created: false, replacedManagerId: null });
     expect(fake.createCalls).toEqual([]);
     expect(cliFake.runs).toEqual([]);
+  });
+
+  it("replaces a current Manager whose hook binding expired unsettled (design §7.17.7)", async () => {
+    await withHome(async (home) => {
+      createAlertStore(home).raise(unboundManagerAlertOf({ agentId: "mgr-1", workspaceId: WS }));
+      const fake = daemonWith({ agents: [agent({ id: "mgr-1", labels: { "bm.role": "manager", "bm.modeSet": "x", "bm.instructions": MANAGER_HASH } })] });
+      const cliFake = fakeCli();
+      const result = await ensureManager({ workspaceId: WS, replaceOutdated: true }, { ...deps(fake.paseo), home, cli: cliFake.cli, log: () => {} });
+      expect(result).toMatchObject({ agentId: "created-1", created: true, replacedManagerId: "mgr-1" });
+      expect(createAlertStore(home).isOpen(`outdated-agent:${WS}:mgr-1`)).toBe(false);
+    });
   });
 
   it("without replaceOutdated, an outdated Manager is still opened, not replaced", async () => {

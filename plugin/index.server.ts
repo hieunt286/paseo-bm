@@ -21,7 +21,7 @@ import { createFallbackWaiter } from "./server/fallback-wait";
 import { checkNoVerdict } from "./server/no-verdict";
 import { relayUnboundBlocks } from "./server/unbound-relay";
 import { cancelOffToolReviewer, checkOffToolReviewer, registerOffToolAlertClear, registerOffToolTurnCancel } from "./server/off-tool-reviewer";
-import { settleCreatedAgent } from "./server/creation-settle";
+import { recoverHookBindings, settleCreatedAgent } from "./server/creation-settle";
 import { applyReviewBudgetGrants } from "./server/review-tools";
 import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
@@ -179,7 +179,12 @@ export default function contribute(server: PluginServerContext): () => void {
   // Reviewer at once — allowed, or held as the owner's decision h:<agentId>:<requestId>. It scans the
   // pending requests at the first Paseo handle of the run and at every Worker pass (events are not replayed).
   const actionBoundary = createActionBoundary();
-  const stallWatcher = createStallWatcher({ bus: eventBus, beforeWorkerPass: (handle) => actionBoundary.scan(handle) });
+  // Design §7.17.7: each minute, before the stall pass, the hook bindings of Managers the owner opened are recovered.
+  const stallWatcher = createStallWatcher({
+    bus: eventBus,
+    beforeWorkerPass: (handle) => actionBoundary.scan(handle),
+    beforePass: (handle) => recoverHookBindings(handle, { home: dataHome(), bindings: agentTools.bindings }),
+  });
   // The agents' block-building tools (ADR-010): one endpoint, given to every bm-* agent created from now on.
   // A decision the Orchestrator decides for the owner (bm_decide, autonomy design §B.5) takes the delivery
   // the owner's answers take: the settlement hook below, read when a call comes, long after this line.
@@ -460,7 +465,8 @@ export default function contribute(server: PluginServerContext): () => void {
       await handoffs.turnRecorded(event, record, paseo);
       // Autonomy design §A.8: a new Worker question the policy asks the Orchestrator to
       // decide or predict (§B.9, per cell) or a finished step of a project in the
-      // policy's scope is an event for the Orchestrator, batched with the rest.
+      // policy's scope is an event for the Orchestrator, batched with the rest. A finish is read from
+      // the Manager's turn or the Worker's own (its bm_report or relayed block, design §7.17.8 i).
       // Autonomy design §C.3: a finished report that leaves its request finished-unverified
       // (read from the request's records, now written) is an event too, and says so.
       const isUnverified = await unverifiedFinishesOf({ location, paseo: paseo as DashboardPaseo }, record);

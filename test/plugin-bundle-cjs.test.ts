@@ -277,7 +277,8 @@ describe.each([
       "updates.install",
       "workspaces.overview",
     ]);
-    expect([...beforeHooks.keys()]).toEqual(["agent.create"]);
+    // Design §7.17.7: the session-open hook claims a hook binding for the agent that holds its token.
+    expect([...beforeHooks.keys()]).toEqual(["agent.session_open", "agent.create"]);
     // bm-wq6 propagates a Worker stop to its Reviewers on agent.turn_ended;
     // WP-205 adds the trace collector on turn_started and turn_ended; delta
     // 20260918g labels a bm-* agent created without bm.role on agent.created,

@@ -55,6 +55,7 @@ import { interventionOfAdvice, interventionOfDecision, recordIntervention } from
 import { commandRequestIdOf } from "./orchestrator-state";
 import { preparedChangeFactsOf } from "./prepared-changes";
 import { isFinishedUnverifiedNow } from "./request-trace";
+import { policyGrantCapAt } from "./review-tools";
 import {
   Refusal,
   json,
@@ -75,6 +76,7 @@ import {
   MAX_ANSWER_REASON_CHARS,
   MAX_ASK_OWNER_OPTIONS,
   MAX_DECISION_TEXT_CHARS,
+  REVIEW_BUDGET_SUBJECT,
   UNSETTLED_STATUSES,
   answerDecision,
   carriesPreparedChange,
@@ -267,8 +269,21 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
   }
   if (problems.length > 0) return fixThese("bm_ask_owner", problems);
   const preparedChange = carriesPreparedChange({ options });
+  const askedClass = checkedClass(input.class, declaredEffects({ options }));
+  const subject = input.subject ?? null;
+  if (requestId !== null && subject !== null) {
+    // Design §7.17.8 (a): a request's review budget is the Worker's to ask, so the policy can answer it as it opens.
+    if (askedClass === "cost" && /review[\s_-]*budget/i.test(subject)) {
+      refuse(`the Worker asks for review calls itself, with bm_questions subject ${REVIEW_BUDGET_SUBJECT}; nothing was stored`);
+    }
+    // Design §7.17.8 (b): the Worker's own question on this subject is the one the owner answers.
+    const asked = createDecisionStore(context.home)
+      .list({ workspaceId: input.workspaceId, requestId, statuses: UNSETTLED_STATUSES })
+      .find((decision) => decisionKindOf(decision.id) === "question" && decision.subject === subject);
+    if (asked !== undefined) refuse(`the Worker's question ${asked.id} of this request asks "${subject}" already: decide it with bm_decide, or leave it to the owner; nothing was stored`);
+  }
 
-  const replaced = input.separate === true ? null : replacedByAsk(input.workspaceId, requestId, input.subject ?? null, context.home);
+  const replaced = input.separate === true ? null : replacedByAsk(input.workspaceId, requestId, subject, context.home);
   const decision: Decision = {
     id,
     workspaceId: input.workspaceId,
@@ -277,9 +292,9 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
     askedAt: context.now.toISOString(),
     round: null,
     question,
-    subject: input.subject ?? null,
+    subject,
     // The Orchestrator's proposal, raised to what its options' effects imply (autonomy design §B.1).
-    class: checkedClass(input.class, declaredEffects({ options })),
+    class: askedClass,
     options,
     status: "open",
     settledAt: null,
@@ -513,8 +528,11 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
   // owner's while that request stands finished-unverified. Read from the trace store now, before the write (which
   // awaits nothing), and only for such an option; a decision that cannot be read here is refused by the write.
   let finishedUnverified = false;
+  let grantCap: number | undefined;
   try {
     const target = createDecisionStore(context.home).get(input.decisionId);
+    // Design §7.17.8 (a): the policy grants a request review calls up to its tier's budget, in all.
+    if (target?.subject === REVIEW_BUDGET_SUBJECT) grantCap = policyGrantCapAt(context.home, target.workspaceId, target.requestId, deps.log);
     const option = target?.options.find((entry) => entry.key === input.optionKey);
     if (target !== null && option !== undefined && actsOnFinish(option)) {
       finishedUnverified = await isFinishedUnverifiedNow({ ...finishReadOf(context), ...(deps.log === undefined ? {} : { log: deps.log }) }, target.workspaceId, {
@@ -526,7 +544,7 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
     // The write reads the decision again and refuses what it cannot read.
   }
   const { decision: answered, store } = transitionUnderPolicy(input, context, {
-    refusalOf: (policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey, finishedUnverified }),
+    refusalOf: (policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey, finishedUnverified, grantCap }),
     idsFrom: "a decision.opened line or bm_decisions gave",
     what: "the answer to",
     change: (current, { reason, at }) =>

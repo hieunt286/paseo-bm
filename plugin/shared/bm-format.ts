@@ -95,13 +95,15 @@ const BLOCKERS_QUESTIONS = new RegExp(`^(\\d+) questions?: (Q\\d+(?:, Q\\d+)*) $
 export const WAITING_ON_OWNER_PREFIX = "waiting on the owner:";
 /** How it names the other request or Worker it waits for (`bm_report`'s `waitingFor`). */
 export const WAITING_FOR_PREFIX = "waiting for:";
+/** How it names the peer links it asked and waits on (`bm_report`'s `waitingOnPeers`, design §7.17.3). */
+export const WAITING_ON_PROJECT_PREFIX = "waiting on project:";
 /**
  * The `blockers` of a blocked report that carries no `BM-QUESTIONS`: a bound
  * Worker asked with `bm_questions` before and names what it waits on instead
  * (design §16.11). Nothing else may leave its questions out. Built from the
  * prefixes `bm_report` writes (they hold no regex metacharacters).
  */
-const BLOCKERS_WAITING = new RegExp(`^(?:${WAITING_ON_OWNER_PREFIX} Q\\d+(?:, Q\\d+)*(?:\\.|$)|${WAITING_FOR_PREFIX} \\S)`);
+const BLOCKERS_WAITING = new RegExp(`^(?:${WAITING_ON_OWNER_PREFIX} Q\\d+(?:, Q\\d+)*(?:\\.|$)|${WAITING_FOR_PREFIX} \\S|${WAITING_ON_PROJECT_PREFIX} \\S)`);
 
 const REVIEW_FIELDS = ["requestId", "batchId", "reviewKind", "verdict", "checked", "findings", "notChecked"] as const;
 /** The free-text fields of BM-REVIEW: their value may run over several indented lines. */

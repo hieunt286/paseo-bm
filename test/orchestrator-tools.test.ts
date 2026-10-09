@@ -24,6 +24,10 @@ import { ORCHESTRATOR_FIRST_PROMPT, ORCHESTRATOR_FIRST_PROMPT_START, isOwnerWord
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
+import { createRequestRegistry } from "../plugin/server/request-registry";
+import { applyReviewBudgetGrants } from "../plugin/server/review-tools";
+import { createPeerLinkStore } from "../plugin/server/peer-links";
 import { EMPTY_AUTONOMY_POLICY, LEVELS, decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
 
 /** Cruise's classes (level 2, ADR-025), riskiest first: every class but release, data, security and cost. */
@@ -515,7 +519,7 @@ describe("bounded reads by default (autonomy design §A.9)", () => {
       label: "invoice-app",
       lastActivityAt: at(3, 20),
       managers: [{ id: MANAGER, title: "Beads manager", status: "idle" }],
-      counts: { requests: 1, byState: { completed: 1 }, waitingOnOwner: 0, openStalls: 1, notes: 1, openDecisions: 1 },
+      counts: { requests: 1, byState: { completed: 1 }, waitingOnOwner: 0, openStalls: 1, notes: 1, openDecisions: 1, openLinks: 0 },
       openDecisions: [
         { decisionId, requestId: fixture.requestId, askedBy: "orchestrator", status: "open", question: `Publish with ${REDACTED}?`, options: ["Yes", "No"], at: NOW.toISOString() },
       ],
@@ -525,8 +529,46 @@ describe("bounded reads by default (autonomy design §A.9)", () => {
     const full = await tools.call("bm_projects", { detail: "full" });
     expect(full.text.startsWith("{")).toBe(true);
     const fullProject = (jsonOf(full) as { projects: Array<Record<string, unknown>> }).projects[0]!;
-    expect(Object.keys(fullProject)).toEqual(["workspaceId", "label", "directory", "lastActivityAt", "managers", "notes", "requests"]);
+    expect(Object.keys(fullProject)).toEqual(["workspaceId", "label", "directory", "lastActivityAt", "managers", "notes", "links", "requests"]);
     expect(sends).toEqual([]);
+  });
+
+  it("bm_projects: counts each project's live peer links and lists them in full, as bm_peers does (design §7.17.5)", async () => {
+    const fixture = smallWithBead();
+    await store(fixture.records);
+    const { paseo } = daemonWith(fixture.agents.map((facts) => snapshotOf(facts)));
+    let n = 0;
+    const links = createPeerLinkStore(home, { now: () => NOW, newId: () => `peer-${(++n).toString(16).padStart(12, "0")}`, env: {} });
+    const ask = (from: string, to: string) => {
+      const made = links.createLink({ kind: "work", from: { workspaceId: from, requestId: fixture.requestId, agentId: WORKER, role: "worker" }, to: { workspaceId: to, managerId: "mgr-x" }, text: "Add the export endpoint." });
+      if (!made.ok) throw new Error(made.reasons.join("\n"));
+      return made.link.linkId;
+    };
+    const asked = ask(WORKSPACE_ID, OTHER_WORKSPACE);
+    const askedOfUs = ask(OTHER_WORKSPACE, WORKSPACE_ID);
+    const closed = ask(WORKSPACE_ID, OTHER_WORKSPACE);
+    links.closeLink(closed, "asker");
+    ask(OTHER_WORKSPACE, "wks_third");
+    const tools = toolsWith(paseo);
+
+    const summary = (jsonOf(await tools.call("bm_projects", {})) as { projects: Array<{ counts: Record<string, unknown> }> }).projects[0]!;
+    expect(summary.counts.openLinks).toBe(2);
+    const full = (jsonOf(await tools.call("bm_projects", { detail: "full" })) as { projects: Array<{ links: Array<Record<string, unknown>> }> }).projects[0]!;
+    expect(full.links.map((link) => [link.linkId, link.direction, link.project, link.state])).toEqual([
+      [closed, "asked", OTHER_WORKSPACE, "closed"],
+      [askedOfUs, "asked of us", OTHER_WORKSPACE, "open"],
+      [asked, "asked", OTHER_WORKSPACE, "open"],
+    ]);
+    expect(full.links[1]).toEqual({
+      linkId: askedOfUs,
+      direction: "asked of us",
+      project: OTHER_WORKSPACE,
+      ourRequestId: null,
+      theirRequestId: fixture.requestId,
+      state: "open",
+      createdAt: NOW.toISOString(),
+      newest: null,
+    });
   });
 
   it("bm_projects: no note when there is nothing to leave out, and an unknown detail is refused", async () => {
@@ -1519,6 +1561,28 @@ describe("bm_ask_owner (autonomy design §A.3, §A.6)", () => {
     ]);
   });
 
+  it("refuses to ask a request's review budget, or a subject the Worker's open question of that request already asks (design §7.17.8 a, b)", async () => {
+    const { paseo } = daemonWith(agents());
+    const tools = toolsWith(paseo);
+    const budget = { ...ask, subject: "review-budget", class: "cost" };
+    expect((await tools.call("bm_ask_owner", budget)).text).toBe("Refused: the Worker asks for review calls itself, with bm_questions subject review-budget; nothing was stored.");
+    expect((await tools.call("bm_ask_owner", { ...budget, subject: "Review budget for the auth fix" })).ok).toBe(false);
+    // Another class, or no request, is asked as before.
+    expect((await tools.call("bm_ask_owner", { ...budget, class: "scope", separate: true })).ok).toBe(true);
+    expect((await tools.call("bm_ask_owner", { workspaceId: ask.workspaceId, question: ask.question, recommendation: ask.recommendation, subject: "review-budget", class: "cost" })).ok).toBe(true);
+
+    const workerQuestion = (status: Decision["status"]) =>
+      makeDecision({ id: `q:${REQUEST}:Q4`, workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "worker", agentId: WORKER }, subject: "invoices-table", status });
+    createDecisionStore(home).open(workerQuestion("open"));
+    expect((await tools.call("bm_ask_owner", { ...ask, subject: "invoices-table" })).text).toBe(
+      `Refused: the Worker's question q:${REQUEST}:Q4 of this request asks "invoices-table" already: decide it with bm_decide, or leave it to the owner; nothing was stored.`,
+    );
+    // A different subject, or another request, is asked.
+    expect((await tools.call("bm_ask_owner", { ...ask, subject: "push-backends", separate: true })).ok).toBe(true);
+    expect((await tools.call("bm_ask_owner", { ...ask, requestId: "req-20260926T110000Z", subject: "invoices-table" })).ok).toBe(true);
+    expect(decisions().filter((decision) => decision.subject === "invoices-table" && decision.requestId === REQUEST).map((decision) => decision.id)).toEqual([`q:${REQUEST}:Q4`]);
+  });
+
   it("refuses what cannot be asked or sent, and stores nothing", async () => {
     const { paseo, sends } = daemonWith(agents());
     const tools = toolsWith(paseo);
@@ -1930,6 +1994,37 @@ describe("bm_decide (autonomy design §B.5, §B.9; bead t9lm.11): the Orchestrat
     return { ...fake, tools: toolsWith(fake.paseo) };
   }
   const decide = (tools: ReturnType<typeof toolsWith>, decisionId: string, optionKey = "b", reason = REASON) => tools.call("bm_decide", { decisionId, optionKey, reason });
+
+  it("grants review calls up to the request tier's own budget: 8 of a Large budget of 8 decided, 9 or untilClean left to the owner (design §7.17.8 a)", async () => {
+    cell("cost", "delegate");
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Large", phase: "blocked", at: at(0) });
+    createCoordinationStore(home).set({ key: "review.largeBudget", value: 8 });
+    const budget = (n: number, grant: { calls: number } | { untilClean: string }) =>
+      question(n, ["none"], {
+        subject: "review-budget",
+        class: "cost",
+        options: [
+          { key: "a", label: "More reviews", recommended: true, effects: ["none"], grant },
+          { key: "b", label: "No more reviews", recommended: false, effects: ["none"] },
+        ],
+      });
+    for (const [n, grant] of [[1, { calls: 8 }], [2, { calls: 9 }], [3, { untilClean: "b1" }], [4, { calls: 1 }]] as const) createDecisionStore(home).open(budget(n, grant));
+    const { tools } = decideTools();
+
+    expect((await decide(tools, QID(1), "a")).ok).toBe(true);
+    expect(stored(QID(1)).answer).toMatchObject({ by: "policy", optionKey: "a" });
+    expect((await decide(tools, QID(2), "a")).text).toBe(
+      `Refused: option a of ${QID(2)} grants more review calls than the owner's policy may (at most { calls: 8 } now: the request tier's budget, less the calls the policy already granted this request; never untilClean); choose a smaller grant or none, or leave decision ${QID(2)} to the owner.`,
+    );
+    expect((await decide(tools, QID(3), "a")).text).toContain("never untilClean");
+    expect([stored(QID(2)).status, stored(QID(3)).status]).toEqual(["open", "open"]);
+    // Once the policy's 8 are granted (the settlement hook records them), it has granted the tier's budget in all: one more call is the owner's.
+    expect(applyReviewBudgetGrants([stored(QID(1))], { home, log: () => {} })).toEqual([QID(1)]);
+    expect((await decide(tools, QID(4), "a")).text).toContain(`option a of ${QID(4)} grants more review calls than the owner's policy may (at most { calls: 0 } now`);
+    expect(stored(QID(4)).status).toBe("open");
+  });
 
   it("answers an open Worker question whose class the owner delegated to it: by policy, its reason, the owner's grant, handed to the owners' delivery", async () => {
     cell("reversible-technical", "delegate");

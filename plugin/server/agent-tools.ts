@@ -57,7 +57,15 @@
  * other caller of those builder names still gets the pure builder, with its
  * send line. A bound Manager also has `bm_create_worker` (`create-worker.ts`),
  * a bound Worker `bm_create_reviewer` and `bm_rereview` (`review-tools.ts`,
- * design §16.8).
+ * design §16.8). A bound Manager and Worker also have the peer tools
+ * (`peer-tools.ts`, design §7.17.3): `bm_peers`, `bm_ask_project`,
+ * `bm_peer_reply`.
+ *
+ * An unbound Manager's `bm_answers` is checked first (design §7.17.8 c,
+ * `settledAnswersRefusalOf`): a `Qn` whose `q:<requestId>:Qn` is found in
+ * exactly one workspace's decision store, read only, and is settled there
+ * refuses the call with the standing answer, so a chat answer never silently
+ * contradicts one given on the card. Anything else gets the builder.
  *
  * Nothing here throws into the plugin: a failure is one log line and no tools.
  */
@@ -85,9 +93,11 @@ import { createOrchestratorTools, type OrchestratorTools } from "./orchestrator-
 import { createWorkerTools } from "./decision-ask";
 import { createDeliveringTools, type DeliveringTools } from "./deliver-tools";
 import { createReviewTools } from "./review-tools";
+import { createPeerTools, type PeerTools } from "./peer-tools";
 import { currentTurnStartOf } from "./collector";
 import { BUILDER_SEND_LINES } from "./role-instructions";
-import type { Decision } from "../shared/decisions";
+import { answeredByText, isAnswerable, questionDecisionId, type Decision } from "../shared/decisions";
+import { createDecisionStore } from "./decision-store";
 import { assertNoSymlinkOnPath, ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
 /** Name of the MCP server in an agent's config; Claude shows the tools as `mcp__paseo-bm__<tool>`. */
@@ -208,12 +218,17 @@ export async function answerWithServerTools(
   return (await serve(role, message, tools, caller)).reply;
 }
 
-/** `answerWithServerTools`, and whether one of `tools` answered the call (`served`) rather than a builder or an error. */
+/**
+ * `answerWithServerTools`, and whether one of `tools` answered the call
+ * (`served`) rather than a builder or an error. `home`: the data folder whose
+ * decisions an unbound Manager's `bm_answers` is checked against, or null.
+ */
 async function serve(
   role: ToolRole,
   message: unknown,
   tools: Pick<ServerTools, "has" | "call">,
   caller: ToolCaller | null,
+  home: string | null = null,
 ): Promise<{ reply: JsonRpcReply | null; served: boolean }> {
   const { id, method, params } = (message ?? {}) as JsonRpcRequest;
   // A bound (or pending) caller lists its delivering and creating tools (design §16.6); every other caller, the builders.
@@ -221,6 +236,11 @@ async function serve(
   const built = () => ({ reply: answer(role, message, bound), served: false });
   if (method !== "tools/call" || id === undefined || message === null || typeof message !== "object" || Array.isArray(message)) return built();
   const call = (params ?? {}) as { name?: unknown; arguments?: unknown };
+  // Design §7.17.8 c: the builder never builds a chat answer to a question already settled. The bound tool refuses it itself.
+  if (role === "manager" && !bound && call.name === "bm_answers" && home !== null) {
+    const refusal = settledAnswersRefusalOf(home, call.arguments);
+    if (refusal !== null) return { reply: reply(id, { content: [{ type: "text", text: refusal }], isError: true }), served: false };
+  }
   if (typeof call.name !== "string" || !tools.has(call.name)) {
     return role === "orchestrator" ? { reply: failure(id, -32602, `Unknown tool: ${String(call.name)}`), served: false } : built();
   }
@@ -230,6 +250,42 @@ async function serve(
   const result = await tools.call(call.name, call.arguments ?? {}, caller);
   const content = [{ type: "text", text: result.text }];
   return { reply: reply(id, result.ok ? { content } : { content, isError: true }), served: true };
+}
+
+/**
+ * The refusal of an unbound Manager's `bm_answers` call (design §7.17.8 c):
+ * one line per `Qn` whose `q:<requestId>:Qn` is found in exactly one
+ * workspace's decision store and is settled there, naming what stands. Null —
+ * the builder answers — when every `Qn` is open, unknown or found in several
+ * workspaces, when the input is not one the builder takes, and when the
+ * stores cannot be read. Reads only; never throws.
+ */
+export function settledAnswersRefusalOf(home: string, input: unknown): string | null {
+  try {
+    const { requestId, answers } = (input ?? {}) as { requestId?: unknown; answers?: unknown };
+    if (typeof requestId !== "string" || !Array.isArray(answers)) return null;
+    const stored = createDecisionStore(home, { log: () => {} }).list({ requestId });
+    const lines: string[] = [];
+    const stands = "tell the owner, and a change needs the Worker to ask again";
+    for (const qn of new Set(answers.map((entry) => (entry as { id?: unknown } | null)?.id))) {
+      if (typeof qn !== "string") continue;
+      const found = stored.filter((decision) => decision.id === questionDecisionId(requestId, qn));
+      const decision = found.length === 1 ? found[0]! : null;
+      if (decision === null || isAnswerable(decision)) continue;
+      const given = decision.answer;
+      if (decision.status === "answered" && given !== null) {
+        // The policy's answer names the policy (it is stored `via: inbox`); the card's two surfaces read as "on its card"; any other answer names who gave it.
+        const where = given.by === "policy" ? "by your policy" : given.via === "chat-card" || given.via === "inbox" ? "on its card" : `by ${answeredByText(given.by)}`;
+        const chosen = given.optionKey !== null ? `option ${given.optionKey}` : "in words";
+        lines.push(`- ${qn} was answered ${where} at ${given.at} (${chosen}); that answer stands — ${stands}`);
+      } else {
+        lines.push(`- ${qn} is ${decision.status}${decision.settledAt === null ? "" : ` since ${decision.settledAt}`}; it can no longer be answered — ${stands}`);
+      }
+    }
+    return lines.length === 0 ? null : `The block was not built:\n${lines.join("\n")}`;
+  } catch {
+    return null;
+  }
 }
 
 /** A new secret for the Orchestrator's path; `startAgentTools` keeps it on disk. */
@@ -304,10 +360,12 @@ interface HandleContext {
   tools: { orchestrator: OrchestratorTools } & Record<Exclude<ToolRole, "orchestrator">, ServerTools>;
   /** The per-agent bindings (design §16.5); null without a data folder. */
   bindings: BindingStore | null;
+  /** The data folder: an unbound Manager's `bm_answers` is checked against its decisions (design §7.17.8 c). */
+  home: string;
   log: (line: string) => void;
 }
 
-async function handle(request: IncomingMessage, response: ServerResponse, { secret, tools, bindings, log }: HandleContext): Promise<void> {
+async function handle(request: IncomingMessage, response: ServerResponse, { secret, tools, bindings, home, log }: HandleContext): Promise<void> {
   // An agent's MCP client sends no Origin; a web page always does.
   if (request.headers.origin !== undefined) return send(response, 403);
   const host = (request.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
@@ -333,7 +391,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, { secr
   const who = caller === null ? "" : caller.agentId === null ? " (binding still pending)" : ` (agent ${caller.agentId})`;
   const answered: Array<JsonRpcReply | null> = [];
   for (const message of messages) {
-    const { reply, served } = role === "orchestrator" ? { reply: await answerOrchestrator(message, tools.orchestrator), served: true } : await serve(role, message, tools[role], caller);
+    const { reply, served } = role === "orchestrator" ? { reply: await answerOrchestrator(message, tools.orchestrator), served: true } : await serve(role, message, tools[role], caller, home);
     // One line per call of a real tool, for the numbers of AT-5; an unknown tool is not worth one.
     if (reply !== null && "result" in reply && (message as JsonRpcRequest).method === "tools/call") {
       const name = String(((message as JsonRpcRequest).params as { name?: unknown }).name);
@@ -528,6 +586,12 @@ export interface StartOptions {
    * endpoint's binder, Paseo handle and data folder by default.
    */
   reviewTools?: ServerTools;
+  /**
+   * The bound Manager's and Worker's peer tools (design §7.17.3: `bm_peers`,
+   * `bm_ask_project`, `bm_peer_reply`); `createPeerTools` with this endpoint's
+   * binder, Paseo handle and data folder by default.
+   */
+  peerTools?: PeerTools;
   /** Decisions a bound Worker's `bm_questions` opened: their `decision.opened` events (the event bus). */
   onDecisionsOpened?: (opened: readonly Decision[], paseo: unknown) => unknown;
   /** The per-agent bindings; the data folder's `ui/agent-bindings.json` by default (design §16.5). */
@@ -636,20 +700,27 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
       turnStartOf: currentTurnStartOf,
       ...(options.onDecisionsOpened === undefined ? {} : { onOpened: options.onDecisionsOpened }),
     });
+  const peer = options.peerTools ?? createPeerTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log });
   const manager = joinServerTools(
     joinServerTools(
-      options.manager ?? createManagerTools(),
-      options.createWorker ?? createWorkerCreationTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+      joinServerTools(
+        options.manager ?? createManagerTools(),
+        options.createWorker ?? createWorkerCreationTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+      ),
+      delivering.manager,
     ),
-    delivering.manager,
+    peer.manager,
   );
   const worker = joinServerTools(
-    joinServerTools(baseWorker, delivering.worker),
-    options.reviewTools ?? createReviewTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+    joinServerTools(
+      joinServerTools(baseWorker, delivering.worker),
+      options.reviewTools ?? createReviewTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+    ),
+    peer.worker,
   );
   const reviewer = delivering.reviewer;
   const server = createServer((request, response) => {
-    handle(request, response, { secret, tools: { orchestrator, manager, worker, reviewer }, bindings, log }).catch(() => send(response, 500));
+    handle(request, response, { secret, tools: { orchestrator, manager, worker, reviewer }, bindings, home, log }).catch(() => send(response, 500));
   });
   const ready = (async () => {
     try {

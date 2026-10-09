@@ -19,14 +19,17 @@
  *    block it returns in its own chat. Either way the collector records it as
  *    the report's `handoffNote`. The Worker's turn the request
  *    started carries it or not; with none, or after `NOTE_WAIT_MS` at any
- *    recorded turn, the plugin goes on without it.
+ *    recorded turn, the plugin goes on without it; a `canceled` turn without
+ *    the note is no answer (§7.17.8 h).
  * 3. **The brief** (`handoffBriefOf`): built on the fallback Worker handover's
  *    facts (`workerHandoverFacts`, change-008 C3) — the latest report, the
  *    review calls, the request's questions with their answers, the original
  *    request — plus the owner's later words, the plan and document paths, the
- *    bead state, the branch and diff stat (read-only `git`) and the note;
- *    masked with `redactText`, at most `HANDOFF_BRIEF_MAX_CHARS` so it travels
- *    inside the command, and kept with the entry.
+ *    bead state, the branch and diff stat (read-only `git`), the note and a
+ *    linked request's `peer:` block; the fixed short facts first, then the
+ *    lists, newest kept (§7.17.8 h); masked with `redactText`, at most
+ *    `HANDOFF_BRIEF_MAX_CHARS` so it travels inside the command, never cut
+ *    mid-word, and kept with the entry.
  * 4. **The command** (`handoffCommandOf`): a `BM-COMMAND` to the Worker's
  *    Manager, `intent: handoff`, `authority: coordination:handoff`, no effect,
  *    the brief in its body, through the one send pipeline (`command-send.ts`:
@@ -109,6 +112,7 @@ import { HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, briefLineOf } from "./no
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff } from "./manager";
 import { createRequestRegistry } from "./request-registry";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
+import { PEER_RULES } from "./peer-links";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import type { OrchestratorStoreDeps } from "./orchestrator-store";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
@@ -294,6 +298,8 @@ export interface BriefDeps {
   git?: GitRunner;
   log?: (message: string) => void;
   budgetMs?: number;
+  /** The brief's time, for the newest report's age; the clock by default. */
+  now?: () => Date;
 }
 
 /** `work()` within `budget` ms, or null on timeout or failure. Never throws. */
@@ -317,8 +323,94 @@ async function within<T>(budget: number, work: () => Promise<T> | T): Promise<T 
 /** A plan, a design or another document among the files changed. */
 const DOC_PATH = /(?:^|\/)(?:docs?|plans?|design|adr)\/|\.(?:md|mdx|rst|adoc)$/i;
 
-const listed = (values: readonly string[], max: number): string => (values.length === 0 ? "none" : shorten([...new Set(values)].join(", "), max));
-const text = (value: string | null | undefined, max: number): string => (value === null || value === undefined || value.trim() === "" ? "none" : shorten(value, max));
+/** `text` cut at a word's end to at most `max` characters (mid-word only for one word longer than `max`). */
+function wordCut(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const at = text.slice(0, max + 1).search(/\s\S*$/);
+  return text.slice(0, at > 0 ? at : Math.max(0, max)).trimEnd();
+}
+
+/** `text` on one line, at most `max` characters, cut at a word's end with an ellipsis (§7.17.8 h). */
+const clipLine = (value: string, max: number): string => {
+  const line = value.replace(/\s+/g, " ").trim();
+  return line.length <= max ? line : `${wordCut(line, max - 1)}…`;
+};
+const text = (value: string | null | undefined, max: number): string => (value === null || value === undefined || value.trim() === "" ? "none" : clipLine(value, max));
+
+/** A list in at most `max` characters: its newest items whole, the earlier ones counted (`+3 earlier, d, e`); `none` when empty. */
+function newest(values: readonly string[], max: number): string {
+  const unique = [...new Set(values)];
+  if (unique.length === 0) return "none";
+  let kept = 1;
+  const line = (count: number) => `${count < unique.length ? `+${unique.length - count} earlier, ` : ""}${unique.slice(-count).join(", ")}`;
+  while (kept < unique.length && line(kept + 1).length <= max) kept += 1;
+  return clipLine(line(kept), Math.max(max, 40));
+}
+
+/**
+ * The `questions` block in at most `max` characters (§7.17.8 h): every open
+ * question first, whatever its length, then the answered ones newest first,
+ * then `+<n> earlier (bm_decisions)` for those left out. Each line keeps its
+ * `→ outcome`: only the question's own words are shortened.
+ */
+function questionsWithin(block: readonly string[], max: number): string[] {
+  if (block.length <= 1) return [...block];
+  const line = max >= 600 ? 220 : 140;
+  const fitted = block.slice(1).map((entry) => {
+    const arrow = entry.lastIndexOf(" → ");
+    const head = entry.indexOf(": ") + 2;
+    if (arrow < 0 || head < 2 || head > arrow) return clipLine(entry, line);
+    const outcome = clipLine(entry.slice(arrow + 3), 100);
+    return `${entry.slice(0, head)}${clipLine(entry.slice(head, arrow), Math.max(40, line - head - outcome.length - 3))} → ${outcome}`;
+  });
+  const open = fitted.filter((entry) => entry.endsWith(" → open"));
+  const answered = fitted.filter((entry) => !entry.endsWith(" → open")).reverse();
+  const size = (lines: readonly string[]) => lines.reduce((sum, entry) => sum + entry.length + 1, 0);
+  let kept = answered.length;
+  while (kept > 0 && size([...open, ...answered.slice(0, kept)]) > max) kept -= 1;
+  const earlier = answered.length - kept;
+  return [block[0]!, ...open, ...answered.slice(0, kept), ...(earlier > 0 ? [`+${earlier} earlier (bm_decisions)`] : [])];
+}
+
+export { PEER_RULES };
+/** The most characters of the carried `peer:` blocks, the rules aside. */
+const PEER_BLOCK_MAX_CHARS = 900;
+
+/**
+ * The `peer:` / `peerAsk:` blocks of the Worker's brief and messages, oldest
+ * first (the newest wins for one link), and the rules once (§7.17.8 h): each
+ * block is its `peer:` line and what follows it up to a blank line or another
+ * label. Empty when the request carries no link.
+ */
+export function peerBlockOf(texts: readonly (string | null)[]): string[] {
+  const blocks = new Map<string, string[]>();
+  for (const value of texts) {
+    const lines = (value ?? "").split("\n");
+    lines.forEach((line, index) => {
+      if (!line.startsWith("peer: ")) return;
+      const rest = lines.slice(index + 1);
+      const end = rest.findIndex((next) => next.trim() === "" || (/^[\w.-]+:(?: |$)/.test(next) && !next.startsWith("peerAsk:")));
+      blocks.set(line, [line, ...(end < 0 ? rest : rest.slice(0, end))].filter((kept) => !(PEER_RULES as readonly string[]).includes(kept)));
+    });
+  }
+  if (blocks.size === 0) return [];
+  const joined = [...blocks.values()].flat().join("\n");
+  return [...(joined.length <= PEER_BLOCK_MAX_CHARS ? joined : `${wordCut(joined, PEER_BLOCK_MAX_CHARS - 4)}\n> …`).split("\n"), ...PEER_RULES];
+}
+
+/** `12 min` or `3.5 h`: how long ago `at` was at `now`. */
+function ageOf(at: string, now: number): string {
+  const minutes = Math.max(0, Math.round((now - (timeOrNull(at) ?? now)) / 60_000));
+  return minutes < 120 ? `${minutes} min` : `${(minutes / 60).toFixed(1)} h`;
+}
+
+/** A brief cut to `max` characters at a word's end, its last paragraph (the closing) kept whole (§7.17.8 h). */
+function clipBrief(brief: string, max: number): string {
+  if (brief.length <= max) return brief;
+  const at = brief.lastIndexOf("\n\n");
+  const tail = at < 0 ? "" : brief.slice(at);
+  return `${wordCut(at < 0 ? brief : brief.slice(0, at), max - tail.length - 2)}\n…${tail}`;
+}
 
 /** The `request:` line of an earlier brief: a successor's first message is its brief, whose request is the owner's. */
 function requestOfBrief(brief: string): string | null {
@@ -346,7 +438,7 @@ async function gitFacts(folder: string | null, git: GitRunner, budget: number): 
   if (folder === null) return { branch: "unknown", diff: "unknown" };
   const run = (args: string[]) => within(budget, async () => (await git([...GIT_READ_ONLY_PREFIX, ...args], { cwd: folder, maxBytes: 64 * 1024 })).stdout.trim());
   const [branch, diff] = await Promise.all([run(["rev-parse", "--abbrev-ref", "HEAD"]), run(["diff", "--shortstat", "HEAD"])]);
-  return { branch: branch === null || branch === "" ? "unknown" : shorten(branch, 120), diff: diff === null ? "unknown" : diff === "" ? "no change against HEAD" : shorten(diff, 200) };
+  return { branch: branch === null || branch === "" ? "unknown" : shorten(branch, 120), diff: diff === null ? "unknown" : diff === "" ? "no change against HEAD" : clipLine(diff, 200) };
 }
 
 /** The last paragraph of the brief: what the successor does with it (design §G.6 steps 4–5). */
@@ -354,17 +446,24 @@ export function briefClosingOf(workerId: string): string {
   return [
     `You take this request over from Worker ${workerId}: the Orchestrator handed it over so the work goes on in a fresh context.`,
     "Work from this brief and the repository, not from memory: read `git status` and `git diff` first — every change there belongs to the request, so never revert it — and go on from the note.",
-    "The questions above are settled: never ask an answered one again.",
+    "An answered question above is settled: never ask it again.",
     "Nothing counts as done until you prove it again: run each check after your last edit before a report says it passes.",
     "Send `received` to `managerAgentId` now.",
   ].join(" ");
 }
 
+/** How far the long lists of a brief shrink, one step at a time, before the note gives way. */
+const BRIEF_SCALES = [1, 0.7, 0.5, 0.35, 0.25, 0.15, 0.1] as const;
+
 /**
- * The brief of `entry` (design §G.6 step 2): built on the fallback Worker
- * handover's facts, masked, at most `HANDOFF_BRIEF_MAX_CHARS` — the note is
- * cut first, then the facts; the closing paragraph always stays. Never
- * throws: a part it cannot get in time reads `unknown`.
+ * The brief of `entry` (design §G.6 step 2, §7.17.8 h): built on the fallback
+ * Worker handover's facts, masked, at most `HANDOFF_BRIEF_MAX_CHARS`. The
+ * fixed short facts come first — who and what, the request's `peer:` block
+ * and rules, the newest report and its age, the review calls, the branch and
+ * diff stat, the note — then the long lists, each shortened by keeping its
+ * newest items whole: they shrink first, then the note; the closing
+ * paragraph always stays, and nothing is cut mid-word. Never throws: a part
+ * it cannot get in time reads `unknown`.
  */
 export async function handoffBriefOf(entry: HandoffEntry, deps: BriefDeps): Promise<string> {
   const budget = deps.budgetMs ?? BRIEF_BUDGET_MS;
@@ -388,42 +487,52 @@ export async function handoffBriefOf(entry: HandoffEntry, deps: BriefDeps): Prom
   const later = owner.slice(1).slice(-3);
   const all = <K extends "filesChanged" | "beadsCreated" | "beadsClosed">(key: K) => reports.flatMap((report) => report[key]);
   const { branch, diff } = await gitFacts(await folderOf(deps.paseo, entry.workerId, deps.location, entry.workspaceId), deps.git ?? runGit, budget);
-  const questions = facts.questions.length <= 1 ? facts.questions : [facts.questions[0]!, ...facts.questions.slice(1).map((line) => shorten(line, 200))];
+  // The Worker's own brief (a successor's: the handoff brief that carried it on), then the messages it was sent.
+  const peer = peerBlockOf([facts.original, ...own.filter((record) => record.agentId === entry.workerId).flatMap((record) => record.sent.map((message) => message.text))]);
+  const now = (deps.now?.() ?? new Date()).getTime();
 
-  const head = [
+  const fixed = [
     `${HANDOFF_BRIEF_MARKER} ${entry.id}`,
     "role: worker",
     `requestId: ${entry.requestId}`,
     `managerAgentId: ${entry.managerId}`,
+    ...peer,
     `replaces: ${entry.workerId}`,
-    `reason: ${text(entry.reason, 300)}`,
-    `request: ${text(original, 700)}`,
-    later.length === 0 ? "ownerSaid: nothing more" : `ownerSaid: ${later.map((message) => shorten(message.text, 200)).join(" | ")}`,
-    ...questions.slice(0, 6),
-    `decided: ${latest === null ? "none" : listed(latest.decided ?? [], 300)}`,
-    `planAndDocs: ${listed(all("filesChanged").filter((path) => DOC_PATH.test(path)), 250)}`,
-    `beadsClosed: ${listed(all("beadsClosed"), 250)}`,
-    `beadsReady: ${listed(latest?.beadsReady ?? [], 200)}`,
-    `beadsCreated: ${listed(all("beadsCreated"), 200)}`,
-    `blockers: ${text(latest?.blockers, 200)}`,
-    `lastReport: ${latest === null ? "none" : `${latest.phase ?? "unknown"} at ${latest.at}`}`,
+    `lastReport: ${latest === null ? "none" : `${latest.phase ?? "unknown"} at ${latest.at} (${ageOf(latest.at, now)} before this brief)`}`,
     `tier: ${facts.tier ?? latest?.tier ?? "unknown"}`,
-    `filesChanged: ${listed(all("filesChanged"), 300)}`,
-    `checks: ${text(latest?.buildAndTests, 250)}`,
-    `reviewFindingsOpen: ${text(latest?.reviewFindingsOpen, 300)}`,
     `reviewCalls: ${facts.reviewCalls}`,
     `branch: ${branch}`,
     `diffStat: ${diff}`,
   ];
+  const lists = (scale: number): string[] => {
+    const max = (chars: number) => Math.max(40, Math.round(chars * scale));
+    return [
+      `reason: (the Orchestrator's, at ${entry.requestedAt}; the facts above are newer) ${text(entry.reason, max(300))}`,
+      `request: ${text(original, max(700))}`,
+      later.length === 0 ? "ownerSaid: nothing more" : `ownerSaid: ${later.map((message) => clipLine(message.text, max(200))).join(" | ")}`,
+      `blockers: ${text(latest?.blockers, max(200))}`,
+      `checks: ${text(latest?.buildAndTests, max(250))}`,
+      `reviewFindingsOpen: ${text(latest?.reviewFindingsOpen, max(300))}`,
+      `decided: ${latest === null ? "none" : newest(latest.decided ?? [], max(300))}`,
+      ...questionsWithin(facts.questions, max(1_200)),
+      `beadsReady: ${newest(latest?.beadsReady ?? [], max(200))}`,
+      `beadsClosed: ${newest(all("beadsClosed"), max(250))}`,
+      `beadsCreated: ${newest(all("beadsCreated"), max(200))}`,
+      `planAndDocs: ${newest(all("filesChanged").filter((path) => DOC_PATH.test(path)), max(250))}`,
+      `filesChanged: ${newest(all("filesChanged"), max(300))}`,
+    ];
+  };
   const closing = briefClosingOf(entry.workerId);
-  const noteLine = (max: number) => `note: ${entry.note === null ? "none — the outgoing Worker wrote no note" : shorten(entry.note, Math.max(40, max))}`;
-  const compose = (note: string) => redactText([...head, note, "", closing].join("\n"), env);
-  let brief = compose(noteLine(1_500));
-  if (brief.length > HANDOFF_BRIEF_MAX_CHARS) brief = compose(noteLine(1_500 - (brief.length - HANDOFF_BRIEF_MAX_CHARS)));
-  if (brief.length <= HANDOFF_BRIEF_MAX_CHARS) return brief;
-  // Still too long: the facts are cut, the closing paragraph kept.
-  const tail = `\n…\n\n${closing}`;
-  return `${brief.slice(0, HANDOFF_BRIEF_MAX_CHARS - tail.length).trimEnd()}${tail}`;
+  const noteLine = (max: number) => `note: ${entry.note === null ? "none — the outgoing Worker wrote no note" : clipLine(entry.note, Math.max(40, max))}`;
+  const compose = (scale: number, note: number) => redactText([...fixed, noteLine(note), ...lists(scale), "", closing].join("\n"), env);
+  let brief = "";
+  for (const scale of BRIEF_SCALES) {
+    brief = compose(scale, 1_500);
+    if (brief.length <= HANDOFF_BRIEF_MAX_CHARS) return brief;
+  }
+  // The lists at their shortest: the note gives way, then whatever is still over, at a word's end.
+  brief = compose(BRIEF_SCALES.at(-1)!, 1_500 - (brief.length - HANDOFF_BRIEF_MAX_CHARS));
+  return clipBrief(brief, HANDOFF_BRIEF_MAX_CHARS);
 }
 
 // ---------------------------------------------------------------------------
@@ -443,13 +552,13 @@ export function handoffHeaderOf(entry: Pick<HandoffEntry, "id" | "requestId" | "
  * The `BM-COMMAND` of a handoff (design §G.6 step 3, change-008 C3): from the
  * Orchestrator to the Worker's Manager, `intent: handoff` on
  * `coordination:handoff`, no effect declared or approved, the Manager's
- * instructions then the brief in its body (cut to fit), the Orchestrator's
- * reason as its `why:`.
+ * instructions then the brief in its body (cut to fit at a word's end, its
+ * closing kept), the Orchestrator's reason as its `why:`.
  */
 export function handoffCommandOf(entry: Pick<HandoffEntry, "id" | "requestId" | "workerId" | "reason">, brief: string): CommandInput {
   const header = handoffHeaderOf(entry);
   const room = MAX_COMMAND_BODY_CHARS - header.length - 2;
-  const body = `${header}\n\n${brief.length <= room ? brief : `${brief.slice(0, room - 2).trimEnd()}\n…`}`;
+  const body = `${header}\n\n${clipBrief(brief, room)}`;
   return {
     from: "orchestrator",
     via: "chat",
@@ -629,10 +738,11 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
   /** The brief from the stores and the note (or none), kept with the entry: `briefed`. */
   async function brief(home: string, entry: HandoffEntry, note: string | null, paseo: unknown): Promise<HandoffEntry | null> {
     const env = deps.redactEnv ?? process.env;
-    const masked = note === null ? null : shorten(redactText(note, env), 1_500);
+    const masked = note === null ? null : clipLine(redactText(note, env), 1_500);
     const withNote = { ...entry, note: masked };
     const text = await handoffBriefOf(withNote, {
       paseo,
+      now,
       location: locationOf(home),
       env,
       log,
@@ -923,9 +1033,12 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
             const asked = timeOrNull(entry.noteAskedAt) ?? at;
             // The turn the request started carries the note, or none will come: it starts after the send (a few
             // seconds of slack, the start mark and the send log being stamped apart); a turn it ended does not count.
-            const answered = own !== null && (timeOrNull(own.startedAt) ?? endOf(own)) >= asked - NOTE_START_SLACK_MS;
+            const answer = own !== null && (timeOrNull(own.startedAt) ?? endOf(own)) >= asked - NOTE_START_SLACK_MS ? own : null;
+            const note = answer === null ? null : noteIn(answer, items, entry.requestId);
+            // A canceled turn without the note is no answer (§7.17.8 h): the wait goes on to its bound.
+            const answered = answer !== null && (note !== null || answer.outcome !== "canceled");
             if (!answered && at - asked <= NOTE_WAIT_MS) continue;
-            current = await brief(home, entry, answered ? noteIn(own, items, entry.requestId) : null, paseo);
+            current = await brief(home, entry, note, paseo);
           }
           if (current !== null && current.state === "briefed") await command(home, current, paseo);
         }

@@ -126,9 +126,10 @@ const OR = flat(rulesBlock(orchestrator).join("\n"));
 describe("budgets (design §A.11)", () => {
   // Rewritten from zero on 2026-09-29: 201 / 400 / 167 / 181 lines before. ADR-027 step 5 (design §16.12): the
   // hand path moved to an unbound agent's Runtime facts, 120 / 250 / 119 lines before; §A.11's budgets stay the ceilings.
+  // Peer links (design §7.17.9, bead bm-peer-links-j8r3.12): Manager 80 → 90, Worker 170 → 180.
   it.each([
-    ["manager.md", manager, 80],
-    ["worker.md", worker, 170],
+    ["manager.md", manager, 90],
+    ["worker.md", worker, 180],
     ["reviewer.md", reviewer, 95],
     ["orchestrator.md", orchestrator, 100],
   ])("%s stays within %i lines", (_name, text, limit) => {
@@ -655,8 +656,8 @@ describe("bound role files and the unbound hand path (ADR-027 decisions 8–9)",
 
   it("each role names each of its bound tools", () => {
     // bm_reply answers a BM-ASK, whose notice says so: the role file need not (D5).
-    for (const name of ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview"]) verbatim(W, `\`${name}\``);
-    for (const name of ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]) verbatim(M, `\`${name}\``);
+    for (const name of ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply"]) verbatim(W, `\`${name}\``);
+    for (const name of ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]) verbatim(M, `\`${name}\``);
     verbatim(R, "`bm_review`");
   });
 
@@ -842,6 +843,33 @@ describe("orchestrator.md — decides what reaches it, verifies, declares effect
 // the messages no test of their own pins; BM-FORMAT, BM-SETTINGS, the Manager-id
 // notice, BM-RESUME, BM-BUDGET and the Runtime facts' mode and skills lines are
 // pinned word for word beside their code.
+describe("peer links and the owner-turn noise (design §7.17.8–9, REQ-176 c, REQ-177, REQ-183 d, e, g)", () => {
+  it("the Manager takes another project's ask as that project's request and asks other projects through the plugin", () => {
+    keys(M, "a peer ask is never the owner's word", "`BM-DELIVERY peer`", "another project's ask", "never the owner's word");
+    keys(M, "a Worker, an attachment or a reply", "`bm_create_worker` (`peerLink`)", "`bm_tell_worker` (`peerLink`)", "`bm_peer_reply`", "one line");
+    keys(M, "its own asks through bm_ask_project, never a raw message", "`bm_ask_project`", "never a raw agent message");
+    keys(M, "where another project stands is read", "Where another project stands", "`bm_peers`");
+    keys(M, "a repeated delivery needs no reply", "repeats what you already told the owner", "no reply");
+    keys(M, "its own question once, again at most at finished", "Ask it once", "goes on as briefed", "at most once", "`finished`");
+    keys(M, "a stopped is the owner's only when their message or BM-STOP shows it", "`stopped` is the owner's only when", "`BM-STOP`");
+  });
+
+  it("the Worker asks another project without leaving its workspace and answers the one that asked", () => {
+    keys(WR, "asking another project is not leaving", "`bm_ask_project` is not leaving", "Manager and owner decide its work");
+    keys(WR, "a peerAsk is no yes", "`peerAsk`", "another project's words", "no yes");
+    keys(W, "asks, carries on, blocks only when nothing else can go on", "`bm_ask_project`", "carry on", "`waitingOnPeers`", "nothing else can go on", "`BM-DELIVERY peer-reply`");
+    keys(W, "a peer brief ends finished with forPeer", "`peer:` line", "`finished` with `forPeer`", "`bm_peer_reply`");
+    keys(W, "an empty turn after a cut is a message delivery, never a stop", "nothing right after a cut turn", "Paseo delivering a message, never a stop");
+    expect(W).not.toMatch(/\*\*nothing at all\*\*/);
+  });
+
+  it("the Orchestrator leaves projects to their links, review budgets to the Worker, and reads a danger signal first", () => {
+    keys(O, "never carries words between projects", "peer links", "never carry words between projects", "command no agent to wait for you");
+    keys(O, "a review budget is the Worker's question", "review budget a request needs", "Worker's question", "never ask the owner");
+    keys(O, "reads a danger signal before a stop", "`danger`", "read its evidence first", "`bm_direct_worker`");
+  });
+});
+
 describe("plugin messages carry their own instructions", () => {
   it("each notice says what its receiver does", () => {
     for (const part of ["never revert it", "Continue the review budget from `reviewCalls`", "send `received` to `managerAgentId`"]) {

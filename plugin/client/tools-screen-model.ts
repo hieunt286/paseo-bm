@@ -6,12 +6,13 @@
  *
  * The skills' install state and the tools come from `setup.status`, as
  * Settings read them before Tools & skills became a section of its own; the
- * agent tools by role come from `shared/bm-tools.ts` (paseo-bm's own tools)
+ * agent tools by role come from `shared/bm-tool-names.ts` (paseo-bm's own tools, as a bound agent gets them)
  * and `setup.status` (whether the last Manager and Worker got Paseo's).
  *
  * Pure: no React, no React Native, no `server/` import.
  */
-import { toolFacesFor, type ToolRole } from "../shared/bm-tools";
+import type { ToolRole } from "../shared/bm-tools";
+import { BM_TOOL_NAMES } from "../shared/bm-tool-names";
 import type { SetupStatus, SkillUsage } from "../shared/contracts";
 import { GROUP_LOADING, type GroupState } from "./settings-model";
 import { SKILL_COLUMNS, skillAgentOfProvider, skillChips, toolBadge } from "./settings-machine-model";
@@ -194,7 +195,7 @@ const ROLE_ROWS: ReadonlyArray<{ role: ToolRole; label: string; paseo: string | 
 
 /** The Orchestrator's tools in short: how many, and what they are for. */
 export function orchestratorToolsText(): string {
-  return `${toolFacesFor("orchestrator").length} tools · read, command, decide, compact, handoff`;
+  return `${BM_TOOL_NAMES.orchestrator.length} tools · read, command, decide, compact, handoff`;
 }
 
 /**
@@ -206,7 +207,7 @@ export function orchestratorToolsText(): string {
 export function agentToolsRows(status: SetupStatus): AgentToolsRowView[] {
   const inject = status.setup?.agentTools.injectIntoAgents;
   return ROLE_ROWS.map(({ role, label, paseo }) => {
-    const bm = role === "orchestrator" ? orchestratorToolsText() : toolFacesFor(role).map((face) => face.name).join(" · ") || "none";
+    const bm = role === "orchestrator" ? orchestratorToolsText() : BM_TOOL_NAMES[role].join(" · ") || "none";
     if (paseo === null) return { role: label, paseo: { text: "none", tone: "muted" }, bm };
     const seen = role === "manager" || role === "worker" ? status.paseoTools?.[role] : undefined;
     if (inject === false) return { role: label, paseo: { text: `${paseo} · off for every agent`, tone: "warning" }, bm };

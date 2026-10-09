@@ -1,11 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS } from "../plugin/server/agent-bindings";
+import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, createBindingStore } from "../plugin/server/agent-bindings";
 import { BUILDER_SEND_LINES, answer, answerWithServerTools, withAgentTools } from "../plugin/server/agent-tools";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { clearStartMarks, currentTurnStartOf, noteTurnStart, relayRequestIdOf } from "../plugin/server/collector";
 import { clearMaterialiserMemory, materialiseTurn } from "../plugin/server/decision-materialiser";
+import { clearJsonFileCache } from "../plugin/server/data-files";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import {
   DELIVERY_NOT_BOUND_MESSAGE,
@@ -16,7 +17,10 @@ import {
   createDeliveringTools,
   type DeliveringToolDeps,
 } from "../plugin/server/deliver-tools";
-import { noteIn } from "../plugin/server/handoff";
+import { noteIn, peerBlockOf } from "../plugin/server/handoff";
+import { CUT_NOTE_LINE, clearSeenTurns, createInterruptionWatch } from "../plugin/server/interruption-watch";
+import { PEER_RULES, createPeerLinkStore } from "../plugin/server/peer-links";
+import { peerReplyText } from "../plugin/server/peer-tools";
 import { offToolAlertOf } from "../plugin/server/off-tool-reviewer";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { OUTBOX_DIR_NAME, OUTBOX_SETTLED_MS, createOutbox } from "../plugin/server/outbox";
@@ -32,7 +36,8 @@ import { originOf } from "../plugin/shared/message-origin";
 import { msg, turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
-import { MANAGER_CALLER, REVIEWER_CALLER, WORKER_CALLER } from "./helpers/bindings";
+import { MANAGER_CALLER, REVIEWER_CALLER, WORKER_CALLER, bindAgent } from "./helpers/bindings";
+import type { TraceRecord } from "../plugin/shared/contracts";
 
 /**
  * The bound agents' delivering tools (design §16.6, §16.7; ADR-027 decisions
@@ -56,6 +61,8 @@ afterEach(() => {
   clearProposedAnswers();
   clearMaterialiserMemory();
   clearStartMarks();
+  clearJsonFileCache();
+  clearSeenTurns();
   removeDataFolders();
 });
 
@@ -125,9 +132,9 @@ const call = (name: string, args: unknown) => ({ jsonrpc: "2.0", id: 1, method: 
 
 describe("the bound lists (design §16.6)", () => {
   it("a bound Worker, Reviewer and Manager list their delivering tools; unbound agents keep today's lists", () => {
-    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
+    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
     expect(toolFacesFor("reviewer", true).map((face) => face.name)).toEqual(["bm_review"]);
-    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]);
     expect(toolFacesFor("worker").map((face) => face.name)).toEqual(["bm_report", "bm_reply"]);
     expect(toolFacesFor("reviewer").map((face) => face.name)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).toEqual(["bm_answers", "bm_decisions"]);
@@ -141,9 +148,9 @@ describe("the bound lists (design §16.6)", () => {
   it("the hook pre-approves exactly the bound list", () => {
     const empty: { toolPolicy?: { preapproved?: Array<{ tool: string }> } } = {};
     const tools = (role: "worker" | "reviewer" | "manager") => withAgentTools(empty, role, "http://127.0.0.1:1/mcp/x", true)?.toolPolicy?.preapproved?.map((grant) => grant.tool);
-    expect(tools("worker")).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
+    expect(tools("worker")).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
     expect(tools("reviewer")).toEqual(["bm_review"]);
-    expect(tools("manager")).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
+    expect(tools("manager")).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]);
     expect(answer("reviewer", { jsonrpc: "2.0", id: 1, method: "tools/list" }, true)).toMatchObject({ result: { tools: [{ name: "bm_review" }] } });
   });
 });
@@ -649,5 +656,241 @@ describe("bm_tell_worker for a bound Manager (design §16.6)", () => {
     }
     expect(relayRequestIdOf({ type: "tool_call", name: "mcp__paseo-bm__bm_tell_worker", detail: { input: { requestId: "nope" } } } as never)).toBeNull();
     expect(relayRequestIdOf({ type: "tool_call", name: "mcp__paseo__send_agent_prompt", detail: { input: { prompt: `Continue ${REQ}.\nGo on.` } } } as never)).toBe(REQ);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Peer links (design §7.17.3, §7.17.4, §7.17.8 g).
+// ---------------------------------------------------------------------------
+
+describe("peer links through bm_report and bm_tell_worker (design §7.17.3)", () => {
+  const FRONT = "wks_front";
+  const REQ_FRONT = "req-20261003T090000Z";
+  const ANSWERED = "peer-0000000000a1";
+  const ASKED = "peer-0000000000b1";
+  const ASKER: Agent = { id: "wrk-front", provider: "bm-worker/claude-opus-5", status: "idle", workspaceId: FRONT, labels: { "bm.role": "worker", "bm.requestId": REQ_FRONT } };
+  const PEER_AGENTS = [...AGENTS, ASKER];
+
+  /** A link another project asked of this one; `take` gives it to REQ. */
+  const askOfUs = (home: string, linkId = ANSWERED, take = true) => {
+    const links = createPeerLinkStore(home, { newId: () => linkId, now: () => T0 });
+    links.createLink({ kind: "work", from: { workspaceId: FRONT, requestId: REQ_FRONT, agentId: ASKER.id, role: "worker" }, to: { workspaceId: WS, managerId: MANAGER }, text: "Add GET /api/orders." });
+    if (take) links.takeLink(linkId, { workspaceId: WS, requestId: REQ, workerId: WORKER });
+  };
+  /** A link REQ asked of another project. */
+  const askedByUs = (home: string, linkId = ASKED) =>
+    createPeerLinkStore(home, { newId: () => linkId, now: () => T0 }).createLink({
+      kind: "question",
+      from: { workspaceId: WS, requestId: REQ, agentId: WORKER, role: "worker" },
+      to: { workspaceId: "wks_back", managerId: "mgr-back" },
+      text: "Which date format does the API take?",
+    });
+  const link = (home: string, id: string) => createPeerLinkStore(home).get(id)!;
+
+  it("finished of a request that carries a link needs forPeer; with it the reply is stored pending in this outbox and delivered to the asker after the report", async () => {
+    const { home, fake, tools } = setup({ agents: PEER_AGENTS });
+    register(home);
+    askOfUs(home);
+    const finished = { ...REPORT, phase: "finished" };
+    const refusal = await tools.worker.call("bm_report", finished, WORKER_CALLER);
+    expect(refusal).toEqual({
+      ok: false,
+      text: `The call was refused. Fix these and call bm_report again:\n- input.forPeer: request ${REQ} answers link ${ANSWERED}: write what that project needs to know`,
+    });
+    expect(existsSync(join(home, OUTBOX_DIR_NAME))).toBe(false);
+
+    expect(parsed(await tools.worker.call("bm_report", { ...finished, forPeer: "GET /api/orders is live.\nShape: { id, total }." }, WORKER_CALLER))).toEqual({ recordId: "out-000000000001", delivery: "sent" });
+    const [report, reply] = createOutbox(home).list(WS);
+    expect(report).toMatchObject({ kind: "report", to: MANAGER });
+    // The block never carries forPeer: it goes to the other project only.
+    expect(report!.text).not.toContain("GET /api/orders");
+    const text = peerReplyText({ linkId: ANSWERED, title: WS, workspaceId: WS, requestId: REQ, phase: "finished", body: "GET /api/orders is live.\nShape: { id, total }." });
+    expect(reply).toMatchObject({ id: "out-000000000002", kind: "peer-reply", requestId: REQ, from: WORKER, to: ASKER.id, text });
+    await vi.waitFor(() => expect(fake.sends.map((send) => send.id)).toEqual([MANAGER, ASKER.id]));
+    expect(fake.sends[1]!.text).toBe(`BM-DELIVERY peer-reply out-000000000002\n${text}`);
+    await vi.waitFor(() => expect(createOutbox(home).list(WS)[1]!.state).toBe("delivered"));
+    expect(link(home, ANSWERED)).toMatchObject({ state: "answered", answeredAt: T0.toISOString() });
+    expect(link(home, ANSWERED).messages).toMatchObject([{ recordId: "out-000000000002", workspaceId: WS, side: "answerer", agentId: WORKER, kind: "peer-reply", phase: "finished" }]);
+
+    // A later finished announces again; the link stays answered.
+    fake.byId(MANAGER)!.status = "idle";
+    fake.byId(ASKER.id)!.status = "idle";
+    expect((await tools.worker.call("bm_report", { ...finished, forPeer: "Also GET /api/orders/:id." }, WORKER_CALLER)).ok).toBe(true);
+    await vi.waitFor(() => expect(fake.sends.map((send) => send.id)).toEqual([MANAGER, ASKER.id, MANAGER, ASKER.id]));
+    expect(link(home, ANSWERED).state).toBe("answered");
+    expect(link(home, ANSWERED).messages.map((message) => message.phase)).toEqual(["finished", "finished"]);
+  });
+
+  it("a finished reply answers its link only once delivered: queued for a running asker the link stays taken; one dropped leaves it taken", async () => {
+    const { home, fake, queue, tools } = setup({ agents: [...AGENTS, { ...ASKER, status: "running" }] });
+    register(home);
+    askOfUs(home);
+    const finished = { ...REPORT, phase: "finished", forPeer: "GET /api/orders is live." };
+    expect((await tools.worker.call("bm_report", finished, WORKER_CALLER)).ok).toBe(true);
+    await vi.waitFor(() => expect(queue.pending(ASKER.id)).toHaveLength(1));
+    expect(createOutbox(home).list(WS)[1]).toMatchObject({ kind: "peer-reply", state: "pending" });
+    expect(link(home, ANSWERED)).toMatchObject({ state: "taken", answeredAt: null });
+    fake.byId(ASKER.id)!.status = "idle";
+    await queue.turnEnded({ agent: { id: ASKER.id, workspaceId: FRONT, parentAgentId: null, provider: ASKER.provider, cwd: "/repo", title: null }, turnId: "t", outcome: { kind: "completed" }, timeline: [] }, fake.paseo);
+    await vi.waitFor(() => expect(createOutbox(home).list(WS)[1]!.state).toBe("delivered"));
+    expect(link(home, ANSWERED)).toMatchObject({ state: "answered", answeredAt: T0.toISOString() });
+
+    // No live agent on the asking side: the reply is dropped and the link stays taken.
+    const gone = setup();
+    register(gone.home);
+    askOfUs(gone.home);
+    expect((await gone.tools.worker.call("bm_report", finished, WORKER_CALLER)).ok).toBe(true);
+    await vi.waitFor(() => expect(createOutbox(gone.home).list(WS)[1]).toMatchObject({ kind: "peer-reply", state: "dropped", reason: "no live agent is left on the link's other side" }));
+    expect(link(gone.home, ANSWERED).state).toBe("taken");
+  });
+
+  it("finished closes, by the asker, each link the request asked that nobody took yet; a taken one stays, and other phases close nothing", async () => {
+    const { home, fake, tools } = setup({ agents: PEER_AGENTS });
+    register(home);
+    askedByUs(home);
+    const TAKEN = "peer-0000000000b2";
+    askedByUs(home, TAKEN);
+    createPeerLinkStore(home).takeLink(TAKEN, { workspaceId: "wks_back", requestId: "req-20261003T120000Z", workerId: "wrk-back" });
+    for (const phase of ["received", "beads-done", "stopped"]) {
+      fake.byId(MANAGER)!.status = "idle";
+      expect((await tools.worker.call("bm_report", { ...REPORT, phase }, WORKER_CALLER)).ok).toBe(true);
+    }
+    expect(link(home, ASKED).state).toBe("open");
+    fake.byId(MANAGER)!.status = "idle";
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    expect(link(home, ASKED)).toMatchObject({ state: "closed", closedBy: "asker", closedAt: T0.toISOString() });
+    expect(link(home, TAKEN).state).toBe("taken");
+  });
+
+  it("blocked and stopped reply with the report's blockers line (and forPeer when given); received and beads-done reply nothing", async () => {
+    const { home, fake, tools } = setup({ agents: PEER_AGENTS });
+    register(home);
+    askOfUs(home);
+    askedByUs(home);
+    for (const phase of ["received", "beads-done"]) expect((await tools.worker.call("bm_report", { ...REPORT, phase }, WORKER_CALLER)).ok).toBe(true);
+    expect(createOutbox(home).list(WS).filter((record) => record.kind === "peer-reply")).toEqual([]);
+    fake.byId(MANAGER)!.status = "idle";
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "blocked", waitingOnPeers: [ASKED] }, WORKER_CALLER)).ok).toBe(true);
+    fake.byId(MANAGER)!.status = "idle";
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "stopped", forPeer: "Stopped by the owner." }, WORKER_CALLER)).ok).toBe(true);
+    const replies = createOutbox(home).list(WS).filter((record) => record.kind === "peer-reply");
+    expect(replies.map((record) => record.text)).toEqual([
+      peerReplyText({ linkId: ANSWERED, title: WS, workspaceId: WS, requestId: REQ, phase: "blocked", body: `blockers: waiting on project: wks_back (${ASKED})` }),
+      peerReplyText({ linkId: ANSWERED, title: WS, workspaceId: WS, requestId: REQ, phase: "stopped", body: "blockers: none\nStopped by the owner." }),
+    ]);
+    expect(link(home, ANSWERED).state).toBe("taken");
+  });
+
+  it("waitingOnPeers: blocked only, live links this request asked; it sets waitingSince and every report clears it", async () => {
+    const { home, fake, tools, tick } = setup({ agents: PEER_AGENTS });
+    register(home);
+    askedByUs(home);
+    askOfUs(home, "peer-0000000000c1", false);
+    const blocked = { ...REPORT, phase: "blocked", waitingOnPeers: [ASKED] };
+    expect((await tools.worker.call("bm_report", blocked, WORKER_CALLER)).ok).toBe(true);
+    const [record] = createOutbox(home).list(WS);
+    expect(record!.text).toContain(`blockers: waiting on project: wks_back (${ASKED})`);
+    expect(checkBlocks(record!.text).flatMap((block) => block.issues)).toEqual([]);
+    expect(link(home, ASKED).waitingSince).toBe(T0.toISOString());
+    tick(60_000);
+    fake.byId(MANAGER)!.status = "idle";
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "beads-done" }, WORKER_CALLER)).ok).toBe(true);
+    expect(link(home, ASKED).waitingSince).toBeNull();
+
+    // Refused: outside blocked; a link it did not ask, an unknown one, a closed one.
+    createPeerLinkStore(home, { newId: () => "peer-0000000000d1" }).createLink({ kind: "work", from: { workspaceId: WS, requestId: REQ, agentId: WORKER, role: "worker" }, to: { workspaceId: "wks_back", managerId: null }, text: "x" });
+    createPeerLinkStore(home).closeLink("peer-0000000000d1", "asker");
+    const before = createOutbox(home).list(WS).length;
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "beads-done", waitingOnPeers: [ASKED] }, WORKER_CALLER)).text).toContain("- input.waitingOnPeers: only a blocked report waits; leave it out");
+    const wrong = await tools.worker.call("bm_report", { ...blocked, waitingOnPeers: ["peer-0000000000c1", "peer-0000000000e1", "peer-0000000000d1"] }, WORKER_CALLER);
+    expect(wrong.text.split("\n").slice(1)).toEqual([
+      "- input.waitingOnPeers: peer-0000000000c1 is not a live link your request asked; leave it out",
+      "- input.waitingOnPeers: peer-0000000000e1 is not a live link your request asked; leave it out",
+      "- input.waitingOnPeers: peer-0000000000d1 is not a live link your request asked; leave it out",
+    ]);
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "blocked" }, WORKER_CALLER)).text).toContain("waitingOnPeers (links you asked)");
+    expect(createOutbox(home).list(WS)).toHaveLength(before);
+  });
+
+  it("a stopped report sent in the first turn after a Paseo cut carries the note line; after an owner's message, or with no cut, it does not (§7.17.8 g)", async () => {
+    const cutAt = Date.parse("2026-10-03T10:04:00.000Z");
+    let clock = cutAt + 1_000;
+    const watch = createInterruptionWatch({ now: () => clock, setTimer: () => undefined });
+    const canceled = { agentId: WORKER, role: "worker", outcome: "canceled", startedAt: "2026-10-03T10:00:00.000Z", endedAt: new Date(cutAt).toISOString(), sent: [] } as unknown as TraceRecord;
+    const stopped = { ...REPORT, phase: "stopped" };
+
+    // No cut seen: no note, and the timeline is never read.
+    const plain = setup();
+    register(plain.home);
+    expect((await plain.tools.worker.call("bm_report", stopped, WORKER_CALLER)).ok).toBe(true);
+    expect(createOutbox(plain.home).list(WS)[0]!.text).not.toContain(CUT_NOTE_LINE);
+
+    // Paseo cut the turn to deliver another agent's message: the stop is not the owner's.
+    watch.turnRecorded(canceled, undefined);
+    watch.turnStarted(WORKER);
+    const cut = setup();
+    register(cut.home);
+    cut.fake.setTimeline(WORKER, [{ item: { type: "user_message", text: "Reviewer agent-reviewer finished." }, timestamp: "2026-10-03T10:04:01.000Z" }]);
+    expect((await cut.tools.worker.call("bm_report", stopped, WORKER_CALLER)).ok).toBe(true);
+    const [record] = createOutbox(cut.home).list(WS);
+    expect(record!.text.endsWith(`\n\n${CUT_NOTE_LINE}`)).toBe(true);
+    expect(CUT_NOTE_LINE).toBe("note: the turn before this report was cut by a message delivery, not by the owner");
+    expect(cut.fake.sends[0]!.text).toContain(CUT_NOTE_LINE);
+    expect(parseReports(record!.text, { agentId: WORKER, at: T0.toISOString() })[0]).toMatchObject({ phase: "stopped" });
+    // Only a stopped report carries it.
+    cut.fake.byId(MANAGER)!.status = "idle";
+    expect((await cut.tools.worker.call("bm_report", { ...REPORT, phase: "beads-done" }, WORKER_CALLER)).ok).toBe(true);
+    expect(createOutbox(cut.home).list(WS)[1]!.text).not.toContain(CUT_NOTE_LINE);
+
+    // The owner typed the message that started the turn: their stop.
+    const owner = setup();
+    register(owner.home);
+    owner.fake.setTimeline(WORKER, [{ item: { type: "user_message", text: "Stop here.", clientMessageId: "m-1" }, timestamp: "2026-10-03T10:04:01.000Z" }]);
+    expect((await owner.tools.worker.call("bm_report", stopped, WORKER_CALLER)).ok).toBe(true);
+    expect(createOutbox(owner.home).list(WS)[0]!.text).not.toContain(CUT_NOTE_LINE);
+
+    // A later turn, long after the cut, is not the first after it.
+    clock = cutAt + 120_000;
+    watch.turnStarted(WORKER);
+    const later = setup();
+    register(later.home);
+    later.fake.setTimeline(WORKER, [{ item: { type: "user_message", text: "Reviewer agent-reviewer finished." }, timestamp: "2026-10-03T10:06:00.000Z" }]);
+    expect((await later.tools.worker.call("bm_report", stopped, WORKER_CALLER)).ok).toBe(true);
+    expect(createOutbox(later.home).list(WS)[0]!.text).not.toContain(CUT_NOTE_LINE);
+  });
+
+  it("bm_tell_worker with peerLink attaches an open link to a bound Worker's request and carries the peer: block and rules", async () => {
+    const { home, fake, tools } = setup();
+    register(home);
+    askOfUs(home, ANSWERED, false);
+    bindAgent(createBindingStore(home), WORKER, { role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER });
+    const result = await tools.manager.call("bm_tell_worker", { requestId: REQ, text: "The frontend needs this too.", peerLink: ANSWERED }, MANAGER_CALLER);
+    expect(parsed(result)).toEqual({ workerId: WORKER, delivery: "sent" });
+    const block = [`peer: ${ANSWERED} from project "${FRONT}" (${FRONT}), request ${REQ_FRONT}`, "peerAsk:", "> Add GET /api/orders."];
+    const [record] = createOutbox(home).list(WS);
+    expect(fake.sends[0]!.text).toBe([`BM-DELIVERY message ${record!.id}`, `Continue ${REQ}.`, "The frontend needs this too.", ...block, "", ...PEER_RULES].join("\n"));
+    expect(peerBlockOf([record!.text])).toEqual([...block, ...PEER_RULES]);
+    expect(link(home, ANSWERED)).toMatchObject({ state: "taken", to: { requestId: REQ, workerId: WORKER, managerId: MANAGER } });
+  });
+
+  it("bm_tell_worker refuses a link that is not open or not this project's, and an unbound Worker, sending nothing", async () => {
+    const { home, fake, tools } = setup();
+    register(home);
+    const tell = { requestId: REQ, text: "Take this on.", peerLink: ANSWERED };
+    const notOpen = `link ${ANSWERED} is not an open ask of this project (bm_peers lists them). Nothing was sent.`;
+    expect(await tools.manager.call("bm_tell_worker", tell, MANAGER_CALLER)).toEqual({ ok: false, text: notOpen });
+    askOfUs(home, ANSWERED, false);
+    // The Worker has no binding: it could not answer the link.
+    expect(await tools.manager.call("bm_tell_worker", tell, MANAGER_CALLER)).toEqual({
+      ok: false,
+      text: `a Worker without paseo-bm's tools could neither report forPeer nor answer link ${ANSWERED}; answer it with bm_peer_reply. Nothing was sent.`,
+    });
+    createPeerLinkStore(home).closeLink(ANSWERED, "answerer");
+    bindAgent(createBindingStore(home), WORKER, { role: "worker", workspaceId: WS, requestId: REQ, parentId: MANAGER });
+    expect(await tools.manager.call("bm_tell_worker", tell, MANAGER_CALLER)).toEqual({ ok: false, text: notOpen });
+    createPeerLinkStore(home, { newId: () => "peer-0000000000f1" }).createLink({ kind: "work", from: { workspaceId: FRONT, requestId: REQ_FRONT, agentId: ASKER.id, role: "worker" }, to: { workspaceId: "wks_back", managerId: null }, text: "x" });
+    expect((await tools.manager.call("bm_tell_worker", { ...tell, peerLink: "peer-0000000000f1" }, MANAGER_CALLER)).text).toBe(notOpen.replace(ANSWERED, "peer-0000000000f1"));
+    expect(fake.sends).toEqual([]);
+    expect(existsSync(join(home, OUTBOX_DIR_NAME))).toBe(false);
   });
 });

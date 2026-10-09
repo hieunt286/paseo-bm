@@ -891,12 +891,12 @@ describe("the event bus: only BM-EVENTS, only to the Orchestrator, a finished st
     expectBoundary({ sendsTo: [ORCHESTRATOR_ID] });
   });
 
-  it("a Worker's turn is never a request.finished event, and a Manager turn without a report is no event at all (a Manager's turn wakes nobody)", async () => {
+  it("a Reviewer's turn is never a request.finished event (a Worker's own finish is, design §7.17.8 i), and a Manager turn without a report is no event at all (a Manager's turn wakes nobody)", async () => {
     seedOrchestrator();
     ownerScopes();
     fake.table.get(WORKER)!.status = "idle";
     fake.table.get(REVIEWER)!.status = "idle";
-    await expect(eventBus.turnRecorded({ ...finishedManagerRecord(), agentId: WORKER, role: "worker" }, [], fake.paseo)).resolves.toMatchObject({ status: "none" });
+    await expect(eventBus.turnRecorded({ ...finishedManagerRecord(), agentId: REVIEWER, role: "reviewer" }, [], fake.paseo)).resolves.toMatchObject({ status: "none" });
     await expect(eventBus.turnRecorded(askingManagerRecord(), [], fake.paseo)).resolves.toMatchObject({ status: "none" });
     expectBoundary();
   });

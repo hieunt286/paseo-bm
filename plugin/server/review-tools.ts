@@ -55,6 +55,7 @@ import { parseReviews } from "./bm-report";
 import { readReviewBudget } from "./coordination-rpc";
 import { folderOfAgent } from "./create-worker";
 import { resolveDataHome, TRACES_DIR_NAME } from "./data-home";
+import { createDecisionStore } from "./decision-store";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
 import type { NoticeQueue } from "./notice-queue";
@@ -69,7 +70,7 @@ import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, ref
 import type { ReconstructedTrace } from "./traces";
 import { CREATE_REVIEWER_FACE, REREVIEW_FACE, createReviewerRules, schemaIssues, type CreateReviewerInput } from "../shared/bm-tools";
 import type { Tier } from "../shared/contracts";
-import { REVIEW_BUDGET_SUBJECT, policyMayGrant, type Decision } from "../shared/decisions";
+import { REVIEW_BUDGET_SUBJECT, policyGrantCapOf, policyMayGrant, type Decision } from "../shared/decisions";
 import { overReviewCeiling, reviewCeilingOf } from "../shared/orchestrator-rules";
 import type { RuleReviewGrant } from "../shared/rule-input";
 import { reviewerBriefLineOf } from "../shared/notices";
@@ -408,6 +409,38 @@ function serialised<T>(key: string, work: () => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------------------
 
 /**
+ * The review calls the owner's policy may still grant `requestId` (design
+ * §7.17.8 a): `policyGrantCapOf` its tier in the registry (unknown: the Small
+ * budget) and the owner's budget now, less the calls of the request's grants
+ * the policy already gave — each registry grant whose decision is answered
+ * `by: policy`, or is no longer stored (counted, to stay on the safe side) —
+ * but `exceptDecisionId`'s own. In total the policy grants a request at most
+ * its tier's budget: it at most doubles it. Never throws: an unreadable
+ * decision store counts every grant.
+ */
+export function policyGrantCapAt(
+  home: string,
+  workspaceId: string,
+  requestId: string | null,
+  log?: (message: string) => void,
+  exceptDecisionId?: string,
+): number {
+  const request = requestId === null ? null : createRequestRegistry(home, { log }).get(workspaceId, requestId);
+  const cap = policyGrantCapOf(request?.tier ?? null, readReviewBudget({ home, log }));
+  const grants = (request?.reviews.grants ?? []).filter((grant) => grant.decisionId !== exceptDecisionId && grant.calls !== null);
+  if (grants.length === 0) return cap;
+  const callsOf = (counted: typeof grants) => counted.reduce((sum, grant) => sum + (grant.calls ?? 0), 0);
+  let granted = callsOf(grants);
+  try {
+    const store = createDecisionStore(home, log === undefined ? {} : { log });
+    granted = callsOf(grants.filter((grant) => (store.get(grant.decisionId, workspaceId)?.answer?.by ?? "policy") === "policy"));
+  } catch {
+    // Every grant counts as the policy's.
+  }
+  return Math.max(0, cap - granted);
+}
+
+/**
  * Appends the grant of every answered `review-budget` decision of `decisions`
  * to its request (design §16.8): the chosen option's `grant`; an option
  * without one, or an answer in the owner's words, grants nothing. Once per
@@ -437,8 +470,8 @@ export function applyReviewBudgetGrants(
     const key = decision.answer.optionKey;
     const grant = key === null ? undefined : decision.options.find((option) => option.key === key)?.grant;
     if (grant === undefined) continue;
-    // The owner's policy grants at most { calls: 2 } (bm_decide refuses more); should one ever have, it grants nothing.
-    if (decision.answer.by === "policy" && !policyMayGrant(grant)) {
+    // The owner's policy grants at most the request tier's budget in all (bm_decide refuses more); should one ever have, it grants nothing.
+    if (decision.answer.by === "policy" && !policyMayGrant(grant, policyGrantCapAt(home, decision.workspaceId, decision.requestId, log, decision.id))) {
       log(`[paseo-bm] the review-budget answer of ${decision.id} by the owner's policy grants more than it may; nothing was granted.`);
       continue;
     }

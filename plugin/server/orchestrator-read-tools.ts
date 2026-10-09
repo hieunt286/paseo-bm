@@ -15,6 +15,9 @@
  *   Each returns a bounded summary by default and today's content with
  *   `detail: "full"` (autonomy design §A.9), with a one-line note first
  *   whenever the summary left something out.
+ * - `bm_projects` also counts each project's live peer links
+ *   (`counts.openLinks`) and lists them in full (`links`, as `bm_peers` does;
+ *   design §7.17.5).
  * - `bm_note` (§6B.4) keeps the Orchestrator's notes about a project, which
  *   `bm_projects` returns.
  *
@@ -29,6 +32,7 @@ import { readTimelinePages } from "./live-timeline";
 import { isPluginOrigin, originOf } from "../shared/message-origin";
 import { createAlertStore } from "./alert-store";
 import { createDecisionStore } from "./decision-store";
+import { createPeerLinkStore, isLiveLink, linkViewsOf } from "./peer-links";
 import {
   MESSAGE_PAGES,
   MESSAGE_PAGE_LIMIT,
@@ -48,6 +52,8 @@ import { timeOrZero } from "../shared/time";
 
 /** The most recent requests `bm_projects` lists per project (design §5.2). */
 export const PROJECT_REQUEST_LIMIT = 10;
+/** The most peer links `bm_projects` lists per project in full, newest first (design §7.17.5; `bm_peers` shows as many). */
+export const PROJECT_LINK_LIMIT = 30;
 /** The longest message `bm_agent_messages` hands out (design §6A: long enough for a question with all its options). */
 export const AGENT_MESSAGE_MAX_CHARS = 12_000;
 /** The note `bm_projects` puts first when its summary left requests or notes out (autonomy design §A.9). */
@@ -110,6 +116,8 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
   const [allAgents, listed] = await Promise.all([bmAgentsOf(context.paseo), listedWorkspaces(context.paseo)]);
   // Stalled requests are Inbox alerts (autonomy design §A.8); `situation` is why they stalled.
   const openStalls = createAlertStore(context.home).list({ open: true, kinds: ["request-stalled"] });
+  // Design §7.17.5: the peer links, read once.
+  const peerLinks = createPeerLinkStore(context.home).list();
 
   // A workspace is active when the store saw a turn in the period, or one of its agents runs now.
   const running = new Set(allAgents.filter((entry) => entry.facts.status === "running" && entry.workspaceId !== null).map((entry) => entry.workspaceId!));
@@ -152,6 +160,7 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
           openStalls: openStalls.filter((stall) => stall.workspaceId === workspaceId).length,
           notes,
           openDecisions: openDecisions.total,
+          openLinks: peerLinks.filter((link) => isLiveLink(link) && (link.from.workspaceId === workspaceId || link.to.workspaceId === workspaceId)).length,
         },
         openDecisions: openDecisions.entries,
       });
@@ -165,6 +174,7 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
       managers,
       // The Orchestrator's own memory of the project (design §6B.4, §6B.6), oldest first.
       notes: notesOf(workspaceId, context),
+      links: linkViewsOf(peerLinks, workspaceId).slice(0, PROJECT_LINK_LIMIT),
       requests: recent.slice(0, PROJECT_REQUEST_LIMIT).map(({ trace, lastActivityAt }) => {
         const key = requestKeyOf(trace);
         return {

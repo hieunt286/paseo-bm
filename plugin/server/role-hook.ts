@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
 import { TOOL_PROVIDERS, boundTokenOf, boundUrlOf, withAgentTools, withoutAgentTools, type AgentToolsEndpoint } from "./agent-tools";
-import { isBoundRole } from "./agent-bindings";
+import { HOOK_BINDING_ENV, hookTagOf, isBoundRole } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
 import {
@@ -64,6 +64,14 @@ import { suppressCodexNativeDelegation } from "./provider-native-delegation";
  * Elsewhere today's rule applies, and a creator's boundary mode is moved back
  * to today's pick. Its Runtime facts say which, as `Action boundary: on` or
  * `off — <why>`.
+ *
+ * A Manager the owner opens from Paseo's composer carries no bound URL: the
+ * hook binds it itself (`hookBindingFor`, design §7.17.7), so it gets the
+ * bound tools and instructions without the hand path. Its creation carries
+ * the binding's tag in `env`; the `before("agent.session_open")` hook this
+ * module also registers reads it with the new agent's id and claims the
+ * binding for that agent (`claimHookBinding`), which is the only agent the
+ * binding ever settles to.
  *
  * Provider ids map to roles through `roleOfProvider` (agent-role.ts), the
  * same rule every lookup uses to tell paseo-bm agents apart (delta 20260918g):
@@ -464,6 +472,8 @@ async function prepare(
   base: string | null;
   /** The action boundary for a Worker or Reviewer (§D.2); null for another role. */
   boundary: BoundaryPosture | null;
+  /** The workspace whose folder is `cwd`, or null when none can be told. */
+  workspaceId: string | null;
 }> {
   const cwd = typeof request?.config?.cwd === "string" ? request.config.cwd : undefined;
   const id = providerId(request?.config?.provider);
@@ -503,7 +513,16 @@ async function prepare(
         });
   const base = id === null ? null : ((await aliasBases(paseo))[id] ?? null);
   const boundary = boundaryPostureOf({ role, base, project: project.boundary, modes, profileModeId });
-  return { modes, facts: boundary === null ? facts : { ...facts, actionBoundary: boundary }, profileModeId, profile, features, base, boundary };
+  return {
+    modes,
+    facts: boundary === null ? facts : { ...facts, actionBoundary: boundary },
+    profileModeId,
+    profile,
+    features,
+    base,
+    boundary,
+    workspaceId: project.workspaceId,
+  };
 }
 
 /**
@@ -606,6 +625,91 @@ export function applyAgentTools(request: AgentCreateRequest, tools: RoleHookTool
   }
 }
 
+/** A binding the hook issued itself (design §7.17.7): the creation with its token URL, and the binding's hash. */
+export interface HookBinding {
+  request: AgentCreateRequest;
+  tokenSha256: string;
+}
+
+/**
+ * True when the creation already carries the Manager's role text: the
+ * plugin's own `createManager` sends the instructions it read
+ * (`readInstructions`), and Paseo's composer never does. The request holds
+ * no labels (`{ config, env }` only), so this is how a `createManager`
+ * creation is told apart here, even one its binder did not bind. Never throws.
+ */
+function isPluginManagerCreation(request: AgentCreateRequest): boolean {
+  try {
+    const prompt = request.config.systemPrompt;
+    return typeof prompt === "string" && prompt.includes(BASE_INSTRUCTIONS.manager.trimEnd());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Binds a Manager the owner opens from Paseo's composer (design §7.17.7,
+ * ADR-028 decision 10): when the creation is a `bm-manager` one carrying no
+ * bound URL and not the plugin's own (`isPluginManagerCreation`), its base
+ * provider is in `TOOL_PROVIDERS`, its workspace is known, the endpoint
+ * listens and the store takes the new one, a `pending` binding `{ role:
+ * "manager", workspaceId, parentId: null, requestId: null, origin: "hook" }`
+ * is issued, the creation gets its token URL, which `applyAgentTools` then
+ * keeps as for the plugin's own creations, and its `env` gets the binding's
+ * tag under `HOOK_BINDING_ENV` (`hookTagOf`, never the token) for the
+ * session-open hook to claim it with the agent's id. Each creation gets its
+ * own binding, concurrent ones included: a binding settles only to the agent
+ * that claimed it. Null otherwise: the creation goes on unbound with the hand
+ * path. Never throws.
+ */
+export function hookBindingFor(request: AgentCreateRequest, tools: RoleHookTools | null, base: string | null, workspaceId: string | null): HookBinding | null {
+  try {
+    if (roleOfProvider(request.config.provider) !== "manager" || isPluginManagerCreation(request)) return null;
+    const bindings = tools?.bindings;
+    if (tools === null || bindings === null || bindings === undefined) return null;
+    if (base === null || !TOOL_PROVIDERS.includes(base) || workspaceId === null || workspaceId === "") return null;
+    const roleUrl = tools.urlFor("manager");
+    if (roleUrl === null || boundTokenOf(request.config, "manager", roleUrl) !== null) return null;
+    const { token, tokenSha256 } = bindings.issue({ role: "manager", workspaceId, parentId: null, requestId: null, origin: "hook" });
+    const config = withAgentTools(request.config, "manager", boundUrlOf(roleUrl, token));
+    if (config === undefined) {
+      bindings.discard(tokenSha256);
+      return null;
+    }
+    const env = { ...(request.env ?? {}), [HOOK_BINDING_ENV]: hookTagOf(tokenSha256) };
+    return { request: { ...request, config, env }, tokenSha256 };
+  } catch {
+    return null;
+  }
+}
+
+/** The `agent.session_open` before-request the daemon hands to the hook. */
+export type SessionOpenRequest = PluginBeforeRequests["agent.session_open"];
+
+/**
+ * `before("agent.session_open")` (design §7.17.7): Paseo opens a new agent's
+ * session with the `env` the `agent.create` hook returned and the agent's id,
+ * before `agent.created`. A session opened for a creation (`reason:
+ * "create"`) whose `env` carries a hook binding's tag claims that binding for
+ * the agent (`BindingStore.claimHook`); the tag never reaches the agent's
+ * process: the request comes back without it. `undefined` when the `env`
+ * carries no tag. Never throws.
+ */
+export function claimHookBinding(request: SessionOpenRequest, tools: RoleHookTools | null): SessionOpenRequest | undefined {
+  try {
+    const env = (request as Partial<SessionOpenRequest> | null | undefined)?.env;
+    if (env === null || typeof env !== "object" || !(HOOK_BINDING_ENV in env)) return undefined;
+    const tag = env[HOOK_BINDING_ENV];
+    const rest = Object.fromEntries(Object.entries(env).filter(([name]) => name !== HOOK_BINDING_ENV));
+    if (request.reason === "create" && typeof request.agentId === "string" && request.agentId !== "" && tag !== undefined) {
+      tools?.bindings?.claimHook(tag, request.agentId);
+    }
+    return { ...request, env: rest };
+  } catch {
+    return undefined;
+  }
+}
+
 /** True when `request` still carries the bound URL of its role: `applyAgentTools` kept it, so the binding was attached. Never throws. */
 function keepsBoundUrl(request: AgentCreateRequest, tools: RoleHookTools | null): boolean {
   try {
@@ -613,6 +717,15 @@ function keepsBoundUrl(request: AgentCreateRequest, tools: RoleHookTools | null)
     return tools !== null && isBoundRole(role) && boundTokenOf(request.config, role, tools.urlFor(role)) !== null;
   } catch {
     return false;
+  }
+}
+
+/** Deletes a hook binding the creation did not keep (unattached, so the store deletes it). Never throws. */
+function discardHookBinding(tools: RoleHookTools | null, tokenSha256: string): void {
+  try {
+    tools?.bindings?.discard(tokenSha256);
+  } catch {
+    // Unattached and never claimed, it expires in ten minutes and goes without an alert.
   }
 }
 
@@ -637,6 +750,16 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
     );
     return () => {};
   }
+  // Design §7.17.7: registered first, so a hook binding is issued only when its claim can be read.
+  let removeClaim: (() => void) | null = null;
+  try {
+    const removed = host.before("agent.session_open", (input) => claimHookBinding((input as { request?: SessionOpenRequest } | undefined)?.request as SessionOpenRequest, tools));
+    removeClaim = typeof removed === "function" ? removed : () => {};
+  } catch {
+    // An older host without the session-open hook: no Manager the owner opens is bound by this hook.
+    removeClaim = null;
+  }
+  const claims = removeClaim !== null;
   const remove = host.before("agent.create", (input, context) => {
     const request = (input as { request?: AgentCreateRequest } | undefined)?.request as AgentCreateRequest;
     // Every agent creation passes here: only paseo-bm's own pay for a lookup.
@@ -667,15 +790,22 @@ export function registerRoleHook(host: RoleHookHost, tools: RoleHookTools | null
       const configure = (from: AgentCreateRequest, facts: RuntimeFacts) =>
         applyRoleConfig(from, prepared.modes, facts, prepared.profileModeId, prepared.profile, prepared.features, { posture: prepared.boundary, base: prepared.base });
       rememberBoundaryOf(request, prepared.boundary);
-      const configured = configure(request, prepared.facts);
-      const tooled = applyAgentTools(configured ?? request, tools, prepared.base) ?? configured;
-      if (!bound || keepsBoundUrl(tooled ?? request, tools)) return marked(tooled, request);
+      // Design §7.17.7: a Manager the owner opened is bound by this hook, decided before the instructions are composed.
+      const hooked = bound || !claims ? null : hookBindingFor(request, tools, prepared.base, prepared.workspaceId);
+      const from = hooked?.request ?? request;
+      const configured = configure(from, hooked === null ? prepared.facts : { ...prepared.facts, bound: true });
+      const tooled = applyAgentTools(configured ?? from, tools, prepared.base) ?? configured ?? (hooked === null ? undefined : from);
+      if ((!bound && hooked === null) || keepsBoundUrl(tooled ?? request, tools)) return marked(tooled, request);
       // The binding could not record its attachment: the agent gets the role path and is unbound, so its
-      // Runtime facts get the hand path back (design §16.12).
+      // Runtime facts get the hand path back (design §16.12). A hook binding is never attached now: it goes.
+      if (hooked !== null) discardHookBinding(tools, hooked.tokenSha256);
       const plain = withoutToolServer(request) ?? request;
       const unbound = configure(plain, { ...prepared.facts, bound: false });
       return marked(applyAgentTools(unbound ?? plain, tools, prepared.base) ?? unbound ?? (plain === request ? undefined : plain), request);
     })();
   });
-  return typeof remove === "function" ? remove : () => {};
+  return () => {
+    if (typeof remove === "function") remove();
+    removeClaim?.();
+  };
 }

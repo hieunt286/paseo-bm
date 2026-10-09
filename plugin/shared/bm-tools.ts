@@ -39,7 +39,7 @@
  * check built with Zod (the daemon's copy of Zod is the host's, not ours).
  */
 import { AUTONOMY_MODES } from "./autonomy";
-import { REPORT_PHASES, WAITING_FOR_PREFIX, WAITING_ON_OWNER_PREFIX, checkBlocks, issueText, type BlockKind } from "./bm-format";
+import { REPORT_PHASES, WAITING_FOR_PREFIX, WAITING_ON_OWNER_PREFIX, WAITING_ON_PROJECT_PREFIX, checkBlocks, issueText, type BlockKind } from "./bm-format";
 import { MAX_OPTIONS, MAX_SUBJECT_CHARS } from "./bm-questions";
 import { COORDINATION_KEYS, coordinationRuleOf } from "./coordination";
 import {
@@ -326,6 +326,10 @@ interface ReportInput {
   waitingOn?: string[];
   /** A bound Worker's blocked report: the other request or Worker it waits for. */
   waitingFor?: string;
+  /** A bound Worker's blocked report: the live peer links its request asked and waits on (design §7.17.3). */
+  waitingOnPeers?: string[];
+  /** What the project whose link the request answers needs to know; it goes in the `peer-reply`, never in the block. */
+  forPeer?: string;
 }
 
 /** Empty is `[]` or left out; a model used to the text template writes `none`, which is not JSON (live run, 2026-09-24). */
@@ -504,20 +508,22 @@ function questionNumberOf(decisionId: string): string {
 /**
  * What a bound Worker's blocked report waits on (design §16.6, §16.11), as
  * its `blockers` line opens: `waiting on the owner: Q2, Q3`, then `waiting
- * for: <the other request or Worker>`; null when it names neither.
+ * for: <the other request or Worker>`, then `waiting on project: <title>
+ * (<linkId>), …` (`titleOf` names a link's project); null when it names none.
  */
-function waitingText(input: Pick<ReportInput, "waitingOn" | "waitingFor">): string | null {
+function waitingText(input: Pick<ReportInput, "waitingOn" | "waitingFor" | "waitingOnPeers">, titleOf: (linkId: string) => string): string | null {
   const numbers = [...new Set((input.waitingOn ?? []).map(questionNumberOf))].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
   const parts = [
     numbers.length === 0 ? null : `${WAITING_ON_OWNER_PREFIX} ${numbers.join(", ")}`,
     input.waitingFor === undefined || line(input.waitingFor) === "" ? null : `${WAITING_FOR_PREFIX} ${line(input.waitingFor)}`,
+    (input.waitingOnPeers ?? []).length === 0 ? null : `${WAITING_ON_PROJECT_PREFIX} ${input.waitingOnPeers!.map((id) => `${line(titleOf(id))} (${id})`).join(", ")}`,
   ].filter((part): part is string => part !== null);
   return parts.length === 0 ? null : parts.join(". ");
 }
 
-function blockersText(input: ReportInput): string {
+function blockersText(input: ReportInput, titleOf: (linkId: string) => string): string {
   const ids = (input.questions ?? []).map((question) => question.id);
-  const waiting = input.phase === "blocked" ? waitingText(input) : null;
+  const waiting = input.phase === "blocked" ? waitingText(input, titleOf) : null;
   const asked =
     waiting !== null ? waiting : input.phase === "blocked" ? `${ids.length} ${ids.length === 1 ? "question" : "questions"}: ${ids.join(", ")} — see BM-QUESTIONS` : null;
   const { waits: own, suggested: fromBlockers } = splitBlockers(input.blockers);
@@ -540,7 +546,7 @@ function tagFree(text: string): string {
   return line(text).replace(/\[(\s*[a-z][a-z-]*\s*:[^\][]*)\]/gi, "($1)");
 }
 
-function buildReport(input: ReportInput): string {
+function buildReport(input: ReportInput, titleOf: (linkId: string) => string = (linkId) => linkId): string {
   const lines = [
     "BM-REPORT",
     `requestId: ${input.requestId}`,
@@ -555,7 +561,7 @@ function buildReport(input: ReportInput): string {
     `buildAndTests: ${line(input.buildAndTests)}`,
     `skillsUsed: ${list(input.skillsUsed)}`,
     `decided: ${list((input.decided ?? []).map((entry) => `${item(entry.choice)} — ${item(entry.why)}`), "; ")}`,
-    `blockers: ${blockersText(input)}`,
+    `blockers: ${blockersText(input, titleOf)}`,
     ...(input.handoffNote === undefined || line(input.handoffNote) === "" ? [] : [`handoffNote: ${line(input.handoffNote)}`]),
   ];
   if (input.phase !== "blocked" || input.questions === undefined) return lines.join("\n");
@@ -1174,7 +1180,15 @@ export const CREATE_WORKER_LIMITS = { request: 20_000, contextItems: 20, fact: 5
 // ---------------------------------------------------------------------------
 
 /** The bounds of the bound delivering tools (design §16.6). */
-export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, questions: 5, tellText: 8_000, tellSource: 300, grantCalls: 10 } as const;
+export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, waitingOnPeers: 10, forPeer: 4_000, questions: 5, tellText: 8_000, tellSource: 300, grantCalls: 10 } as const;
+/** A peer link id: `peer-` + 12 hex digits. */
+export const PEER_LINK_ID_SOURCE = "^peer-[0-9a-f]{12}$";
+/** An open peer link a Manager gives the request (design §7.17.3). */
+const PEER_LINK: JsonSchema = {
+  type: "string",
+  pattern: PEER_LINK_ID_SOURCE,
+  description: "An open peer link (BM-DELIVERY peer) this request takes: its Worker answers it with forPeer. Only for a Worker with paseo-bm's tools.",
+};
 /** A `q:` decision id: `q:<requestId>:<Qn>`. */
 export const QUESTION_DECISION_ID_SOURCE = "^q:req-\\d{8}T\\d{6}Z:Q[1-9]\\d{0,2}$";
 
@@ -1205,33 +1219,56 @@ const BOUND_REPORT_SCHEMA: JsonSchema = {
       maxLength: DELIVERING_LIMITS.waitingFor,
       description: "Only when blocked: the other request or Worker you wait for, and why, in one line.",
     },
+    waitingOnPeers: {
+      type: "array",
+      minItems: 1,
+      maxItems: DELIVERING_LIMITS.waitingOnPeers,
+      items: { type: "string", pattern: PEER_LINK_ID_SOURCE },
+      description: "Only when blocked, and only when nothing else can go on: the live links your request asked with bm_ask_project that you wait on.",
+    },
+    forPeer: {
+      type: "string",
+      minLength: 1,
+      maxLength: DELIVERING_LIMITS.forPeer,
+      description: "Required on finished when your first prompt has a peer: line: what that project needs to know. paseo-bm delivers it to the project.",
+    },
   },
 };
 
 function boundReportRules(input: ReportInput): string[] {
   const out = tierRules(input);
-  const waits = (input.waitingOn?.length ?? 0) > 0 || input.waitingFor !== undefined;
-  if (input.phase === "blocked" && !waits) out.push("input.waitingOn: a blocked report names what it waits on: waitingOn (open questions from bm_questions) or waitingFor (another request or Worker), or both");
-  if (input.phase !== "blocked" && input.waitingOn !== undefined) out.push("input.waitingOn: only a blocked report waits; leave it out");
-  if (input.phase !== "blocked" && input.waitingFor !== undefined) out.push("input.waitingFor: only a blocked report waits; leave it out");
+  const waits = (input.waitingOn?.length ?? 0) > 0 || input.waitingFor !== undefined || (input.waitingOnPeers?.length ?? 0) > 0;
+  if (input.phase === "blocked" && !waits) {
+    out.push("input.waitingOn: a blocked report names what it waits on: waitingOn (open questions from bm_questions), waitingFor (another request or Worker) or waitingOnPeers (links you asked)");
+  }
+  for (const field of ["waitingOn", "waitingFor", "waitingOnPeers"] as const) {
+    if (input.phase !== "blocked" && input[field] !== undefined) out.push(`input.${field}: only a blocked report waits; leave it out`);
+  }
   (input.waitingOn ?? []).forEach((id, index) => {
     if (!id.startsWith(`q:${input.requestId}:`)) out.push(`input.waitingOn[${index}]: ${id} is not a question of ${input.requestId}`);
   });
   return out;
 }
 
-/** `bm_report` for a bound Worker: built and checked as the builder's, then stored and delivered by the plugin. */
-export const BOUND_REPORT_TOOL: AgentTool = tool<ReportInput>({
-  name: "bm_report",
-  role: "worker",
-  description:
-    "Report to your Manager: paseo-bm builds your BM-REPORT, stores it and delivers it to the Manager that created you, at its next idle moment. phase: received first, beads-done, blocked (with waitingOn or waitingFor), finished when the request is done, stopped when your run was stopped. Ask the owner with bm_questions, never here. Returns JSON { recordId, delivery } — delivery sent, queued (the Manager is busy; it arrives at its next idle moment) or dropped.",
-  inputSchema: BOUND_REPORT_SCHEMA,
-  rules: boundReportRules,
-  build: buildReport,
-  kinds: () => ["BM-REPORT"],
-  suffix: DELIVERED,
-});
+/**
+ * `bm_report` for a bound Worker: built and checked as the builder's, then
+ * stored and delivered by the plugin. `titleOf` names the project of each
+ * `waitingOnPeers` link in the `blockers` line (the link id alone by default).
+ */
+export function boundReportTool(titleOf?: (linkId: string) => string): AgentTool {
+  return tool<ReportInput>({
+    name: "bm_report",
+    role: "worker",
+    description:
+      "Report to your Manager: paseo-bm builds your BM-REPORT, stores it and delivers it to the Manager that created you, at its next idle moment. phase: received first, beads-done, blocked (with waitingOn, waitingFor or waitingOnPeers), finished when the request is done, stopped when your run was stopped. Ask the owner with bm_questions, never here. Returns JSON { recordId, delivery } — delivery sent, queued (the Manager is busy; it arrives at its next idle moment) or dropped.",
+    inputSchema: BOUND_REPORT_SCHEMA,
+    rules: boundReportRules,
+    build: (input) => buildReport(input, titleOf),
+    kinds: () => ["BM-REPORT"],
+    suffix: DELIVERED,
+  });
+}
+export const BOUND_REPORT_TOOL: AgentTool = boundReportTool();
 
 /** The builder `bm_review` (an unbound Reviewer's): it returns the block to send. */
 const REVIEW_BUILDER: AgentTool = tool<ReviewInput>({
@@ -1389,6 +1426,7 @@ export const TELL_WORKER_FACE: ToolFace = {
       requestId: { ...REQUEST_ID, description: "The request, as bm_create_worker gave it." },
       text: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellText, description: "The owner's words, verbatim, or the fact." },
       source: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellSource, description: "Where it comes from: the owner's message, a document, a decision id." },
+      peerLink: PEER_LINK,
     },
   },
 };
@@ -1466,6 +1504,76 @@ export const REREVIEW_FACE: ToolFace = {
   },
 };
 
+/** One fact passed on, with where it comes from (`bm_create_worker`, `bm_ask_project`). */
+const CONTEXT_ITEM: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["fact", "source"],
+  properties: {
+    fact: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.fact },
+    source: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.source, description: "Where the fact comes from: a message, a document, a decision id, a Worker id." },
+  },
+};
+
+/** The bounds of the peer tools (design §7.17.3). */
+export const PEER_TOOL_LIMITS = { project: 4_096, request: 20_000, text: 8_000 } as const;
+
+const PROJECT: JsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: PEER_TOOL_LIMITS.project,
+  description: "Another project: its workspace id, or an absolute folder of it (bm_peers lists them).",
+};
+
+/**
+ * The peer tools of a bound Manager or Worker (design §7.17.3, ADR-028): one
+ * project asks another through paseo-bm, never with a raw agent message. A
+ * Manager names which of its requests asks; a Worker asks for its own.
+ */
+function peerFaces(role: "manager" | "worker"): ToolFace[] {
+  return [
+    {
+      name: "bm_peers",
+      role,
+      description:
+        "Read the other projects you can ask (Paseo workspaces, each with its live Manager) and this project's peer links both ways, newest first: who asked whom, the requests, the state and the newest message. project narrows the links to one project. Read-only. Returns JSON { projects, links }.",
+      inputSchema: { type: "object", additionalProperties: false, properties: { project: PROJECT } },
+    },
+    {
+      name: "bm_ask_project",
+      role,
+      description: `Ask another project for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that project's Manager (opening one when it has none). Never message another project's agents yourself. Its reply reaches you as a BM-DELIVERY peer-reply; talk on the link with bm_peer_reply. Returns JSON { linkId, project, managerId, delivery, openedManager }. ${DELIVERED}`,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: role === "manager" ? ["project", "request", "requestId"] : ["project", "request"],
+        properties: {
+          project: PROJECT,
+          request: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.request, description: "The ask in full: what is needed, why, and the contract you expect back." },
+          kind: { type: "string", enum: ["work", "question"], description: "work (the default): the project does something; question: what reading answers." },
+          context: { type: "array", maxItems: CREATE_WORKER_LIMITS.contextItems, items: CONTEXT_ITEM, description: "Facts the other project needs, each with its source." },
+          ...(role === "manager" ? { requestId: { ...REQUEST_ID, description: "The request of yours that asks, as bm_create_worker gave it." } } : {}),
+        },
+      },
+    },
+    {
+      name: "bm_peer_reply",
+      role,
+      description: `Write on a peer link you are a party to: paseo-bm delivers the text to the agent on the link's other side at its next idle moment. close: true closes the link after this message (decline an ask, or withdraw yours). Returns JSON { recordId, to, delivery, state }. ${DELIVERED}`,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["linkId", "text"],
+        properties: {
+          linkId: { ...PEER_LINK, description: "The link, peer-…, as bm_ask_project or the delivery gave it." },
+          text: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.text, description: "The message." },
+          close: { type: "boolean", description: "True to close the link after this message." },
+        },
+      },
+    },
+  ];
+}
+
 /**
  * The tools only a bound agent has (design §16.6,
  * ADR-027 ship point C), run on the plugin server: they create agents, or
@@ -1490,16 +1598,9 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
           type: "array",
           maxItems: CREATE_WORKER_LIMITS.contextItems,
           description: "Facts that bear on the request — the owner's goals, earlier decisions, precedents, related requests — each with its source. Facts, never how to do the work. An empty list when there are none.",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["fact", "source"],
-            properties: {
-              fact: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.fact },
-              source: { type: "string", minLength: 1, maxLength: CREATE_WORKER_LIMITS.source, description: "Where the fact comes from: a message, a document, a decision id, a Worker id." },
-            },
-          },
+          items: CONTEXT_ITEM,
         },
+        peerLink: { ...PEER_LINK, description: `${PEER_LINK.description} request is then your own words of what you hand over.` },
       },
     },
   },
@@ -1510,6 +1611,8 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
   CREATE_REVIEWER_FACE,
   REREVIEW_FACE,
   BOUND_REVIEW_TOOL,
+  ...peerFaces("manager"),
+  ...peerFaces("worker"),
 ];
 
 /** The faces only a creation-bound `role` lists (`BOUND_SERVER_TOOLS`), in the order its list shows them. */

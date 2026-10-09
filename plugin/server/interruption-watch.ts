@@ -36,13 +36,21 @@
  *   the plugin run; after a reload the first cut is missed, and the stall pass
  *   (`stall-watcher.ts`) still raises the request if it stops moving.
  *
+ * **A stopped report after a cut** (design §7.17.8 g): every watch also keeps,
+ * for the run, each agent's newest canceled turn, its newest turn start and
+ * the owner's denies, so `followsPaseoCut` can tell whether the turn a
+ * `stopped` report is sent in is the first after a Paseo cut; that report's
+ * delivery then carries `CUT_NOTE_LINE`.
+ *
  * Never throws: a failure is one log line.
  */
+import { sliceLastTurn } from "./collector";
 import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
 import { baseProviderOf } from "./role-instructions";
 import { enqueue as enqueueNotice, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { errorText } from "./rpc-kit";
 import type { TraceRecord } from "../shared/contracts";
+import { originOf } from "../shared/message-origin";
 import { INTERRUPTED_NOTICE_MARKER } from "../shared/notices";
 
 /** The next turn starts this close to the cut, either side (field: −0.8 s … +2.0 s). */
@@ -89,6 +97,33 @@ export function isPaseoInterruption(
   const from = time(previous.startedAt) ?? cut - INTERRUPT_COOLDOWN_MS;
   const to = Math.max(started + INTERRUPT_GAP_MS, time(current.endedAt) ?? started);
   return !deniedAt.some((at) => at >= from && at <= to);
+}
+
+/** The line a `stopped` report sent in the first turn after a Paseo cut carries in its delivery (§7.17.8 g). */
+export const CUT_NOTE_LINE = "note: the turn before this report was cut by a message delivery, not by the owner";
+
+/** What every watch saw this run, per agent: its newest canceled turn, its newest turn start, the owner's denies. */
+const seenCanceled = new Map<string, PreviousTurn>();
+const seenStarts = new Map<string, string>();
+const seenDenies = new Map<string, number[]>();
+
+/**
+ * Whether `agentId`'s newest turn — the running one, or the one that just
+ * ended — is the first after a Paseo cut (`isPaseoInterruption`), from what
+ * the watches saw; `timelineOf` gives that turn's items, read only when the
+ * rest holds, and the turn's opening `user_message` must not be the owner's.
+ * False when unsure: after a reload, or with no timeline.
+ */
+export async function followsPaseoCut(agentId: string, timelineOf: () => readonly unknown[] | Promise<readonly unknown[]>, now = Date.now()): Promise<boolean> {
+  const current = { startedAt: seenStarts.get(agentId) ?? null, endedAt: new Date(now).toISOString(), sent: [] };
+  if (!isPaseoInterruption(seenCanceled.get(agentId), current, seenDenies.get(agentId) ?? [])) return false;
+  const opener = sliceLastTurn(await timelineOf())[0] as { type?: unknown; text?: unknown; clientMessageId?: unknown } | undefined;
+  return opener?.type === "user_message" && typeof opener.text === "string" && originOf({ text: opener.text, clientMessageId: opener.clientMessageId }) !== "owner";
+}
+
+/** Test helper: forget what the watches saw. */
+export function clearSeenTurns(): void {
+  for (const map of [seenCanceled, seenStarts, seenDenies]) map.clear();
 }
 
 /** The notice. The words are fixed; nothing of the conversation goes in it. */
@@ -172,6 +207,7 @@ export function createInterruptionWatch(deps: InterruptionWatchDeps = {}): Inter
       try {
         const before = previous.get(record.agentId);
         previous.set(record.agentId, { outcome: record.outcome, startedAt: record.startedAt, endedAt: record.endedAt });
+        if (record.outcome === "canceled") seenCanceled.set(record.agentId, previous.get(record.agentId)!);
         const seen = bump(record.agentId);
         if (paseo === undefined || paseo === null || !ROLES.has(record.role)) return;
         const alias = record.runtime?.provider;
@@ -193,6 +229,7 @@ export function createInterruptionWatch(deps: InterruptionWatchDeps = {}): Inter
     },
     turnStarted(agentId) {
       bump(agentId);
+      seenStarts.set(agentId, new Date(now()).toISOString());
     },
     permissionResolved(event) {
       const { agent, resolution } = (event ?? {}) as { agent?: { id?: unknown }; resolution?: { behavior?: unknown } };
@@ -200,6 +237,7 @@ export function createInterruptionWatch(deps: InterruptionWatchDeps = {}): Inter
       const kept = (denies.get(agent.id) ?? []).filter((at) => now() - at < INTERRUPT_COOLDOWN_MS * 3);
       kept.push(now());
       denies.set(agent.id, kept);
+      seenDenies.set(agent.id, kept);
     },
     async settled() {
       await Promise.all([...pending]);

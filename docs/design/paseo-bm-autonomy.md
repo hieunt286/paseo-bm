@@ -54,6 +54,8 @@ Does not own: decision classes, policy and delegation (Part B); evidence classif
 
 ### A.3 The decision model
 
+*Since 2026-10-09 (ADR-028; [base design §7.17.8](./paseo-bm.md) (b)):* the Orchestrator's `bm_ask_owner` with a `requestId` is refused while an unsettled `q:` decision of that request has the same subject, and for a `cost` question about a request's review budget, which is the Worker's to ask.
+
 `plugin/shared/decisions.ts` (zod, shared by server and client):
 
 | Field | Meaning |
@@ -165,6 +167,8 @@ Detail (`shared/orchestrator-command.ts`, `server/command-authority.ts`):
 - No tab sends commands (§A.14): an option the owner picks on an `o:` decision delivers its prepared command as v2 `via: tab` with `authority: decision:<id>`; `from: owner` is only read from older builds. Nothing silences the backstop (§B.8). The fixed limits stay only as the base the `limits:` line is derived from.
 
 ### A.8 Events to the Orchestrator and the Inbox
+
+*Since 2026-10-09 (ADR-028; base design §7.17.8 (i), §7.17.5):* `request.finished` is raised from the `finished` reports of Manager **and Worker** turn records (a bound Worker's tool records and a relayed unbound Worker's blocks), a finish seen in both counted once; the Inbox has the alert kind `peer-unanswered`.
 
 `plugin/server/event-bus.ts` replaces `BM-STALL`, `BM-EVENT` and the `autopilot-on` prompt with typed events: `decision.opened` (by §B.9's per-cell rule), `request.finished`, `request.stalled` (no Worker or Reviewer of an unfinished request running for 5 min; a review over budget), `worker.signal` (the live watch's signals) — the last three only for the projects in the owner's policy scope (Scope below). There is no `waiting-user` or `manager-turn` event: a question waits in the Inbox, and the Manager relays nothing.
 
@@ -371,6 +375,8 @@ The owner delegates by choosing a level whenever they choose ([ADR-023](../adr/A
 Detail (ADR-023, change-013; ADR-025, change-014): nothing checks agreement — neither `autonomy.set-level` nor `autonomy.set` — and there is no eligibility rule. The only confirmation is the level's (§B.2): Turbo and Full auto, in place, Cancel first. Nothing demotes: a reversal recorded by the materialiser or an override (§B.3, §B.7) changes nothing but the decision's record. A `demotions` map or an `autonomy-demoted` alert an older build left is skipped on read and dropped by the next write.
 
 ### B.5 Delegation
+
+*Since 2026-10-09 (ADR-028; base design §7.17.8 (a)):* a delegated `review-budget` question is answered by the policy as it opens when its recommended option's grant fits the request tier's budget, and the policy grants a request at most that budget in total.
 
 When a decision opens in a `delegate` cell, a `decision.opened` event asks the Orchestrator to decide it with `bm_decide { decisionId, optionKey, reason }`; it is delivered exactly as an owner answer would be (A.6). The Orchestrator is the only predictor (ADR-025 decision 5): nothing answers by the recommended option, and `resolveAtOpen` (`server/policy-resolve.ts`) applies precedents only (§B.6). Autopilot and **Allow…** are retired (§B.8).
 
@@ -786,6 +792,8 @@ Every `bm_decide` answer is an `answer` to the Worker that asked, with trigger `
 
 ### G.4 Proactive advice (Phase 2, REQ-128; replaces the workflow assessment, §B.9)
 
+*Since 2026-10-09 (ADR-028):* the advice count reads the `finished` reports of Manager and Worker turn records (base design §7.17.8 (i)).
+
 **The trigger.**
 - Each `finished` report the collector records counts toward its project.
 - When the count since the last advice reaches `advice.everyFinished` (Settings, G.7; default 5; 0 = off), the event bus publishes `advice.due` for that project. It is a judgement wake.
@@ -844,6 +852,8 @@ Detail (bead `bm-autonomy-phase2-t9lm.25`):
 **As built** (bead `7gxw.10`). `bm_compact { agentId, reason }` lives in `server/orchestrator-coordination-tools.ts`; refused, writing nothing, in this order: compaction off; the target the Orchestrator, a Reviewer, not a paseo-bm Manager or Worker, archived or in no project; a compaction of it pending; `compact.maxPerAgent` reached (a Worker's refusal names `bm_handoff`); its provider cannot compact; its last measured turn below the threshold, or none measured since its last compaction. The provider comes from the alias's `extends`, else the turn's model id. Accepted: a `compact` intervention (trigger `threshold.crossed` when the wake carried that agent's event, else `owner` when the owner just spoke, else `orchestrator`), the compaction recorded with its reason masked, and a reply saying whether the `/compact` went now, is queued or waits. The runner (`server/compaction.ts`) sends at a safe point — a Worker's turn that just sent a `BM-REPORT`; a Manager's idle moment with no notice queued — as a one-item batch through the notice queue (Claude `/compact <COMPACT_FOCUS>`, Codex and OpenCode bare); a `/compact` held while the target turned busy is dropped after 60 s and sent again at the next safe point, never doubled; the next recorded turn with a completed `compaction` item (Codex: its own `autonomous-…` turn) triggers the `BM-STATE` brief. States `waiting | compacting | done | failed | dropped`; 60 min to find a safe point, 10 min for the compaction. **The send log** (`server/compaction-store.ts`, `<data>/orchestrator/compactions.json`, deleted with the folder): `{ agentId, at, hash, compactionId }` — the SHA-256 of the trimmed text, never the text — written just before the send; the collector records a would-be owner `user_message` of that agent with that hash, from 60 s before to 30 min after, as `origin: "agent"`, never parsed as a report. **The brief** (`BM-STATE`, a plugin notice) tells the agent to reply "noted" and end its turn: a Worker's holds its request id and the owner's first words, up to 3 later owner messages, up to 8 decisions with their answers and the report facts (phase, tier, files, beads, open findings, checks, `decided`, blockers); a Manager's its 5 newest requests (phase, Worker, open decisions, written `- req-…`) and the owner's 3 newest messages; masked, at most 6,000 characters. **The outcome** (§G.3): from the `/compact` being sent, at most 60 min, the mean tokens read over the next 3 measured turns against the 3 before — met at 60 % or less, else missed (the compaction's own turn and OpenCode's repeat turns left out; judged on 1–2 turns when the window ends early); unknown when the compaction never went out or no turn compares — so the A-12 guard (§G.7) can fire. The `threshold.crossed` event carries a `cycle` (the `/compact`s sent to that agent), is raised from `turnRecorded` (a turn holding a compaction is never judged), goes to every project and is dropped at delivery when compaction was turned off, the agent compacted, or a compaction was requested meanwhile. Work's live view (`live-timeline.ts`) checks typed messages against the send log with the collector's own matcher (`pluginSentBeside`) and leaves the plugin's `/compact` out of the owner's messages; `BM-STATE` is recognised by its marker and shown in chat as "State restored after compaction". Inbox → Decided for you reads a `compact` line's target role and masked reason from the compaction store (by its `interventionId`). The Manager handover drops what the send log says the plugin sent (bead `7gxw.11`).
 
 ### G.6 Handoff (Phase 3, REQ-135)
+
+*Since 2026-10-09 (ADR-028; base design §7.17.8 (h)):* the brief puts its short facts first (the newest report and its age), keeps the open questions, shortens lists to their newest items with `+n earlier`, is never cut mid-word, waits on through a canceled note turn, and carries a request's `peer:` / `peerAsk:` block.
 
 **What wakes the Orchestrator:** a `threshold.crossed` event of kind `handoff` (§G.7, change-008 C1).
 
@@ -997,3 +1007,4 @@ Rows up to 2026-10-02 are archived in [paseo-bm-autonomy-revision-history-to-202
 | 2026-10-03 | Claude (owner's delegation) | ADR-027 built (ship point C): the pointer lines in §A.5, §A.6, §A.11 and §G.6 now state what is built and point at base design §7.7, §7.15, §7.16 and §10 |
 | 2026-10-03 | Claude (owner's delegation) | §D.2 *Answering*: Claude's `AskUserQuestion` is denied for every Manager, Worker and Reviewer, boundary on or off, with the role's channel — the one request answered outside the boundary's scope (ADR-027, amended 2026-10-03) |
 | 2026-10-05 | hieu.nt10 (owner decisions; written by Codex) | §A.12 and DQ-3: live Inbox count on the sidebar; daily cached and manually refreshable npm version checks; update indicators on Settings and the sidebar; the version endpoint is the narrow network exception. |
+| 2026-10-09 | Claude (owner's delegation) | ADR-028 as built: pointer lines in §A.3, §A.8, §B.5, §G.4 and §G.6 to base design §7.17.8 |

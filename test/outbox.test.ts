@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   OUTBOX_DIR_NAME,
   OUTBOX_SETTLED_LIMIT,
   OUTBOX_SETTLED_MS,
+  PEER_RETARGETS,
   capOutbox,
   clearDroppedAlert,
   createOutbox,
@@ -14,6 +15,7 @@ import {
   dropsCovered,
   newestReportRecordOf,
   storeAndDeliver,
+  usePeerTargets,
   type OutboxRecord,
 } from "../plugin/server/outbox";
 import { createNoticeQueue, type NoticePaseo } from "../plugin/server/notice-queue";
@@ -168,6 +170,29 @@ describe("the store", () => {
     expect(kept.filter((entry) => entry.state === "delivered")).toHaveLength(OUTBOX_SETTLED_LIMIT);
     // The two oldest settled ones went.
     expect(kept.some((entry) => entry.id === records[3]!.id || entry.id === records[4]!.id)).toBe(false);
+  });
+
+  it("skips a record of a kind it does not know, as an older build skips the peer kinds, and keeps the rest (design §7.17.4)", () => {
+    const home = dataFolder();
+    mkdirSync(join(home, OUTBOX_DIR_NAME), { mode: 0o700 });
+    const known = { id: "out-000000000001", kind: "report", requestId: REQ, batchId: null, from: "w", to: "m", text: "x", createdAt: T0.toISOString(), state: "pending", outcomeAt: null, reason: null };
+    const future = { ...known, id: "out-000000000002", kind: "peer-future" };
+    writeFileSync(join(home, OUTBOX_DIR_NAME, `${WS}.json`), JSON.stringify({ schemaVersion: 1, records: [known, future] }), { mode: 0o600 });
+    const outbox = createOutbox(home);
+    expect(outbox.list(WS).map((record) => record.id)).toEqual([known.id]);
+    expect(() => outbox.add(WS, { kind: "message", requestId: REQ, from: "a", to: "b", text: "x" })).not.toThrow();
+  });
+
+  it("takes a link id as a peer record's requestId, and writes a new target only on a pending record", () => {
+    const home = dataFolder();
+    const outbox = createOutbox(home, { now: () => T0 });
+    const record = outbox.add(WS, { kind: "peer-message", requestId: "peer-0123456789ab", from: "mgr-b", to: "wrk-a", text: "link: peer-0123456789ab\n> hi" });
+    expect(record).toMatchObject({ kind: "peer-message", requestId: "peer-0123456789ab", state: "pending" });
+    expect(outbox.retarget(WS, record.id, "wrk-a2")).toMatchObject({ id: record.id, to: "wrk-a2" });
+    expect(stored(home, record.id)?.to).toBe("wrk-a2");
+    outbox.settle(WS, record.id, "delivered");
+    expect(outbox.retarget(WS, record.id, "wrk-a3")?.to).toBe("wrk-a2");
+    expect(outbox.retarget(WS, "out-ffffffffffff", "x")).toBeNull();
   });
 
   it("is deleted by setup.cleanup", () => {
@@ -330,6 +355,76 @@ describe("delivery", () => {
     const w = world({ "mgr-1": { status: "idle" } });
     await expect(storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, deps(home, w))).rejects.toThrow();
     expect(w.sends).toEqual([]);
+  });
+});
+
+describe("peer records the queue drops (design §7.17.4)", () => {
+  const LINK_TEXT = "link: peer-0123456789ab\nfrom: project \"back\" (wks_b), request req-20261003T100000Z, phase: finished\n> Done.";
+  /** A scripted resolver: the targets it gives in turn (the last repeats), and how often it was asked. */
+  const resolver = (...targets: Array<string | null | undefined>) => {
+    const asked: string[] = [];
+    const delivered: OutboxRecord[] = [];
+    usePeerTargets(
+      async (_workspaceId, record) => {
+        asked.push(record.to);
+        return targets.length > 1 ? targets.shift() : targets[0];
+      },
+      (_workspaceId, record) => void delivered.push(record),
+    );
+    return { asked, delivered };
+  };
+
+  afterEach(() => usePeerTargets(async () => undefined));
+
+  it("a record dropped while queued for a replaced asker is resolved again and goes to the successor; the delivered hook sees it", async () => {
+    const home = dataFolder();
+    const w = world({ "wrk-a": { status: "running" }, "wrk-a2": { status: "idle" } });
+    const peers = resolver("wrk-a", "wrk-a2");
+    const { record, outcome } = await storeAndDeliver(WS, { kind: "peer-reply", requestId: REQ, from: "wrk-b", to: "wrk-a", text: LINK_TEXT }, deps(home, w));
+    expect(outcome).toBe("queued");
+    // The asker is archived (handed off) while the reply waits in the queue.
+    w.set("wrk-a", { status: "idle", archivedAt: "2026-10-03T10:01:00.000Z" });
+    await w.turnEnded("wrk-a");
+    await vi.waitFor(() => expect(stored(home, record.id)?.state).toBe("delivered"));
+    expect(stored(home, record.id)?.to).toBe("wrk-a2");
+    expect(w.sends).toEqual([{ id: "wrk-a2", text: `BM-DELIVERY peer-reply ${record.id}\n${LINK_TEXT}` }]);
+    expect(peers.asked).toEqual(["wrk-a", "wrk-a"]);
+    expect(peers.delivered).toMatchObject([{ id: record.id, to: "wrk-a2", state: "delivered" }]);
+    expect(createAlertStore(home).list({ open: true })).toEqual([]);
+  });
+
+  it("resolves again at most PEER_RETARGETS times per delivery, then drops it with the queue's reason", async () => {
+    const home = dataFolder();
+    const w = world({});
+    const peers = resolver("wrk-1", "wrk-2", "wrk-3", "wrk-4");
+    const record = createOutbox(home, { now: () => T0 }).add(WS, { kind: "peer-message", requestId: REQ, from: "mgr-b", to: "wrk-0", text: LINK_TEXT });
+    expect(await deliverRecord(WS, record, deps(home, w))).toBe("dropped");
+    expect(peers.asked).toHaveLength(1 + PEER_RETARGETS);
+    expect(stored(home, record.id)).toMatchObject({ to: "wrk-3", state: "dropped", reason: "the target is archived, closed or gone" });
+    expect(peers.delivered).toEqual([]);
+    expect(createAlertStore(home).list({ open: true }).map((alert) => alert.kind)).toEqual(["delivery-dropped"]);
+  });
+
+  it("drops it at once when the side resolves to the same agent or to none, and never resolves a report again", async () => {
+    const home = dataFolder();
+    const w = world({});
+    const same = resolver("wrk-a");
+    const first = createOutbox(home, { now: () => T0 }).add(WS, { kind: "peer-reply", requestId: REQ, from: "wrk-b", to: "wrk-a", text: LINK_TEXT });
+    expect(await deliverRecord(WS, first, deps(home, w))).toBe("dropped");
+    expect(same.asked).toEqual(["wrk-a", "wrk-a"]);
+    expect(stored(home, first.id)).toMatchObject({ to: "wrk-a", state: "dropped", reason: "the target is archived, closed or gone" });
+
+    const none = resolver("wrk-a", null);
+    const second = createOutbox(home, { now: () => T0 }).add(WS, { kind: "peer-reply", requestId: REQ, from: "wrk-b", to: "wrk-a", text: LINK_TEXT });
+    expect(await deliverRecord(WS, second, deps(home, w))).toBe("dropped");
+    expect(none.asked).toHaveLength(2);
+    expect(stored(home, second.id)).toMatchObject({ state: "dropped", reason: "the target is archived, closed or gone" });
+
+    const report = resolver("mgr-2");
+    const third = createOutbox(home, { now: () => T0 }).add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-gone", text: REPORT });
+    expect(await deliverRecord(WS, third, deps(home, w))).toBe("dropped");
+    expect(report.asked).toEqual([]);
+    expect(report.delivered).toEqual([]);
   });
 });
 

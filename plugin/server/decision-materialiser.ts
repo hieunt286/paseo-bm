@@ -63,7 +63,9 @@
  *   neither changes anything the second time. A `needs-confirmation` mark is
  *   remembered by its owner message (agent, time, text) for this plugin run,
  *   so the same message never marks a question again after the owner said
- *   "Keep open".
+ *   "Keep open". A chat answer to a question settled before it (on its card)
+ *   is refused and logged, one line (design §7.17.8 c); the same answer read
+ *   again is not.
  * - **Settlement.** The decisions this turn answered go to `onSettled`, the
  *   same hook shape as `decisions.answer` (`decision-rpc.ts`): the delivery of
  *   §A.6 consumes it. A no-op by default; a failing hook is logged. Then
@@ -83,10 +85,13 @@ import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { parseAnswers, parseQuestions, type Answer, type Question } from "../shared/bm-questions";
 import { parseReports } from "../shared/bm-report";
 import type { TraceMessage, TraceRecord } from "../shared/contracts";
+import { decideRefusalOf } from "../shared/autonomy";
 import {
   DECISION_ID_PATTERN,
+  REVIEW_BUDGET_SUBJECT,
   answerDecision,
   checkedClass,
+  decisionClassOf,
   declaredEffects,
   decisionKindOf,
   deliveryKindOf,
@@ -106,12 +111,14 @@ import {
 import { parseCommandBlock } from "../shared/orchestrator-command";
 import { BR_REOPEN } from "../shared/shell";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
+import { currentPolicy } from "./autonomy-store";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { isPluginNotice } from "./notices";
 import { resolveAtOpen } from "./policy-resolve";
 import { supersedePrecedentsBy } from "./precedent-resolve";
 import { takeProposedAnswers } from "./proposed-answers";
+import { applyReviewBudgetGrants, policyGrantCapAt } from "./review-tools";
 import type { TraceStoreLocation } from "./trace-store";
 import { errorText } from "./rpc-kit";
 
@@ -477,6 +484,34 @@ function freshQuestions(existing: readonly Decision[], requestId: string, questi
   return questions.filter((question) => !ids.has(questionDecisionId(requestId, question.id)));
 }
 
+/**
+ * Design §7.17.8 (a): a `review-budget` question that has just opened, in a
+ * project whose cell for its class delegates, answered `by: policy` with its
+ * recommended option when that option's grant is within what the policy may
+ * still grant the request — its tier's budget less the policy's earlier
+ * grants to it, so in all the policy at most doubles the budget
+ * (`decideRefusalOf`, `policyGrantCapAt`) — and its grant recorded at once:
+ * no card opens. Null when it waits for the owner or the Orchestrator.
+ */
+function answerBudgetByPolicy(context: OpenContext, decision: Decision): Decision | null {
+  if (decision.subject !== REVIEW_BUDGET_SUBJECT) return null;
+  const option = decision.options.find((entry) => entry.recommended);
+  if (option === undefined) return null;
+  const { home, log, workspaceId } = context;
+  const grantCap = policyGrantCapAt(home, workspaceId, decision.requestId, log);
+  const policy = currentPolicy(home, (why) => log(`[paseo-bm] could not read the autonomy policy; ${decision.id} waits: ${why}`));
+  if (decideRefusalOf(policy, decision, { optionKey: option.key, finishedUnverified: false, grantCap }) !== null) return null;
+  const reason = `Answered as it opened by your policy: ${decisionClassOf(decision)} is delegated in this project, and the grant is within what the policy may still grant this request (${grantCap} calls: the tier's budget, less its earlier grants)`;
+  const mutation = context.store.transition(
+    decision.id,
+    (current) => answerDecision(current, { by: "policy", via: "inbox", optionKey: option.key, class: decisionClassOf(current), reason, at: context.now }),
+    workspaceId,
+  );
+  if (mutation.status !== "updated") return null;
+  applyReviewBudgetGrants([mutation.decision], { home, log });
+  return mutation.decision;
+}
+
 /** Opens the questions of one `BM-QUESTIONS` block (§A.5 a). */
 async function openBlock(
   context: Context,
@@ -496,7 +531,9 @@ async function openBlock(
  * superseding the question it names or one of the same text, its round shared
  * with the others, its recommended option as the prediction — and lets an
  * active precedent answer it at once (`resolveAtOpen`; never on a subject a
- * precedent already answered in the request, never on `review-budget`).
+ * precedent already answered in the request, never on `review-budget`), or
+ * the owner's policy answer a `review-budget` one within its cap
+ * (`answerBudgetByPolicy`, design §7.17.8 a).
  * Records what it opened, superseded, answered and reversed in
  * `context.outcome`. Synchronous, so a caller that numbers the questions
  * first opens them before anything else reads the store. Never throws: a
@@ -568,8 +605,9 @@ export function openQuestions(
           // answered in this request: asked again, the same answer did not do, so the owner decides.
           skipPrecedent: answeredBefore(["precedent"]),
         });
-        context.outcome.opened.push(atOpen.decision);
-        if (atOpen.answered !== null) context.outcome.answered.push(atOpen.answered);
+        const answered = atOpen.answered ?? answerBudgetByPolicy(context, atOpen.decision);
+        context.outcome.opened.push(answered ?? atOpen.decision);
+        if (answered !== null) context.outcome.answered.push(answered);
       }
       if (result.superseded !== null) context.outcome.superseded.push(result.superseded);
     } catch (error) {
@@ -605,6 +643,9 @@ function settleBlock(context: Context, block: { requestId: string; answers: read
         context.outcome.answered.push(mutation.decision);
         // REQ-124 c: the owner's answer that differs from a standing precedent on its subject supersedes it.
         supersedePrecedentsBy(mutation.decision, { home: context.home, now: new Date(context.now), log: context.log });
+      } else if (mutation.status === "refused" && mutation.refusal === "settled" && !(mutation.decision.answer?.via === via && mutation.decision.answer.at === at)) {
+        // Design §7.17.8 c: a chat answer to a question already settled (on its card) is refused, never silently; a turn read again is not one.
+        context.log(`[paseo-bm] the ${via} answer to ${id} was not recorded: ${mutation.message}.`);
       }
     } catch (error) {
       context.log(`[paseo-bm] could not settle decision ${id}: ${errorText(error)}`);

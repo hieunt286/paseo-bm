@@ -31,6 +31,7 @@
 - Supersedes: none
 - Amended: 2026-09-25 — [ADR-012](../adr/ADR-012-plugin-is-the-product.md), the owner's decision: a single source; Designed lane (PRD, Technical Design, ADR edited in place)
 - Amended: 2026-10-03 — [ADR-027](../adr/ADR-027-agents-write-content-code-carries-it.md), whose own Routing Decision governs that work: REQ-037, REQ-025 (c), M-17 and the §9 Phase 3 row
+- Amended: 2026-10-09 — [ADR-028](../adr/ADR-028-projects-ask-each-other-through-the-plugin.md), whose own Routing Decision governs that work: REQ-175 → REQ-183, M-19 → M-21, the §3 and §9 rows of that date
 
 ## 1. Context
 
@@ -52,6 +53,10 @@ The installation is therefore **not the product**; it is the path that brings th
 4. The plugin works best when the machine already has the set of bead skills for agents, but new users usually do not know that, nor where to install them.
 
 **Settled boundary on skills:** paseo-bm **does not copy, edit or delete skills files by itself**. Ownership of skills belongs to the user and to the official skills installer. But paseo-bm **does help**: when it detects that the machine does not have enough skills, it offers to run the official skills installer on the user's behalf from the recommended source (`github.com/cuongntr/agent-skills`, another author's repo — [Appendix A](#12-appendix-a--survey-of-the-recommended-skills-source)) after the user's explicit consent. This spares new users from figuring it out alone, while keeping the principle intact: every skills file on the machine is managed by the skills installer, not by paseo-bm. It is also how the biggest risk is avoided: on the owner's machine, 5 bead skills are managed by `npx skills` in `~/.agents/skills` and symlinked into `~/.claude/skills`; if paseo-bm copied same-named skills in there itself, it would overwrite another tool's copies.
+
+### 1.2 Projects that depend on each other (2026-10-09)
+
+An owner often runs two or more projects whose work depends on each other — a frontend whose screens need a backend's APIs. Each project has its own Beads Manager. A field trace of 2026-10-07 → 09 showed the owner carrying every piece between them: 6 of the 36 messages the owner typed only moved information or permission from one project to the other, answers that were ready waited 3 to 14 hours, and a contract that drifted was found only because the frontend read the backend's repository. Nothing in the plugin let one project ask another, carried the answer back or woke the waiting Worker, and the trace's Managers had none of the plugin's tools because the owner had opened them from Paseo's own composer. REQ-175 → REQ-183 close that gap ([ADR-028](../adr/ADR-028-projects-ask-each-other-through-the-plugin.md)).
 
 ### 1.1 Lessons from paseo-room
 
@@ -81,6 +86,9 @@ paseo-bm was designed against [paseo-room](https://github.com/cuongntr/paseo-roo
 | M-18 | Number of **new document files** created by a Small-tier request | 0 | Sample request no. 1 — compare the list of new files in `git status` |
 | M-12 | Number of duplicate beads created when the request already falls within an open bead | 0 | Sample request no. 5 |
 | M-13 | Number of times Worker or Reviewer crosses a boundary: commit, push, create a pull request, run a destructive command, or write outside the workspace | 0 | Run on a throwaway repo: compare filesystem snapshots before/after, read the whole timeline of commands and tool calls, check the remote is unchanged and there is no pull request. `git reflog` alone is **not enough** because it does not see a push, a PR creation or writes outside the repo |
+| M-19 | Owner messages that only carry information or permission between two projects, per cross-project request | 0 on the cross-project acceptance scenario (baseline: 6 in the field trace of 2026-10-07 → 09) | Count the owner's messages in both Managers' timelines of the acceptance run |
+| M-20 | Time from a linked request's `finished` report to the reply reaching the asker | ≤ 2 minutes when the asker is idle (baseline: 3 h 20 min → 13 h 45 min) | The outbox records of the acceptance run: the report's `createdAt` → the `peer-reply` record's `outcomeAt` |
+| M-21 | Owner decision cards about a review budget at a level that delegates `cost`, and Manager turns that answer a repeated delivery | 0 on the acceptance scenario (baseline: about 15 cards, 12 turns) | The decision store and the Managers' timelines of the acceptance run |
 
 ## 3. Out of scope
 
@@ -98,6 +106,8 @@ paseo-bm was designed against [paseo-room](https://github.com/cuongntr/paseo-roo
 - Managing plugins, providers, profiles created by other tools or by the user.
 - Silent self-updates, notices that a new version is out.
 - Telemetry.
+- **A cross-project feature with its own plan.** Peer links group the requests of a feature across projects (REQ-176 → REQ-182); one plan or board spanning several workspaces is not built (ADR-028, alternatives).
+- **Asking a project on another machine or daemon,** and asking from an agent whose provider cannot take the plugin's tools (Pi): those keep Paseo's own agent messages.
 
 ## 4. Personas / Affected Actors
 
@@ -173,6 +183,13 @@ Journeys J-1 → J-5 and J-8 describe the install from paseo.cafe (since 0.4.0, 
   3. The owner consents; the new plugin runs, the roles, switches and history remain intact. If the npm release does not come up, the old one is reinstalled and the owner is told why.
   4. Later, an old `npx paseo-bm` still in the cache that is run by mistake stops without changing anything.
 
+- **J-10 A feature that spans two projects:**
+  1. The owner tells the frontend's Manager: "the UI is agreed; ask the backend for the APIs N1–N4". The request's Worker asks the backend project with one tool call and reports `blocked`, waiting on that link; it carries on with what does not depend on it.
+  2. The backend's Manager receives the ask as a request from the frontend, gives it to a Worker and says so in a line. The owner is not asked to carry anything.
+  3. The backend Worker builds the APIs and reports `finished` with what the frontend needs: the endpoints, the shapes, what changed. The plugin delivers that reply to the frontend Worker within moments, which wakes and wires the UI.
+  4. Later the backend fixes a field of one API: its `finished` report announces it to the frontend again.
+  5. The owner asks the frontend's Manager "where does the backend stand?"; the Manager reads the links and answers.
+
 ## 6. Functional Requirements
 
 Priority: **P1** = required for the Phase 1 MVP; **P2/P3** = later phases.
@@ -225,6 +242,15 @@ Priority: **P1** = required for the Phase 1 MVP; **P2/P3** = later phases.
 | REQ-016 | Skills reminder right inside Paseo | P2 | The plugin shows the status of the recommended skills in the Paseo UI with the command to add them; the user can turn this reminder off. |
 | REQ-017 | Suggested agent profiles for the beads process | P2 | An option to register profiles (for example planner, implementer). Profiles the user created are not changed; uninstall deletes only profiles created by paseo-bm. |
 | REQ-019 | Remote daemon | P3 | Install, check and remove the plugin on a daemon specified by host, with checks equivalent to REQ-002 and REQ-006. Clarify skills behaviour when the daemon is on another machine (skills live on the machine running the agents, not the machine running the command). |
+| REQ-175 | Every Beads Manager gets the plugin's tools, however it was opened | P1 | (a) A Manager the owner starts from Paseo's own new-agent composer with the `bm-manager` provider, or from the sidebar or the Command Center, gets the same tool binding as one the plugin creates (ADR-027): its Workers are created with `bm_create_worker`, their reports, questions and reviews go through the delivering tools. (b) An agent on a base provider that cannot take the tools (Pi) keeps the hand-written path, as today. (c) A Manager created before this version keeps working; the outdated-agents notice asks the owner to replace it. |
+| REQ-176 | A project asks another project through the plugin | P1 | (a) A bound Manager or Worker asks another project of the same machine (named by its workspace or its folder) for work or for a fact with one tool call; the plugin stores the ask as a **peer link** and delivers it to that project's Beads Manager, opening one if none is live. (b) The delivery is stored first, never cuts a running turn, is sent again after a plugin reload, and a delivery that cannot be made raises the existing `delivery-dropped` Inbox alert. (c) The role files send every ask to another project this way, not with a raw agent message. |
+| REQ-177 | The receiving project takes an ask as that project's request, never as the owner's word | P1 | (a) The receiving Manager delegates the ask to a new Worker, attaches it to the request that already does that work, or answers what reading answers; it raises an ask that goes against its own owner's goals with the owner, as for any request. (b) An ask never answers a decision, approves an effectful action or counts as the owner's message (the existing origin rules). (c) The ask's Worker works only in its own project, under that project's autonomy level and action boundary. (d) The ask reaches that Worker as another project's words, never as its owner's request: it is no yes for committing, pushing, deploying or anything else that needs the owner's yes. |
+| REQ-178 | The answer comes back by itself | P1 | (a) When a Worker of a request that answers an ask reports `finished`, `blocked` or `stopped`, the plugin delivers the reply to the asker — its live successor, else the asking request's Manager — with no agent relaying it. (b) A `finished` report of such a request carries what the asking project needs to know (the contract as built, how to use it, what changed); the tool refuses a `finished` without it. (c) Every later `finished` of that request delivers again, so a contract changed after the first answer is announced. |
+| REQ-179 | Both sides talk on the link | P1 | (a) Either side sends a message on a link with one tool call: the asker's goes to the Worker of the linked request (else that project's Manager), the other side's goes to the asker. (b) Each message is stored, delivered through the queue and readable later with the link. |
+| REQ-180 | Waiting on another project is a wait, not a stall | P1 | (a) A Worker that reports `blocked` waiting on one or more of its links is not flagged as stalled while any of them is open; the reply wakes it. (b) A link that no request took and no message answered within 10 minutes raises the Inbox alert `peer-unanswered` on the asking request. |
+| REQ-181 | Where every link stands can be read | P1 | (a) A Manager or Worker lists the other projects and its project's links in both directions — who asked, which request took it, its state, the newest reply — so a Manager answers "where does the other project stand" by reading. (b) The Orchestrator's project view shows each project's open links. (c) Peer deliveries draw cards in the chat like other deliveries. |
+| REQ-182 | Asks between projects are bounded | P1 | (a) At most 10 open links per request. (b) A request that answers an ask may ask a third project, but not the project the chain started from (it replies on the existing link), and a chain is at most 3 links long. (c) The link store keeps at most 2,000 links and never drops an open one; removing paseo-bm's data removes it. |
+| REQ-183 | No owner turn spent on the plugin's own noise | P1 | (a) At an autonomy level that delegates the `cost` class, a request's extra review calls are decided by the policy within the tier's budget, and the Orchestrator does not ask the owner about a review budget a Worker can ask for itself. (b) An Orchestrator question that repeats an open Worker question of the same request and subject is refused. (c) A Manager's answer to a question already answered on its card is refused with the answer that stands. (d) A delivery whose report the Manager already summarised, or a second report of the same request in one Worker turn, does not cost the owner a turn. (e) A Manager asks its own alignment question once, and again at most at `finished`. (f) The danger signal reads the commands an agent runs, not the text it writes into a file. (g) A Worker reads a turn cut by a message delivery as a cut, not as the owner's stop, and the Manager reports a stop as the owner's only when their message or `BM-STOP` shows it. (h) A handoff brief is built from the newest report and activity, keeps the open questions, and is never cut mid-word. |
 
 ## 7. Non-Functional Requirements
 
@@ -255,6 +281,8 @@ Priority: **P1** = required for the Phase 1 MVP; **P2/P3** = later phases.
 - **Privacy:** the request content and source code go to the model provider the user chose for that role. paseo-bm sends data nowhere else and has no telemetry. The only exception: after recognising that a paseo-bm agent has hit its usage limit (REQ-065 i), the plugin asks the daemon to read the usage limits of the Claude or Codex plan; the daemon calls that provider's own usage-limit API with its sign-in session. paseo-bm does not see the credentials and sends no content.
 - **Fault tolerance:** a Worker dying midway must not leave the documents or the beads store in a broken state; what has been written must be readable and Manager must state clearly where it stopped.
 - **Determinism (to a reasonable degree):** the same request must not produce duplicate beads when run again; REQ-023 is the main mechanism that ensures this.
+
+- **Between projects (REQ-176 → REQ-182):** an ask from another project carries no authority of the owner's; it never answers a decision, approves an effectful action or moves a Worker out of its own workspace. Fan-out is bounded per request and per chain.
 
 ## 8. Boundaries & Dependencies
 
@@ -287,6 +315,7 @@ Priority: **P1** = required for the Phase 1 MVP; **P2/P3** = later phases.
 | Phase 2 MVP | A bead progress board in Paseo; REQ-016, REQ-017, REQ-028, REQ-029, REQ-030 | **Partly done:** the board and REQ-030 by the [Dashboard PRD](./paseo-bm-dashboard-prd.md), REQ-028 by REQ-064. Not built: REQ-016, REQ-017, REQ-029 |
 | Worker fallback and role settings | REQ-062 → REQ-068 | **Done** (0.3.x; REQ-067 amended by ADR-022 and the autonomy PRD) |
 | Phase 3 MVP | REQ-019 remote daemon; assess WSL/Windows support; notices that a new version is out | **Not started.** The code-level budget layer this row once considered is decided by [ADR-027](../adr/ADR-027-agents-write-content-code-carries-it.md) and amended into REQ-037 |
+| Projects ask each other | REQ-175 → REQ-183 ([ADR-028](../adr/ADR-028-projects-ask-each-other-through-the-plugin.md)) | **Done** (2026-10-09, not yet released): built and accepted on an isolated daemon — M-19 = 0, M-20 = 0.1 s, M-21 = 0 ([acceptance record](../operations/paseo-bm-peer-links-acceptance-20261009.md)) |
 
 The calibrated-autonomy programme (built and shipped in 0.5.0) has its own phases: [autonomy PRD](./paseo-bm-autonomy-prd.md) §10.
 
@@ -330,6 +359,8 @@ Rows up to 2026-10-02 are archived in [paseo-bm-prd-revision-history-to-20261002
 | 2026-10-02 | hieu.nt10 (owner decision; written by Claude) | §2: M-14 (a review round every time Worker touches documents or beads) removed; it contradicted the risk-sized review of REQ-024, which is the rule, and REQ-024 (g) now measures that rule |
 | 2026-10-03 | hieu.nt10 (owner decisions Q1 a, Q2 b of ADR-027; written by Claude) | REQ-037: review rounds and the budget enforced in code for Workers whose tools know their caller, a behavioural guardrail for the rest; REQ-025 (c): a stopped run reports `stopped`; M-17's method; §9's Phase 3 row. `prd-ready` re-run on the amended requirements: PASS |
 | 2026-10-04 | hieu.nt10 (owner request; written by Codex) | REQ-021 (g): plugin-created Workers use concise request-derived titles while preserving the Worker role marker and colour; handoff successors use the same rule. `prd-ready`: PASS |
+| 2026-10-09 | hieu.nt10 (owner request; written by Claude) | REQ-175 → REQ-183, M-19 → M-21, §3 and §9 rows: projects ask each other through the plugin, every Manager is bound, the noise that cost owner turns removed ([ADR-028](../adr/ADR-028-projects-ask-each-other-through-the-plugin.md)). `prd-ready`: PASS (approved by Claude under the owner's delegation, 2026-10-09) |
+| 2026-10-09 | Claude (owner's delegation) | §9: "Projects ask each other" built and accepted (M-19 = 0, M-20 = 0.1 s, M-21 = 0); not yet released |
 
 ## 12. Appendix A — Survey of the recommended skills source
 

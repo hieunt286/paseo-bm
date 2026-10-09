@@ -105,11 +105,19 @@ export const ANSWER_NOTICE_MARKER = "BM-ANSWER";
 export const DELIVERY_NOTICE_MARKER = "BM-DELIVERY";
 
 /**
- * The kinds of an outbox record (design §16.7): what a bound agent's tool
- * stored and the plugin delivers, each as `BM-DELIVERY <kind> <recordId>` on
- * its first line, the text after it.
+ * The kinds of a delivery between projects (design §7.17.4): an ask, a
+ * request's reply to it, and a message on its link. Their target is resolved
+ * again at every delivery attempt (`outbox.ts`).
  */
-export const DELIVERY_KINDS = ["report", "review", "message", "no-verdict"] as const;
+export const PEER_DELIVERY_KINDS = ["peer", "peer-reply", "peer-message"] as const;
+
+/**
+ * The kinds of an outbox record (design §16.7, §7.17.4): what a bound agent's
+ * tool stored and the plugin delivers, each as `BM-DELIVERY <kind> <recordId>`
+ * on its first line, the text after it. An older build skips a record of a
+ * kind it does not know.
+ */
+export const DELIVERY_KINDS = ["report", "review", "message", "no-verdict", ...PEER_DELIVERY_KINDS] as const;
 export type DeliveryKind = (typeof DELIVERY_KINDS)[number];
 
 /** An outbox record's id: `out-` + 12 lowercase hex digits. */

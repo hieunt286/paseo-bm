@@ -29,6 +29,19 @@
  * plugin run sweeps away every binding whose agent Paseo no longer lists. At
  * most 5,000 bindings are kept, the oldest revoked ones dropped first.
  *
+ * A Manager the owner opens from Paseo's composer is bound by the creation
+ * hook itself (design §7.17.7, ADR-028 decision 10): its binding carries
+ * `origin: "hook"` (no parent, no request). The creation also carries the
+ * binding's tag (`HOOK_BINDING_ENV`, `hookTagOf`) in its `env`, which Paseo
+ * hands to `before("agent.session_open")` with the new agent's id: that hook
+ * records the id as `claimedBy` (`claimHook`). The binding settles only to
+ * that agent — the one that holds its token — at `agent.created`, or later
+ * through the recovery pass (`creation-settle.ts`); never to another Manager
+ * of the workspace. An attached hook binding that expires unsettled stays in
+ * the file, out of every lookup, for `HOOK_EXPIRED_KEEP_MS`, so that pass can
+ * raise `outdated-agent` for the Manager that claimed it (`expiredHooks`,
+ * `removeExpiredHook`).
+ *
  * Every function is synchronous on the file (the plugin server is one
  * thread, so a read-modify-write cannot interleave with another) and the
  * lookups never throw: a lost or unreadable file must never cost an agent its
@@ -55,14 +68,27 @@ export const PENDING_TTL_MS = 10 * 60 * 1000;
 export const REVOKED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** The most bindings the file keeps; the oldest revoked ones go first. */
 export const MAX_BINDINGS = 5_000;
+/** An attached hook binding that expired unsettled stays in the file this long past its ten minutes, for the recovery pass to see. */
+export const HOOK_EXPIRED_KEEP_MS = 24 * 60 * 60 * 1000;
 /** The answer a delivering or creating tool gives a caller whose binding is still pending. */
 export const PENDING_CALLER_MESSAGE = "paseo-bm is still setting up this agent's tools; try again in a moment. Nothing was created, stored or sent.";
 
 export const BOUND_ROLES = ["manager", "worker", "reviewer"] as const;
 export type BoundRole = (typeof BOUND_ROLES)[number];
 export type BindingState = "pending" | "bound" | "revoked";
+/** Who issued a binding: absent for the plugin's own creations, `hook` for the creation hook's (§7.17.7). */
+export type BindingOrigin = "hook";
+/**
+ * The `env` key a hook-bound creation carries its binding's tag in (§7.17.7):
+ * Paseo hands that `env` to `before("agent.session_open")` with the new
+ * agent's id, which claims the binding (`claimHook`) and removes the key.
+ */
+export const HOOK_BINDING_ENV = "PASEO_BM_HOOK_BINDING";
+/** Hex characters of a token's SHA-256 a hook binding's tag keeps (`hookTagOf`). */
+export const HOOK_TAG_LENGTH = 16;
 
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const HOOK_TAG_PATTERN = new RegExp(`^[0-9a-f]{${HOOK_TAG_LENGTH}}$`);
 
 const isoOrNull = z.string().nullable();
 const bindingSchema = z.object({
@@ -78,6 +104,10 @@ const bindingSchema = z.object({
   attachedAt: isoOrNull,
   boundAt: isoOrNull,
   revokedAt: isoOrNull,
+  /** Design §7.17.7: issued by the creation hook for a Manager the owner opened. `BINDINGS_VERSION` stays 1. */
+  origin: z.literal("hook").optional(),
+  /** Design §7.17.7: the agent whose session the hook-bound creation opened — the only one this binding settles to. */
+  claimedBy: z.string().min(1).optional(),
 });
 
 export type AgentBinding = z.infer<typeof bindingSchema>;
@@ -113,6 +143,8 @@ export interface BindingInput {
   requestId?: string | null;
   parentId?: string | null;
   batchId?: string | null;
+  /** `hook`: the creation hook issued it for a Manager the owner opened (§7.17.7). */
+  origin?: BindingOrigin;
 }
 
 export function isBoundRole(value: unknown): value is BoundRole {
@@ -140,9 +172,39 @@ export function isExpired(binding: AgentBinding, now: number): boolean {
   return false;
 }
 
-/** The bindings kept at `now`: the expired ones out, then at most `MAX_BINDINGS`, the oldest revoked ones first to go. */
+/** True when `binding` is an attached hook binding that expired unsettled and is still kept for the recovery pass at `now` (§7.17.7). */
+export function isExpiredHook(binding: AgentBinding, now: number): boolean {
+  return (
+    binding.origin === "hook" &&
+    binding.state === "pending" &&
+    binding.attachedAt !== null &&
+    isExpired(binding, now) &&
+    now - timeOrZero(binding.createdAt) <= PENDING_TTL_MS + HOOK_EXPIRED_KEEP_MS
+  );
+}
+
+/** True when `binding` is an attached, unexpired `pending` hook binding of a Manager at `now` (§7.17.7). */
+function isPendingHook(binding: AgentBinding, now: number): boolean {
+  return binding.origin === "hook" && binding.role === "manager" && binding.state === "pending" && binding.attachedAt !== null && !isExpired(binding, now);
+}
+
+/** The tag of a hook binding (§7.17.7): the first `HOOK_TAG_LENGTH` hex characters of its token's SHA-256, never the token. Pure. */
+export function hookTagOf(tokenSha256: string): string {
+  return tokenSha256.slice(0, HOOK_TAG_LENGTH);
+}
+
+/** True when `value` has the shape of a hook binding's tag. */
+export function isHookTag(value: unknown): value is string {
+  return typeof value === "string" && HOOK_TAG_PATTERN.test(value);
+}
+
+/**
+ * The bindings kept at `now`: the expired ones out (an expired attached hook
+ * binding is kept for the recovery pass, `isExpiredHook`), then at most
+ * `MAX_BINDINGS`, the oldest revoked ones first to go.
+ */
 export function capBindings(bindings: readonly AgentBinding[], now: number): AgentBinding[] {
-  const live = bindings.filter((binding) => !isExpired(binding, now));
+  const live = bindings.filter((binding) => !isExpired(binding, now) || isExpiredHook(binding, now));
   return capBy(live, MAX_BINDINGS, (binding) => (binding.state === "revoked" ? timeOrZero(binding.revokedAt) : Number.MAX_SAFE_INTEGER));
 }
 
@@ -174,10 +236,31 @@ export interface BindingStore {
    * `agents.create` did not settle the binding (it threw, or a reload lost it):
    * the one attached, unexpired `pending` binding of that role, parent and
    * workspace — and `bm.batchId` (a Reviewer) or `bm.requestId` (a Worker) —
-   * becomes `bound` to it. Returns the agent's binding (one it already had
-   * included, `settledNow: false`), or null. Never throws.
+   * becomes `bound` to it. A Manager (§7.17.7) takes only the attached
+   * `pending` hook binding of its workspace that it claimed (`claimHook`):
+   * matched by its id, never by its workspace alone. Returns the agent's
+   * binding (one it already had included, `settledNow: false`), or null.
+   * Never throws.
    */
   settleCreated(agent: CreatedBindingAgent): { binding: AgentBinding | null; settledNow: boolean };
+  /**
+   * `before("agent.session_open")` of a creation carrying the tag `tag`
+   * (§7.17.7): the one attached, unexpired `pending` hook binding with that
+   * tag and no claim records `claimedBy: agentId`. False when there is none
+   * (or more than one, or a write failure). Never throws.
+   */
+  claimHook(tag: string, agentId: string): boolean;
+  /**
+   * The recovery pass (§7.17.7): the attached, unexpired `pending` hook
+   * binding `tokenSha256` that `agentId` claimed becomes `bound` to it, a
+   * Manager that has no binding. False when there is none, another agent
+   * claimed it, or the agent has one. Never throws.
+   */
+  settleHook(tokenSha256: string, agentId: string): boolean;
+  /** The recovery pass (§7.17.7): every attached hook binding that expired unsettled and is still kept (`isExpiredHook`). Never throws. */
+  expiredHooks(): AgentBinding[];
+  /** The recovery pass raised what it had to for that expired hook binding: it goes. False when there was none. Never throws. */
+  removeExpiredHook(tokenSha256: string): boolean;
   /** The caller a token path names: bound → its agent, pending → `agentId: null`; unknown, revoked or another role's → null. Never throws. */
   callerOf(token: string, role: BoundRole): ToolCaller | null;
   /** `agent.archived`: every bound binding of `agentId` is revoked. Returns how many. Never throws. */
@@ -206,6 +289,8 @@ export interface CreatedBindingAgent {
   requestId: string | null;
   /** Its `bm.batchId` label (a Reviewer). */
   batchId: string | null;
+  /** It carries a `bm.version` label (a Manager): the plugin's own creation, never a hook binding's (§7.17.7). */
+  versioned?: boolean;
 }
 
 /** Drops the read cache; tests only. */
@@ -288,6 +373,7 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         attachedAt: null,
         boundAt: null,
         revokedAt: null,
+        ...(input.origin === "hook" ? { origin: "hook" as const } : {}),
       };
       update((bindings) => [...bindings, bindingSchema.parse(binding)]);
       return { token, tokenSha256 };
@@ -351,6 +437,23 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
       const own = list().find((binding) => binding.agentId === agent.agentId) ?? null;
       if (own !== null) return { binding: own, settledNow: false };
       const none = { binding: null, settledNow: false };
+      // Design §7.17.7: a Manager the owner opened takes the hook binding it claimed, the one whose token it holds;
+      // the plugin's own (`bm.version`) never takes one.
+      if (agent.role === "manager") {
+        if (agent.versioned === true || agent.workspaceId === null) return none;
+        const workspaceId = agent.workspaceId;
+        let settled = null as AgentBinding | null;
+        const at = now();
+        quietly(`settle the binding of the new Manager ${agent.agentId}`, (bindings) => {
+          const candidate = bindings.find(
+            (binding) => isPendingHook(binding, at.getTime()) && binding.claimedBy === agent.agentId && binding.workspaceId === workspaceId,
+          );
+          if (candidate === undefined) return null;
+          settled = { ...candidate, state: "bound" as const, agentId: agent.agentId, boundAt: at.toISOString() };
+          return bindings.map((entry) => (entry === candidate ? settled! : entry));
+        });
+        return settled === null ? none : { binding: settled, settledNow: true };
+      }
       if (agent.parentId === null) return none;
       const key = agent.role === "reviewer" ? agent.batchId : agent.role === "worker" ? agent.requestId : null;
       if (key === null) return none;
@@ -377,6 +480,51 @@ export function createBindingStore(home: string, deps: BindingStoreDeps = {}): B
         return bindings.map((entry) => (entry === candidate ? settled! : entry));
       });
       return settled === null ? none : { binding: settled, settledNow: true };
+    },
+    claimHook(tag, agentId) {
+      if (!isHookTag(tag) || agentId === "") return false;
+      let claimed = false;
+      const at = now().getTime();
+      const written = quietly(`record the new Manager ${agentId} on its hook binding`, (bindings) => {
+        const candidates = bindings.filter((entry) => isPendingHook(entry, at) && hookTagOf(entry.tokenSha256) === tag);
+        // Two bindings with one tag (a 64-bit collision) are never guessed between.
+        const candidate = candidates.length === 1 ? candidates[0]! : null;
+        if (candidate === null || (candidate.claimedBy !== undefined && candidate.claimedBy !== agentId)) return null;
+        claimed = true;
+        if (candidate.claimedBy === agentId) return null;
+        return bindings.map((entry) => (entry === candidate ? { ...entry, claimedBy: agentId } : entry));
+      });
+      return written && claimed;
+    },
+    settleHook(tokenSha256, agentId) {
+      let settled = false;
+      const at = now();
+      quietly(`settle the binding of the Manager ${agentId}`, (bindings) => {
+        if (bindings.some((entry) => entry.agentId === agentId && !isExpired(entry, at.getTime()))) return null;
+        const candidate = bindings.find((entry) => entry.tokenSha256 === tokenSha256 && isPendingHook(entry, at.getTime()) && entry.claimedBy === agentId);
+        if (candidate === undefined) return null;
+        settled = true;
+        return bindings.map((entry) => (entry === candidate ? { ...entry, state: "bound" as const, agentId, boundAt: at.toISOString() } : entry));
+      });
+      return settled;
+    },
+    expiredHooks() {
+      try {
+        const at = now().getTime();
+        return file.read().bindings.filter((binding) => isExpiredHook(binding, at));
+      } catch {
+        return [];
+      }
+    },
+    removeExpiredHook(tokenSha256) {
+      let removed = false;
+      const at = now().getTime();
+      quietly("remove an expired hook binding", (bindings) => {
+        const next = bindings.filter((binding) => !(binding.tokenSha256 === tokenSha256 && isExpiredHook(binding, at)));
+        removed = next.length !== bindings.length;
+        return removed ? next : null;
+      });
+      return removed;
     },
     callerOf(token, role) {
       if (!isBindingToken(token)) return null;

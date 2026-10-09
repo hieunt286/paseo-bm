@@ -40,6 +40,7 @@ import { HANDOFFS_DIR_NAME } from "./handoff-store";
 import { AUTONOMY_DIR_NAME } from "./autonomy-store";
 import { REQUESTS_DIR_NAME } from "./request-registry";
 import { OUTBOX_DIR_NAME } from "./outbox";
+import { PEERS_DIR_NAME } from "./peer-links";
 import { UI_DIR_NAME } from "./data-home";
 import { TIMED_OUT, withTimeout } from "./role-mode";
 import { ROLE_NAMES, markCleanedUpThisRun, roleId, type RoleName } from "./setup-roles";
@@ -243,6 +244,8 @@ export const CLEANUP_DELETES: readonly string[] = [
   REQUESTS_DIR_NAME,
   // Design §16.7: and the outbox of the agents' reports and messages.
   OUTBOX_DIR_NAME,
+  // Design §7.17.1: and the peer links between projects.
+  PEERS_DIR_NAME,
 ];
 
 export type CleanupDeps = SetupStateDeps & { now?: () => Date };

@@ -178,13 +178,25 @@ export interface ParsedShellLine {
 const SHELL_KEYWORDS: ReadonlySet<string> = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "in", "case", "esac", "!", "{", "}", "time"]);
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 
-/** The line without here-document bodies: each `<<WORD` drops the lines after it up to the one that is `WORD`. */
-function withoutHereDocuments(line: string): string {
-  const lines = line.split("\n");
+/** A here-document of a line: the line holding its `<<WORD` marker, and its body (the closing line included). */
+export interface HereDocument {
+  head: string;
+  body: string;
+}
+
+/**
+ * Reads a line's here-documents: each `<<WORD` takes the lines after it up to
+ * the one that is `WORD` (`<<-WORD`: with its leading tabs stripped). The kept
+ * lines, and each marker line with the body after it (several markers on one
+ * line share one body).
+ */
+function readHereDocuments(line: string): { kept: string[]; documents: HereDocument[] } {
   const kept: string[] = [];
+  const documents: Array<{ head: string; body: string[] }> = [];
   const pending: Array<{ word: string; strip: boolean }> = [];
-  for (const current of lines) {
+  for (const current of line.split("\n")) {
     if (pending.length > 0) {
+      documents[documents.length - 1]!.body.push(current);
       const next = pending[0]!;
       if ((next.strip ? current.replace(/^\t+/, "") : current) === next.word) pending.shift();
       continue;
@@ -192,9 +204,25 @@ function withoutHereDocuments(line: string): string {
     kept.push(current);
     // The markers of this line, outside single quotes (a rough read: enough for `cat > f <<'EOF'`).
     const bare = current.replace(/'[^']*'(?!\w)/g, (quoted) => (/^'[A-Za-z_][\w-]*'$/.test(quoted) ? quoted : " ".repeat(quoted.length)));
-    for (const match of bare.matchAll(/<<(-?)\s*(['"]?)([A-Za-z_][\w-]*)\2/g)) pending.push({ word: match[3]!, strip: match[1] === "-" });
+    const markers = [...bare.matchAll(/<<(-?)\s*(['"]?)([A-Za-z_][\w-]*)\2/g)];
+    for (const match of markers) pending.push({ word: match[3]!, strip: match[1] === "-" });
+    if (markers.length > 0) documents.push({ head: current, body: [] });
   }
-  return kept.join("\n");
+  return { kept, documents: documents.map((document) => ({ head: document.head, body: document.body.join("\n") })) };
+}
+
+/** The line without here-document bodies (`readHereDocuments`). */
+export function withoutHereDocuments(line: string): string {
+  return readHereDocuments(line).kept.join("\n");
+}
+
+/**
+ * The here-documents of a line (see `HereDocument`), read as
+ * `withoutHereDocuments` drops them. The danger signal (`effectfulCommandOf`)
+ * reads them to skip SQL a command only writes.
+ */
+export function hereDocumentsOf(line: string): HereDocument[] {
+  return readHereDocuments(line).documents;
 }
 
 /** The body of a `$(…)` starting at `open` (the index of its `(`), and the index after its `)`; null when it never closes. */

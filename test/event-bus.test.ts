@@ -192,7 +192,11 @@ describe("events: types, keys, lines (design §A.8)", () => {
       reports: [report({ at: at(5), requestId: REQUEST, phase: "finished", beadsReady: ["bd-1"] }), report({ at: at(6), requestId: null, phase: "blocked" })],
     });
     expect(requestFinishedEventsOf(record)).toEqual([{ type: "request.finished", workspaceId: WS, requestId: REQUEST, managerId: MANAGER, at: at(5) }]);
-    expect(requestFinishedEventsOf({ ...record, role: "worker" })).toEqual([]);
+    // A Worker's own record raises it too (design §7.17.8 i), told to its Manager; a Reviewer's never.
+    expect(requestFinishedEventsOf({ ...record, agentId: WORKER, role: "worker", parentAgentId: MANAGER })).toEqual([
+      { type: "request.finished", workspaceId: WS, requestId: REQUEST, managerId: MANAGER, at: at(5) },
+    ]);
+    expect(requestFinishedEventsOf({ ...record, role: "reviewer" })).toEqual([]);
     expect(requestFinishedEventsOf(undefined)).toEqual([]);
   });
 
@@ -914,7 +918,7 @@ describe("advice.due: after every N finished requests of a project (design §G.4
     expect(isInEventScope(event, new Set())).toBe(true);
   });
 
-  it("counts one key per finished request of a Manager turn; a Worker's turn, a blocked report or no report counts nothing", () => {
+  it("counts one key per finished request of a Manager's or a Worker's turn; a Reviewer's turn, a blocked report or no report counts nothing", () => {
     const record = turn({
       workspaceId: WS,
       requestId: null,
@@ -926,7 +930,8 @@ describe("advice.due: after every N finished requests of a project (design §G.4
       ],
     });
     expect(finishedRequestKeysOf(record)).toEqual({ workspaceId: WS, keys: [request(1), request(2)], at: at(7) });
-    expect(finishedRequestKeysOf({ ...record, role: "worker" })).toBeNull();
+    expect(finishedRequestKeysOf({ ...record, agentId: WORKER, role: "worker" })).toEqual({ workspaceId: WS, keys: [request(1), request(2)], at: at(7) });
+    expect(finishedRequestKeysOf({ ...record, role: "reviewer" })).toBeNull();
     expect(finishedRequestKeysOf(turn({ workspaceId: WS }))).toBeNull();
     expect(finishedRequestKeysOf(undefined)).toBeNull();
   });
@@ -1069,9 +1074,18 @@ describe("a finished-unverified request wakes the Orchestrator as work left (des
     expect(requestFinishedEventsOf(record)).toEqual([]);
     // Work left and unverified: one event, which says both.
     expect(requestFinishedEventsOf(managerTurn(cleanFinish({ beadsReady: ["bd-2"] })), () => true)).toEqual([expect.objectContaining({ unverified: true })]);
-    // Only a Manager's record, only a finished report.
-    expect(requestFinishedEventsOf({ ...record, role: "worker" }, () => true)).toEqual([]);
+    // A Manager's or a Worker's record, never a Reviewer's; only a finished report.
+    expect(requestFinishedEventsOf({ ...record, role: "reviewer" }, () => true)).toEqual([]);
     expect(requestFinishedEventsOf(managerTurn(cleanFinish({ phase: "bead-implemented" })), () => true)).toEqual([]);
+  });
+
+  it("reads a Worker's own finish against its request's records too (design §7.17.8 i)", async () => {
+    await appendRecord(traces(), turn({ workspaceId: WS, requestId: REQUEST, at: at(1), endedAt: at(1) }));
+    await appendRecord(traces(), turn({ agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQUEST, at: at(4), endedAt: at(4), evidence: [edit(2)] }));
+    const own = turn({ agentId: WORKER, role: "worker", parentAgentId: MANAGER, workspaceId: WS, requestId: REQUEST, at: at(6), endedAt: at(6), reports: [cleanFinish({ agentId: WORKER, recordId: "rec-1" })] });
+    await appendRecord(traces(), own);
+    const isUnverified = await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, own);
+    expect(requestFinishedEventsOf(own, isUnverified)).toEqual([expect.objectContaining({ requestId: REQUEST, managerId: MANAGER, unverified: true })]);
   });
 
   it("reads the request's records: code changed and npm test never ran → unverified; run and passed after the edit → not", async () => {
@@ -1102,7 +1116,9 @@ describe("a finished-unverified request wakes the Orchestrator as work left (des
     expect(requestFinishedEventsOf(old, oldTest)).toEqual([]);
   });
 
-  it("reads nothing for a Worker's turn, or a Manager's without a finish, and a store it cannot read changes nothing", async () => {
+  it("reads nothing for a Reviewer's turn, or one without a finish, and a store it cannot read changes nothing", async () => {
+    const reviewer = turn({ agentId: "agent-reviewer", role: "reviewer", workspaceId: WS, requestId: REQUEST, reports: [cleanFinish()] });
+    expect((await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, reviewer))(reviewer.reports[0]!)).toBe(false);
     const worker = turn({ agentId: WORKER, role: "worker", workspaceId: WS, requestId: REQUEST });
     expect((await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, worker))(cleanFinish())).toBe(false);
     expect((await unverifiedFinishesOf({ location: traces(), paseo: noAgents, home }, undefined))(cleanFinish())).toBe(false);
@@ -1451,5 +1467,51 @@ describe("writers.observed: two agents wrote one file in overlapping turns (desi
     expect(await bus().publish([observed(raised.alert.key)], fake.paseo)).toMatchObject({ status: "none", published: [] });
     expect(fake.sends).toEqual([]);
     expect(alerts().isOpen(raised.alert.key)).toBe(true);
+  });
+});
+
+describe("a Worker's own finished report raises request.finished and counts toward the advice (design §7.17.8 i; REQ-183 i)", () => {
+  const cadence = (value: number) => createCoordinationStore(home).set({ key: "advice.everyFinished", value });
+  /** A finish with work left, as a Worker's record holds it: stored by `bm_report` (with its record id), or the Worker's own block the plugin relays. */
+  const finish = (over: Parameters<typeof report>[0] = {}) =>
+    report({ agentId: WORKER, at: at(5), requestId: REQUEST, phase: "finished", beadsReady: ["bd-1"], ...over });
+  const workerTurn = (finished = finish()) =>
+    turn({ agentId: WORKER, role: "worker", parentAgentId: MANAGER, workspaceId: WS, requestId: REQUEST, at: at(6), endedAt: at(6), reports: [finished] });
+  /** The same report as a Manager's record holds it: sent to it by hand, read at its own time. */
+  const managerTurn = () => turn({ workspaceId: WS, requestId: REQUEST, at: at(8), endedAt: at(8), reports: [finish({ agentId: MANAGER, at: at(7) })] });
+
+  it.each([
+    ["a bound Worker's bm_report", finish({ recordId: "rec-1" })],
+    ["an unbound Worker's relayed block", finish()],
+  ])("%s: one request.finished, told to its Manager, and one advice count", async (_, finished) => {
+    inScope();
+    cadence(1);
+    const fake = daemon();
+    const result = await bus().turnRecorded(workerTurn(finished), [], fake.paseo);
+    expect(result).toEqual({ status: "done", published: [`request.finished:${WS}:${REQUEST}@${at(5)}`, `advice.due:${WS}@${at(5)}`], skipped: [] });
+    expect(fake.sends).toHaveLength(1);
+    expect(fake.sends[0]!.text).toContain(`- request.finished — project ${WS}, request ${REQUEST}, Manager ${MANAGER}`);
+    expect(createAdviceStore(home).read()[WS]).toEqual({ counted: [], at: at(5), dueAt: at(5) });
+  });
+
+  it("no duplicate with a Manager-record finish of the same request, in either order; a repeat in one role keeps its own dedupe", async () => {
+    inScope();
+    cadence(2);
+    const fake = daemon();
+    fake.byId(ORCHESTRATOR)!.status = "running";
+    const events = bus();
+    expect(await events.turnRecorded(workerTurn(finish({ recordId: "rec-1" })), [], fake.paseo)).toMatchObject({ published: [`request.finished:${WS}:${REQUEST}@${at(5)}`] });
+    expect(await events.turnRecorded(managerTurn(), [], fake.paseo)).toMatchObject({ status: "none", published: [] });
+    expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [REQUEST], dueAt: null });
+
+    const reverse = bus();
+    rmSync(home, { recursive: true, force: true });
+    cadence(2);
+    inScope();
+    expect(await reverse.turnRecorded(managerTurn(), [], fake.paseo)).toMatchObject({ published: [`request.finished:${WS}:${REQUEST}@${at(7)}`] });
+    expect(await reverse.turnRecorded(workerTurn(), [], fake.paseo)).toMatchObject({ status: "none", published: [] });
+    // The Manager's record read again later: its own event key, as before.
+    expect(await reverse.turnRecorded(managerTurn(), [], fake.paseo)).toMatchObject({ status: "none", published: [] });
+    expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [REQUEST], dueAt: null });
   });
 });

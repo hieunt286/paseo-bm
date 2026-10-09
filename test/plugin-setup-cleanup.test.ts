@@ -8,6 +8,7 @@ import { createInterventionStore } from "../plugin/server/intervention-store";
 import { cleanupPaseoBm } from "../plugin/server/setup-machine";
 import { REQUESTS_DIR_NAME, createRequestRegistry } from "../plugin/server/request-registry";
 import { OUTBOX_DIR_NAME, createOutbox } from "../plugin/server/outbox";
+import { PEERS_DIR_NAME, createPeerLinkStore } from "../plugin/server/peer-links";
 import { createBindingStore } from "../plugin/server/agent-bindings";
 import { ensureRoles, markCleanedUpThisRun } from "../plugin/server/setup-roles";
 import { readSetupState, updateSetupState } from "../plugin/server/setup-state";
@@ -319,6 +320,19 @@ describe("deleting the data too", () => {
     expect(result.data?.deleted).toContain(OUTBOX_DIR_NAME);
     expect(existsSync(join(dataHome, OUTBOX_DIR_NAME))).toBe(false);
     expect(result.data?.kept.join("\n")).not.toContain(OUTBOX_DIR_NAME);
+  });
+
+  it("deletes the peer links with the rest (design §7.17.1)", async () => {
+    const daemon = daemonWith();
+    fillDataHome();
+    const links = createPeerLinkStore(dataHome);
+    links.createLink({ kind: "question", from: { workspaceId: "w1", requestId: "req-20261009T100000Z", agentId: "wrk-1", role: "worker" }, to: { workspaceId: "w2", managerId: null }, text: "Which port?" });
+    expect(existsSync(links.path)).toBe(true);
+
+    const result = await cleanupPaseoBm(daemon.paseo, { deleteData: true }, deps());
+
+    expect(result.data?.deleted).toContain(PEERS_DIR_NAME);
+    expect(existsSync(join(dataHome, PEERS_DIR_NAME))).toBe(false);
   });
 
   it("deletes the intervention log with orchestrator/ (autonomy design §G.3)", async () => {

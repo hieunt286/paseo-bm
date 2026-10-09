@@ -27,6 +27,7 @@ import { agentFactsOf, type DashboardPaseo } from "./paseo-directory";
 import { readRecords, readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
 import { handoffSuccessorsOf, reconstructTraces, reviewCallsOf, toolCallsOf, type AgentFacts, type ReconstructedTrace } from "./traces";
 import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
+import { isLiveLink, type PeerLink } from "./peer-links";
 import { timeOrZero } from "../shared/time";
 import { dirname } from "node:path";
 
@@ -120,10 +121,11 @@ export function recentTracesOf(traces: readonly ReconstructedTrace[], since: num
 }
 
 /**
- * When the request started waiting on the user: the time of its last report,
- * when that one is `blocked`. A stored message time can be the write time
- * (AGENTS.md), which is never before the end of the turn that carried the
- * report, so that end time is used when it is earlier (design §6).
+ * When the request started waiting: the time of its last report, when that
+ * one is `blocked` — on the owner, or on another project (`waitedLinksOf`,
+ * design §7.17.5), which counts as waiting too. A stored message time can be
+ * the write time (AGENTS.md), which is never before the end of the turn that
+ * carried the report, so that end time is used when it is earlier (design §6).
  */
 export function waitingSinceOf(trace: ReconstructedTrace): string | null {
   const last = trace.reports.at(-1);
@@ -133,6 +135,28 @@ export function waitingSinceOf(trace: ReconstructedTrace): string | null {
   );
   const endedAt = carrier === undefined ? 0 : timeOrZero(carrier.endedAt);
   return endedAt > 0 && endedAt < timeOrZero(last.at) ? carrier!.endedAt : last.at;
+}
+
+/** bm_report notes the wait on a link a moment before its record (the report's time) is stored: a wait this close before the report is that report's. */
+export const PEER_WAIT_SLACK_MS = 60_000;
+
+/**
+ * The live links the request of `workspaceId` waits on (design §7.17.5): its
+ * newest report is `blocked` and each of these links, asked by the request,
+ * has `waitingSince` at or after that report's time. None otherwise. Pure.
+ */
+export function waitedLinksOf(trace: ReconstructedTrace, workspaceId: string, links: readonly PeerLink[]): PeerLink[] {
+  const last = trace.reports.at(-1);
+  if (last?.phase !== "blocked" || trace.requestId === null) return [];
+  const reportedAt = timeOrZero(last.at) - PEER_WAIT_SLACK_MS;
+  return links.filter(
+    (link) =>
+      isLiveLink(link) &&
+      link.from.workspaceId === workspaceId &&
+      link.from.requestId === trace.requestId &&
+      link.waitingSince !== null &&
+      timeOrZero(link.waitingSince) >= reportedAt,
+  );
 }
 
 /** One request's trace, with the live facts of its agents and its registry entry beside it. */
@@ -308,7 +332,7 @@ export async function isFinishedUnverifiedNow(
 }
 
 /**
- * Which `finished` reports of a recorded Manager turn leave their request
+ * Which `finished` reports of a recorded Manager or Worker turn leave their request
  * finished-unverified (autonomy design §C.3, §A.8): each labelled against
  * every record of its request — by the report's request id, else the Manager's
  * newest turn — read once the collector has written the turn. The answer is a
@@ -321,7 +345,7 @@ export async function unverifiedFinishesOf(
   record: TraceRecord | null | undefined,
 ): Promise<(report: ParsedReport) => boolean> {
   const none = () => false;
-  if (record === null || record === undefined || record.role !== "manager") return none;
+  if (record === null || record === undefined || (record.role !== "manager" && record.role !== "worker")) return none;
   const finished = record.reports.filter((report) => report.phase === "finished");
   if (finished.length === 0) return none;
   try {

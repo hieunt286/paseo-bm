@@ -30,6 +30,17 @@
  *   When the store cannot be read, a `blocked` report counts as waiting, as
  *   before. A request the Manager answered itself (no Worker, no report)
  *   never stalls.
+ * - **Waiting on another project** (design §7.17.5): the link store is read
+ *   once per pass; a `blocked` request whose live links it asked carry
+ *   `waitingSince` from that report (`waitedLinksOf`) waits, as on the owner,
+ *   until each waited link passes its ceiling (`peerCeilingOf`: taken but no
+ *   live agent of the answering request, or `PEER_SILENT_MS` without a word
+ *   from the answering side). One `peer-unanswered` alert per asking request
+ *   names its links past the ceiling and those `open` for
+ *   `PEER_UNANSWERED_MS` without a word from the answering side
+ *   (`unansweredOf`); it clears when none is left (taken, answered, closed or
+ *   answered on), and an asking request whose newest report is `finished` or
+ *   `stopped` has none (it waits on nobody). No event: the Inbox shows it.
  * - **Once per stall.** The alert is raised once while it holds and cleared
  *   when it no longer does (an agent runs, a new report arrives, the request
  *   leaves the 24-hour window or its trace is deleted); raised afresh after
@@ -58,7 +69,8 @@ import { createDecisionStore } from "./decision-store";
 import { isAnswerable } from "../shared/decisions";
 import { createEventBus, eventScopeOf, type BmEvent, type EventBus, type StallReason } from "./event-bus";
 import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
-import { lastActivityOf, recentWorkspacesOf, requestKeyOf, ruleInputOf, workspaceTracesOf } from "./request-trace";
+import { lastActivityOf, recentWorkspacesOf, requestKeyOf, ruleInputOf, waitedLinksOf, workspaceTracesOf } from "./request-trace";
+import { createPeerLinkStore, isLiveLink, type PeerLink } from "./peer-links";
 import { ruleReviewGrantOf } from "./review-tools";
 import type { TraceStoreLocation } from "./trace-store";
 import type { AgentFacts, ReconstructedTrace } from "./traces";
@@ -74,6 +86,10 @@ export const STALL_PASS_MS = 60_000;
 export const IDLE_UNFINISHED_MS = 5 * 60_000;
 /** Only workspaces and requests with activity in this window are looked at (design §6). */
 export const STALL_WINDOW_MS = 24 * 3_600_000;
+/** A waited link with no word from the answering side for this long stops counting as a wait (design §7.17.5). */
+export const PEER_SILENT_MS = 2 * 3_600_000;
+/** An `open` link with no word from the answering side for this long raises `peer-unanswered` (design §7.17.5). */
+export const PEER_UNANSWERED_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Why a request stalls (pure).
@@ -92,7 +108,8 @@ export interface HeldStall {
  * its workspace; `flags` are the rules' flags for the request. `waitsOnOwner`
  * is whether the request has an unsettled decision in the decision store;
  * `null` when the store could not be read, and then a `blocked` report counts
- * as waiting on the owner (ADR-024). Pure.
+ * as waiting on the owner (ADR-024). `waitsOnPeer`: the request waits on a
+ * link within its ceiling (design §7.17.5). Pure.
  */
 export function stallReasonsOf(
   trace: ReconstructedTrace,
@@ -100,6 +117,7 @@ export function stallReasonsOf(
   flags: readonly Flag[],
   now: Date,
   waitsOnOwner: boolean | null = null,
+  waitsOnPeer = false,
 ): HeldStall[] {
   if ([...trace.workerIds, ...trace.reviewerIds].some((id) => agents.get(id)?.status === "running")) return [];
   // No Worker and no report: the Manager answered itself; nothing was handed over to stall.
@@ -108,7 +126,7 @@ export function stallReasonsOf(
   const phase = trace.reports.at(-1)?.phase ?? null;
   const lastActivityAt = lastActivityOf(trace);
   const held: HeldStall[] = [];
-  const waiting = waitsOnOwner ?? phase === "blocked";
+  const waiting = (waitsOnOwner ?? phase === "blocked") || waitsOnPeer;
   if (phase !== "finished" && !waiting && now.getTime() - timeOrZero(lastActivityAt) >= IDLE_UNFINISHED_MS) {
     held.push({ reason: "idle-unfinished", since: lastActivityAt });
   }
@@ -116,6 +134,27 @@ export function stallReasonsOf(
     held.push({ reason: "review-over-budget", since: lastActivityAt });
   }
   return held;
+}
+
+/**
+ * Why a waited link no longer counts as a wait at `now` (design §7.17.5), or
+ * null while it does: it is `taken` but `answering` finds no live agent of
+ * the answering request, or nothing came from the answering side for
+ * `PEER_SILENT_MS` since the wait began or its last word. Pure.
+ */
+export function peerCeilingOf(link: PeerLink, now: Date, answering: (link: PeerLink) => boolean): string | null {
+  if (link.state === "taken" && !answering(link)) {
+    return `${link.linkId}: taken by request ${link.to.requestId ?? "?"} of project ${link.to.workspaceId}, which has no live agent`;
+  }
+  const heard = Math.max(timeOrZero(link.waitingSince), ...link.messages.filter((entry) => entry.side === "answerer").map((entry) => timeOrZero(entry.at)));
+  return now.getTime() - heard >= PEER_SILENT_MS ? `${link.linkId}: no word from project ${link.to.workspaceId} for 2 hours` : null;
+}
+
+/** Why a live link raises `peer-unanswered` on its own (design §7.17.5): `open` for `PEER_UNANSWERED_MS` with no word from the answering side; else null. Pure. */
+export function unansweredOf(link: PeerLink, now: Date): string | null {
+  if (link.state !== "open" || now.getTime() - timeOrZero(link.createdAt) < PEER_UNANSWERED_MS) return null;
+  if (link.messages.some((entry) => entry.side === "answerer")) return null;
+  return `${link.linkId}: project ${link.to.workspaceId} has not taken it for 10 minutes`;
 }
 
 /**
@@ -164,6 +203,8 @@ export interface StallWatcherDeps extends DataHomeDeps {
    * left. A failure is logged; the pass goes on.
    */
   beforeWorkerPass?: (handle: StallWatcherPaseo) => Promise<unknown>;
+  /** Runs with the handle before each pass (design §7.17.7: the hook bindings' recovery). A failure is logged; the pass goes on. */
+  beforePass?: (handle: StallWatcherPaseo) => Promise<unknown>;
 }
 
 /** What one pass did, for the tests and the log. */
@@ -266,6 +307,26 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     const examined = new Set<string>();
     /** Workspaces whose open alerts stay as they are: unreadable ones. */
     const untouched = new Set<string>();
+    // The link store, read once per pass (design §7.17.5), and the live agents of each request.
+    const peerLinks = createPeerLinkStore(home).list();
+    const liveAgents = new Set(
+      snapshot.bm
+        .filter(({ facts }) => !facts.archived && facts.status !== "closed" && (facts.replacedBy ?? null) === null)
+        .flatMap(({ workspaceId, facts }) => [facts.id, ...(facts.requestIdLabel === null || facts.role === "manager" ? [] : [`${workspaceId}::${facts.requestIdLabel}`])]),
+    );
+    const answering = (link: PeerLink): boolean =>
+      (link.to.workerId !== null && liveAgents.has(link.to.workerId)) || liveAgents.has(`${link.to.workspaceId}::${link.to.requestId}`);
+    /** `peer-unanswered` per asking request: `<workspaceId>::<requestId>` → why, per link. */
+    const unanswered = new Map<string, { workspaceId: string; requestId: string; why: Map<string, string> }>();
+    /** The requests whose newest report is `finished` or `stopped`: `<workspaceId>::<requestId>`; they raise no `peer-unanswered`. */
+    const ended = new Set<string>();
+    const noteUnanswered = (link: PeerLink, why: string): void => {
+      const key = `${link.from.workspaceId}::${link.from.requestId}`;
+      if (ended.has(key)) return;
+      const entry = unanswered.get(key) ?? { workspaceId: link.from.workspaceId, requestId: link.from.requestId, why: new Map<string, string>() };
+      if (!entry.why.has(link.linkId)) entry.why.set(link.linkId, why);
+      unanswered.set(key, entry);
+    };
 
     // A workspace the store did not see in 24 hours has no request in the window.
     for (const { workspaceId } of recentWorkspacesOf(location, since)) {
@@ -278,6 +339,8 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
         if (!live()) return result("off");
         const waitingRequests = unsettledRequestsOf(home, workspaceId, log);
         for (const trace of traces) {
+          const phase = trace.reports.at(-1)?.phase;
+          if (trace.requestId !== null && (phase === "finished" || phase === "stopped")) ended.add(`${workspaceId}::${trace.requestId}`);
           // The group of agents linked to no request has no Manager to name.
           if (trace.managerAgentId === null || timeOrZero(lastActivityOf(trace)) < since) continue;
           const requestKey = requestKeyOf(trace);
@@ -286,7 +349,15 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
           // Design §16.8: the request's review-budget grants, read as the review tools enforce them.
           const request = trace.requestId === null ? undefined : registered.find((entry) => entry.requestId === trace.requestId);
           const grant = request === undefined ? undefined : ruleReviewGrantOf(request);
-          const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace, grant), facts), at, waitsOnOwner);
+          // Design §7.17.5: a wait on another project, until each waited link passes its ceiling.
+          const waited = waitedLinksOf(trace, workspaceId, peerLinks);
+          let withinCeiling = 0;
+          for (const link of waited) {
+            const ceiling = peerCeilingOf(link, at, answering);
+            if (ceiling === null) withinCeiling += 1;
+            else noteUnanswered(link, ceiling);
+          }
+          const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace, grant), facts), at, waitsOnOwner, withinCeiling > 0);
           if (held.length === 0) {
             done.cleared.push(...alerts.clearWhere((alert) => alert.kind === "request-stalled" && alert.workspaceId === workspaceId && alert.subject === requestKey));
             continue;
@@ -316,8 +387,26 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
       }
     }
 
-    // A request that left the window, or whose trace was deleted, is no longer stalled.
+    // Design §7.17.5: the links nobody on the answering side took or answered.
     if (!live()) return done;
+    for (const link of peerLinks) {
+      const why = isLiveLink(link) ? unansweredOf(link, at) : null;
+      if (why !== null) noteUnanswered(link, why);
+    }
+    for (const entry of unanswered.values()) {
+      const raised = alerts.raise({ workspaceId: entry.workspaceId, kind: "peer-unanswered", subject: entry.requestId, detail: [...entry.why.values()].join("; ") });
+      if (raised.raised) done.raised.push(raised.alert.key);
+    }
+    done.cleared.push(
+      ...alerts.clearWhere(
+        (alert) =>
+          alert.kind === "peer-unanswered" &&
+          !(alert.workspaceId !== null && untouched.has(alert.workspaceId)) &&
+          !unanswered.has(`${alert.workspaceId}::${alert.subject}`),
+      ),
+    );
+
+    // A request that left the window, or whose trace was deleted, is no longer stalled.
     done.cleared.push(
       ...alerts.clearWhere(
         (alert) =>
@@ -339,6 +428,13 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     passing = true;
     const started = epoch;
     try {
+      if (deps.beforePass !== undefined) {
+        try {
+          await deps.beforePass(handle);
+        } catch (error) {
+          log(`[paseo-bm] the step before a stall pass failed: ${errorText(error)}`);
+        }
+      }
       return await run(handle, home, () => epoch === started);
     } catch (error) {
       log(`[paseo-bm] a stall pass failed: ${errorText(error)}`);

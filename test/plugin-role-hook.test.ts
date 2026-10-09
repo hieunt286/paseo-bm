@@ -12,7 +12,7 @@ import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { BOUNDARY_MODES, boundaryPostureOf, creatorModeOffBoundary } from "../plugin/server/role-mode";
 import { currentInstructionsHash, instructionsHashOf, roleTextOf } from "../plugin/server/instructions-label";
 import { forgetCreatedBoundaries, takeCreatedBoundary } from "../plugin/server/created-boundary";
-import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
+import { HOOK_BINDING_ENV, clearBindingCache, createBindingStore, hookTagOf, type BindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 
 // The entry resolves the install home from $HOME when Paseo's config names no
@@ -116,10 +116,10 @@ async function pastLookupBudget<T>(work: () => Promise<T>): Promise<T> {
 }
 
 describe("before(\"agent.create\") role hook", () => {
-  it("registers exactly one agent.create hook", async () => {
+  it("registers exactly one agent.create hook, after the agent.session_open hook that claims a hook binding (design §7.17.7)", async () => {
     const { server, hooks } = setup();
-    expect(server.before).toHaveBeenCalledTimes(1);
-    expect([...hooks.keys()]).toEqual(["agent.create"]);
+    expect(server.before).toHaveBeenCalledTimes(2);
+    expect([...hooks.keys()]).toEqual(["agent.session_open", "agent.create"]);
   });
 
   it("gives bm-worker the text of roles/worker.md and keeps the rest of the request", async () => {
@@ -205,10 +205,10 @@ describe("before(\"agent.create\") role hook", () => {
     expect(applyRoleInstructions({ config: { provider: "bm-worker", systemPrompt: 7 } } as never)?.config.systemPrompt).toBe(workerUnbound);
   });
 
-  it("removes the hook on cleanup", async () => {
+  it("removes both hooks on cleanup", async () => {
     const { cleanup, hooks, removers } = setup();
     cleanup();
-    expect(removers).toEqual(["agent.create"]);
+    expect(removers).toEqual(["agent.create", "agent.session_open"]);
     expect(hooks.size).toBe(0);
   });
 
@@ -1314,7 +1314,7 @@ describe("before(\"agent.create\") — a bound creation (design §16.5)", () => 
     // Bound: its delivering and creating tools are pre-approved beside the builders (design §16.6).
     const approved = (request: AgentCreateRequest | undefined) => request?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
     expect(approved(plain)).toEqual(["bm_report", "bm_reply"]);
-    expect(approved(bound)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
+    expect(approved(bound)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
   });
 
   it("a binding that cannot record its attachment: the role path, and Runtime facts with the hand path, as an unbound creation's", async () => {
@@ -1340,6 +1340,157 @@ describe("before(\"agent.create\") — a bound creation (design §16.5)", () => 
     const onPi = await create({ provider: "bm-worker-fallback-1/pi-default", cwd: "/repo", mcpServers: { "paseo-bm": { type: "http", url: roleUrl("worker") }, keep: { type: "http", url: "http://x" } } });
     expect(onPi?.config.mcpServers).toEqual({ keep: { type: "http", url: "http://x" } });
     expect(onPi?.config.toolPolicy).toBeUndefined();
+    expect(bindings.list()).toEqual([]);
+  });
+});
+
+describe("before(\"agent.create\") — a Manager the owner opens is bound by the hook (design §7.17.7)", () => {
+  const roleUrl = (role: string) => `http://127.0.0.1:4567/mcp/${role}`;
+  const hostFor = (bases: Record<string, string>) => ({
+    config: { get: async () => ({ config: { providers: Object.fromEntries(Object.entries(bases).map(([alias, base]) => [alias, { extends: base }])) } }) },
+    workspaces: { list: async () => ({ entries: [{ workspace: { id: "wks_1", directory: "/repo" } }] }) },
+  });
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "bm-hook-manager-"));
+    mkdirSync(join(root, ".paseo-bm"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    clearBindingCache();
+    rmSync(root, { recursive: true, force: true });
+  });
+  type Handler = (input: { request: unknown }, context: unknown) => unknown;
+  type SessionOpen = { agentId: string; workspaceId: string | null; provider: string; cwd: string; reason: string; purpose: string; env: Record<string, string> };
+  /** The two hooks `registerRoleHook` registers, by name: `create` runs agent.create, `open` agent.session_open. */
+  function hooksWith(bindings: BindingStore, paseo: unknown, before?: (name: string) => void) {
+    const hooks = new Map<string, Handler>();
+    registerRoleHook({ before: ((name: string, handler: Handler) => (before?.(name), hooks.set(name, handler), () => {})) as never }, { urlFor: roleUrl, bindings });
+    return {
+      create: async (config: Record<string, unknown>, env?: Record<string, string>) =>
+        (await hooks.get("agent.create")!({ request: { config, ...(env === undefined ? {} : { env }) } }, { paseo })) as AgentCreateRequest | undefined,
+      // Paseo opens the session with the env the create hook returned and the new agent's id, before agent.created.
+      open: (agentId: string, created: AgentCreateRequest | undefined, reason = "create") =>
+        hooks.get("agent.session_open")?.(
+          { request: { agentId, workspaceId: "wks_1", provider: "bm-manager", cwd: "/repo", reason, purpose: "interactive", env: { ...(created?.env ?? {}) } } },
+          {},
+        ) as SessionOpen | undefined,
+    };
+  }
+  const hookWith = (bindings: BindingStore, paseo: unknown) => hooksWith(bindings, paseo).create;
+  const urlOf = (request: AgentCreateRequest | undefined) => (request?.config.mcpServers as Record<string, { url?: string }> | undefined)?.["paseo-bm"]?.url;
+  const approved = (request: AgentCreateRequest | undefined) => request?.config.toolPolicy?.preapproved?.map((grant) => grant.tool) ?? [];
+
+  it.each(["claude", "codex", "opencode"])("an owner-created bm-manager on %s gets an attached hook binding, its token URL, its tag in env and the bound instructions", async (base) => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const created = await hookWith(bindings, hostFor({ "bm-manager": base }))({ provider: "bm-manager", cwd: "/repo" }, { KEEP: "1" });
+    const [binding, ...rest] = bindings.list();
+    expect(rest).toEqual([]);
+    expect(binding).toMatchObject({ role: "manager", state: "pending", workspaceId: "wks_1", parentId: null, requestId: null, batchId: null, origin: "hook", agentId: null });
+    expect(binding?.attachedAt).not.toBeNull();
+    expect(binding?.claimedBy).toBeUndefined();
+    expect(urlOf(created)).toMatch(new RegExp(`^${roleUrl("manager")}/[0-9a-f]{64}$`));
+    // The tag is the hash's first 16 hex characters, never the token.
+    expect(created?.env).toEqual({ KEEP: "1", [HOOK_BINDING_ENV]: hookTagOf(binding!.tokenSha256) });
+    expect(urlOf(created)).not.toContain(created!.env![HOOK_BINDING_ENV]!);
+    expect(String(created?.config.systemPrompt)).not.toContain(HAND_PATH_HEADING);
+    expect(String(created?.config.systemPrompt).startsWith(managerMd.trimEnd())).toBe(true);
+    expect(approved(created)).toContain("bm_create_worker");
+  });
+
+  it("the session Paseo opens for the creation claims its binding for the new agent, and the tag never reaches the agent", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const { create, open } = hooksWith(bindings, hostFor({ "bm-manager": "claude" }));
+    const created = await create({ provider: "bm-manager", cwd: "/repo" }, { KEEP: "1" });
+    // A resume or refresh never claims; the tag is stripped all the same.
+    expect(open("mgr-x", created, "resume")?.env).toEqual({ KEEP: "1" });
+    expect(bindings.list()[0]?.claimedBy).toBeUndefined();
+    expect(open("mgr-1", created)?.env).toEqual({ KEEP: "1" });
+    expect(bindings.list()[0]?.claimedBy).toBe("mgr-1");
+    // Another agent cannot take the claim over; an env without the tag is left as it is.
+    open("mgr-2", created);
+    expect(bindings.list()[0]?.claimedBy).toBe("mgr-1");
+    expect(open("mgr-3", { config: {}, env: { KEEP: "1" } } as unknown as AgentCreateRequest)).toBeUndefined();
+  });
+
+  it("two concurrent creations in one workspace each get their own hook binding, and each session claims only its own", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const { create, open } = hooksWith(bindings, hostFor({ "bm-manager": "claude" }));
+    const [first, second] = await Promise.all([create({ provider: "bm-manager", cwd: "/repo" }), create({ provider: "bm-manager", cwd: "/repo" })]);
+    expect(urlOf(first)).toMatch(/\/[0-9a-f]{64}$/);
+    expect(urlOf(second)).toMatch(/\/[0-9a-f]{64}$/);
+    expect(urlOf(first)).not.toBe(urlOf(second));
+    for (const request of [first, second]) {
+      expect(String(request?.config.systemPrompt)).not.toContain(HAND_PATH_HEADING);
+      expect(approved(request)).toContain("bm_create_worker");
+    }
+    expect(bindings.list()).toHaveLength(2);
+    // The second session opens first: it claims the second binding only.
+    open("mgr-2", second);
+    open("mgr-1", first);
+    const claimOf = (request: AgentCreateRequest | undefined) => bindings.list().find((binding) => hookTagOf(binding.tokenSha256) === request?.env?.[HOOK_BINDING_ENV])?.claimedBy;
+    expect(claimOf(first)).toBe("mgr-1");
+    expect(claimOf(second)).toBe("mgr-2");
+  });
+
+  it("the plugin's own createManager keeps its binding and the hook issues none", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const issued = binderOf(roleUrl, bindings, () => {}).issue({ role: "manager", base: "claude", workspaceId: "wks_1" })!;
+    const created = await hookWith(bindings, hostFor({ "bm-manager": "claude" }))({ provider: "bm-manager", cwd: "/repo", mcpServers: { "paseo-bm": issued.mcpServer } });
+    expect(urlOf(created)).toBe(issued.mcpServer.url);
+    expect(bindings.list()).toHaveLength(1);
+    expect(bindings.list()[0]).toMatchObject({ tokenSha256: issued.tokenSha256, attachedAt: expect.any(String) });
+    expect(bindings.list()[0]?.origin).toBeUndefined();
+    expect(created?.env).toBeUndefined();
+  });
+
+  it("the plugin's own createManager its binder did not bind (it carries the Manager's role text) gets no hook binding either", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const systemPrompt = await currentInstructions("manager", null, { workspaceId: "wks_1" });
+    const created = await hookWith(bindings, hostFor({ "bm-manager": "claude" }))({ provider: "bm-manager", cwd: "/repo", systemPrompt });
+    expect(urlOf(created)).toBe(roleUrl("manager"));
+    expect(String(created?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    expect(created?.env).toBeUndefined();
+    expect(bindings.list()).toEqual([]);
+  });
+
+  it("a host without the session-open hook binds no Manager the owner opens", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const { create } = hooksWith(bindings, hostFor({ "bm-manager": "claude" }), (name) => {
+      if (name === "agent.session_open") throw new Error("unknown hook");
+    });
+    const created = await create({ provider: "bm-manager", cwd: "/repo" });
+    expect(urlOf(created)).toBe(roleUrl("manager"));
+    expect(String(created?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    expect(bindings.list()).toEqual([]);
+  });
+
+  it("stays unbound with the hand path outside TOOL_PROVIDERS, without a known workspace, or when the store cannot be written", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const onPi = await hookWith(bindings, hostFor({ "bm-manager": "pi" }))({ provider: "bm-manager", cwd: "/repo" });
+    expect(urlOf(onPi)).toBeUndefined();
+    expect(String(onPi?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    const elsewhere = await hookWith(bindings, hostFor({ "bm-manager": "claude" }))({ provider: "bm-manager", cwd: "/elsewhere" });
+    expect(urlOf(elsewhere)).toBe(roleUrl("manager"));
+    expect(String(elsewhere?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    const unwritable = await hookWith({ ...bindings, issue: () => { throw new Error("read-only"); } }, hostFor({ "bm-manager": "claude" }))({ provider: "bm-manager", cwd: "/repo" });
+    expect(urlOf(unwritable)).toBe(roleUrl("manager"));
+    expect(String(unwritable?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    expect(bindings.list()).toEqual([]);
+  });
+
+  it("a hook binding that cannot record its attachment is deleted, and the Manager gets the hand path", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const created = await hookWith({ ...bindings, attach: () => false }, hostFor({ "bm-manager": "claude" }))({ provider: "bm-manager", cwd: "/repo" });
+    expect(urlOf(created)).toBe(roleUrl("manager"));
+    expect(String(created?.config.systemPrompt)).toContain(`\n${HAND_PATH_HEADING}\n`);
+    expect(bindings.list()).toEqual([]);
+  });
+
+  it("a Worker created by hand stays unbound", async () => {
+    const bindings = createBindingStore(join(root, ".paseo-bm"));
+    const created = await hookWith(bindings, hostFor({ "bm-worker": "claude" }))({ provider: "bm-worker", cwd: "/repo" });
+    expect(urlOf(created)).toBe(roleUrl("worker"));
     expect(bindings.list()).toEqual([]);
   });
 });

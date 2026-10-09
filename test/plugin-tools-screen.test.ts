@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SetupStatus, SkillUsage } from "../plugin/shared/contracts";
 import { toolFacesFor } from "../plugin/shared/bm-tools";
+import { BM_TOOL_NAMES } from "../plugin/shared/bm-tool-names";
 import { GROUP_LOADING } from "../plugin/client/settings-model";
 import {
   SKILLS_USAGE_QUERY_KEY,
@@ -174,15 +175,22 @@ describe("the agent tools by role", () => {
       ["Orchestrator", "none", "muted"],
     ]);
     expect(rows.map((row) => row.bm)).toEqual([
-      toolFacesFor("manager").map((face) => face.name).join(" · "),
-      toolFacesFor("worker").map((face) => face.name).join(" · "),
-      toolFacesFor("reviewer").map((face) => face.name).join(" · "),
+      toolFacesFor("manager", true).map((face) => face.name).join(" · "),
+      toolFacesFor("worker", true).map((face) => face.name).join(" · "),
+      toolFacesFor("reviewer", true).map((face) => face.name).join(" · "),
       orchestratorToolsText(),
     ]);
+    expect(rows[0]!.bm).toContain("bm_ask_project");
     expect(rows[0]!.bm).toContain("bm_answers");
     expect(rows[1]!.bm).toContain("bm_report");
     expect(rows[2]!.bm).toBe("bm_review");
     expect(orchestratorToolsText()).toBe(`${toolFacesFor("orchestrator").length} tools · read, command, decide, compact, handoff`);
+  });
+
+  it("keeps the client's tool names equal to the tools a bound agent gets", () => {
+    for (const role of ["manager", "worker", "reviewer", "orchestrator"] as const) {
+      expect(BM_TOOL_NAMES[role]).toEqual(toolFacesFor(role, true).map((face) => face.name));
+    }
   });
 
   it("warns when Paseo's tools are off for every agent, unknown, or the last Manager or Worker had none", () => {

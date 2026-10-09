@@ -43,6 +43,7 @@ import { createAlertStore } from "./alert-store";
 import { NO_BINDER, createBound, type AgentBinder } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { alertKeyOf } from "../shared/alerts";
+import { hasUnboundManagerAlert } from "./outdated-agents";
 
 /** Label key and value that identify a paseo-bm Manager (Technical Design §7.1). */
 export const MANAGER_ROLE_LABEL = "bm.role";
@@ -462,7 +463,10 @@ export async function ensureManager(
   const ensured = await ensureRolesFor(paseo, deps.log);
 
   const [chosen, ...others] = await findLiveManagers(paseo, workspaceId, { home: deps.home, log: deps.log });
-  if (chosen && !(input.replaceOutdated === true && hasOutdatedInstructions(chosen.labels, "manager"))) {
+  // Design §7.17.7: a Manager whose hook binding expired unsettled is replaced like an outdated one.
+  const replaceable = (agent: ManagerAgentSnapshot): boolean =>
+    hasOutdatedInstructions(agent.labels, "manager") || hasUnboundManagerAlert(deps.home !== undefined ? deps.home : dataHomeOf(), agent.workspaceId ?? workspaceId, agent.id);
+  if (chosen && !(input.replaceOutdated === true && replaceable(chosen))) {
     return {
       agentId: chosen.id,
       created: false,
@@ -514,9 +518,10 @@ async function markReplaced(old: ManagerAgentSnapshot, newId: string, workspaceI
 /**
  * Creates the workspace's Manager from the `bm-manager` profile: the path of
  * `manager.ensure` when there is no live Manager, or when an outdated one is
- * replaced.
+ * replaced; and of `bm_ask_project` for a project with no live Manager
+ * (design §7.17.2), which never creates roles.
  */
-async function createFromProfile(deps: EnsureManagerDeps, workspaceId: string, ensured: EnsureRolesResult): Promise<CreateManagerResult> {
+export async function createFromProfile(deps: EnsureManagerDeps, workspaceId: string, ensured: EnsureRolesResult): Promise<CreateManagerResult> {
   const { paseo } = deps;
 
   // A Manager gets Paseo's tools when it is created, never later: one created

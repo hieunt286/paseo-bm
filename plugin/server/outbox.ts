@@ -29,6 +29,21 @@
  * canceled Reviewer turn, which must not wake its stopped Worker). It raises
  * no alert and is no drop.
  *
+ * **Peer deliveries** (design §7.17.4): a `peer`, `peer-reply` or
+ * `peer-message` record's target is resolved again at every attempt — the
+ * first send and every resend — through the link's asker or answering agent
+ * (`peerTargetOf`, which `peer-tools.ts` registers with `usePeerTargets`:
+ * the outbox imports nothing of the links), so a replaced asker's successor
+ * gets the reply. A changed target is written on the record before the send; no live
+ * agent on that side drops the record. A peer record the queue drops (its
+ * target was archived or replaced while the record waited) is resolved again,
+ * at most `PEER_RETARGETS` times per delivery: a different live agent gets it
+ * (the target written on the record first), else it is `dropped`. A delivered
+ * peer record is handed to the hook `peer-tools.ts` registers beside the
+ * resolver (a delivered `finished` `peer-reply` answers its link). Its
+ * `requestId` may be a link id (the answering Manager's message on a link no
+ * request took yet).
+ *
  * **After a reload** (`createOutboxResend`): at the first hook or RPC with a
  * Paseo handle, every `pending` record of every workspace is enqueued again.
  * One sent just before the reload, whose outcome was not written yet, reaches
@@ -47,7 +62,7 @@ import { randomBytes } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { DELIVERY_KINDS, OUTBOX_RECORD_ID_PATTERN, deliveryLineOf, type DeliveryKind } from "../shared/notices";
+import { DELIVERY_KINDS, OUTBOX_RECORD_ID_PATTERN, PEER_DELIVERY_KINDS, deliveryLineOf, type DeliveryKind } from "../shared/notices";
 import { createAlertStore, type AlertInput } from "./alert-store";
 import { redactText } from "./collector";
 import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
@@ -147,6 +162,8 @@ export interface Outbox {
    * none. `reason` is kept for `dropped`. Throws when the file cannot be written.
    */
   settle(workspaceId: string, id: string, state: "delivered" | "dropped", reason?: string | null): { record: OutboxRecord; changed: boolean } | null;
+  /** Writes a new target on a `pending` record (§7.17.4); returns it as it is now, or null when there is none. Throws when the file cannot be written. */
+  retarget(workspaceId: string, id: string, to: string): OutboxRecord | null;
   /** The workspaces with an outbox file. Never throws. */
   workspaces(): string[];
 }
@@ -227,6 +244,18 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
       });
       return result;
     },
+    retarget(workspaceId, id, to) {
+      requireWorkspace(workspaceId);
+      let result: OutboxRecord | null = null;
+      fileOf(workspaceId).update((current) => {
+        const index = current.records.findIndex((record) => record.id === id);
+        if (index === -1) return null;
+        const found = current.records[index]!;
+        result = isOpenRecord(found) && found.to !== to ? { ...found, to } : found;
+        return result === found ? null : { records: current.records.map((record, at) => (at === index ? result! : record)) };
+      });
+      return result;
+    },
     workspaces() {
       try {
         return readdirSync(join(home, OUTBOX_DIR_NAME))
@@ -252,6 +281,24 @@ export function deliveryTextOf(record: Pick<OutboxRecord, "kind" | "id" | "text"
 /** The notice-queue kind of a record: its own, so no record ever replaces another. */
 export function deliveryKindOf(record: Pick<OutboxRecord, "kind" | "id">): string {
   return `${record.kind}:${record.id}`;
+}
+
+/** Who a peer record goes to now (§7.17.4): an agent id, null for none left, undefined to keep the stored target. */
+export type PeerTargetResolver = (workspaceId: string, record: OutboxRecord, home: string, paseo: unknown) => Promise<string | null | undefined>;
+
+/** What a peer record that just reached its target does to its link (§7.17.1); a throw is one log line. */
+export type PeerDeliveredHook = (workspaceId: string, record: OutboxRecord, home: string, now: () => Date) => void;
+
+/** The most times one delivery of a peer record the queue dropped resolves its target again (§7.17.4). */
+export const PEER_RETARGETS = 2;
+
+/** The resolver and the delivered hook `deliverRecord` uses for the peer kinds; `peer-tools.ts` registers them when it loads. */
+const peerTargets: { resolve: PeerTargetResolver | null; delivered: PeerDeliveredHook | null } = { resolve: null, delivered: null };
+
+/** Registers who peer records go to, and what a delivered one does (`peer-tools.ts`, at load). */
+export function usePeerTargets(resolve: PeerTargetResolver, delivered: PeerDeliveredHook | null = null): void {
+  peerTargets.resolve = resolve;
+  peerTargets.delivered = delivered;
 }
 
 export interface OutboxDeliveryDeps extends OutboxDeps {
@@ -305,20 +352,29 @@ export function clearDroppedAlert(home: string, workspaceId: string, requestId: 
 
 /**
  * Hands one record to the notice queue; the queue's callbacks record its
- * outcome (§16.7 steps 2–3). Never rejects: a store failure is one log line,
- * and the record stays as it was, to be sent again after a reload.
+ * outcome (§16.7 steps 2–3). A peer record the queue drops is resolved again
+ * (§7.17.4, `PEER_RETARGETS`); the outcome returned is the last attempt's when
+ * the drop came during the call. Never rejects: a store failure is one log
+ * line, and the record stays as it was, to be sent again after a reload.
  */
-export async function deliverRecord(workspaceId: string, record: OutboxRecord, deps: OutboxDeliveryDeps): Promise<NoticeOutcome> {
+export async function deliverRecord(workspaceId: string, given: OutboxRecord, deps: OutboxDeliveryDeps): Promise<NoticeOutcome> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const queue = deps.queue ?? noticeQueue;
-  let told = false;
+  let record = given;
+  const isPeer = (PEER_DELIVERY_KINDS as readonly string[]).includes(record.kind);
 
   const settle = (state: "delivered" | "dropped", reason: string | null = null): void => {
-    told = true;
     try {
       const result = createOutbox(deps.home, deps).settle(workspaceId, record.id, state, reason);
       if (result === null || !result.changed) return;
       if (state === "delivered") {
+        if (isPeer && peerTargets.delivered !== null) {
+          try {
+            peerTargets.delivered(workspaceId, result.record, deps.home, deps.now ?? (() => new Date()));
+          } catch (error) {
+            log(`[paseo-bm] after delivering the ${record.kind} ${record.id}: ${errorText(error)}`);
+          }
+        }
         try {
           clearDroppedAlert(deps.home, workspaceId, record.requestId, result.record, deps);
         } catch (error) {
@@ -337,18 +393,80 @@ export async function deliverRecord(workspaceId: string, record: OutboxRecord, d
     }
   };
 
-  try {
-    const outcome = await queue.enqueue(record.to, deliveryKindOf(record), deliveryTextOf(record), deps.paseo, {
-      onSent: () => settle("delivered"),
-      onDropped: (_targetId, _kind, reason) => settle("dropped", reason),
-    });
-    // An input the queue refuses outright calls no callback; `queued` and `replaced` settle later.
-    if (outcome === "dropped" && !told) settle("dropped", "the notice queue refused it");
-    return outcome;
-  } catch (error) {
-    log(`[paseo-bm] could not deliver the ${record.kind} ${record.id}: ${errorText(error)}`);
-    return "dropped";
+  const resolve = peerTargets.resolve;
+  const paseo = deps.paseo;
+  /** The link's side now (§7.17.4); a failed lookup keeps the stored target. Null when peer records are not resolved here. */
+  const peerTarget =
+    resolve !== null && isPeer && paseo !== undefined ? (): Promise<string | null | undefined> => resolve(workspaceId, record, deps.home, paseo).catch(() => undefined) : null;
+
+  /** Writes a new target on the record before its send; false when the stored record is settled already (nothing to send). */
+  const retarget = (to: string): boolean => {
+    try {
+      const now = createOutbox(deps.home, deps).retarget(workspaceId, record.id, to);
+      if (now !== null && !isOpenRecord(now)) return false;
+      record = now ?? { ...record, to };
+    } catch (error) {
+      log(`[paseo-bm] could not write the new target of the ${record.kind} ${record.id}: ${errorText(error)}`);
+      record = { ...record, to };
+    }
+    return true;
+  };
+
+  /** One enqueue of the record as it is now. Never rejects. */
+  const attempt = async (retargets: number): Promise<NoticeOutcome> => {
+    const told = { any: false, again: null as Promise<NoticeOutcome> | null };
+    try {
+      const outcome = await queue.enqueue(record.to, deliveryKindOf(record), deliveryTextOf(record), deps.paseo, {
+        onSent: () => {
+          told.any = true;
+          settle("delivered");
+        },
+        onDropped: (_targetId, _kind, reason) => {
+          told.any = true;
+          told.again = dropped(reason, retargets);
+        },
+      });
+      // A drop during this call that sent the record on: its outcome is this delivery's.
+      if (told.again !== null) return await told.again;
+      // An input the queue refuses outright calls no callback; `queued` and `replaced` settle later.
+      if (outcome === "dropped" && !told.any) settle("dropped", "the notice queue refused it");
+      return outcome;
+    } catch (error) {
+      log(`[paseo-bm] could not deliver the ${record.kind} ${record.id}: ${errorText(error)}`);
+      return "dropped";
+    }
+  };
+
+  /**
+   * The queue dropped the record. A peer record's side is resolved again (at
+   * most `PEER_RETARGETS` times): a different live agent gets it; else, and
+   * for every other kind, it is `dropped`. Null when settled here.
+   */
+  const dropped = (reason: string, retargets: number): Promise<NoticeOutcome> | null => {
+    if (peerTarget === null || retargets >= PEER_RETARGETS) {
+      settle("dropped", reason);
+      return null;
+    }
+    return (async (): Promise<NoticeOutcome> => {
+      const to = await peerTarget();
+      if (typeof to !== "string" || to === record.to) {
+        settle("dropped", reason);
+        return "dropped";
+      }
+      return retarget(to) ? attempt(retargets + 1) : "dropped";
+    })();
+  };
+
+  if (peerTarget !== null) {
+    // §7.17.4: the link's side is resolved again at every attempt.
+    const to = await peerTarget();
+    if (to === null) {
+      settle("dropped", "no live agent is left on the link's other side");
+      return "dropped";
+    }
+    if (to !== undefined && to !== record.to) retarget(to);
   }
+  return attempt(0);
 }
 
 /**

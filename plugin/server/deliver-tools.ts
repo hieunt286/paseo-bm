@@ -9,7 +9,19 @@
  * | `bm_questions` | bound Worker | opens each question through the materialiser's shared open path (`openQuestions`), numbered after the request's highest `Qn` |
  * | `bm_review` | bound Reviewer | builds and checks the `BM-REVIEW`, stores a `review` record for its batch, delivers it to its Worker |
  * | `bm_answers` | bound Manager | checks each `Qn` is an open question of a request of its own and proposes the answers for its current turn (`proposed-answers.ts`); the materialiser settles them at the turn's end only with the owner's own message in it |
- * | `bm_tell_worker` | bound Manager | stores a `message` record and delivers `Continue <requestId>.`, the owner's words and their source to the request's sole live Worker |
+ * | `bm_tell_worker` | bound Manager | stores a `message` record and delivers `Continue <requestId>.`, the owner's words and their source to the request's sole live Worker; with `peerLink` the request takes that open link (a bound Worker only) and the message carries its `peer:` block and rules |
+ *
+ * **Peer links** (design §7.17.3): `finished` of a request that carries a
+ * `taken` or `answered` link needs `forPeer`; `waitingOnPeers` (blocked only)
+ * names live links the request asked and sets their `waitingSince`, which
+ * every report clears. In the report's `before` step a `pending` `peer-reply`
+ * is written for each carried link on `finished`, `blocked` or `stopped`,
+ * delivered after the report, not awaited; a `finished` one marks its link
+ * `answered` once it is delivered (`peerDelivered`, `peer-tools.ts`), so the
+ * link stays `taken` until then. `finished` also closes, by the asker, each
+ * link the request asked that is still `open` (no request took it).
+ * A `stopped` report sent in the first turn after a Paseo cut carries
+ * `CUT_NOTE_LINE` (§7.17.8 g).
  *
  * An unbound caller never reaches `bm_report`, `bm_review` or `bm_answers`
  * here: the endpoint answers it with the pure builders (`agent-tools.ts`).
@@ -26,7 +38,12 @@
  *
  * Nothing here throws into the endpoint: a failure is one refusal line.
  */
-import { PENDING_TTL_MS, type ToolCaller } from "./agent-bindings";
+import { PENDING_TTL_MS, createBindingStore, liveBindingOf, type ToolCaller } from "./agent-bindings";
+import { openLinkOf, unboundPeerReason } from "./create-worker";
+import { CUT_NOTE_LINE, followsPaseoCut } from "./interruption-watch";
+import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
+import { createPeerLinkStore, type PeerLink } from "./peer-links";
+import { peerBriefOf, peerReplyText, titleIn } from "./peer-tools";
 import { answersKindOf, soleWorkerOfRequest } from "./decision-delivery";
 import { expireQuestionsOf, openQuestions, type OpenContext, type OpenableQuestion } from "./decision-materialiser";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
@@ -34,8 +51,8 @@ import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import type { NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
-import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, isOpenRecord, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
-import type { DashboardPaseo } from "./paseo-directory";
+import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
+import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
 import { createRequestRegistry, isEmptyCreateCall, newestCallOf, type RegisteredRequest, type ReviewCall } from "./request-registry";
 import { reasonOf } from "./role-choices";
@@ -47,6 +64,7 @@ import {
   BOUND_REVIEW_TOOL,
   QUESTIONS_FACE,
   TELL_WORKER_FACE,
+  boundReportTool,
   questionsRules,
   schemaIssues,
   type AgentTool,
@@ -181,6 +199,35 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     return result.ok ? { text: result.text } : fixThese(tool.name, result.issues);
   };
 
+  /** The newest page of an agent's timeline, its items only; none when it cannot be read. */
+  const recentItemsOf = async (paseo: unknown, agentId: string): Promise<unknown[]> => {
+    const items: unknown[] = [];
+    try {
+      await readTimelinePages(paseo as LiveTimelinePaseo, agentId, { pages: 1, limit: 50 }, (entries) => items.push(...entries.map((entry) => entry.item)));
+    } catch {
+      // None: no note.
+    }
+    return items;
+  };
+
+  /** One `pending` `peer-reply` in the answering side's outbox, noted on its link (§7.17.4); a `finished` one answers the link once delivered. */
+  const storeReply = (
+    link: PeerLink,
+    reply: { workspaceId: string; requestId: string; agentId: string; phase: "finished" | "blocked" | "stopped"; body: string; title: string },
+    outbox: ReturnType<typeof createOutbox>,
+    links: ReturnType<typeof createPeerLinkStore>,
+  ): OutboxRecord[] => {
+    try {
+      const text = peerReplyText({ linkId: link.linkId, ...reply });
+      const record = outbox.add(reply.workspaceId, { kind: "peer-reply", requestId: reply.requestId, from: reply.agentId, to: link.from.agentId, text });
+      links.appendMessage(link.linkId, { recordId: record.id, workspaceId: reply.workspaceId, side: "answerer", agentId: reply.agentId, kind: "peer-reply", phase: reply.phase, text: reply.body });
+      return [record];
+    } catch (error) {
+      log(`[paseo-bm] could not store the reply of request ${reply.requestId} on link ${link.linkId}: ${reasonOf(error)}`);
+      return [];
+    }
+  };
+
   // -------------------------------------------------------------------------
   // bm_report (bound Worker).
   // -------------------------------------------------------------------------
@@ -197,7 +244,13 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     if (worker.parentId === null) return refused("paseo-bm does not know the Manager that created you, so it cannot deliver your report; tell the owner in one line and stop. Nothing was stored or sent.");
-    const { phase, tier, waitingOn } = withoutNulls(input) as { phase: string; tier: { level: "Small" | "Medium" | "Large" }; waitingOn?: string[] };
+    const { phase, tier, waitingOn, waitingOnPeers = [], forPeer } = withoutNulls(input) as {
+      phase: string;
+      tier: { level: "Small" | "Medium" | "Large" };
+      waitingOn?: string[];
+      waitingOnPeers?: string[];
+      forPeer?: string;
+    };
     const requestId = worker.requestId;
     if (phase === "finished") {
       // A review the request has running ends before `finished` (F3); `stopped` and `blocked` are never held for it.
@@ -220,13 +273,56 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
         notOpen.map((id) => `input.waitingOn: ${id} is not an open question of ${requestId}; ask it with bm_questions, or leave it out`),
       );
     }
+    // The links this request answers (§7.17.3), and the live ones it asked.
+    const links = createPeerLinkStore(home, { now });
+    const carried = links.linksOfRequest(worker.workspaceId, requestId, "answerer").filter((link) => link.state === "taken" || link.state === "answered");
+    const asked = new Set(links.liveLinksFrom(worker.workspaceId, requestId).map((link) => link.linkId));
+    const peerIssues = [
+      ...(phase === "finished" && carried.length > 0 && forPeer === undefined
+        ? [`input.forPeer: request ${requestId} answers link ${carried.map((link) => link.linkId).join(", ")}: write what that project needs to know`]
+        : []),
+      ...waitingOnPeers.filter((id) => !asked.has(id)).map((id) => `input.waitingOnPeers: ${id} is not a live link your request asked; leave it out`),
+    ];
+    if (peerIssues.length > 0) return fixThese("bm_report", peerIssues);
+    const listed = carried.length > 0 || waitingOnPeers.length > 0 ? await listedWorkspaces(paseo as DashboardPaseo) : null;
+    let text = built.text;
+    if (waitingOnPeers.length > 0) {
+      const named = build(boundReportTool((id) => titleIn(listed, links.get(id)?.to.workspaceId ?? id)), input);
+      if ("ok" in named) return named;
+      text = named.text;
+    }
+    // §7.17.8 (g): the Manager reads a stop in the first turn after a Paseo cut as no stop of the owner's.
+    if (phase === "stopped" && (await followsPaseoCut(worker.agentId, () => recentItemsOf(paseo, worker.agentId)))) text = `${text}\n\n${CUT_NOTE_LINE}`;
+    const outbox = createOutbox(home, { now, ...deps.outbox });
+    const replies: OutboxRecord[] = [];
     const at = now().toISOString();
     const stored = await storeThenDeliver(
       home,
       worker.workspaceId,
-      { kind: "report", requestId, from: worker.agentId, to: worker.parentId, text: built.text },
+      { kind: "report", requestId, from: worker.agentId, to: worker.parentId, text },
       paseo,
       () => {
+        try {
+          links.clearWaiting(worker.workspaceId, requestId);
+          if (phase === "blocked" && waitingOnPeers.length > 0) links.setWaiting(worker.workspaceId, requestId, waitingOnPeers, at);
+        } catch (error) {
+          log(`[paseo-bm] could not note the wait of request ${requestId} on its links: ${reasonOf(error)}`);
+        }
+        if (phase === "finished") {
+          // A finished request asks no more: an ask nobody took yet is withdrawn; a taken one still gets its reply.
+          for (const link of links.liveLinksFrom(worker.workspaceId, requestId).filter((entry) => entry.state === "open")) {
+            try {
+              links.closeLink(link.linkId, "asker");
+            } catch (error) {
+              log(`[paseo-bm] could not close link ${link.linkId} of finished request ${requestId}: ${reasonOf(error)}`);
+            }
+          }
+        }
+        if (phase === "finished" || phase === "blocked" || phase === "stopped") {
+          const blockers = text.split("\n").find((entry) => entry.startsWith("blockers: ")) ?? "";
+          const body = phase === "finished" ? forPeer! : [blockers, forPeer ?? ""].filter((entry) => entry !== "").join("\n");
+          for (const link of carried) replies.push(...storeReply(link, { workspaceId: worker.workspaceId, requestId, agentId: worker.agentId, phase, body, title: titleIn(listed, worker.workspaceId) }, outbox, links));
+        }
         // A finished request no longer waits on its questions (§A.3); a stopped one expires nothing.
         if (phase === "finished") expireQuestionsOf({ store, workspaceId: worker.workspaceId, log }, requestId, at);
         try {
@@ -246,6 +342,13 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       },
     );
     if ("ok" in stored) return stored;
+    if (replies.length > 0) {
+      // After the report, in order; not awaited: deliverRecord never rejects.
+      const delivery = outboxDepsOf(home, { ...deps, now, log }, paseo);
+      void (async () => {
+        for (const reply of replies) await deliverRecord(worker.workspaceId, reply, delivery);
+      })();
+    }
     if (phase === "stopped") {
       // Not awaited: the report is answered at once; a failure costs one log line.
       const stop = deps.stopReviewers ?? ((handle, workerId, workspaceId) => stopRunningReviewers(handle as StopPaseo, workerId, workspaceId));
@@ -436,7 +539,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const input = withoutNulls(raw);
     const shape = schemaIssues(TELL_WORKER_FACE.inputSchema, input);
     if (shape.length > 0) return fixThese(TELL_WORKER_TOOL, shape);
-    const { requestId, text, source } = input as { requestId: string; text: string; source?: string };
+    const { requestId, text, source, peerLink } = input as { requestId: string; text: string; source?: string; peerLink?: string };
     const home = deps.home();
     const nothing = "Nothing was sent.";
     const request = managersRequest(home, manager.workspaceId, requestId, manager.agentId, nothing);
@@ -450,8 +553,26 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       return refused(`paseo-bm could not read the Workers of ${requestId} (${reasonOf(error)}); try again in a moment. ${nothing}`);
     }
     if (workerId === null) return refused(`request ${requestId} has no single live Worker to tell; tell the owner in one line. ${nothing}`);
-    const message = [`Continue ${requestId}.`, text.replace(/\r\n/g, "\n").trim(), ...(source === undefined ? [] : [`source: ${source.replace(/\s*\r?\n\s*/g, " ").trim()}`])].join("\n");
-    const stored = await storeThenDeliver(home, manager.workspaceId, { kind: "message", requestId, from: manager.agentId, to: workerId, text: message }, paseo);
+    // §7.17.3: the request takes an open link of this workspace when its Worker is bound.
+    let peer: string[] = [];
+    if (peerLink !== undefined) {
+      const link = openLinkOf(home, peerLink, manager.workspaceId);
+      if (typeof link === "string") return refused(`${link} ${nothing}`);
+      if (liveBindingOf(createBindingStore(home, { log }).list(), workerId, "worker") === null) return refused(`${unboundPeerReason(peerLink)} ${nothing}`);
+      peer = peerBriefOf(link, titleIn(await listedWorkspaces(paseo as DashboardPaseo), link.from.workspaceId));
+    }
+    const message = [
+      `Continue ${requestId}.`,
+      text.replace(/\r\n/g, "\n").trim(),
+      ...(source === undefined ? [] : [`source: ${source.replace(/\s*\r?\n\s*/g, " ").trim()}`]),
+      ...peer,
+    ].join("\n");
+    const to = workerId;
+    const take = (): void => {
+      const taken = createPeerLinkStore(home, { now }).takeLink(peerLink!, { workspaceId: manager.workspaceId, requestId, workerId: to, managerId: manager.agentId });
+      if (!taken.ok) log(`[paseo-bm] request ${requestId} could not take link ${peerLink}: ${taken.reasons.join("; ")}`);
+    };
+    const stored = await storeThenDeliver(home, manager.workspaceId, { kind: "message", requestId, from: manager.agentId, to: workerId, text: message }, paseo, peerLink === undefined ? undefined : take);
     if ("ok" in stored) return stored;
     return answered({ workerId, delivery: stored.delivery });
   };

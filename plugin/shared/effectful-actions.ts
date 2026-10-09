@@ -11,7 +11,7 @@
  */
 import { GATE_CATEGORIES, GATE_CATEGORY_EFFECTS, gateMatchesOf, type GateCategory } from "./decision-gate";
 import { classOfEffects, realEffects, type DecisionClass, type Effect } from "./decisions";
-import { parseShellLine, type ShellCommand, type ShellWord } from "./shell";
+import { hereDocumentsOf, parseShellLine, withoutHereDocuments, type ShellCommand, type ShellWord } from "./shell";
 
 /** The actions, in the order A-6 reports them; each is also the name the `danger` evidence gives, but `rm -rf`, which names its target. */
 export const EFFECTFUL_ACTIONS = [
@@ -308,6 +308,134 @@ function deleteWithoutWhere(command: string): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// The SQL a command runs, as the danger signal and A-6 read it (design
+// §7.17.8 f): not the SQL it only writes. Default deny: a here-document body
+// is text only when its head writes it to files (`cat > down.sql <<EOF`,
+// `tee a b <<EOF`) or is an interpreter's stdin script naming no database
+// driver (`python3 - <<EOF` writing migrations); every other body is SQL that
+// runs. The action boundary reads none of this.
+// ---------------------------------------------------------------------------
+
+/** The SQL actions; read from `SqlTexts`, never from the raw command. */
+const SQL_ACTIONS: ReadonlySet<EffectfulAction> = new Set(["DROP TABLE/DATABASE", "TRUNCATE"]);
+/** Outside a database client, a bare `truncate` is SQL only as `TRUNCATE TABLE` or an upper-case `TRUNCATE <name>`: Tailwind's `truncate` class is not. */
+const TRUNCATE_TABLE = /\btruncate\s+table\s+[\w"`[]/i;
+const TRUNCATE_UPPER = /\bTRUNCATE\s+[\w"`[]/;
+/**
+ * A database driver or call in a script, case-insensitive and never inside
+ * another word (`import psycopg`, `require("mysql2")`, `@prisma/client`,
+ * `cur.execute(`, `create_engine(`, a `postgres://` URL); `pgUrl` is not one.
+ */
+const DATABASE_DRIVER =
+  /(?<!\w)(?:psycopg\d?|pymysql|mysqlclient|mysqldb|mysql\d?|mysql-connector|asyncpg|aiomysql|aiosqlite|sqlite\d?|better-sqlite3|duckdb|cx_oracle|oracledb|pyodbc|pymssql|mssql|tedious|mariadb|pg|pg-promise|postgres|knex|prisma|sequelize|typeorm|sqlalchemy|drizzle|jdbc)(?!\w)|\.(?:execute|executescript|query)\(|\b(?:cursor|create_engine)\(|\b(?:postgres(?:ql)?|mysql|mariadb|sqlite|mssql|sqlserver|oracle|redshift|cockroachdb|clickhouse)(?:\+\w+)?:\/\//i;
+/** Database clients beyond `DATABASE_CLIS`, for the SQL a command runs only; `prisma db execute` and `supabase db` are read as phrases. */
+const SQL_CLIENT_WORDS: ReadonlySet<string> = new Set(["dbshell", "bq", "snowsql", "cqlsh", "redis-cli"]);
+/** Interpreters whose stdin script may be text: python and node with no script or `-`; ruby and perl with `-`. */
+const STDIN_INTERPRETER = /^(?:python[\d.]*|node|ruby|perl)$/;
+/** Words that make a head's body shell commands: shells, remote and container wrappers, and command wrappers. */
+const SHELL_WRAPPERS: ReadonlySet<string> = new Set(["ssh", "docker", "kubectl", "podman", "sh", "bash", "zsh", "dash", "sudo", "env", "nohup", "timeout", "xargs"]);
+/** Interpreters whose stdin is a script, not shell commands, even behind a wrapper (`ssh db python3 -`). */
+const SCRIPT_INTERPRETER = /^(?:python[\d.]*|node|nodejs|ruby|perl|php|deno|bun)$/;
+/** A shell body is read as a command line this deep; deeper, the body counts as SQL that runs. */
+const MAX_HERE_DOCUMENT_DEPTH = 4;
+const SQL_WORD = /\b(?:drop|truncate|delete)\b/i;
+
+/** The texts a command's SQL is read from: `outside` with the strict `truncate`, `database` (a client's command, a body it is fed) case-insensitive. */
+interface SqlTexts {
+  outside: string[];
+  database: string[];
+}
+
+const baseNameOf = (word: ShellWord): string => word.value.split("/").pop() ?? word.value;
+
+/** True when the command is a database client's: one of its words names one (`psql`, `docker exec db psql`, `bq query`, `manage.py dbshell`, `prisma db execute`). */
+function isDatabaseClient(command: ShellCommand): boolean {
+  const names = command.words.map((word) => (word.dynamic ? "" : baseNameOf(word)));
+  return names.some(
+    (name, index) =>
+      DATABASE_CLIS.has(name) ||
+      SQL_CLIENT_WORDS.has(name) ||
+      (name === "prisma" && names[index + 1] === "db" && names[index + 2] === "execute") ||
+      (name === "supabase" && names[index + 1] === "db"),
+  );
+}
+
+/** True when the command runs its script from stdin with one of `STDIN_INTERPRETER` (no script file, no `-c` / `-e` / `-m`). */
+function isStdinScript(command: ShellCommand): boolean {
+  const program = programOf(command.words);
+  if (program === null || program.dynamic || !STDIN_INTERPRETER.test(program.name)) return false;
+  const args = command.words.slice(program.index + 1);
+  if (args.some((word) => ["-c", "-e", "-E", "-m", "--eval", "-p", "--print"].includes(word.value))) return false;
+  if (args.some((word) => word.value === "-")) return true;
+  return (program.name.startsWith("python") || program.name === "node") && positional(args).length === 0;
+}
+
+/** True when the command only writes its stdin to files: `cat > f` / `cat >> f` (no input file), `tee [-a] f…`. */
+function isFileSink(command: ShellCommand): boolean {
+  const program = programOf(command.words);
+  if (program === null || program.dynamic) return false;
+  const args = positional(command.words.slice(program.index + 1));
+  const toFiles = (targets: readonly ShellWord[]) => targets.length > 0 && targets.every((word) => !/^\/dev\/(?:stdout|fd\/1|tty)$/.test(word.value));
+  if (program.name === "cat") return args.every((word) => word.value === "-") && toFiles(command.writes);
+  return program.name === "tee" && toFiles(args);
+}
+
+/** True when a word of the commands, by its base name, passes `test`. */
+const namesWord = (commands: readonly ShellCommand[], test: (name: string) => boolean): boolean =>
+  commands.some((entry) => entry.words.some((word) => !word.dynamic && test(baseNameOf(word))));
+
+/**
+ * How a here-document's head treats its body (default deny): `text` when the
+ * head line's here-document commands are all file sinks (`isFileSink`), with
+ * no pipe and no other command a client, shell or interpreter; or when it is a
+ * stdin script (`isStdinScript`) whose body names no `DATABASE_DRIVER`.
+ * `commands` when a shell or wrapper (`SHELL_WRAPPERS`) would run it as a
+ * command line, no client nor script interpreter on the head. Else `sql`.
+ */
+function bodyReadingOf(head: string, body: string): "text" | "commands" | "sql" {
+  const commands = parseShellLine(head).commands;
+  if (commands.length === 0 || commands.some(isDatabaseClient)) return "sql";
+  const feeding = commands.filter((entry) => entry.text.includes("<<"));
+  const others = commands.filter((entry) => !feeding.includes(entry));
+  const piped = /(?<!\|)\|(?!\|)/.test(head.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ""));
+  const consumes = namesWord(others, (name) => SHELL_WRAPPERS.has(name) || SCRIPT_INTERPRETER.test(name));
+  if (feeding.length > 0 && feeding.every(isFileSink) && !piped && !consumes) return "text";
+  if (feeding.length > 0 && feeding.every(isStdinScript) && !piped && !consumes) return DATABASE_DRIVER.test(body) ? "sql" : "text";
+  if (namesWord(commands, (name) => SHELL_WRAPPERS.has(name)) && !namesWord(commands, (name) => SCRIPT_INTERPRETER.test(name))) return "commands";
+  return "sql";
+}
+
+/**
+ * Where a command's SQL is read (see `SqlTexts`): the command without its
+ * here-document bodies; each database client's own command; each body as its
+ * head reads it (`bodyReadingOf`): skipped as text, read as a command line of
+ * its own (`shell.ts` `hereDocumentsOf`), or as SQL that runs. Past
+ * `MAX_HERE_DOCUMENT_DEPTH`, the whole body is read as SQL that runs.
+ */
+function sqlTextsOf(command: string, depth = 0): SqlTexts {
+  if (depth > MAX_HERE_DOCUMENT_DEPTH) return { outside: [], database: [command] };
+  const texts: SqlTexts = { outside: [withoutHereDocuments(command)], database: [] };
+  for (const entry of parseShellLine(command).commands) if (isDatabaseClient(entry)) texts.database.push(entry.text);
+  for (const { head, body } of hereDocumentsOf(command)) {
+    const reading = bodyReadingOf(head, body);
+    if (reading === "sql") texts.database.push(body);
+    else if (reading === "commands") {
+      const inner = sqlTextsOf(body, depth + 1);
+      texts.outside.push(...inner.outside);
+      texts.database.push(...inner.database);
+    }
+  }
+  return texts;
+}
+
+/** True when the SQL texts run the action's pattern; outside a database client, `TRUNCATE` is read strictly. */
+function runsSql(texts: SqlTexts, action: EffectfulAction, pattern: RegExp): boolean {
+  if (texts.database.some((text) => pattern.test(text))) return true;
+  if (action === "TRUNCATE") return texts.outside.some((text) => TRUNCATE_TABLE.test(text) || TRUNCATE_UPPER.test(text));
+  return texts.outside.some((text) => pattern.test(text));
+}
+
 /**
  * What a shell command runs of the list: the action, and the name its
  * evidence gives — the action's own, or `rm -rf <target>` — or none, with
@@ -319,11 +447,14 @@ export type EffectfulCommand = { action: EffectfulAction; name: string } | { act
 /**
  * The effectful action a shell command runs (see `EffectfulCommand`). `cwd` is
  * where it ran: a relative `rm` target is resolved against it, else against
- * the workspace directory. Pure.
+ * the workspace directory. Its SQL is the SQL it runs (`sqlTextsOf`). Pure.
  */
 export function effectfulCommandOf(command: string, cwd: string | null, workspaceDirectory: string | null): EffectfulCommand {
-  for (const { action, pattern } of EFFECTFUL_PATTERNS) if (pattern.test(command)) return { action, name: action };
-  if (deleteWithoutWhere(command)) return { action: "DELETE FROM without WHERE", name: "DELETE FROM without WHERE" };
+  const sql: SqlTexts = SQL_WORD.test(command) ? sqlTextsOf(command) : { outside: [], database: [] };
+  for (const { action, pattern } of EFFECTFUL_PATTERNS) {
+    if (SQL_ACTIONS.has(action) ? runsSql(sql, action, pattern) : pattern.test(command)) return { action, name: action };
+  }
+  if ([...sql.outside, ...sql.database].some(deleteWithoutWhere)) return { action: "DELETE FROM without WHERE", name: "DELETE FROM without WHERE" };
   const targets = rmTargetsOf(command, cwd, workspaceDirectory);
   const outside = targets.find((entry) => entry.verdict === "outside");
   if (outside !== undefined) return { action: "rm -rf outside the workspace", name: `rm -rf ${outside.target}` };

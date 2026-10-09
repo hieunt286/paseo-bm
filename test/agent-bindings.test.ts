@@ -6,9 +6,11 @@ import {
   BINDINGS_FILE,
   MAX_BINDINGS,
   PENDING_CALLER_MESSAGE,
+  HOOK_EXPIRED_KEEP_MS,
   PENDING_TTL_MS,
   REVOKED_TTL_MS,
   capBindings,
+  hookTagOf,
   clearBindingCache,
   createBindingStore,
   createBindingSweep,
@@ -427,7 +429,7 @@ describe("binding a creation (design §16.5)", () => {
     expect(kept?.config.mcpServers?.[AGENT_TOOLS_SERVER]).toEqual({ type: "http", url: issued.mcpServer.url, alwaysLoad: true });
     expect(kept?.config.mcpServers?.["other"]).toEqual({ type: "http", url: "http://x/mcp" });
     // Bound: its delivering and creating tools are pre-approved too (design §16.6).
-    expect(kept?.config.toolPolicy?.preapproved).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })));
+    expect(kept?.config.toolPolicy?.preapproved).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"].map((tool) => ({ kind: "mcp", server: AGENT_TOOLS_SERVER, tool })));
     expect(store.list()[0]).toMatchObject({ state: "pending", attachedAt: T0.toISOString() });
 
     // Foreign: another port, an unknown token, or another role's binding — rewritten to the role path.
@@ -601,5 +603,157 @@ describe("a creation Paseo did not settle (review of ADR-027's creation paths)",
       expect(before.message).not.toContain(url.slice(-64));
       expect(after.message).not.toContain(url.slice(-64));
     }
+  });
+});
+
+describe("a Manager the owner opened: the hook's binding (design §7.17.7)", () => {
+  const manager = (over: Partial<Parameters<BindingStore["settleCreated"]>[0]> = {}) => ({
+    agentId: "mgr-1",
+    role: "manager" as const,
+    parentId: null,
+    workspaceId: WS,
+    requestId: null,
+    batchId: null,
+    ...over,
+  });
+
+  it("writes origin hook, keeps BINDINGS_VERSION 1, and reads a file without the field as before", () => {
+    const home = dataFolder();
+    const store = storeAt(home, { now: T0 });
+    const own = store.issue({ role: "manager", workspaceId: WS });
+    const hooked = store.issue({ role: "manager", workspaceId: WS, origin: "hook" });
+    const file = JSON.parse(readFileSync(store.path, "utf8")) as { schemaVersion: number; bindings: Array<Record<string, unknown>> };
+    expect(file.schemaVersion).toBe(1);
+    expect(file.bindings.find((entry) => entry["tokenSha256"] === own.tokenSha256)).not.toHaveProperty("origin");
+    expect(file.bindings.find((entry) => entry["tokenSha256"] === hooked.tokenSha256)?.["origin"]).toBe("hook");
+    expect(file.bindings.find((entry) => entry["tokenSha256"] === hooked.tokenSha256)).not.toHaveProperty("claimedBy");
+  });
+
+  it("claimHook records the agent on the one attached pending hook binding with that tag, once", () => {
+    const home = dataFolder();
+    const clock = { now: T0 };
+    const store = storeAt(home, clock);
+    const own = store.issue({ role: "manager", workspaceId: WS });
+    store.attach(own.token, "manager");
+    const hooked = store.issue({ role: "manager", workspaceId: WS, origin: "hook" });
+    const tag = hookTagOf(hooked.tokenSha256);
+    expect(tag).toMatch(/^[0-9a-f]{16}$/);
+    // Not attached yet, a malformed tag, or a binding the plugin made itself: no claim.
+    expect(store.claimHook(tag, "mgr-1")).toBe(false);
+    store.attach(hooked.token, "manager");
+    expect(store.claimHook(hooked.tokenSha256, "mgr-1")).toBe(false);
+    expect(store.claimHook(hookTagOf(own.tokenSha256), "mgr-1")).toBe(false);
+    expect(store.claimHook(tag, "")).toBe(false);
+    expect(store.claimHook(tag, "mgr-1")).toBe(true);
+    expect(store.claimHook(tag, "mgr-1")).toBe(true);
+    // Claimed: another agent never takes it over.
+    expect(store.claimHook(tag, "mgr-2")).toBe(false);
+    expect(store.list().find((binding) => binding.tokenSha256 === hooked.tokenSha256)).toMatchObject({ claimedBy: "mgr-1", state: "pending", agentId: null });
+    expect(store.callerOf(hooked.token, "manager")).toMatchObject({ agentId: null });
+    expect(store.bindingOfAgent("mgr-1")).toBeNull();
+    // Expired: no claim.
+    const late = store.issue({ role: "manager", workspaceId: WS, origin: "hook" });
+    store.attach(late.token, "manager");
+    clock.now = later(PENDING_TTL_MS + 1);
+    expect(store.claimHook(hookTagOf(late.tokenSha256), "mgr-3")).toBe(false);
+  });
+
+  it("settleCreated binds a Manager without bm.version only to the attached hook binding it claimed", () => {
+    const home = dataFolder();
+    const clock = { now: T0 };
+    const store = storeAt(home, clock);
+    const none = { binding: null, settledNow: false };
+    // The plugin's own createManager binding, attached: never taken by a Manager the hook bound.
+    const own = store.issue({ role: "manager", workspaceId: WS });
+    store.attach(own.token, "manager");
+    expect(store.settleCreated(manager())).toEqual(none);
+    const hooked = store.issue({ role: "manager", workspaceId: WS, origin: "hook" });
+    // Not attached yet: nothing.
+    expect(store.settleCreated(manager())).toEqual(none);
+    store.attach(hooked.token, "manager");
+    // Attached, in its workspace, but claimed by no agent: never matched by workspace alone.
+    expect(store.settleCreated(manager())).toEqual(none);
+    store.claimHook(hookTagOf(hooked.tokenSha256), "mgr-1");
+    // Another Manager of the workspace, created first, never takes it.
+    expect(store.settleCreated(manager({ agentId: "mgr-2" }))).toEqual(none);
+    expect(store.settleCreated(manager({ versioned: true }))).toEqual(none);
+    expect(store.settleCreated(manager({ workspaceId: "wks_other" }))).toEqual(none);
+    expect(store.settleCreated(manager({ workspaceId: null }))).toEqual(none);
+    clock.now = later(1_000);
+    const settled = store.settleCreated(manager());
+    expect(settled.settledNow).toBe(true);
+    expect(settled.binding).toMatchObject({ tokenSha256: hooked.tokenSha256, state: "bound", agentId: "mgr-1", origin: "hook", boundAt: later(1_000).toISOString() });
+    expect(store.callerOf(hooked.token, "manager")).toMatchObject({ agentId: "mgr-1", role: "manager", workspaceId: WS });
+    // Its own binding again, settled before.
+    expect(store.settleCreated(manager())).toEqual({ binding: settled.binding, settledNow: false });
+    expect(store.list().find((binding) => binding.tokenSha256 === own.tokenSha256)?.state).toBe("pending");
+  });
+
+  it("settleHook binds a still-pending attached hook binding to the Manager that claimed it, when it has no binding", () => {
+    const home = dataFolder();
+    const store = storeAt(home, { now: T0 });
+    const hooked = store.issue({ role: "manager", workspaceId: WS, origin: "hook" });
+    expect(store.settleHook(hooked.tokenSha256, "mgr-1")).toBe(false);
+    store.attach(hooked.token, "manager");
+    // Attached but unclaimed: no Manager is known to hold its token.
+    expect(store.settleHook(hooked.tokenSha256, "mgr-1")).toBe(false);
+    store.claimHook(hookTagOf(hooked.tokenSha256), "mgr-1");
+    const other = store.issue({ role: "manager", workspaceId: WS });
+    store.attach(other.token, "manager");
+    store.settle(other.tokenSha256, "mgr-2");
+    // Claimed by another Manager.
+    expect(store.settleHook(hooked.tokenSha256, "mgr-2")).toBe(false);
+    expect(store.settleHook(hooked.tokenSha256, "mgr-3")).toBe(false);
+    // Not a hook binding.
+    expect(store.settleHook(other.tokenSha256, "mgr-1")).toBe(false);
+    expect(store.settleHook(hooked.tokenSha256, "mgr-1")).toBe(true);
+    expect(store.bindingOfAgent("mgr-1")).toMatchObject({ tokenSha256: hooked.tokenSha256, state: "bound" });
+  });
+
+  it("an attached hook binding that expires unsettled leaves every lookup but stays for the recovery pass, then goes", () => {
+    const home = dataFolder();
+    const clock = { now: T0 };
+    const store = storeAt(home, clock);
+    const hooked = store.issue({ role: "manager", workspaceId: WS, origin: "hook" });
+    store.attach(hooked.token, "manager");
+    store.claimHook(hookTagOf(hooked.tokenSha256), "mgr-1");
+    const unattached = store.issue({ role: "manager", workspaceId: "wks_2", origin: "hook" });
+    expect(store.expiredHooks()).toEqual([]);
+    clock.now = later(PENDING_TTL_MS + 1);
+    // Another write caps the file: the expired attached hook binding is kept, the unattached one goes.
+    store.issue({ role: "worker", workspaceId: WS });
+    expect(store.list().map((binding) => binding.role)).toEqual(["worker"]);
+    expect(store.callerOf(hooked.token, "manager")).toBeNull();
+    expect(store.expiredHooks().map((binding) => binding.tokenSha256)).toEqual([hooked.tokenSha256]);
+    expect(store.settleHook(hooked.tokenSha256, "mgr-1")).toBe(false);
+    expect(store.settleCreated(manager())).toEqual({ binding: null, settledNow: false });
+    const raw = JSON.parse(readFileSync(store.path, "utf8")) as { bindings: AgentBinding[] };
+    expect(raw.bindings.map((binding) => binding.tokenSha256)).not.toContain(unattached.tokenSha256);
+    expect(store.removeExpiredHook(hooked.tokenSha256)).toBe(true);
+    expect(store.expiredHooks()).toEqual([]);
+    expect(store.removeExpiredHook(hooked.tokenSha256)).toBe(false);
+  });
+
+  it("the cap drops an expired hook binding HOOK_EXPIRED_KEEP_MS after its ten minutes", () => {
+    const hook: AgentBinding = {
+      tokenSha256: "a".repeat(64),
+      role: "manager",
+      state: "pending",
+      agentId: null,
+      workspaceId: WS,
+      requestId: null,
+      parentId: null,
+      batchId: null,
+      createdAt: T0.toISOString(),
+      attachedAt: T0.toISOString(),
+      boundAt: null,
+      revokedAt: null,
+      origin: "hook",
+    };
+    expect(capBindings([hook], later(PENDING_TTL_MS + HOOK_EXPIRED_KEEP_MS).getTime())).toEqual([hook]);
+    expect(capBindings([hook], later(PENDING_TTL_MS + HOOK_EXPIRED_KEEP_MS + 1).getTime())).toEqual([]);
+    const plain: AgentBinding = { ...hook };
+    delete plain.origin;
+    expect(capBindings([plain], later(PENDING_TTL_MS + 1).getTime())).toEqual([]);
   });
 });

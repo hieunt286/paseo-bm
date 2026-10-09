@@ -15,7 +15,8 @@
  * `shared/`: Zod and plain values only, no Node or React Native imports.
  */
 import { z } from "zod";
-import { coordinationChangeSchema } from "./coordination";
+import { coordinationChangeSchema, type ReviewBudget } from "./coordination";
+import type { Tier } from "./contracts";
 
 // ---------------------------------------------------------------------------
 // Vocabulary.
@@ -314,12 +315,19 @@ export function preparedChangeRefusalText(decisionId: string): string {
 export const REVIEW_BUDGET_SUBJECT = "review-budget";
 /** The most review calls one `{ calls: n }` grant adds (design §16.6, §16.8). */
 export const MAX_REVIEW_GRANT_CALLS = 10;
+/** The fewest review calls a grant the owner's policy chooses may add, whatever the tier's budget (design §7.17.8 a). */
+export const MIN_POLICY_REVIEW_GRANT_CALLS = 2;
+
 /**
- * The most review calls a grant the owner's policy chooses may add (design
- * §16.8): where `cost` is delegated, an answer `by: policy` grants at most
- * `{ calls: 2 }`; a larger grant or an `untilClean` one is the owner's.
+ * The most review calls a grant the owner's policy chooses may add for a
+ * request of `tier` (design §7.17.8 a): that tier's own budget in `budget`
+ * (the owner's coordination settings), the Small one while the tier is
+ * unknown, and at least `MIN_POLICY_REVIEW_GRANT_CALLS`. A larger grant or an
+ * `untilClean` one is the owner's. Pure.
  */
-export const MAX_POLICY_REVIEW_GRANT_CALLS = 2;
+export function policyGrantCapOf(tier: Tier | null, budget: ReviewBudget): number {
+  return Math.max(MIN_POLICY_REVIEW_GRANT_CALLS, budget[tier ?? "Small"]);
+}
 
 /**
  * What choosing an option of a `review-budget` question grants (design §16.8):
@@ -333,9 +341,9 @@ export const reviewGrantSchema = z.union([
 ]);
 export type ReviewGrant = z.infer<typeof reviewGrantSchema>;
 
-/** True for a grant the owner's policy may choose: `{ calls: n }` with n at most `MAX_POLICY_REVIEW_GRANT_CALLS` (design §16.8). Pure. */
-export function policyMayGrant(grant: ReviewGrant | undefined): boolean {
-  return grant === undefined || ("calls" in grant && grant.calls <= MAX_POLICY_REVIEW_GRANT_CALLS);
+/** True for a grant the owner's policy may choose: none, or `{ calls: n }` with n at most `cap` (`policyGrantCapOf`; design §16.8). Pure. */
+export function policyMayGrant(grant: ReviewGrant | undefined, cap: number): boolean {
+  return grant === undefined || ("calls" in grant && grant.calls <= cap);
 }
 
 export const decisionOptionSchema = z.object({

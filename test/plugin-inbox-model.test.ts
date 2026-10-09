@@ -413,6 +413,16 @@ describe("Alerts", () => {
     expect(alertRowOf(alert("outdated-agent", "mgr-1", 3), input()).action).toMatchObject({ kind: "open-agent" });
   });
 
+  it("names a request whose ask another project leaves unanswered, after request-stalled, and opens its project (design §7.17.5)", () => {
+    const detail = "peer-000000000001: project wks_b has not taken it for 10 minutes";
+    const row = alertRowOf(alert("peer-unanswered", "req-20261009T100000Z", 3, { detail }), input());
+    expect(row.what).toBe("Another project has not answered an ask");
+    expect(row.tone).toBe("warning");
+    expect(row.action).toMatchObject({ kind: "open-project", workspaceId: DECISION_WS });
+    expect(row.details[0]).toBe(detail);
+    expect(ALERT_KINDS.indexOf("peer-unanswered")).toBe(ALERT_KINDS.indexOf("request-stalled") + 1);
+  });
+
   it("names a Worker or Reviewer running without the action boundary, and only opens it (autonomy design §D.2, change-010 C6)", () => {
     const row = alertRowOf(alert("boundary-off", "wrk-1", 3), input());
     expect(row.action).toMatchObject({ kind: "open-agent", agentId: "wrk-1" });

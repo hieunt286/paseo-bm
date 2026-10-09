@@ -20,7 +20,7 @@ Code cites designs by name and section ("autonomy design §G.2", "design §7.13"
 
 | Design | Covers |
 |---|---|
-| [paseo-bm.md](design/paseo-bm.md) — "the design" | Packaging and release, the data folder, machine set-up, Paseo configuration, the plugin server: the agent-creation hook, Manager, agent tools, `BM-*` notices, review budget, questions and answers, fallback, traces |
+| [paseo-bm.md](design/paseo-bm.md) — "the design" | Packaging and release, the data folder, machine set-up, Paseo configuration, the plugin server: the agent-creation hook, Manager, agent tools, `BM-*` notices, review budget, questions and answers, fallback, traces, projects asking each other (peer links, §7.17) |
 | [paseo-bm-dashboard.md](design/paseo-bm-dashboard.md) | The trace store, a trace per request, process steps, tokens and cost, the Beads Manager surface, the Beads board, chat cards |
 | [paseo-bm-orchestrator.md](design/paseo-bm-orchestrator.md) | The Orchestrator agent: role and tools, rules and signals, the stall pass, Autopilot, `BM-COMMAND`, live coordination, the gate, the `orchestrator.*` RPCs |
 | [paseo-bm-autonomy.md](design/paseo-bm-autonomy.md) | The autonomy programme, Parts A–G: decision objects and typed handoffs, autonomy per class and level, evidence, the action boundary, traceability, specialisation, coordination control |
@@ -61,6 +61,7 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [025](adr/ADR-025-autonomy-levels.md) | Five autonomy levels per project; no owner-only class; overrides recorded | Accepted |
 | [026](adr/ADR-026-published-plugin-is-bundled.md) | The published plugin is `plugin-package/`, each entry bundled | Accepted |
 | [027](adr/ADR-027-agents-write-content-code-carries-it.md) | Agents write the content; the plugin's code creates, routes and delivers | Accepted |
+| [028](adr/ADR-028-projects-ask-each-other-through-the-plugin.md) | Projects ask each other through the plugin: peer links; every Manager bound | Accepted |
 
 ## Work in progress — `plans/`
 

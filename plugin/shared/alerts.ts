@@ -9,7 +9,8 @@ import { z } from "zod";
  * in overlapping turns (§F.1), a Worker or Reviewer running without the
  * action boundary in a project where it is on (§D.2, change-010 C6), a
  * report, review or message the plugin could not deliver (design §16.7), a
- * Reviewer a bound Worker created outside its tools (design §16.8).
+ * Reviewer a bound Worker created outside its tools (design §16.8), another
+ * project that does not answer an ask (design §7.17.5).
  *
  * Kept in `<data folder>/inbox/alerts.json` (`server/alert-store.ts`), shared
  * here so the Inbox (part b) reads the same shape. An alert is data the Inbox
@@ -23,6 +24,7 @@ import { z } from "zod";
 /** Every alert kind, in the order the Inbox lists them. */
 export const ALERT_KINDS = [
   "request-stalled",
+  "peer-unanswered",
   "permission-waiting",
   "danger",
   "stuck",
@@ -47,7 +49,8 @@ export const MAX_ALERT_DETAIL_CHARS = 300;
 
 /**
  * One alert. Open while `clearedAt` is null. `subject` names what it is about:
- * the request key (`request-stalled`), the Worker's id (`permission-waiting`,
+ * the request key (`request-stalled`), the asking request's id
+ * (`peer-unanswered`, its links and why in the detail), the Worker's id (`permission-waiting`,
  * `danger`, `stuck`), the agent's id (`pairing-mismatch`, `outdated-agent`,
  * `boundary-off`),
  * the decision's id (`fallback-failed`), the request's id (`delivery-dropped`,

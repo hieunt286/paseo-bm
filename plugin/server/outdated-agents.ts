@@ -15,6 +15,13 @@
  * - a **Worker** or **Reviewer** is only flagged: it ends with its request, and
  *   the next request gets a new, current one.
  *
+ * A Manager the creation hook bound whose binding expired unsettled (design
+ * §7.17.7) is an `outdated-agent` alert too, with its own detail
+ * (`UNBOUND_MANAGER_DETAIL`): its instructions are bound, its tools are not,
+ * so it has neither path. The recovery pass raises it (`creation-settle.ts`);
+ * the pass here keeps it open while the Manager is live and not replaced, and
+ * `manager.ensure { replaceOutdated: true }` replaces that Manager too.
+ *
  * The Orchestrator is not flagged: it replaces itself (`orchestrator-agent.ts`).
  * An agent another agent replaced (`bm.replacedBy`), an archived or closed
  * one, and one created in the last `STAMP_GRACE_MS` still without the label
@@ -41,6 +48,7 @@ import { resolveDataHome, type DataHomeDeps } from "./data-home";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { INSTRUCTIONS_LABEL, hasOutdatedInstructions } from "./instructions-label";
 import { errorText } from "./rpc-kit";
+import { alertKeyOf } from "../shared/alerts";
 
 /** Least time between two passes. */
 export const OUTDATED_PASS_INTERVAL_MS = 60_000;
@@ -119,6 +127,35 @@ export function outdatedAgentDetail(role: OutdatedRole): string {
     : `This ${ROLE_NAME[role]} runs the instructions of an older paseo-bm. It keeps its request; the next request gets a new ${ROLE_NAME[role]} with the current ones.`;
 }
 
+/** The detail of a Manager whose hook binding expired unsettled (§7.17.7): what it is and what the owner can do. */
+export const UNBOUND_MANAGER_DETAIL =
+  "This Beads Manager was set up for paseo-bm's tools, but they never connected. Replace it to give the project a Manager that has them; the old one stays until you archive it.";
+
+/** The `outdated-agent` alert of a Manager whose hook binding expired unsettled (§7.17.7). */
+export function unboundManagerAlertOf(agent: { agentId: string; workspaceId: string | null }): AlertInput {
+  return { workspaceId: agent.workspaceId, kind: "outdated-agent", subject: agent.agentId, detail: UNBOUND_MANAGER_DETAIL, role: "manager" };
+}
+
+/** True when the Manager's open `outdated-agent` alert is the unbound one (§7.17.7): `manager.ensure` may replace it. Never throws. */
+export function hasUnboundManagerAlert(home: string | null, workspaceId: string, agentId: string): boolean {
+  try {
+    if (home === null) return false;
+    const alert = createAlertStore(home).get(alertKeyOf("outdated-agent", workspaceId, agentId));
+    return alert !== null && alert.clearedAt === null && alert.detail === UNBOUND_MANAGER_DETAIL;
+  } catch {
+    return false;
+  }
+}
+
+/** True when the snapshot is a live Manager no other agent replaced: one an unbound-Manager alert stays open for. Never throws. */
+function isLiveManager(agent: OutdatedAgentSnapshot): boolean {
+  try {
+    return roleOfAgent(agent)?.role === "manager" && !agent.archivedAt && agent.status !== "closed" && agent.labels?.[REPLACED_BY_LABEL] === undefined;
+  } catch {
+    return false;
+  }
+}
+
 /** The alert of an outdated agent. */
 export function outdatedAgentAlertOf(agent: OutdatedAgent): AlertInput {
   return {
@@ -141,8 +178,9 @@ export interface OutdatedPassResult {
 /**
  * One pass: lists every non-archived agent, raises an alert for each outdated
  * one and clears every open `outdated-agent` alert whose agent is no longer
- * outdated (current, replaced, archived, closed or gone). Rejects when the
- * listing fails, before touching the store.
+ * outdated (current, replaced, archived, closed or gone) — an unbound
+ * Manager's (§7.17.7) only once that Manager is no longer live or is
+ * replaced. Rejects when the listing fails, before touching the store.
  */
 export async function detectOutdatedAgents(
   paseo: OutdatedPaseo,
@@ -159,7 +197,10 @@ export async function detectOutdatedAgents(
     keep.add(result.alert.key);
     if (result.raised) raised.push(result.alert.key);
   }
-  const cleared = store.clearWhere((alert) => alert.kind === "outdated-agent" && !keep.has(alert.key));
+  const liveManagers = new Set(agents.filter((agent): agent is OutdatedAgentSnapshot => agent !== null && agent !== undefined && isLiveManager(agent)).map((agent) => agent.id));
+  const cleared = store.clearWhere(
+    (alert) => alert.kind === "outdated-agent" && !keep.has(alert.key) && !(alert.detail === UNBOUND_MANAGER_DETAIL && liveManagers.has(alert.subject)),
+  );
   return { outdated, raised, cleared };
 }
 

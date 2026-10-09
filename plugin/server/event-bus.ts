@@ -7,10 +7,10 @@
  * | Event | Source | Settled (dropped before delivery) when |
  * |---|---|---|
  * | `decision.opened` | a new `q:` decision the materialiser opened (`decision-materialiser.ts`) or a new `f:` decision a fallback incident's listener opened (`fallback-rpc.ts`), by the owner's policy per cell (below): a decision asked of the Orchestrator, or a prediction asked of the challenger | the decision may no longer be decided (`decideRefusalOf`), or predicted (`predictionRefusalOf`) |
- * | `request.finished` | a `finished` report recorded in a Manager's turn (the collector's `onRecorded`) that shows work left, or leaves its request finished-unverified (Phase 3, design §C.3) | — (only its project leaving the scope) |
+ * | `request.finished` | a `finished` report recorded in a Manager's turn or in the Worker's own (the collector's `onRecorded`; REQ-183 i) that shows work left, or leaves its request finished-unverified (Phase 3, design §C.3) | — (only its project leaving the scope) |
  * | `request.stalled` | the stall pass raised a `request-stalled` alert (`stall-watcher.ts`) | its alert is cleared |
  * | `worker.signal` | the live watch saw a signal (`worker-watch.ts`) | its alert is cleared (`stuck`, `permission`, `danger`), or the Worker's turn ended (`failing`, `heavy`, `outside`) |
- * | `advice.due` | a project's finished requests since its last advice reached Settings' `advice.everyFinished` (the `finished` reports of recorded Manager turns, counted in `advice-store.ts`; design §G.4) | advice was turned off (`advice.everyFinished` 0) |
+ * | `advice.due` | a project's finished requests since its last advice reached Settings' `advice.everyFinished` (the `finished` reports of recorded Manager and Worker turns, counted in `advice-store.ts`; design §G.4) | advice was turned off (`advice.everyFinished` 0) |
  * | `threshold.crossed` (`compact`) | a recorded Manager's or Worker's turn crossing its compaction threshold (`compactCrossedEventOf`, design §G.7, change-008 C1) while compaction is on for its provider, the agent is below `compact.maxPerAgent` and no compaction of it is pending | compaction was turned off, or the agent compacted (or a compaction of it was requested) |
  * | `threshold.crossed` (`handoff`) | a recorded Worker's turn of an unfinished request whose tokens read since it started, or since its last handoff, reach `handoff.requestTokens` (`handoffCrossedEventOf`, design §G.6, §G.7, change-008 C1) while handoff is on, the request is below `handoff.maxPerRequest` and no handoff of it is pending | handoff was turned off, or the request was handed over (or a handoff of it was requested), or it finished |
  * | `writers.observed` | a recorded turn wrote a file another agent of its workspace wrote in an overlapping turn (`writers-watch.ts`, design §F.1), with its `writers-observed` alert | its alert is cleared (the later of the two requests finished) |
@@ -47,7 +47,7 @@
  *   whose request crosses `handoff.requestTokens` raises one keyed by the
  *   request and its handoffs so far; its line names `bm_handoff`.
  * - **`advice.due`, per project** (design §G.4, §G.7; PRD REQ-128). Each
- *   `finished` report of a recorded Manager turn counts its request toward
+ *   `finished` report of a recorded Manager or Worker turn counts its request toward
  *   its project, once per advice (`finishedRequestKeysOf`); when the count
  *   reaches `advice.everyFinished` (Settings → Coordination, default 5), the
  *   count starts again and one `advice.due` is published — a judgement wake:
@@ -489,8 +489,21 @@ export function workLeftOf(report: TraceRecord["reports"][number]): boolean {
 }
 
 /**
- * `request.finished` for each `finished` report recorded in a Manager's turn
- * that shows work left (§A.8) or leaves its request finished-unverified
+ * The turns whose `finished` reports the events read (design §7.17.8 i): a
+ * Manager's (a report sent to it by hand), and a Worker's own — what its
+ * `bm_report` stored (with its `recordId`, `outboxBlocksOf`) or the block the
+ * plugin relays for an unbound Worker — since the collector skips every
+ * `BM-DELIVERY` in the Manager's turn.
+ */
+const readsFinishes = (record: TraceRecord | null | undefined): record is TraceRecord =>
+  record !== null && record !== undefined && (record.role === "manager" || record.role === "worker");
+
+/** The Manager a finish is told to: the recording Manager, else the Worker's parent, else the Worker. */
+const managerOf = (record: TraceRecord): string => (record.role === "manager" ? record.agentId : (record.parentAgentId ?? record.agentId));
+
+/**
+ * `request.finished` for each `finished` report recorded in a Manager's or a
+ * Worker's turn (`readsFinishes`) that shows work left (§A.8) or leaves its request finished-unverified
  * (design §C.3; `isUnverified`, read from the request's records by the caller,
  * `unverifiedFinishesOf`), which the event carries as `unverified: true`. Pure.
  */
@@ -498,7 +511,7 @@ export function requestFinishedEventsOf(
   record: TraceRecord | null | undefined,
   isUnverified: (report: ParsedReport) => boolean = () => false,
 ): RequestFinishedEvent[] {
-  if (record === null || record === undefined || record.role !== "manager") return [];
+  if (!readsFinishes(record)) return [];
   return record.reports.flatMap((report): RequestFinishedEvent[] => {
     if (report.phase !== "finished") return [];
     const unverified = isUnverified(report);
@@ -508,7 +521,7 @@ export function requestFinishedEventsOf(
         type: "request.finished",
         workspaceId: record.workspaceId,
         requestId: report.requestId ?? record.requestId,
-        managerId: record.agentId,
+        managerId: managerOf(record),
         at: report.at,
         ...(unverified ? { unverified: true as const } : {}),
       },
@@ -517,16 +530,17 @@ export function requestFinishedEventsOf(
 }
 
 /**
- * The finished requests of a recorded Manager turn, for the advice cadence
- * (design §G.4): one key per request that sent a `finished` report — its
- * request id, else the Manager and the report's time — with the latest such
+ * The finished requests of a recorded Manager or Worker turn
+ * (`readsFinishes`), for the advice cadence (design §G.4): one key per
+ * request that sent a `finished` report — its request id, else the Manager
+ * and the report's time — with the latest such
  * report's time. Every finished report counts, work left or not. Pure.
  */
 export function finishedRequestKeysOf(record: TraceRecord | null | undefined): { workspaceId: string; keys: string[]; at: string } | null {
-  if (record === null || record === undefined || record.role !== "manager") return null;
+  if (!readsFinishes(record)) return null;
   const finished = record.reports.filter((report) => report.phase === "finished");
   if (finished.length === 0) return null;
-  const keys = [...new Set(finished.map((report) => report.requestId ?? record.requestId ?? `manager:${record.agentId}@${report.at}`))];
+  const keys = [...new Set(finished.map((report) => report.requestId ?? record.requestId ?? `manager:${managerOf(record)}@${report.at}`))];
   const at = finished.map((report) => report.at).reduce((latest, next) => (Date.parse(next) > Date.parse(latest) ? next : latest));
   return { workspaceId: record.workspaceId, keys, at };
 }
@@ -643,6 +657,26 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
   let lastPaseo: OrchestratorAgentPaseo | null = null;
   /** Keys published in this run, oldest first. */
   const published = new Set<string>();
+  /** Finishes read in this run (project, request, the report without its sender and time) → the role whose turn held it first. */
+  const finishes = new Map<string, TraceRecord["role"]>();
+  /**
+   * The turn without the finishes already read in the other role's turns: a
+   * Worker's report sent to its Manager by hand is one finish in both records,
+   * raised and counted once (REQ-183 i). Repeats in one role's turns keep the
+   * event keys' and the advice count's own dedupe.
+   */
+  const unseenFinishesOf = (record: TraceRecord | null | undefined): TraceRecord | null | undefined => {
+    if (!readsFinishes(record)) return record;
+    const reports = record.reports.filter((report) => {
+      if (report.phase !== "finished") return true;
+      const key = JSON.stringify([record.workspaceId, report.requestId ?? record.requestId, { ...report, agentId: null, at: null, recordId: null }]);
+      const first = finishes.get(key);
+      if (first === undefined) finishes.set(key, record.role);
+      if (finishes.size > PUBLISHED_KEYS_LIMIT) finishes.delete(finishes.keys().next().value!);
+      return first === undefined || first === record.role;
+    });
+    return { ...record, reports };
+  };
   /** Open non-alert Worker-signal keys → their Worker. */
   const openSignals = new Map<string, string>();
   /** Published keys → their project, until the wake that carried them is recorded (A-7). */
@@ -810,8 +844,8 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
   };
 
   /**
-   * Counts a recorded Manager turn's finished requests toward its project's
-   * advice (design §G.4): `advice.due` when the count reaches the cadence,
+   * Counts the finished requests of a recorded Manager's or Worker's turn
+   * toward its project's advice (design §G.4): `advice.due` when the count reaches the cadence,
    * which starts the count again in the same write. Nothing with advice off.
    * Never throws: a store failure is one log line and no event.
    */
@@ -904,7 +938,8 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     },
     publish,
     turnRecorded(record, opened, paseo, isUnverified) {
-      return publish([...openedEventsOf(opened), ...requestFinishedEventsOf(record, isUnverified), ...adviceDueOf(record), ...thresholdCrossedOf(record)], paseo);
+      const finished = unseenFinishesOf(record);
+      return publish([...openedEventsOf(opened), ...requestFinishedEventsOf(finished, isUnverified), ...adviceDueOf(finished), ...thresholdCrossedOf(record)], paseo);
     },
     decisionsOpened(opened, paseo) {
       return publish(openedEventsOf(opened), paseo);

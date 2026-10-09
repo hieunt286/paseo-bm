@@ -12,9 +12,13 @@ import { toolsStaleSince } from "../plugin/server/agent-tools";
 import { REVIEW_BUDGET } from "../plugin/server/review-budget";
 import {
   IDLE_UNFINISHED_MS,
+  PEER_SILENT_MS,
+  PEER_UNANSWERED_MS,
   STALL_PASS_MS,
   createStallWatcher,
+  peerCeilingOf,
   stallReasonsOf,
+  unansweredOf,
   type StallWatcher,
   type StallWatcherDeps,
 } from "../plugin/server/stall-watcher";
@@ -23,7 +27,8 @@ import { reconstructTraces, type AgentFacts, type ReconstructedTrace } from "../
 import type { TraceRecord } from "../plugin/shared/contracts";
 import { alertKeyOf } from "../plugin/shared/alerts";
 import { flagsOf } from "../plugin/shared/orchestrator-rules";
-import { ruleInputOf } from "../plugin/server/request-trace";
+import { PEER_WAIT_SLACK_MS, ruleInputOf, waitedLinksOf, waitingSinceOf } from "../plugin/server/request-trace";
+import { createPeerLinkStore, type PeerLink } from "../plugin/server/peer-links";
 import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { makeDecision } from "./helpers/decisions";
@@ -78,7 +83,7 @@ function handedOver(requestId = REQUEST_ID): TraceRecord[] {
 }
 
 /** The Manager turn that relays one Worker report; `endedAt` defaults to 10 seconds after the report. */
-function relayed(phase: "received" | "blocked" | "finished", reportAt: string, extra: { endedAt?: string; turnId?: string; unparsed?: string[] } = {}) {
+function relayed(phase: "received" | "blocked" | "finished" | "stopped", reportAt: string, extra: { endedAt?: string; turnId?: string; unparsed?: string[] } = {}) {
   return turn({
     at: extra.endedAt ?? reportAt,
     turnId: extra.turnId ?? `m-${phase}`,
@@ -652,5 +657,200 @@ describe("workerTurnEnded", () => {
       [alertKeyOf("danger", WORKSPACE_ID, WORKER), alertKeyOf("stuck", WORKSPACE_ID, WORKER)].sort(),
     );
     expect(alerts().list({ open: true }).map((alert) => alert.subject)).toEqual([WORKER_2]);
+  });
+});
+
+// ── Waiting on another project (design §7.17.5) ─────────────────────────────
+
+const PEER_WS = "wks_backend";
+const PEER_REQUEST = "req-20260926T090000Z";
+const PEER_WORKER = "agent-backend-worker";
+
+/** A link `REQUEST_ID` asked of the backend project, as the store keeps it. */
+function peerLink(overrides: Partial<PeerLink> = {}): PeerLink {
+  return {
+    linkId: "peer-000000000001",
+    createdAt: at(2),
+    kind: "work",
+    from: { workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, agentId: WORKER, role: "worker" },
+    to: { workspaceId: PEER_WS, managerId: "agent-backend-manager", requestId: PEER_REQUEST, workerId: PEER_WORKER },
+    chain: { workspaces: [WORKSPACE_ID], depth: 1 },
+    waitingSince: at(4),
+    text: "Add the /export endpoint.",
+    state: "taken",
+    takenAt: at(3),
+    answeredAt: null,
+    closedAt: null,
+    closedBy: null,
+    messages: [],
+    ...overrides,
+  };
+}
+
+const answerer = (minute: number): PeerLink["messages"][number] => ({
+  recordId: "out-000000000001",
+  workspaceId: PEER_WS,
+  side: "answerer",
+  agentId: PEER_WORKER,
+  at: at(minute),
+  kind: "peer-message",
+  phase: null,
+  gist: "On it.",
+});
+
+describe("the peer wait (pure, design §7.17.5)", () => {
+  const blocked = () => traceOf([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))], agentsWith()).trace;
+
+  it("a blocked request waits on the live links it asked whose wait is from that report; waitingSinceOf counts it", () => {
+    const trace = blocked();
+    expect(waitedLinksOf(trace, WORKSPACE_ID, [peerLink()]).map((link) => link.linkId)).toEqual(["peer-000000000001"]);
+    // bm_report notes the wait a moment before its record is stored.
+    expect(waitedLinksOf(trace, WORKSPACE_ID, [peerLink({ waitingSince: new Date(when(4).getTime() - PEER_WAIT_SLACK_MS).toISOString() })])).toHaveLength(1);
+    // An older wait, no wait, a link no longer live, another request's or another workspace's: no peer wait.
+    expect(waitedLinksOf(trace, WORKSPACE_ID, [peerLink({ waitingSince: at(2) })])).toEqual([]);
+    expect(waitedLinksOf(trace, WORKSPACE_ID, [peerLink({ waitingSince: null })])).toEqual([]);
+    expect(waitedLinksOf(trace, WORKSPACE_ID, [peerLink({ state: "answered" }), peerLink({ state: "closed" })])).toEqual([]);
+    expect(waitedLinksOf(trace, WORKSPACE_ID, [peerLink({ from: { ...peerLink().from, requestId: REQUEST_2 } })])).toEqual([]);
+    expect(waitedLinksOf(trace, "wks_other", [peerLink()])).toEqual([]);
+    // Not blocked: no wait.
+    const working = traceOf([...handedOver(), relayed("received", at(1, 10))], agentsWith()).trace;
+    expect(waitedLinksOf(working, WORKSPACE_ID, [peerLink()])).toEqual([]);
+    expect(waitingSinceOf(trace)).toBe(at(4));
+  });
+
+  it("stallReasonsOf: a blocked request waiting on a peer is no idle-unfinished, even with its questions answered", () => {
+    const { trace, facts } = traceOf([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))], agentsWith());
+    const flags = flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET });
+    expect(stallReasonsOf(trace, facts, flags, when(59), false, true)).toEqual([]);
+    expect(stallReasonsOf(trace, facts, flags, when(59), false, false).map((entry) => entry.reason)).toEqual(["idle-unfinished"]);
+  });
+
+  it("the ceiling: taken with no live agent of the answering request, or 2 hours without a word from the answering side", () => {
+    expect(peerCeilingOf(peerLink(), when(59), () => true)).toBeNull();
+    expect(peerCeilingOf(peerLink(), when(59), () => false)).toBe(
+      `peer-000000000001: taken by request ${PEER_REQUEST} of project ${PEER_WS}, which has no live agent`,
+    );
+    const twoHours = new Date(when(4).getTime() + PEER_SILENT_MS);
+    expect(peerCeilingOf(peerLink(), new Date(twoHours.getTime() - 1000), () => true)).toBeNull();
+    expect(peerCeilingOf(peerLink(), twoHours, () => true)).toBe(`peer-000000000001: no word from project ${PEER_WS} for 2 hours`);
+    // An open link waited on is only silent: nobody took it yet.
+    expect(peerCeilingOf(peerLink({ state: "open" }), twoHours, () => false)).toMatch(/for 2 hours$/);
+    // A word from the answering side restarts the clock; one from the asker does not.
+    expect(peerCeilingOf(peerLink({ messages: [answerer(30)] }), twoHours, () => true)).toBeNull();
+    expect(peerCeilingOf(peerLink({ messages: [{ ...answerer(30), side: "asker" }] }), twoHours, () => true)).not.toBeNull();
+  });
+
+  it("unansweredOf: open for 10 minutes with no word from the answering side; taken, answered on, or younger is fine", () => {
+    const open = peerLink({ state: "open", waitingSince: null, to: { ...peerLink().to, requestId: null, workerId: null } });
+    const tenMinutes = new Date(when(2).getTime() + PEER_UNANSWERED_MS);
+    expect(unansweredOf(open, new Date(tenMinutes.getTime() - 1000))).toBeNull();
+    expect(unansweredOf(open, tenMinutes)).toBe(`peer-000000000001: project ${PEER_WS} has not taken it for 10 minutes`);
+    expect(unansweredOf({ ...open, state: "taken" }, tenMinutes)).toBeNull();
+    expect(unansweredOf({ ...open, messages: [answerer(5)] }, tenMinutes)).toBeNull();
+  });
+});
+
+describe("the pass: a request waiting on another project (design §7.17.5)", () => {
+  const backendWorker = (): FakeAgent => ({
+    id: PEER_WORKER,
+    provider: "bm-worker",
+    status: "idle",
+    workspaceId: PEER_WS,
+    labels: { "bm.role": "worker", "bm.requestId": PEER_REQUEST },
+    createdAt: at(3),
+  });
+  const links = () => createPeerLinkStore(home, { now: () => clock, newId: () => "peer-000000000001", env: {} });
+  const peerAlertOf = (requestId = REQUEST_ID) => alertKeyOf("peer-unanswered", WORKSPACE_ID, requestId);
+
+  /** `REQUEST_ID` asks the backend at `clock`; `taken`: the backend's request took it. */
+  function ask(taken: boolean): string {
+    const made = links().createLink({
+      kind: "work",
+      from: { workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, agentId: WORKER, role: "worker" },
+      to: { workspaceId: PEER_WS, managerId: "agent-backend-manager" },
+      text: "Add the /export endpoint.",
+    });
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    if (taken) links().takeLink(made.link.linkId, { workspaceId: PEER_WS, requestId: PEER_REQUEST, workerId: PEER_WORKER });
+    return made.link.linkId;
+  }
+
+  async function waiting(): Promise<{ fake: ReturnType<typeof daemonWith>; stalls: StallWatcher; linkId: string }> {
+    clock = when(2);
+    const linkId = ask(true);
+    await seed([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))]);
+    links().setWaiting(WORKSPACE_ID, REQUEST_ID, [linkId], at(4));
+    const fake = daemonWith([...fakeAgentsFor(), backendWorker()]);
+    const stalls = watcher();
+    stalls.usePaseo(fake.paseo);
+    return { fake, stalls, linkId };
+  }
+
+  it("raises nothing while the answering request has a live agent; stalls and raises peer-unanswered once none is left", async () => {
+    const { fake, stalls, linkId } = await waiting();
+    clock = when(59);
+    expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
+    expect(alerts().list()).toEqual([]);
+
+    fake.byId(PEER_WORKER)!.archivedAt = at(58);
+    expect(await stalls.pass()).toMatchObject({ raised: [alertOf(), peerAlertOf()], cleared: [] });
+    expect(alerts().list({ open: true }).find((alert) => alert.kind === "peer-unanswered")).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      subject: REQUEST_ID,
+      detail: `${linkId}: taken by request ${PEER_REQUEST} of project ${PEER_WS}, which has no live agent`,
+    });
+
+    // Closed by the asker: no wait any more, and nothing left unanswered.
+    links().closeLink(linkId, "asker");
+    expect((await stalls.pass()).cleared).toEqual([peerAlertOf()]);
+    expect(alerts().list({ open: true }).map((alert) => alert.kind)).toEqual(["request-stalled"]);
+  });
+
+  it("after 2 hours without a word from the answering side the request stalls; a word clears both alerts", async () => {
+    const { stalls, linkId } = await waiting();
+    clock = new Date(when(4).getTime() + PEER_SILENT_MS);
+    expect(await stalls.pass()).toMatchObject({ raised: [alertOf(), peerAlertOf()] });
+    expect(alerts().list({ open: true }).find((alert) => alert.kind === "peer-unanswered")?.detail).toBe(`${linkId}: no word from project ${PEER_WS} for 2 hours`);
+
+    links().appendMessage(linkId, { recordId: "out-000000000001", workspaceId: PEER_WS, side: "answerer", agentId: PEER_WORKER, kind: "peer-message", text: "Half done." });
+    expect((await stalls.pass()).cleared.sort()).toEqual([alertOf(), peerAlertOf()].sort());
+    expect(alerts().list({ open: true })).toEqual([]);
+  });
+
+  it("an ask nobody took for 10 minutes raises peer-unanswered, cleared when it is taken", async () => {
+    clock = when(20);
+    const linkId = ask(false);
+    const fake = daemonWith(fakeAgentsFor());
+    const stalls = watcher();
+    stalls.usePaseo(fake.paseo);
+    clock = new Date(when(20).getTime() + PEER_UNANSWERED_MS - 1000);
+    expect((await stalls.pass()).raised).toEqual([]);
+    clock = new Date(when(20).getTime() + PEER_UNANSWERED_MS);
+    expect((await stalls.pass()).raised).toEqual([peerAlertOf()]);
+    expect(alerts().list({ open: true })).toMatchObject([{ kind: "peer-unanswered", detail: `${linkId}: project ${PEER_WS} has not taken it for 10 minutes` }]);
+    // Later passes: raised once.
+    expect((await stalls.pass()).raised).toEqual([]);
+
+    links().takeLink(linkId, { workspaceId: PEER_WS, requestId: PEER_REQUEST, workerId: PEER_WORKER });
+    expect((await stalls.pass()).cleared).toEqual([peerAlertOf()]);
+    expect(fake.sends).toEqual([]);
+  });
+
+  it.each(["finished", "stopped"] as const)("an asking request whose newest report is %s raises no peer-unanswered, and clears the one it had", async (phase) => {
+    clock = when(2);
+    const linkId = ask(false);
+    await seed([...handedOver(), relayed("received", at(1, 10))]);
+    const fake = daemonWith(fakeAgentsFor());
+    const stalls = watcher();
+    stalls.usePaseo(fake.paseo);
+    clock = new Date(when(2).getTime() + PEER_UNANSWERED_MS);
+    expect((await stalls.pass()).raised).toContain(peerAlertOf());
+
+    await seed([relayed(phase, at(11, 30))]);
+    expect((await stalls.pass()).cleared).toContain(peerAlertOf());
+    expect(alerts().list({ open: true }).map((alert) => alert.kind)).not.toContain("peer-unanswered");
+    // Later passes raise it no more; the pass never changes the link.
+    expect((await stalls.pass()).raised).toEqual([]);
+    expect(links().get(linkId)!.state).toBe("open");
   });
 });

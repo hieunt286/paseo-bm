@@ -10,6 +10,7 @@ import {
   createDecisionMaterialiser,
   materialiseTurn,
   normalisedQuestion,
+  openQuestions,
   reopensOf,
   workerOfRequest,
   type MaterialiserDeps,
@@ -17,6 +18,8 @@ import {
 import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { handleDecisionsAnswer, handleDecisionsList } from "../plugin/server/decision-rpc";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
+import { createRequestRegistry } from "../plugin/server/request-registry";
+import { applyReviewBudgetGrants, policyGrantCapAt } from "../plugin/server/review-tools";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
 import { GRANT_TTL_MS, answerDecision, confirmDecision, markNeedsConfirmation, type Decision } from "../plugin/shared/decisions";
@@ -323,6 +326,22 @@ describe("settling through the Manager (§A.5 b)", () => {
       deps(),
     );
     expect(outcome.answered.map((decision) => decision.id)).toEqual([idOf("Q9")]);
+  });
+
+  it("logs a chat answer it refused because the card had settled the question; its own answer read again is not one (design §7.17.8 c)", async () => {
+    await ask();
+    store().transition(idOf("Q1"), (decision) => answerDecision(decision, { via: "chat-card", optionKey: "c", at: at(5) }), WORKSPACE_ID);
+    const outcome = await materialiseTurn(
+      managerTurn({ sent: [msg(MANAGER, at(6), "b for Q1, a for Q2", "user")], received: [msg(MANAGER, at(7), answers(["Q1: b — Push both", "Q2: a — SQLite"]))] }),
+      deps(),
+    );
+    expect(outcome.answered.map((decision) => decision.id)).toEqual([idOf("Q2")]);
+    expect(get("Q1")?.answer).toMatchObject({ via: "chat-card", optionKey: "c" });
+    expect(logs).toEqual([`[paseo-bm] the chat-manager answer to ${idOf("Q1")} was not recorded: decision ${idOf("Q1")} is answered by the owner; it can no longer be answered.`]);
+    // The turn that answered Q2 read again: Q2 is refused as settled by that same answer, which is no news.
+    logs.length = 0;
+    await materialiseTurn(managerTurn({ sent: [msg(MANAGER, at(6), "a for Q2", "user")], received: [msg(MANAGER, at(7), answers(["Q2: a — SQLite"]))] }), deps());
+    expect(logs).toEqual([]);
   });
 
   it("a failing settlement hook is logged, never thrown", async () => {
@@ -745,5 +764,86 @@ describe("owner precedents (autonomy design §B.6)", () => {
     const other = await materialiseTurn(managerTurn({ sent: [msg(MANAGER, at(3), report(ON_SUBJECTS, OTHER_REQUEST), "agent")] }), deps());
     expect(other.answered.map((decision) => decision.id)).toEqual([idOf("Q2", OTHER_REQUEST)]);
     expect(get("Q2", OTHER_REQUEST)?.answer).toMatchObject({ by: "precedent", optionKey: "b", precedentId: database.id });
+  });
+
+  it("a review-budget question in a project whose cost cell delegates is answered by the policy as it opens, within the tier's cap (design §7.17.8 a)", () => {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Small", phase: "blocked", at: NOW });
+    const budget = (id: string, calls: number) => ({
+      id,
+      text: "Review budget reached: allow more review calls?",
+      subject: "review-budget",
+      class: "cost" as const,
+      options: [
+        { key: "a", text: `${calls} more calls`, recommended: true, effects: ["none" as const], grant: { calls } },
+        { key: "b", text: "No more reviews", recommended: false, effects: ["none" as const] },
+      ],
+    });
+    const open = (question: ReturnType<typeof budget>) => {
+      const outcome = { opened: [] as Decision[], superseded: [] as Decision[], answered: [] as Decision[], reversed: [] as Decision[] };
+      openQuestions({ home, store: store(), workspaceId: WORKSPACE_ID, now: NOW, log: (message) => logs.push(message), outcome }, { requestId: REQUEST, questions: [question], askedBy: WORKER, askedAt: NOW });
+      return outcome;
+    };
+
+    // cost not delegated: it waits for the owner, as before.
+    expect(open(budget("Q1", 2)).answered).toEqual([]);
+    expect(get("Q1")?.status).toBe("open");
+
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "cost", mode: "delegate", confirmed: true }, NOW);
+    // Within the Small cap (2): answered by the policy with the recommended option, and the grant recorded; no card.
+    const within = open(budget("Q2", 2));
+    expect(within.answered.map((decision) => decision.id)).toEqual([idOf("Q2")]);
+    expect(within.opened.map((decision) => decision.status)).toEqual(["answered"]);
+    expect(get("Q2")?.answer).toMatchObject({ by: "policy", via: "inbox", optionKey: "a", class: "cost" });
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.reviews.grants).toEqual([{ decisionId: idOf("Q2"), calls: 2, untilCleanBatch: null }]);
+    // Over the cap: it waits.
+    expect(open(budget("Q3", 3)).answered).toEqual([]);
+    expect(get("Q3")?.status).toBe("open");
+    expect(logs).toEqual([]);
+  });
+
+  it("the policy grants a request at most its tier's budget in all: past it a review-budget question waits; the owner's grants do not count (design §7.17.8 a)", () => {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Small", phase: "blocked", at: NOW });
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "cost", mode: "delegate", confirmed: true }, NOW);
+    const budget = (id: string, calls: number) => ({
+      id,
+      text: `Review budget reached (${id}): allow more review calls?`,
+      subject: "review-budget",
+      class: "cost" as const,
+      options: [
+        { key: "a", text: `${calls} more calls`, recommended: true, effects: ["none" as const], grant: { calls } },
+        { key: "b", text: "No more reviews", recommended: false, effects: ["none" as const] },
+      ],
+    });
+    const answeredAt = (question: ReturnType<typeof budget>) => {
+      const outcome = { opened: [] as Decision[], superseded: [] as Decision[], answered: [] as Decision[], reversed: [] as Decision[] };
+      openQuestions({ home, store: store(), workspaceId: WORKSPACE_ID, now: NOW, log: (message) => logs.push(message), outcome }, { requestId: REQUEST, questions: [question], askedBy: WORKER, askedAt: NOW });
+      return outcome.answered.map((decision) => decision.id);
+    };
+    const callsGranted = () => createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.reviews.grants.map((grant) => [grant.decisionId, grant.calls]);
+
+    // The Small budget is 2: the policy grants 1, then the owner grants 3 on a question the policy may not answer.
+    expect(answeredAt(budget("Q1", 1))).toEqual([idOf("Q1")]);
+    expect(answeredAt(budget("Q2", 3))).toEqual([]);
+    const owners = store().transition(idOf("Q2"), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: NOW }), WORKSPACE_ID);
+    expect(owners.status).toBe("updated");
+    applyReviewBudgetGrants(owners.status === "updated" ? [owners.decision] : [], { home, log: (message) => logs.push(message) });
+    // The owner's grant leaves the policy's room as it was: 1 more call.
+    expect(answeredAt(budget("Q3", 1))).toEqual([idOf("Q3")]);
+    // The policy has granted 2 in all: one more call waits for the Orchestrator or the owner.
+    expect(answeredAt(budget("Q4", 1))).toEqual([]);
+    expect(get("Q4")?.status).toBe("open");
+    expect(callsGranted()).toEqual([
+      [idOf("Q1"), 1],
+      [idOf("Q2"), 3],
+      [idOf("Q3"), 1],
+    ]);
+    // bm_decide's check reads the same room: none left for the policy.
+    expect(policyGrantCapAt(home, WORKSPACE_ID, REQUEST)).toBe(0);
+    expect(decideRefusalOf(createAutonomyStore(home).read(), get("Q4")!, { optionKey: "a", finishedUnverified: false, grantCap: 0 })).toMatch(/at most \{ calls: 0 \} now/);
+    expect(logs).toEqual([]);
   });
 });

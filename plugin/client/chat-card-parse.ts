@@ -17,7 +17,7 @@
  * | (the same) | a `BM-DELIVERY report` or `review` of the outbox (design §16.7): the card of the block after its marker line, `received` |
  * | `brief` | another agent's message that names a request (a request brief, a review request) |
  * | `action` | a delivered `BM-COMMAND` (v2, v1 still read) |
- * | `notice` | every other plugin notice (a `BM-DELIVERY message` or `no-verdict` included), and a Manager's copy of a Worker command: one compact line |
+ * | `notice` | every other plugin notice (a `BM-DELIVERY message`, `no-verdict` or peer delivery included), and a Manager's copy of a Worker command: one compact line |
  *
  * There is no other question UI: no reply box, no answered chip, no "Mark as
  * answered", no "Use recommendations", no question rows. One question has one
@@ -55,6 +55,7 @@ import {
   STATE_NOTICE_MARKER,
   noticeMarkerOf,
   parseDelivery,
+  type PEER_DELIVERY_KINDS,
 } from "../shared/notices";
 import {
   COMMAND_FROM,
@@ -408,12 +409,43 @@ function deliveredBlockCardsOf(text: string): ChatCard[] | undefined {
 function deliveryCardOf(text: string): ChatCard | null {
   const delivery = parseDelivery(text);
   if (delivery === null) return null;
+  const peer = PEER_WORDS[delivery.kind as (typeof PEER_DELIVERY_KINDS)[number]];
+  if (peer !== undefined) return peerCardOf(text, delivery.body, peer);
   const words = delivery.kind === "message" || delivery.kind === "no-verdict" ? DELIVERY_WORDS[delivery.kind] : { what: `A ${delivery.kind}`, tone: "muted" as Tone };
   const requestId = requestIdFromText(delivery.body) ?? BARE_REQUEST_ID.exec(delivery.body)?.[0] ?? null;
   const batchId = LINE_OF("batchId").exec(delivery.body)?.[1]?.trim() ?? "";
   // A no-verdict's body is fields and the fixed sentence: its batch says the rest.
   const gist = delivery.kind === "no-verdict" ? (batchId === "" ? "" : `Batch ${batchId}`) : gistOf(delivery.body);
   return noticeCard(text, requestId, { marker: DELIVERY_NOTICE_MARKER, what: words.what, tone: words.tone, project: null }, gist);
+}
+
+/** How a peer delivery's notice line opens (design §7.17.4). */
+const PEER_WORDS: Readonly<Record<(typeof PEER_DELIVERY_KINDS)[number], string>> = {
+  peer: "From project",
+  "peer-reply": "Reply from project",
+  "peer-message": "Message from project",
+};
+
+/** `from: project "<title>" (<workspaceId>)`, then a `peer`'s or `peer-reply`'s request and a `peer-reply`'s phase. */
+const PEER_FROM = /^from: project ("(?:[^"\\\n]|\\.)*") \([^)\n]*\)(?:, request ([^,\s]+))?(?:, phase: (\S+))?/m;
+
+/**
+ * The notice line of a peer delivery (design §7.17.4): from which project,
+ * gist = the first line of the quoted text. No request id: the one in its body
+ * is the other project's; a `peer-reply` names it as text only, with its phase.
+ */
+function peerCardOf(text: string, body: string, words: string): ChatCard {
+  const from = PEER_FROM.exec(body);
+  let title = "?";
+  try {
+    title = from === null ? title : String(JSON.parse(from[1]!));
+  } catch {
+    // A broken title stays "?".
+  }
+  const phase = from?.[3];
+  const what = `${words} ${title}${phase === undefined ? "" : ` (${phase}) · request ${from?.[2] ?? "?"}`}`;
+  const quote = body.split("\n").filter((line) => line.startsWith(">")).join("\n");
+  return noticeCard(text, null, { marker: DELIVERY_NOTICE_MARKER, what, tone: "muted", project: null }, gistOf(quote));
 }
 
 /** The decision card of a `BM-ANSWER` notice (autonomy design §A.6), or null when it names no decision. */

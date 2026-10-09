@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
+import { CUT_NOTE_LINE, clearSeenTurns, createInterruptionWatch } from "../plugin/server/interruption-watch";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { createOutbox } from "../plugin/server/outbox";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
@@ -8,6 +9,7 @@ import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import { handSentReportKeysOf, relayUnboundBlocks, writtenReportsOf } from "../plugin/server/unbound-relay";
 import { parseDelivery } from "../plugin/shared/notices";
 import type { Decision } from "../plugin/shared/decisions";
+import type { TraceRecord } from "../plugin/shared/contracts";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 import { bindAgent } from "./helpers/bindings";
@@ -29,6 +31,7 @@ afterEach(() => {
   clearBindingCache();
   clearDecisionStoreCache();
   clearRequestRegistryCache();
+  clearSeenTurns();
   removeDataFolders();
 });
 
@@ -140,6 +143,30 @@ describe("an unbound Worker's blocks reach its parent (ADR-027 decision 9, amend
     expect(fake.sends).toHaveLength(1);
   });
 
+  it("relays only the newest report of a request in one turn; the earlier one's questions still open (design §7.17.8 d)", async () => {
+    const { home, fake, relay, turn, opened } = setup();
+    const OTHER = "req-20261003T110000Z";
+    const q2 = QUESTIONS.replace("Q1: Greeting — with a comma or without? [subject: greeting-comma]", "Q2: Exclamation mark? [subject: greeting-mark]");
+    const otherReport = REPORT_RECEIVED.replace(REQ, OTHER);
+    // Streamed replies join into one message, as a turn writes them.
+    const event = turn([[`${REPORT_BLOCKED}\n${QUESTIONS}`, `Asked again.\n\n${REPORT_BLOCKED}\n${q2}`, `The other one:\n\n${otherReport}`].join("\n\n")]);
+    const outcome = await relay(event);
+    expect(outcome).toMatchObject({ status: "done", skipped: 1 });
+    // One delivery per request: the newest of REQ, and OTHER's own.
+    expect(reports(home).map((record) => [record.requestId, record.text])).toEqual([
+      [REQ, `${REPORT_BLOCKED}\n${q2}`],
+      [OTHER, otherReport],
+    ]);
+    expect(fake.sends).toHaveLength(1);
+    // Both blocks' questions opened, asked by the Worker.
+    const store = createDecisionStore(home);
+    expect([store.get(`q:${REQ}:Q1`, WS)?.status, store.get(`q:${REQ}:Q2`, WS)?.status]).toEqual(["open", "open"]);
+    expect(opened.flat().map((decision) => decision.id)).toEqual([`q:${REQ}:Q1`, `q:${REQ}:Q2`]);
+    // Read again: nothing more is delivered or opened.
+    expect(await relay(event)).toMatchObject({ relayed: [], skipped: 3 });
+    expect(reports(home)).toHaveLength(2);
+  });
+
   it("finds the parent by its label when the event names none, and leaves a Worker without one in its chat", async () => {
     const labelled = setup({ parent: null, labels: { "bm.role": "worker", "paseo.parent-agent-id": MANAGER } });
     await labelled.relay(labelled.turn([REPORT_RECEIVED]));
@@ -173,5 +200,36 @@ describe("an unbound Worker's blocks reach its parent (ADR-027 decision 9, amend
     expect(handSentReportKeysOf([{ type: "user_message", text: "go" }, { type: "tool_call", name: "paseo.send_agent_prompt", input: { prompt: REPORT_FINISHED } }])).toEqual(
       new Set([`${REQ}|finished`]),
     );
+  });
+});
+
+describe("a relayed stopped report after a Paseo cut (design §7.17.8 g)", () => {
+  const REPORT_STOPPED = [`BM-REPORT`, `requestId: ${REQ}`, `phase: stopped`, `tier: Small (changed: no)`, `buildAndTests: not run`, `blockers: none`].join("\n");
+
+  it("carries the note line when the turn followed a Paseo cut, once; not after the owner's message, and never on another phase", async () => {
+    const cutAt = Date.parse("2026-10-03T10:04:00.000Z");
+    const watch = createInterruptionWatch({ now: () => cutAt + 1_500, setTimer: () => undefined });
+    watch.turnRecorded({ agentId: WORKER, role: "worker", outcome: "canceled", startedAt: "2026-10-03T10:00:00.000Z", endedAt: new Date(cutAt).toISOString(), sent: [] } as unknown as TraceRecord, undefined);
+    watch.turnStarted(WORKER);
+
+    const { home, fake, relay, turn } = setup();
+    // The turn's opening message is the agent's (no clientMessageId): Paseo's delivery, not the owner.
+    const event = turn([REPORT_STOPPED]);
+    expect((await relay(event)).relayed).toHaveLength(1);
+    const [stopped] = reports(home);
+    expect(stopped!.text).toBe(`${REPORT_STOPPED}\n\n${CUT_NOTE_LINE}`);
+    expect(fake.sends).toEqual([{ id: MANAGER, text: `BM-DELIVERY report ${stopped!.id}\n${REPORT_STOPPED}\n\n${CUT_NOTE_LINE}` }]);
+    // Read again: relayed once.
+    expect(await relay(event)).toMatchObject({ relayed: [], skipped: 1 });
+    // Another phase in the same turn carries no note.
+    const other = setup();
+    await other.relay(other.turn([REPORT_RECEIVED]));
+    expect(reports(other.home)[0]!.text).toBe(REPORT_RECEIVED);
+
+    // The owner typed the message that opened the turn: their stop, no note.
+    const owner = setup();
+    const typed = { ...owner.turn([REPORT_STOPPED]), timeline: [{ type: "user_message", text: "Stop.", clientMessageId: "m-1" }, { type: "assistant_message", text: REPORT_STOPPED }] };
+    await owner.relay(typed);
+    expect(reports(owner.home)[0]!.text).toBe(REPORT_STOPPED);
   });
 });

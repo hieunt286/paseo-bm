@@ -94,6 +94,8 @@ const RUNTIME_ENV_READS: Readonly<Record<string, string>> = {
   "server/collector.ts redactText": "reads the values of SECRET_ENV_VARS, only to mask them before anything is written (REQ-048b)",
   "server/data-home.ts pickEnv": "reads PASEO_BM_HOME and the variables that move ~/.paseo, ~/.claude and ~/.codex, to keep the data folder out of them",
   "server/repo-tool.ts gitEnv": "hands git the plugin's environment minus the GIT_* variables that would redirect it; reads no value",
+  "server/role-hook.ts claimHookBinding": "reads only paseo-bm's own PASEO_BM_HOOK_BINDING tag from a new agent's creation env (not the plugin's environment) and hands the rest back unread (§7.17.7)",
+  "server/role-hook.ts hookBindingFor": "adds paseo-bm's own PASEO_BM_HOOK_BINDING tag to a new agent's creation env, copying the rest unread; reads no value of the plugin's environment (§7.17.7)",
 };
 
 /**

@@ -320,6 +320,56 @@ describe("the Manager's bm_decisions (autonomy design §A.9)", () => {
   });
 });
 
+describe("an unbound Manager's bm_answers checked against the decision stores (design §7.17.8 c)", () => {
+  const REQUEST = "req-20260929T073348Z";
+  const message = (answers: unknown[], id = 1) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "bm_answers", arguments: { requestId: REQUEST, answers } } });
+  afterEach(() => clearDecisionStoreCache());
+
+  it("refuses an answer to a question settled on its card, naming the standing answer; open, unknown and ambiguous ones get the builder unchanged", async () => {
+    const dir = home();
+    const store = createDecisionStore(join(dir, ".paseo-bm"));
+    // Q1 answered on its card; Q2 open; Q3 stored in two projects (no unique match); Q4 expired.
+    store.open(makeDecision({ id: `q:${REQUEST}:Q1` }));
+    store.transition(`q:${REQUEST}:Q1`, (decision) => answerDecision(decision, { via: "chat-card", optionKey: "c", at: "2026-09-29T07:50:00.000Z" }));
+    store.open(makeDecision({ id: `q:${REQUEST}:Q2` }));
+    for (const workspaceId of ["wks_1", "wks_2"]) {
+      store.open(makeDecision({ id: `q:${REQUEST}:Q3`, workspaceId }));
+      store.transition(`q:${REQUEST}:Q3`, (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: "2026-09-29T07:51:00.000Z" }), workspaceId);
+    }
+    store.open(makeDecision({ id: `q:${REQUEST}:Q4`, status: "expired", settledAt: "2026-09-29T08:00:00.000Z" }));
+    // Q5 answered by the owner's policy as it opened (stored via inbox): the refusal names the policy, not the card.
+    store.open(makeDecision({ id: `q:${REQUEST}:Q5` }));
+    store.transition(`q:${REQUEST}:Q5`, (decision) => answerDecision(decision, { by: "policy", via: "inbox", optionKey: "a", reason: "Delegated", at: "2026-09-29T07:52:00.000Z" }));
+    const { endpoint, logs } = await start(dir);
+    const url = endpoint.urlFor("manager")!;
+    const before = snapshot(dir);
+
+    const refused = await rpc(url, message([{ id: "Q1", option: "b", optionText: "Push both and publish" }, { id: "Q2", option: "a", optionText: "Push contract only" }, { id: "Q4", other: "yes" }, { id: "Q5", option: "b", optionText: "Push both and publish" }]));
+    expect(refused.body.result).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: [
+            "The block was not built:",
+            "- Q1 was answered on its card at 2026-09-29T07:50:00.000Z (option c); that answer stands — tell the owner, and a change needs the Worker to ask again",
+            "- Q4 is expired since 2026-09-29T08:00:00.000Z; it can no longer be answered — tell the owner, and a change needs the Worker to ask again",
+            "- Q5 was answered by your policy at 2026-09-29T07:52:00.000Z (option a); that answer stands — tell the owner, and a change needs the Worker to ask again",
+          ].join("\n"),
+        },
+      ],
+    });
+    expect(logs).toContain("[paseo-bm] bm_answers refused its input for a manager");
+    for (const answers of [[{ id: "Q2", option: "a", optionText: "Push contract only" }], [{ id: "Q3", option: "a", optionText: "Push" }, { id: "Q9", other: "no" }]]) {
+      const built = await rpc(url, message(answers, 2));
+      expect(built.body).toEqual(answer("manager", message(answers, 2)));
+      expect(built.body.result.content[0].text).toMatch(/^BM-ANSWERS\n/);
+    }
+    // Read only.
+    expect(snapshot(dir)).toEqual(before);
+  });
+});
+
 describe("the Orchestrator's secret kept across restarts (design §5.1)", () => {
   const made = new Date("2026-09-28T09:00:00.000Z");
   const later = new Date("2026-09-29T08:00:00.000Z");
@@ -646,7 +696,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     const { endpoint } = await start();
     const store = endpoint.bindings!;
     const list = async (url: string) => (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((tool: { name: string }) => tool.name);
-    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1")}`)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
+    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1")}`)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]);
     expect(await list(endpoint.urlFor("manager")!)).toEqual(["bm_answers", "bm_decisions"]);
     // A pending binding lists them; calling waits for the binding (the shared guard).
     const pending = store.issue({ role: "manager", workspaceId: "wks_1" }).token;
@@ -656,11 +706,11 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     expect(await list(endpoint.urlFor("reviewer")!)).toEqual(["bm_review"]);
     const bindAs = (role: "worker" | "reviewer", agentId: string) =>
       bindAgent(store, agentId, { role, workspaceId: "wks_1", requestId: "req-20261003T100000Z", parentId: "agent-m1", batchId: role === "reviewer" ? "b1" : null });
-    expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
+    expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
     expect(await list(`${endpoint.urlFor("reviewer")!}/${bindAs("reviewer", "agent-r1")}`)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).not.toContain("bm_create_worker");
-    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
-    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"]);
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]);
+    expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"]);
   });
 
   it("refuses an unbound caller with one line, creating nothing, and logs it as a served tool", async () => {
@@ -682,7 +732,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
       const request = { config: { provider: "bm-manager/claude-opus-5", cwd: "/repo", mcpServers: { [AGENT_TOOLS_SERVER]: { type: "http", url: `${urlFor("manager")}/${token}` } } } } as unknown as AgentCreateRequest;
       return applyAgentTools(request, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
     };
-    expect(created()).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_decisions"]);
+    expect(created()).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]);
     // A creation without a token: the role path and today's list.
     expect(applyAgentTools({ config: { provider: "bm-manager", cwd: "/repo" } } as unknown as AgentCreateRequest, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool)).toEqual([
       "bm_answers",

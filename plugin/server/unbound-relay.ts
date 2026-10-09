@@ -23,7 +23,11 @@
  *   `send_agent_prompt` (an agent on older instructions): that copy reached
  *   the Manager already, and the materialiser reads it there;
  * - no record of the Worker holds the same text already (a turn end read
- *   again, a reload): a block is relayed once.
+ *   again, a reload): a block is relayed once;
+ * - it is the newest report of its request in the turn (design §7.17.8 d): a
+ *   turn that wrote `received` and then `finished` relays only `finished`, so
+ *   the Manager is not asked to answer a stale phase. An earlier block is not
+ *   delivered, but its questions still open.
  *
  * The questions open through the materialiser's shared open path
  * (`openQuestions`), asked by the Worker, and a `finished` report expires the
@@ -32,7 +36,9 @@
  * no longer reaches. A `finished` or `stopped` report clears the request's
  * `delivery-dropped` alert, as `bm_report` does. Opened decisions go to
  * `onOpened` (the event bus), and a question a precedent answered at once to
- * `onSettled` (its delivery to the Worker).
+ * `onSettled` (its delivery to the Worker). A `stopped` report written in the
+ * first turn after a Paseo cut (`followsPaseoCut`) carries `CUT_NOTE_LINE` in
+ * its delivery (design §7.17.8 g).
  *
  * Nothing here throws into a turn end: a failure is one log line.
  */
@@ -43,6 +49,7 @@ import { joinStreamedText, redactText, sliceLastTurn } from "./collector";
 import { createDecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { expireQuestionsOf, openQuestions, type OpenContext } from "./decision-materialiser";
+import { CUT_NOTE_LINE, followsPaseoCut } from "./interruption-watch";
 import type { NoticePaseo, NoticeQueue } from "./notice-queue";
 import { clearDroppedAlert, createOutbox, storeAndDeliver, type OutboxDeps } from "./outbox";
 import { reasonOf } from "./role-choices";
@@ -61,7 +68,7 @@ export interface RelayOutcome {
   status: "not-unbound-worker" | "no-parent" | "done" | "failed";
   /** The record ids it stored and delivered, oldest first. */
   relayed: string[];
-  /** Blocks left out: already relayed, or sent by hand in the turn. */
+  /** Blocks left out: already relayed, sent by hand in the turn, or followed by a newer report of the same request. */
   skipped: number;
 }
 
@@ -196,21 +203,32 @@ export async function relayUnboundBlocks(event: TurnEndedEvent, deps: RelayDeps)
     const store = createDecisionStore(deps.home, { log });
     const opened: Decision[] = [];
     const answered: Decision[] = [];
-    for (const report of written) {
+    const cut = written.some((report) => report.phase === "stopped") && (await followsPaseoCut(agent.id, () => timeline));
+    // What the Manager's turn end did for a hand-sent block: open its questions.
+    const openOf = (report: WrittenReport, at: string) => {
+      const set = report.questions === null ? null : parseQuestions(report.questions);
+      if (set === null || set.questions.length === 0) return;
+      const context: OpenContext = { home: deps.home, store, workspaceId, now: at, log, outcome: { opened, superseded: [], answered, reversed: [] } };
+      openQuestions(context, { requestId: set.requestId ?? report.requestId, questions: set.questions, askedBy: agent.id, askedAt: at });
+    };
+    for (const [index, report] of written.entries()) {
       const text = redactText(report.text, env);
-      const known = outbox.list(workspaceId).some((record) => record.from === agent.id && record.kind === "report" && record.text === text);
+      const noted = `${text}\n\n${CUT_NOTE_LINE}`;
+      const known = outbox.list(workspaceId).some((record) => record.from === agent.id && record.kind === "report" && (record.text === text || record.text === noted));
       if (known || handSent.has(`${report.requestId}|${report.phase}`)) {
         outcome.skipped += 1;
         continue;
       }
       const at = now().toISOString();
-      const { record } = await storeAndDeliver(workspaceId, { kind: "report", requestId: report.requestId, from: agent.id, to: parentId, text: report.text }, delivery, () => {
-        // What the Manager's turn end did for a hand-sent block: open its questions, expire on finished.
-        const set = report.questions === null ? null : parseQuestions(report.questions);
-        if (set !== null && set.questions.length > 0) {
-          const context: OpenContext = { home: deps.home, store, workspaceId, now: at, log, outcome: { opened, superseded: [], answered, reversed: [] } };
-          openQuestions(context, { requestId: set.requestId ?? report.requestId, questions: set.questions, askedBy: agent.id, askedAt: at });
-        }
+      // Design §7.17.8 d: a newer report of the same request in this turn is the one delivered.
+      if (written.slice(index + 1).some((later) => later.requestId === report.requestId)) {
+        openOf(report, at);
+        outcome.skipped += 1;
+        continue;
+      }
+      const sent = cut && report.phase === "stopped" ? `${report.text}\n\n${CUT_NOTE_LINE}` : report.text;
+      const { record } = await storeAndDeliver(workspaceId, { kind: "report", requestId: report.requestId, from: agent.id, to: parentId, text: sent }, delivery, () => {
+        openOf(report, at);
         if (report.phase === "finished") expireQuestionsOf({ store, workspaceId, log }, report.requestId, at);
         if (report.phase === "finished" || report.phase === "stopped") clearDroppedAlert(deps.home, workspaceId, report.requestId, null, { now });
       });

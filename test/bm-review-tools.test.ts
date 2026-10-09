@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import { answer, binderOf, withAgentTools } from "../plugin/server/agent-tools";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { clearDecisionStoreCache } from "../plugin/server/decision-store";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE } from "../plugin/server/manager";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
@@ -16,6 +17,7 @@ import {
   budgetRefusal,
   budgetRefusalOf,
   createReviewTools,
+  policyGrantCapAt,
   rereviewLineOf,
   reviewBudgetStateOf,
   ruleReviewGrantOf,
@@ -29,7 +31,7 @@ import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store
 import { reviewCallsOf, type ReconstructedTrace } from "../plugin/server/traces";
 import { toolFacesFor } from "../plugin/shared/bm-tools";
 import { decideRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
-import { answerDecision, type Decision } from "../plugin/shared/decisions";
+import { answerDecision, policyGrantCapOf, type Decision } from "../plugin/shared/decisions";
 import { parseDelivery, reviewCallIdOf, reviewerBriefLineOf } from "../plugin/shared/notices";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
@@ -152,7 +154,7 @@ const parsed = (result: { ok: boolean; text: string }) => JSON.parse(result.text
 
 describe("the bound Worker's list (design §16.6)", () => {
   it("lists and pre-approves bm_create_reviewer and bm_rereview after bm_questions; an unbound Worker never lists them", () => {
-    const names = ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_reply"];
+    const names = ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_reply"];
     expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(names);
     expect(toolFacesFor("worker").map((face) => face.name)).toEqual(["bm_report", "bm_reply"]);
     const empty: { toolPolicy?: { preapproved?: Array<{ tool: string }> } } = {};
@@ -491,7 +493,7 @@ describe("the review-budget grant (design §16.8)", () => {
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => grant.calls)).toEqual([1]);
   });
 
-  it("the owner's policy grants at most { calls: 2 }: a larger or untilClean option is never its choice, and such an answer grants nothing", () => {
+  it("the owner's policy grants at most { calls: 2 } under the default Small budget: a larger or untilClean option is never its choice, and such an answer grants nothing", () => {
     const home = dataFolder();
     register(home, "Small");
     const policy: AutonomyPolicy = { projects: { [WS]: { cost: { mode: "delegate", at: T0.toISOString() } } }, challenger: {} };
@@ -508,6 +510,40 @@ describe("the review-budget grant (design §16.8)", () => {
     expect(applyReviewBudgetGrants([answered(budgetQuestion({ untilClean: "b1" }, `q:${REQ}:Q2`), "a", "policy")], { home })).toEqual([]);
     expect(applyReviewBudgetGrants([answered(budgetQuestion({ calls: 3 }, `q:${REQ}:Q3`), "a")], { home })).toEqual([`q:${REQ}:Q3`]);
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => grant.calls)).toEqual([3]);
+  });
+
+  it("the policy's cap is the request tier's own budget (design §7.17.8 a): 8 of a Large budget of 8 at both check points, 9 refused, untilClean never", () => {
+    const home = dataFolder();
+    register(home, "Large");
+    createCoordinationStore(home).set({ key: "review.largeBudget", value: 8 });
+    const policy: AutonomyPolicy = { projects: { [WS]: { cost: { mode: "delegate", at: T0.toISOString() } } }, challenger: {} };
+    const cap = policyGrantCapAt(home, WS, REQ);
+    expect(cap).toBe(8);
+    const choose = (grant: { calls: number } | { untilClean: string }) => decideRefusalOf(policy, budgetQuestion(grant), { optionKey: "a", finishedUnverified: false, grantCap: cap });
+    // bm_decide's check point.
+    expect(choose({ calls: 8 })).toBeNull();
+    expect(choose({ calls: 9 })).toBe(
+      `option a of q:${REQ}:Q1 grants more review calls than the owner's policy may (at most { calls: 8 } now: the request tier's budget, less the calls the policy already granted this request; never untilClean); choose a smaller grant or none, or leave decision q:${REQ}:Q1 to the owner`,
+    );
+    expect(choose({ untilClean: "b1" })).toContain("never untilClean");
+    // The grant's application: 8 granted, 9 and untilClean by the policy grant nothing.
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ calls: 8 }), "a", "policy")], { home })).toEqual([`q:${REQ}:Q1`]);
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ calls: 9 }, `q:${REQ}:Q2`), "a", "policy")], { home })).toEqual([]);
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ untilClean: "b1" }, `q:${REQ}:Q3`), "a", "policy")], { home })).toEqual([]);
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => grant.calls)).toEqual([8]);
+  });
+
+  it("no tier yet, or no request: the Small budget is the cap, never below 2 (design §7.17.8 a)", () => {
+    const home = dataFolder();
+    register(home, null);
+    expect(policyGrantCapAt(home, WS, REQ)).toBe(2);
+    createCoordinationStore(home).set({ key: "review.smallBudget", value: 3 });
+    createCoordinationStore(home).set({ key: "review.largeBudget", value: 8 });
+    expect(policyGrantCapAt(home, WS, REQ)).toBe(3);
+    expect(policyGrantCapAt(home, WS, null)).toBe(3);
+    expect(policyGrantCapAt(home, WS, "req-20261003T110000Z")).toBe(3);
+    expect(policyGrantCapOf(null, { Small: 1, Medium: 5, Large: 8 })).toBe(2);
+    expect(policyGrantCapOf("Medium", { Small: 1, Medium: 5, Large: 8 })).toBe(5);
   });
 
   it("an untilClean grant: its calls are counted but not refused, its one-re-review limit lifted, until the batch passes", async () => {
