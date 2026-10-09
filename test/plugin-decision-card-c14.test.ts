@@ -286,3 +286,12 @@ describe("decided for you by the Orchestrator (change-014, ADR-025)", () => {
     expect(decidedByWords(old)).toBe("your earlier policy");
   });
 });
+
+describe("a mission's card (missions design §4.1)", () => {
+  it("names the Main as its asker, not the plugin that stored it; another plugin card stays the plugin's", () => {
+    const card = makeDecision({ id: "m:mis-0123456789:1", workspaceId: "mis-0123456789", requestId: null, askedBy: { role: "plugin", agentId: "main-aix-0001" } });
+    expect(view(card).frame.actor).toEqual({ mark: "request", name: "Main" });
+    const held = makeDecision({ askedBy: { role: "plugin", agentId: null } });
+    expect(view(held).frame.actor).toEqual({ mark: null, name: "paseo-bm plugin" });
+  });
+});

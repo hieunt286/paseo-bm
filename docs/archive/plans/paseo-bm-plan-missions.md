@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Active |
+| Status | Completed (2026-10-10): Phases 0–3 built and accepted; archived |
 | Plan-ready | PASS — 2026-10-09 — Claude under the owner's delegation (the owner confirmed the needs on 2026-10-09: "Tôi đã xác nhận về nhu cầu của chúng ta") |
 | Owner | hieu.nt10 |
-| Routing decision | [ADR-029 § Routing Decision](../adr/ADR-029-missions-mains-and-a-process-governor.md#routing-decision) |
-| Requirements | [Missions PRD](../product/paseo-bm-missions-prd.md) REQ-184 → REQ-196, M-22 → M-27 |
-| Technical Design | [Missions design](../design/paseo-bm-missions.md) (cited as §n below) |
+| Routing decision | [ADR-029 § Routing Decision](../../adr/ADR-029-missions-mains-and-a-process-governor.md#routing-decision) |
+| Requirements | [Missions PRD](../../product/paseo-bm-missions-prd.md) REQ-184 → REQ-196, M-22 → M-27 |
+| Technical Design | [Missions design](../../design/paseo-bm-missions.md) (cited as §n below) |
 | ADRs | ADR-029, ADR-030 |
 | Branch | `feat/missions` (from `feat/peer-links` a30db32) |
 
@@ -51,7 +51,7 @@
 | WP-207 | Phase 2 docs as built and acceptance (M-26) | §12 | WP-201 → WP-206 |
 | **Phase 3** | | | |
 | WP-301 | A mockup of the Missions screen, approved by the owner | §10 | WP-116 |
-| WP-302 | The Missions screen as the approved mockup, checked visually at phone and desktop widths | §10 | WP-301 |
+| WP-302 | The Missions screen as the approved mockup, checked visually at phone and desktop widths: the RPCs (`missions.list`, `mission.get`, `mission.change`, `memory.list`), the client section, the visual check in a preview harness, then docs and acceptance | §10 | WP-301 |
 
 ## 3. Waves (files disjoint per wave; one build + verify per wave)
 
@@ -87,3 +87,5 @@ Targeted tests per WP by the implementing agents; `npm run build` and `npm run v
 |---|---|---|
 | 2026-10-09 | Claude for hieu.nt10 | Created after the independent design review; `plan-ready-for-beads` PASS |
 | 2026-10-09 | Claude for hieu.nt10 | Phase 2 built and accepted (record `operations/paseo-bm-missions-governor-acceptance-20261009.md`, M-26 0 of 4); from the run: `bm_split_mission` added to WP-204's scope (the owner's decision that a Main's split goes to the governor), ADR-031. Phase 3 waits for the mockup's approval |
+| 2026-10-10 | Claude for hieu.nt10 | The owner approved the mockup ("Tôi duyệt theo mockup"); §10 written in detail; WP-302 split into beads 9qc3.26.1 (RPCs) and .26.2 (client) in parallel, then .26.3 (visual check) and .26.4 (docs, acceptance) |
+| 2026-10-10 | Claude for hieu.nt10 | Phase 3 built and checked against the artboards (record `operations/paseo-bm-missions-screen-acceptance-20261010.md`); every phase done; plan archived. Releasing stays the owner's |

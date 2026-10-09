@@ -63,6 +63,7 @@ import { createInterventionCheck } from "./server/intervention-store";
 import { createCoordinationGuard } from "./server/coordination-guard";
 import { createActionBoundary } from "./server/action-boundary";
 import { registerMissionsHome } from "./server/missions-home";
+import { registerMissionsRpcs } from "./server/missions-rpc";
 import { adoptComposerManager, createLegacyMigration, handleManagerEnsure } from "./server/mission-legacy";
 import { agentsListRpc, managerEnsureRpc, rolesDescribeRpc, type FallbackIncident } from "./shared/contracts";
 import { dashboardSettings } from "./shared/settings";
@@ -251,6 +252,9 @@ export default function contribute(server: PluginServerContext): () => void {
   // Missions design §3.1–§3.3: missions.create and mission.ensure create Mains in the Missions home, bound by
   // the endpoint's binder; a Main archived by a cleared conversation is succeeded by the new bm-manager of the home.
   const missionsHome = registerMissionsHome(server, { binder: () => agentTools.binder, bindings: () => agentTools.bindings });
+  // Missions design §10.4: the Missions screen reads missions.list, mission.get and memory.list; mission.change is
+  // the owner's own change, applied on the m: card's path.
+  registerMissionsRpcs(server);
   const removeActionBoundary = actionBoundary.register(server);
   const removeStopPropagation = registerStopPropagation(server);
   // delta 20260918g §4.5: a bm-* agent created without its bm.role label gets it.

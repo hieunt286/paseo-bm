@@ -642,6 +642,8 @@ describe("layout and theme (structural)", () => {
     for (const file of [
       "../plugin/client/launch-manager.ts",
       "../plugin/client/launcher.tsx",
+      "../plugin/client/missions.tsx",
+      "../plugin/client/missions-model.ts",
       "../plugin/index.client.tsx",
     ]) {
       const source = readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");

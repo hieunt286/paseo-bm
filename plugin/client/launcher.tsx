@@ -5,9 +5,10 @@
  *
  * It is the section router of the management surface (autonomy design §A.12,
  * change-014 outcome 5): it opens on the Inbox, and the shell header
- * (`shell-header.tsx`, the approved mockup's bar) switches Inbox · Projects ·
- * Settings · Tools & skills, the Inbox tab carrying the count of what needs
- * the owner, and shows the Orchestrator's status. Projects is `work.tsx` (the projects,
+ * (`shell-header.tsx`, the approved mockup's bar) switches Inbox · Missions ·
+ * Projects · Settings · Tools & skills, the Inbox tab carrying the count of
+ * what needs the owner, and shows the Orchestrator's status. Missions is
+ * `missions.tsx` (missions design §10). Projects is `work.tsx` (the projects,
  * and a project's Overview · Requests · Beads · Metrics · Agents, Metrics
  * being `insights.tsx`); Settings is `settings-section.tsx`, built from the
  * Setup screen's pieces — so nothing that existed is out of reach; Tools &
@@ -24,8 +25,9 @@ import { AccessibilityInfo, Animated, Pressable, Text, View } from "react-native
 import { SettingsScreen } from "./settings-section";
 import { ToolsScreen, useToolsQueries } from "./tools-screen";
 import { InboxScreen, useInbox } from "./inbox";
+import { MISSIONS_QUERY_KEYS, MissionsScreen } from "./missions";
 import { insightsProjects } from "./insights-model";
-import { inboxTab } from "./inbox-model";
+import { INBOX_POLL_MS, inboxTab } from "./inbox-model";
 import { WorkScreen } from "./work";
 import { projectWorkspacesOf } from "./work-model";
 import {
@@ -47,7 +49,7 @@ import {
 import { ShellHeader } from "./shell-header";
 import type { TextTab } from "./text-tabs";
 import { toneColor, type Tone } from "./tone";
-import { managerEnsureRpc, tracesWorkspacesRpc, workspacesOverviewRpc } from "../shared/contracts";
+import { managerEnsureRpc, missionsListRpc, tracesWorkspacesRpc, workspacesOverviewRpc } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
 import {
   launcherStatusLines,
@@ -228,6 +230,7 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     queryFn: () => listStored({}),
   });
   const listOverview = useRpc(workspacesOverviewRpc);
+  const listMissions = useRpc(missionsListRpc);
   // Bead counts and running agents; read and refreshed only while the Projects
   // list shows them (delta 20260918f F5).
   const overview = useQuery({
@@ -292,16 +295,19 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
     () => (projectTabNow !== null && project !== null ? { workspaceId: project.id, tab: projectTabNow, nonce: (requestCount.current += 1) } : null),
     [view, project?.id],
   );
-  // A project's name for the Inbox: open workspaces first, then the history of closed ones.
+  // The missions name the Inbox's mission cards (an `m:` card's workspace is its mission, missions design §4.1).
+  const missions = useQuery({ queryKey: MISSIONS_QUERY_KEYS.list, queryFn: () => listMissions({}), refetchInterval: view === "inbox" ? INBOX_POLL_MS : false });
+  // A project's name for the Inbox: open workspaces first, then the history of closed ones, then the missions.
   const projectOf = useMemo(() => {
     const names = new Map<string, string>();
+    for (const mission of missions.data?.missions ?? []) names.set(mission.missionId, `Mission ${mission.code} · ${mission.name}`);
     for (const closed of stored.data?.workspaces ?? []) {
       if (closed.lastKnownName !== null) names.set(closed.workspaceId, closed.lastKnownName);
     }
     // The project's own name, as the mockup's group headings show it (change-014).
     for (const workspace of projectWorkspaces ?? []) names.set(workspace.id, workspace.label);
     return (workspaceId: string) => names.get(workspaceId) ?? null;
-  }, [stored.data, projectWorkspaces]);
+  }, [stored.data, projectWorkspaces, missions.data]);
   // Read every INBOX_POLL_MS while the Inbox shows, kept otherwise for the tab's count.
   const inbox = useInbox({
     visible: view === "inbox",
@@ -351,7 +357,7 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   }, [ensure, openAgent]);
 
 
-  // The section tabs, above every view: Inbox (with its count) · Projects · Settings · Tools & skills.
+  // The section tabs, above every view: Inbox (with its count) · Missions · Projects · Settings · Tools & skills.
   const tabs: TextTab[] = SURFACE_SECTIONS.map((section) => {
     if (section.key === "settings") {
       return { key: section.key, label: section.label, indicatorIcon: updates.data?.updateAvailable === true ? "Download" : null };
@@ -395,6 +401,13 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
 
   if (view === "inbox") {
     return framed(<InboxScreen {...props} data={inbox} status={status} onOpenWork={() => setView("projects")} />);
+  }
+
+  if (view === "missions") {
+    // Missions (missions design §10): the projects as Projects lists them, plugin homes left out.
+    return framed(
+      <MissionsScreen {...props} projects={(projectWorkspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.label }))} status={status} />,
+    );
   }
 
   if (view === "settings") {

@@ -36,6 +36,22 @@ describe("launcher.tsx: the Beads Manager surface", () => {
     expect(launcher).toMatch(/<ToolsScreen\b.*\bstatus=\{status\}/);
     // The Projects screen — the list and the chosen project's page beside it — gets it too (work.tsx draws it, F3).
     expect(launcher).toMatch(/<WorkScreen\b[\s\S]*?\bstatus=\{status\}/);
+    expect(launcher).toMatch(/<MissionsScreen\b.*\bstatus=\{status\}/);
+  });
+
+  it("routes the Missions section to its screen, with the projects as Projects lists them (missions design §10.1)", () => {
+    expect(launcher).toMatch(/if \(view === "missions"\) \{\s*\/\/[^\n]*\n\s*return framed\(\s*<MissionsScreen \{\.\.\.props\} projects=\{\(projectWorkspaces \?\? \[\]\)\.map/);
+    const missions = source("missions.tsx");
+    for (const rpc of ["missionsListRpc", "missionGetRpc", "missionChangeRpc", "missionEnsureRpc", "missionsCreateRpc", "autonomySetMissionLevelRpc", "memoryListRpc"]) {
+      expect(missions).toMatch(new RegExp(`useRpc\\(${rpc}\\)`));
+    }
+    // The list and the page are read every WORK_POLL_MS while they show (§10.1).
+    expect(missions).toMatch(/queryKey: MISSIONS_QUERY_KEYS\.list, queryFn: \(\) => listMissions\(\{\}\), \.\.\.pollWhile\(place\.view === "list"\)/);
+    expect(missions).toMatch(/queryKey: MISSIONS_QUERY_KEYS\.page\(missionId\), queryFn: \(\) => getMission\(\{ missionId \}\), \.\.\.pollWhile\(place\.view === "page"\)/);
+    // A project's page shows the same memory view in place (artboard F).
+    const work = source("work.tsx");
+    expect(work).toMatch(/onMemory: \(\) => setMemoryOpen\(true\)/);
+    expect(work).toMatch(/<ProjectMemory workspaceId=\{workspaceId\} onBack=\{\(\) => setMemoryOpen\(false\)\}/);
   });
 
   it("shows Settings and Tools & skills with the same props — the named projects and the strip —, and no Setup or Insights screen", () => {

@@ -110,7 +110,7 @@ describe("the plugin package", () => {
   it("describes the paseo.cafe install, not the retired one", () => {
     expect(pkg.description).toBe(
       "Beads Management for Paseo: a Beads Manager agent that hands each request to a Beads Worker, " +
-        'with an Inbox, Projects, Settings and Tools & skills. Install from paseo.cafe or with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+).',
+        'with an Inbox, Missions, Projects, Settings and Tools & skills. Install from paseo.cafe or with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+).',
     );
   });
 

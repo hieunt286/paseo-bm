@@ -8,7 +8,7 @@ import type { OrchestratorHeaderView } from "../plugin/client/orchestrator-model
 
 /**
  * The phone layout of the shell header and the Inbox (the MobileInbox
- * artboard, 390 wide): the header in two rows with four equal tabs, the
+ * artboard, 390 wide): the header in two rows with five equal tabs, the
  * filter on its own row, option rows with the label under the key line, the
  * card's last row and a held action's buttons as equal cells. The wide
  * layout is unchanged; the existing render tests pin it.
@@ -38,6 +38,7 @@ const flat = (style: unknown) => [style].flat(Infinity).reduce<Record<string, un
 
 const TABS = [
   { key: "inbox", label: "Inbox", badge: 13, accessibilityLabel: "Inbox: 13 need you" },
+  { key: "missions", label: "Missions" },
   { key: "projects", label: "Projects" },
   { key: "settings", label: "Settings" },
   { key: "tools", label: "Tools & skills" },
@@ -58,7 +59,7 @@ function header(view: OrchestratorHeaderView | null, compact: boolean) {
 }
 
 describe("the shell header on a phone", () => {
-  it("is two rows: a 48px brand-and-status row, then four equal 44px tabs with the short Tools", () => {
+  it("is two rows: a 48px brand-and-status row, then five equal 44px tabs with the short Tools (missions design §10.1 keeps Tools)", () => {
     const nodes = header(IDLE, true);
     const root = nodes[0] as RNode;
     const [top, nav] = root.children as RNode[];
@@ -66,8 +67,9 @@ describe("the shell header on a phone", () => {
     expect(texts([top!])).toEqual(["Beads Manager", "Orchestrator idle"]);
     expect(flat(nav!.props["style"])).toMatchObject({ height: 44 });
     const tabs = pressables([nav!]);
-    expect(tabs.map((tab) => tab.props["accessibilityLabel"])).toEqual(["Inbox: 13 need you", "Projects", "Settings", "Tools & skills"]);
-    expect(texts([nav!])).toEqual(["Inbox", "13", "Projects", "Settings", "Tools"]);
+    expect(tabs.map((tab) => tab.props["accessibilityLabel"])).toEqual(["Inbox: 13 need you", "Missions", "Projects", "Settings", "Tools & skills"]);
+    expect(texts([nav!])).toEqual(["Inbox", "13", "Missions", "Projects", "Settings", "Tools"]);
+    expect(tabs).toHaveLength(5);
     for (const tab of tabs) expect(flat(tab.props["style"])).toMatchObject({ flex: 1 });
   });
 
@@ -88,6 +90,7 @@ describe("the shell header on a phone", () => {
     expect(compactStatusText("Orchestrator not open")).toBe("Orchestrator not open");
     expect(compactTabs(TABS).map((tab) => [tab.label, tab.accessibilityLabel])).toEqual([
       ["Inbox", "Inbox: 13 need you"],
+      ["Missions", undefined],
       ["Projects", undefined],
       ["Settings", undefined],
       ["Tools", "Tools & skills"],

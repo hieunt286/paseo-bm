@@ -21,6 +21,8 @@ export interface ConfirmDialog {
   /** The body's colour; plain text when omitted. */
   bodyTone?: Tone;
   confirmLabel: string;
+  /** The confirm button's kind: `danger` for an act that ends something (closing a mission); `primary` when omitted. */
+  confirmKind?: "primary" | "danger";
   cancelLabel: string;
   /** What a screen reader hears for each button; the visible label when omitted. */
   confirmAccessibilityLabel?: string;

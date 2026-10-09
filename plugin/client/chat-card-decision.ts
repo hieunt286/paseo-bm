@@ -232,8 +232,10 @@ export function heldTitleOf(question: string): { title: string; why: string } | 
   return { title: `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${match[2]!}?`, why: `Held: ${match[3]!}.` };
 }
 
-function askerOf(role: DecisionSeed["asker"], agentId: string | null, agents: readonly ChatPeer[]): CardFrameView["actor"] {
+function askerOf(role: DecisionSeed["asker"], agentId: string | null, agents: readonly ChatPeer[], decisionId: string | null = null): CardFrameView["actor"] {
   if (role === "orchestrator") return { mark: "orchestrator", name: "Orchestrator" };
+  // A mission's card (`m:`) is stored by the plugin for the mission's Main, which asked (missions design §4.1).
+  if (role === "plugin" && decisionId?.startsWith("m:") === true) return { mark: "request", name: "Main" };
   if (role === "plugin") return { mark: null, name: "paseo-bm plugin" };
   return { mark: "worker", name: agentNamed(agentId, agents, "worker") };
 }
@@ -350,7 +352,7 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
   const seed = card.decision!;
   const decision = lookup.state === "found" ? lookup.decision : null;
   const frame: CardFrameView = {
-    actor: askerOf(decision?.askedBy.role ?? seed.asker, decision?.askedBy.agentId ?? null, agents),
+    actor: askerOf(decision?.askedBy.role ?? seed.asker, decision?.askedBy.agentId ?? null, agents, decision?.id ?? null),
     // The mockup's meta line: the asker, then when; a decision is always for the owner.
     recipient: null,
     authority: null,

@@ -3,7 +3,7 @@
  * approved mockup's `<header>`): one 56px bar on `surface1` with a bottom
  * border, drawn above every section — the brand (a 2×2 square mark in the
  * accent and "Beads Manager"), the section nav as underline text tabs (Inbox
- * with its count as a badge, Projects, Settings, Tools & skills), and at the
+ * with its count as a badge, Missions, Projects, Settings, Tools & skills), and at the
  * right the Orchestrator's status: an 8px square and "Orchestrator idle · N
  * projects watched", or "Orchestrator not open" with a text button "Start…"
  * that runs the start flow of the Inbox line (`useOrchestratorActions`).
@@ -12,7 +12,7 @@
  *
  * On a phone (`compact`, the MobileInbox artboard) the bar is two rows: a
  * 48px row with the brand and the short status ("Orchestrator idle", or "not
- * open" with "Start…"), then the section nav as four equal 44px tabs, Tools &
+ * open" with "Start…"), then the section nav as five equal 44px tabs, Tools &
  * skills labelled "Tools" (its accessibility label unchanged).
  *
  * Client rules: React Native primitives only, colours from the theme,
@@ -34,7 +34,7 @@ import { ConfirmBlock, ToneText, type Theme } from "./ui";
 export const SHELL_HEADER_HEIGHT = 56;
 /** The phone's first row (the MobileInbox artboard's 48px header). */
 export const COMPACT_HEADER_HEIGHT = 48;
-/** The phone's section nav: four equal tabs, 44px tall. */
+/** The phone's section nav: five equal tabs (Inbox, Missions, Projects, Settings, Tools; missions design §10.1), 44px tall. */
 export const COMPACT_NAV_HEIGHT = 44;
 /** How often the header re-reads `orchestrator.state`: it stays on screen, so slower than Work's rows. */
 export const HEADER_STATE_POLL_MS = 30_000;
@@ -131,7 +131,7 @@ export function OrchestratorStatus({
 
 /**
  * The bar itself, hook-free: one 56px row on a wide screen; on a phone the
- * 48px brand-and-status row, then the four equal section tabs.
+ * 48px brand-and-status row, then the five equal section tabs.
  */
 export function ShellHeaderBar({
   tabs,

@@ -484,7 +484,7 @@ export function ConfirmBlock({ dialog, busy, busyLabel, onConfirm, onCancel, sty
         )}
         <Button
           label={busy ? busyLabel : dialog.confirmLabel}
-          kind="primary"
+          kind={dialog.confirmKind ?? "primary"}
           accessibilityLabel={dialog.confirmAccessibilityLabel ?? dialog.confirmLabel}
           accessibilityState={{ disabled: busy, busy }}
           disabled={busy}

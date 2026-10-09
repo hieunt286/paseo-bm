@@ -264,10 +264,18 @@ export function chosenMissionChange(decision: Decision, optionKey: string | null
 export async function missionAnswerRefusalsOf(decision: Decision, optionKey: string | null, paseo: unknown, home: string): Promise<string[]> {
   const action = chosenMissionChange(decision, optionKey);
   if (action === null) return [];
+  return missionChangeRefusalsOf(action.missionId, action.change, paseo, home);
+}
+
+/**
+ * Why the owner's `change` of mission `missionId` cannot be applied now
+ * (`missionAnswerRefusalsOf`'s checks; the Missions screen's `mission.change`
+ * takes them too, missions design §10.4). Never throws.
+ */
+export async function missionChangeRefusalsOf(missionId: string, change: MissionChange, paseo: unknown, home: string): Promise<string[]> {
   try {
-    const mission = createMissionStore(home).get(action.missionId);
-    if (mission === null) return [`mission ${action.missionId} no longer exists`];
-    const { change } = action;
+    const mission = createMissionStore(home).get(missionId);
+    if (mission === null) return [`mission ${missionId} no longer exists`];
     const applied = applyMissionChange(mission, change, new Date(0).toISOString());
     const reasons = "reasons" in applied ? [...applied.reasons] : [];
     const taken = change.code === undefined ? undefined : codeTakenBy(home, change.code, mission.missionId);
@@ -349,17 +357,25 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
     const lines = missionChangeLinesOf(action.change).join("; ");
     store.appendJournal(missionId, { kind: "charter", by: "owner", text: `The owner applied ${decision.id}: ${lines}.`, ref: decision.id });
     await tellMain(missionId, decision.id, `The owner applied your card ${decision.id}: ${lines}.`, deps);
-    const mission = result.mission;
-    if ((action.change.name !== undefined || action.change.code !== undefined) && mission.mainId !== null) {
-      const titled = await syncMainTitle(mission, deps.cli);
-      if (!titled.ok) deps.log(`[paseo-bm] the Main of mission ${mission.code} could not be retitled: ${titled.reason}`);
-      if (action.change.code !== undefined) {
-        const labelled = await setAgentLabel(mission.mainId, MISSION_CODE_LABEL, mission.code, deps.cli).catch((error: unknown) => ({ ok: false as const, reason: errorText(error) }));
-        if (!labelled.ok) deps.log(`[paseo-bm] the Main of mission ${mission.code} could not be relabelled: ${labelled.reason}`);
-      }
-    }
+    await syncMainAfterChange(result.mission, action.change, deps);
   } catch (error) {
     deps.log(`[paseo-bm] applying ${decision.id} failed: ${errorText(error)}`);
+  }
+}
+
+/**
+ * After the owner's applied `change` (an `m:` card's, or the Missions
+ * screen's `mission.change`): the Main is retitled after a new name or code
+ * and its `bm.missionCode` label set after a new code. Each failure is one
+ * log line. Never throws.
+ */
+export async function syncMainAfterChange(mission: Mission, change: MissionChange, deps: Pick<MissionAnswerDeps, "log" | "cli">): Promise<void> {
+  if ((change.name === undefined && change.code === undefined) || mission.mainId === null) return;
+  const titled = await syncMainTitle(mission, deps.cli);
+  if (!titled.ok) deps.log(`[paseo-bm] the Main of mission ${mission.code} could not be retitled: ${titled.reason}`);
+  if (change.code !== undefined) {
+    const labelled = await setAgentLabel(mission.mainId, MISSION_CODE_LABEL, mission.code, deps.cli).catch((error: unknown) => ({ ok: false as const, reason: errorText(error) }));
+    if (!labelled.ok) deps.log(`[paseo-bm] the Main of mission ${mission.code} could not be relabelled: ${labelled.reason}`);
   }
 }
 

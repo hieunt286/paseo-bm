@@ -133,7 +133,7 @@ describe("the Beads tab of a workspace (delta 20260918e; autonomy design §A.12)
 describe("the Beads Manager surface opens on the Inbox (autonomy design §A.12; change-014 outcome 5)", () => {
   it("opens on the Inbox; a section's own screen has no ←, a project's page leads back to the Projects list", () => {
     expect(SURFACE_HOME_VIEW).toBe("inbox");
-    for (const view of ["inbox", "projects", "settings", "tools"] as const) expect(backOf(view), view).toBeNull();
+    for (const view of ["inbox", "missions", "projects", "settings", "tools"] as const) expect(backOf(view), view).toBeNull();
     for (const view of ["project-overview", "project-requests", "project-beads"] as const) expect(backOf(view), view).toBe("projects");
   });
 
@@ -141,20 +141,23 @@ describe("the Beads Manager surface opens on the Inbox (autonomy design §A.12; 
     expect(projectTabOf("project-overview")).toBe("overview");
     expect(projectTabOf("project-requests")).toBe("requests");
     expect(projectTabOf("project-beads")).toBe("beads");
-    for (const view of ["inbox", "projects", "settings", "tools"] as const) expect(projectTabOf(view), view).toBeNull();
+    for (const view of ["inbox", "missions", "projects", "settings", "tools"] as const) expect(projectTabOf(view), view).toBeNull();
   });
 
   it("labels each ← with where it leads (delta 20260918f F4, owner decision Q6 a)", () => {
     expect(backLabelOf("inbox")).toBeNull();
+    expect(backLabelOf("missions")).toBeNull();
     expect(backLabelOf("projects")).toBeNull();
     expect(backLabelOf("project-overview")).toBe("Back to Projects");
     expect(backLabelOf("project-requests")).toBe("Back to Projects");
     expect(backLabelOf("project-beads")).toBe("Back to Projects");
   });
 
-  it("has four sections — Inbox, Projects, Settings, Tools & skills —, always in that order, each opening on its own view; Insights is none", () => {
+  it("has five sections — Inbox, Missions, Projects, Settings, Tools & skills —, always in that order, each opening on its own view; Insights is none", () => {
     expect(SURFACE_SECTIONS.map((section) => [section.key, section.label, section.home])).toEqual([
       ["inbox", "Inbox", "inbox"],
+      // Missions between Inbox and Projects (missions design §10.1).
+      ["missions", "Missions", "missions"],
       ["projects", "Projects", "projects"],
       ["settings", "Settings", "settings"],
       ["tools", "Tools & skills", "tools"],
@@ -182,7 +185,7 @@ describe("the Beads Manager surface opens on the Inbox (autonomy design §A.12; 
   it("polls the workspace figures only while the Projects list shows (delta 20260918f F5)", () => {
     expect(OVERVIEW_POLL_MS).toBe(10_000);
     expect(overviewPolling("projects")).toEqual({ enabled: true, refetchInterval: OVERVIEW_POLL_MS });
-    for (const view of ["inbox", "settings", "tools", "project-overview", "project-requests", "project-beads"] as const) {
+    for (const view of ["inbox", "missions", "settings", "tools", "project-overview", "project-requests", "project-beads"] as const) {
       expect(overviewPolling(view), view).toEqual({ enabled: false, refetchInterval: false });
     }
   });

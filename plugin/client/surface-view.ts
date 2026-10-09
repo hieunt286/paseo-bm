@@ -15,19 +15,21 @@ import { createSlot, type Slot } from "./slot";
 
 /**
  * The views of the Beads Manager surface (autonomy design §A.12, change-014
- * outcome 5): the Inbox is the home; `projects` is the list of projects, and
+ * outcome 5): the Inbox is the home; `missions` is the Missions section
+ * (`missions.tsx`, missions design §10.1); `projects` is the list of projects, and
  * `project-overview`, `project-requests` and `project-beads` a project's page
  * opened on that tab (`work.tsx`); `settings` and `tools` are those sections.
  * Insights is no section any more: its figures are a project's Metrics tab.
  */
-export type SurfaceView = "inbox" | "projects" | "project-overview" | "project-requests" | "project-beads" | "settings" | "tools";
+export type SurfaceView = "inbox" | "missions" | "projects" | "project-overview" | "project-requests" | "project-beads" | "settings" | "tools";
 
 /** Where the surface opens: the Inbox (experience concept §3). */
 export const SURFACE_HOME_VIEW: SurfaceView = "inbox";
 
-/** The four sections, always in this order, with the view each one opens on. */
+/** The five sections, always in this order, with the view each one opens on (Missions between Inbox and Projects, missions design §10.1). */
 export const SURFACE_SECTIONS = [
   { key: "inbox", label: "Inbox", home: "inbox" },
+  { key: "missions", label: "Missions", home: "missions" },
   { key: "projects", label: "Projects", home: "projects" },
   { key: "settings", label: "Settings", home: "settings" },
   { key: "tools", label: "Tools & skills", home: "tools" },
@@ -40,6 +42,8 @@ export function sectionOf(view: SurfaceView): SurfaceSection {
   switch (view) {
     case "inbox":
       return "inbox";
+    case "missions":
+      return "missions";
     case "projects":
     case "project-overview":
     case "project-requests":

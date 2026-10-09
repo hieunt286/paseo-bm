@@ -74,6 +74,7 @@ import { BeadsScreen } from "./beads-screen";
 import { FigureStrip, INSIGHTS_STALE_MS, ProjectMetrics, RoleTokenBars, SectionHeading, insightsQueryKey } from "./insights";
 import { INSIGHTS_DEFAULT_WINDOW, WINDOW_SEGMENTS } from "./insights-model";
 import { managerLauncher } from "./launch-manager";
+import { ProjectMemory } from "./missions";
 import { AUTONOMY_POLICY_KEY } from "./settings-autonomy-model";
 import { TraceActions } from "./dashboard-actions";
 import { dashboardStyles } from "./styles";
@@ -703,8 +704,9 @@ function HeaderButton({ label, a11y, onPress, disabled, cell = false, theme }: {
 
 /**
  * The project page's header (the Projects artboard): the name 22/600 with its
- * directory in mono under it; at the right Open Manager and Autonomy: <Level>
- * (which opens Settings), the Metrics period before them while Metrics shows;
+ * directory in mono under it; at the right Open Manager, Memory (the
+ * project's memory, missions design §10.1) and Autonomy: <Level> (which opens
+ * Settings), the Metrics period before them while Metrics shows;
  * then the five tabs as underline text tabs. A phone puts a ← first. In the
  * workspace's own Beads tab (no name) only the tabs are drawn.
  */
@@ -720,6 +722,7 @@ export function ProjectHeader({
   chatBusy,
   level,
   onOpenSettings,
+  onMemory,
   extra,
   compact = false,
   theme,
@@ -738,6 +741,8 @@ export function ProjectHeader({
   /** The project's level by name; null until `autonomy.policy` answered. */
   level?: string | null;
   onOpenSettings?: () => void;
+  /** Shows the project's memory in place (artboard F); without it there is no Memory action. */
+  onMemory?: () => void;
   /** Drawn first on the right: the Metrics period; on a phone its own row under the tabs. */
   extra?: ReactNode;
   /** A phone (the MobileProject artboard): ‹ Projects, the name 20/600, the two actions as a grid, the tabs scrolling sideways. */
@@ -795,6 +800,12 @@ export function ProjectHeader({
                 {chat === null || levelCell === null ? <View style={{ flex: 1 }} /> : levelCell}
               </View>
             )}
+            {onMemory === undefined ? null : (
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <HeaderButton label="Memory" a11y={`The project memory of ${label}`} onPress={onMemory} cell theme={theme} />
+                <View style={{ flex: 1 }} />
+              </View>
+            )}
           </>
         )}
         {status}
@@ -832,6 +843,7 @@ export function ProjectHeader({
                 theme={theme}
               />
             )}
+            {onMemory === undefined ? null : <HeaderButton label="Memory" a11y={`The project memory of ${label}`} onPress={onMemory} theme={theme} />}
             {autonomy === null ? null : onOpenSettings === undefined ? (
               <Text style={{ fontSize: 14, color: colors.foregroundMuted }}>{autonomy}</Text>
             ) : (
@@ -1470,6 +1482,8 @@ export function ProjectPage(props: ProjectPageProps) {
   const [tab, setTab] = useState<ProjectTab>(initialTab);
   // The Metrics period, chosen in the header (the ProjectMetrics artboard).
   const [window, setWindow] = useState<InsightsWindow>(INSIGHTS_DEFAULT_WINDOW);
+  // The project's memory, shown in place of the tabs (missions design §10.1, artboard F).
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const readPolicy = useRpc(autonomyPolicyRpc);
   // Settings reads and writes this same query, so a level set there shows here.
   const policy = useQuery({ queryKey: AUTONOMY_POLICY_KEY, queryFn: () => readPolicy({}) });
@@ -1495,11 +1509,21 @@ export function ProjectPage(props: ProjectPageProps) {
       chatBusy={chatBusy === true}
       level={levelNameOf(policy.data?.levels, workspaceId)}
       onOpenSettings={onOpenSettings}
+      {...(label === null ? {} : { onMemory: () => setMemoryOpen(true) })}
       extra={period}
       compact={compact}
       theme={theme}
     />
   );
+  if (memoryOpen) {
+    return (
+      <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ paddingTop: compact ? 16 : PANE.top, paddingHorizontal: side, paddingBottom: compact ? 40 : PANE.bottom }}>
+        <View style={{ width: "100%", maxWidth: PANE.width }}>
+          <ProjectMemory workspaceId={workspaceId} onBack={() => setMemoryOpen(false)} backLabel={`‹ ${label ?? workspaceId}`} compact={compact} theme={theme} />
+        </View>
+      </ScrollView>
+    );
+  }
   // A phone scrolls the header away with the tab's content (the Mobile* artboards); the Agents tab keeps it above its tree.
   const headerScrolls = compact && tab !== "agents";
   const scrolled = (body: ReactNode) => (

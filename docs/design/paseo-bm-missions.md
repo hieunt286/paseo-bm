@@ -368,11 +368,60 @@ Events are batched in `BM-EVENTS`, at most one wake per mission per 15 minutes e
 
 ## 10. The Missions screen (Phase 3)
 
-Built only after the owner approves a mockup ([ui-must-match-mockup]). The content to mock:
-- **The list:** each mission with name, code, Main state, repositories, done criteria progress, live Workers, open questions and governor signals.
-- **A mission's page:** the charter, the plan, the contracts, the roster by repo, its links and the journal.
-- **Actions:** create, rename, close and the mission level.
-- **Project memory:** a read-only view per repo.
+The owner approved the mockup on 2026-10-10 ([`mockups/missions-screen.html`](mockups/missions-screen.html), artboards A–F); it is the contract ([ui-must-match-mockup]). Colours are theme tokens (`surface0/1/2`, `border`, `foreground`, `foregroundMuted`, `accent`, `accentForeground`, `statusSuccess/Warning/Danger`), radius 2, the shared pieces of `plugin/client` (`TextTabs`, `Segmented`, `Button`, `Chip`, `CardFrame`, `KindBar`, `ConfirmBlock`, `StageBarRow`, `ToneText`).
+
+### 10.1 Placement and navigation
+
+- **A section** `missions` of the surface, between Inbox and Projects (`SURFACE_SECTIONS`): label "Missions", its own branch in the launcher's router.
+- **One screen, four views:** the list (A, C), a mission's page (B, D), New mission (E) and Project memory (F). The page replaces the list; "Missions ›" goes back. On a phone the page's chips (Contracts, Journal, Plan, Project memory) open each part in place, and "⋯" holds Rename and Close mission.
+- **The phone's tabs:** the mockup's phone artboards show four tabs; the built tab bar keeps "Tools" as a fifth equal tab, so no section is lost on a phone (the one departure from the artboards, recorded here).
+- **Project memory from Projects:** the project page gets a "Memory" action that shows the same view (F).
+- **Polling:** the list and the page every 10 s while shown (`WORK_POLL_MS`).
+
+### 10.2 What each element shows
+
+| Element (artboard) | Source |
+|---|---|
+| Card bar, code, name (A, C) | the mission; open cards carry the accent bar, closed ones are dimmed (opacity 0.7) without it |
+| Main state chip | the current Main's Paseo status: `idle` (success square) "Main idle", `running` (accent) "Main working", error (danger) "Main stopped", none (muted) "No Main" |
+| "level 2 · proceed, staffing" | the mission level and its delegated classes, in the class words of §10.3 |
+| Repository chips, "3 live Workers · 7 requests" | `charter.repos` by project name; the roster's live Workers (`liveWorkersOf`) and its requests |
+| Progress and "Done criteria 5 of 11" | met criteria of those not dropped |
+| "2 questions for you" | open decisions the owner answers for the mission: `q:` of its requests in the owner's Inbox and its `m:` cards |
+| Governor chip "4 Workers on one area — nudged 12 min ago" | each family at step ≥ 1: its first crossed figure in words (§10.3) and its last action with its age |
+| "No questions · no signals" | neither |
+| Closed card | "closed <date> · <repos>" |
+| Stats (B, D) | done criteria; live Workers with "budget N" when the charter has one; questions for you (warning tone above 0) |
+| Charter card | "Charter · confirmed <date>" (or "not confirmed"); goal; repositories with "+ Add" (open missions); non-goals as "Not in this mission"; the first 4 done criteria with a box (met: success fill; dropped: muted, "— dropped"; open: empty) and "+ N more" that shows the rest |
+| Mission level card | `Segmented` 0–4; "The Main decides:" its delegated classes; "Yours:" the rest; then "Governor": one line per family at step ≥ 1 ("Mess: … — Main nudged 12 min ago, re-plan due in 18 min"), one line for the families within bounds ("Overengineering, drift, budget: within the charter") |
+| Workers by repository | one row per roster request: repository, `req-…<last 7>` and its topic (the request's title), Worker (role mark and the id's first 7), phase (`working` accent, `finished` success, `stopped` muted, `blocked` warning, with "· Qn for you" when an owner question of it is open), links (live peer links of the request by partner repository, "↔ <repo> · <messages>") |
+| Contracts | id and title; "provider → consumers"; "v<version> · <time>" |
+| Journal | the newest lines, "HH:MM <text>" (desktop 5, phone sub-view 20) |
+| Plan | the plan text, "updated <time> by the Main · read-only" |
+| New mission (E) | Name (≤ 80), Short code (`MISSION_CODE_PATTERN`), Goal, repositories as toggle chips (selected: accent square; others muted; plugin homes left out), mission level `Segmented` with its sentence; "Cancel", "Create and open Main" |
+| Project memory (F) | "Memory · <repo>", "<n> entries"; a row per entry: kind chip, text, source ("owner, Q2 · <date>", "Worker <id 7>", "owner · all projects") |
+
+### 10.3 Words
+
+- **Classes:** `proceed` "going on to the next step", `staffing` "creating Workers", `scope-repo` "adding a repository", `answer-technical` "Workers' technical questions your repos keep for you", `answer-effects` "Workers' questions with effects your repos keep for you", `split` "splitting the mission". The list card uses the short words `proceed`, `staffing`, `scope`, `answers`, `effects`, `split`.
+- **Level sentences:** 0 "The Main asks you before each step.", 1 "The Main goes on to next steps by itself.", 2 "The Main goes on to next steps and creates Workers by itself.", 3 "… and decides Workers' technical questions.", 4 "… and adds repositories, decides questions with effects and lets the governor split the mission."
+- **Figures:** each `GOVERNOR_FIGURES` id has one sentence built from its value, threshold and detail (`writersOnOneFile` "<n> Workers wrote <file> today (threshold <t>)", `workersInOneRepo` "<n> Workers at work in <repo> (threshold <t>)", …), in `missions-model.ts`.
+
+### 10.4 RPCs (`shared/contracts/missions.ts`, `server/missions-rpc.ts`)
+
+- `missions.list {}` → `{ missions: MissionSummary[] }`, open first (newest first), then closed (newest closed first).
+- `mission.get { missionId }` → `{ summary, charter, governor, rows, contracts, journal, plan }` (the level and its delegated classes are in `summary`); unknown → `E_MISSION_INVALID`.
+- `mission.change { missionId, name?, code?, addRepos?, close? }` — the owner's own change from the screen, applied at once with the `m:` card's path: refusals as `missionAnswerRefusalsOf` (a taken code, a repo that is no listed project, closing while a Worker of the mission runs, a closed mission), `applyMissionChange`, a `charter` journal line by `owner`, the Main told (`tellMain`), retitled and relabelled after a name or code change. Refusal → `E_MISSION_INVALID` with the reasons.
+- `memory.list { workspaceId }` → `{ workspaceId, name, total, entries }`, newest first, at most 300.
+- New mission uses `missions.create`, then `autonomy.set-mission-level` when the level is not 2 (3 and 4 after the in-place confirmation), then opens the Main (`navigation.openAgent`; without it, a notice).
+- Every handler only reads, except `mission.change`; none creates or messages an agent but through `tellMain`.
+
+### 10.5 Tests and the check
+
+- `test/missions-rpc.test.ts`: each RPC's output from fixture stores, `mission.change` refusals and effects (journal, outbox message, no change on refusal).
+- `test/plugin-missions-model.test.ts`: every element of §10.2 from fixture summaries, the words of §10.3, the form's validation; hook-free renders of the list card, the page parts, the form and the memory table (`renderTree`).
+- Pinned lists updated: `SURFACE_SECTIONS` (five sections), the compact tabs (five equal tabs), the package description, the view-source pins.
+- **The visual check:** the screen in the preview harness (Vite and react-native-web with the real RPC handlers over a fixture data folder and a fake Paseo, outside the repository) at 1040 px and 390 px, each artboard compared element by element; the record goes in the Phase 3 acceptance under `docs/operations/`.
 
 ## 11. Role files
 
@@ -528,6 +577,32 @@ Built by beads `bm-missions-9qc3.18`–`.24` and `.28`; acceptance: [operations 
   - a Main that crosses with no compaction possible is handed over once per run (`handOverMain` → `createMain` reason `handoff` → `replaceMain`).
 - **§11 the governor's file.** `plugin/roles/orchestrator.md` is the governor's file (100 lines, 3 limits): it governs the process and the Mains run the work; it reads `bm_missions` before acting; the plugin runs steps 1–2, the governor re-plans on `mission.signal`, escalates with `bm_ask_owner` when the drift persists at step 4, arbitrates on `mission.conflict`, splits with `bm_create_main`, and stops a Worker only on danger or the stop step. It never briefs, corrects or answers a Worker, decides only `f:` incidents, and keeps one `bm_note` per decision by mission or project. Rule 2 says its commands carry no effect and no answer grants one.
 
+## 18. As built — Phase 3 (2026-10-10)
+
+Built by beads `bm-missions-9qc3.26.1`–`.26.4`; visual check and acceptance: [operations record](../operations/paseo-bm-missions-screen-acceptance-20261010.md). Where this section and §10 differ, this one describes the code.
+
+- **RPCs** (`server/missions-rpc.ts`, registered by `registerMissionsRpcs` after the Missions home):
+  - `missions.list` and `mission.get` read only. A closed mission has no signals (the governor watches open missions only); its live Workers come from the roster.
+  - The Main state is taken from one Paseo agent list: `idle` → idle, `running`/`initializing` → working, `error`/`closed` → stopped, missing, archived or none → none.
+  - Questions are the unsettled `q:` decisions of the roster's requests in their repos plus the open `m:` cards. A row is `blocked` when an owner question of it is open or its Worker's newest report says so.
+  - Links are live peer links in either direction by partner repository (plugin homes left out). The journal is the newest 50 lines (`MISSION_PAGE_JOURNAL`).
+  - `mission.change` drops parts that change nothing (the same name, the same code, a repository already in the charter) and refuses an empty change ("nothing to change"). It checks `missionChangeRefusalsOf` (shared with the `m:` card path), applies `applyMissionChange`, writes a `charter` line by `owner` ("The owner changed the mission from the Missions screen: …"), tells the Main with the mission id as the reference, and retitles and relabels it (`syncMainAfterChange`, shared with `applyMissionDecision`).
+  - `memory.list` lists the repo's active entries and the owner's active precedents of the repo and of all projects (source "all projects", else the deciding question, else "the owner's Settings"), newest first, at most 300 (`MEMORY_LIST_LIMIT`).
+- **Client.**
+  - `client/missions-model.ts` holds the pure views and the words of §10.3: `missionCardOf`, `missionListOf`, `missionPageOf`, `figureSentenceOf` (one sentence per `GOVERNOR_FIGURES` id), `governorLinesOf`, `levelSentenceOf`, `missionDraftErrors`, `memorySourceOf` (a source that already names the owner or carries the date says neither twice), `closeMissionDialog` (a `danger` confirm). Constants: `CRITERIA_SHOWN` 4, `JOURNAL_DESKTOP` 5, `JOURNAL_PHONE` 20.
+  - `client/missions.tsx` `MissionsScreen` keeps one of four places: the list, a page, New mission, or memory (which remembers the page to go back to). Its hook-free parts are `MissionCard`, `MissionList`, `MissionPageBody`, `NewMissionForm`, `MemoryTable`, `LevelCells` and `MissionChip`; `ProjectMemory` is shared with the project page's "Memory" action. Cards in a row grow to one height, as the artboards' grids do.
+  - The surface has five sections (`SURFACE_SECTIONS`: Inbox, Missions, Projects, Settings, Tools & skills). On a phone they are five equal tabs, so "Tools" stays.
+  - The Inbox names a mission's `m:` cards by their mission ("Mission AIX · AI Assistant ↔ xOne", from `missions.list`) and their asker as "Main".
+  - `ConfirmDialog.confirmKind` (`danger` or `primary`) styles the confirm button.
+- **Departures from the artboards, kept on purpose:**
+  - The level cells and chips are local components: the shared `Segmented` fills the chosen cell with `surface2`, and the shared `Chip` is muted capitals; the artboards use the accent and normal case.
+  - The quiet-families line lists `stuck` as well.
+  - On a phone, "Closed · n" opens the closed missions.
+  - The memory view has a back link and, from a mission, its repositories as chips.
+  - A closed mission's page hides Open Main, Rename, Close mission and "+ Add".
+  - New mission needs at least one repository.
+- **Size:** the entries are 1,699,456 of 2,000,000 bytes after Phase 3.
+
 ## 14. Revision History
 
 | Date | Author | Change |
@@ -536,3 +611,5 @@ Built by beads `bm-missions-9qc3.18`–`.24` and `.28`; acceptance: [operations 
 | 2026-10-09 | Claude (owner's delegation) | Independent review against the code (19 findings) applied: §8 rewritten (the Main decides repo-delegated questions; mission cells a further reach), §3.4 resolve-at-delivery and the store list, §3.3 a cleared conversation is a replacement, §3.6 legacy cases, §4.1 `m:` decisions with prepared changes, `ownerOnly` stored and guarded in English and Vietnamese, the Main's `bm_repo`, §6 rows added (Orchestrator targeting in Phase 1), §13 compatibility corrected, §15 phases with ADR-030 first. `design-ready`: PASS |
 | 2026-10-09 | Claude (owner's delegation) | Phase 1 built (beads bm-missions-9qc3.1–.17, .27) and accepted on an isolated daemon (M-22 0, M-23 1, M-24 0, M-25 0, M-27 0): §16 as built; §2.6 `route`, §4.1 `mission-change` location corrected inline |
 | 2026-10-09 | Claude (owner's delegation) | Phase 2 built (beads bm-missions-9qc3.18–.24, .28) and accepted on an isolated daemon (M-26: 0 of 4 wakes without action): §17 as built; ADR-031 (an `o:` answer grants nothing); the backstop reads the Orchestrator's own words; from the run: shell writes count as written, sprawl counts Workers at work, drift pauses when every criterion is settled, a Main suggests a split with `bm_split_mission` |
+| 2026-10-10 | Claude (owner's delegation) | The owner approved the Missions screen mockup: §10 written in detail (placement, element sources, words, RPCs `missions.list`, `mission.get`, `mission.change`, `memory.list`, tests and the visual check); the phone keeps Tools as a fifth tab |
+| 2026-10-10 | Claude (owner's delegation) | Phase 3 built (beads bm-missions-9qc3.26.1–.26.4) and checked against the artboards in the preview harness: §18 as built; `memory.list` shows the owner's precedents; the Inbox names mission cards by their mission and their Main |
