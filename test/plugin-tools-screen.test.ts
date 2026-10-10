@@ -180,9 +180,11 @@ describe("the agent tools by role", () => {
       toolFacesFor("reviewer", true).map((face) => face.name).join(" · "),
       orchestratorToolsText(),
     ]);
-    expect(rows[0]!.bm).toContain("bm_ask_project");
+    // Owner, 2026-10-10: a Main asks no project; a Worker does.
+    expect(rows[0]!.bm).not.toContain("bm_ask_project");
     expect(rows[0]!.bm).toContain("bm_answers");
     expect(rows[1]!.bm).toContain("bm_report");
+    expect(rows[1]!.bm).toContain("bm_ask_project");
     expect(rows[2]!.bm).toBe("bm_review");
     expect(orchestratorToolsText()).toBe(`${toolFacesFor("orchestrator").length} tools · read, command, decide, compact, handoff`);
   });

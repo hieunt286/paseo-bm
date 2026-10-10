@@ -4,9 +4,12 @@
  * answered everywhere on the next read. Split from `chat-cards.ts` (code
  * review 2026-09-30 §4).
  *
- * Change-014 (ADR-025): at Co-pilot and up the Orchestrator's proposal is the
- * primary option, marked "Orchestrator suggests", with its reason under the
- * options; the asker's recommended option keeps its "Recommended" mark. The
+ * Change-014 (ADR-025): at Co-pilot and up the proposal is the primary
+ * option, with its reason under the options: the request's Main's
+ * (`prediction.main`, missions design §8), marked "Main suggests", else an
+ * older record's Orchestrator's (`prediction.orchestrator`, `bm_predict`
+ * retired), marked "Orchestrator suggests"; the asker's recommended option
+ * keeps its "Recommended" mark. The
  * card's meta line names its kind and class ("DECISION · SCOPE", "HELD ACTION
  * · RELEASE"), as the approved mockup draws it. A Worker's question or
  * an Orchestrator's decision can be asked back (`decisions.ask`) and shows its
@@ -105,12 +108,12 @@ export interface DecisionButton {
   key: string;
   /** The option's own label, unmarked. */
   label: string;
-  /** What the row says at its right: `RECOMMENDED_MARK`, `SUGGESTS_MARK`, both, or null. */
+  /** What the row says at its right: `RECOMMENDED_MARK`, the proposer's `SUGGESTS_MARKS` entry, both, or null. */
   mark: string | null;
   /**
-   * The one primary action: the option the Orchestrator suggests when it
-   * proposed one (Co-pilot and up, ADR-025), else the recommended option; the
-   * others are secondary.
+   * The one primary action: the option proposed, when the Main or (an older
+   * record) the Orchestrator proposed one (Co-pilot and up, ADR-025), else the
+   * recommended option; the others are secondary.
    */
   primary: boolean;
   /** Tapping it first asks for the confirmation (release, data, security, cost — X-4). */
@@ -128,7 +131,7 @@ export interface DecisionCardView {
   confirmChat: boolean;
   /** The in-place confirmation, Cancel first; null when none is asked. */
   confirm: ConfirmDialog | null;
-  /** The Orchestrator's reason for the option it suggests, one muted line under the options; null when it proposed none or the options are hidden. */
+  /** The proposer's reason for the option it suggests ("Main: …", "Orchestrator: …"), one muted line under the options; null when none was proposed or the options are hidden. */
   proposal: string | null;
   /** Ask back and the conversation (change-014 outcome 3); null on a decision whose asker cannot be asked. */
   askBack: AskBackView | null;
@@ -191,12 +194,14 @@ const CHAT_WORDS: Readonly<Record<ChatVia, string>> = {
 
 /**
  * Who answered a decision for the owner on their policy (§B.5, ADR-025): the
- * Orchestrator, the only predictor; "your earlier policy" for an answer a
- * build before ADR-025 stored with the recommended option as its predictor;
- * "your policy" for a held request the action boundary allowed (no predictor).
+ * request's Main (missions design §8); the Orchestrator, the only predictor;
+ * "your earlier policy" for an answer a build before ADR-025 stored with the
+ * recommended option as its predictor; "your policy" for a held request the
+ * action boundary allowed (no predictor).
  */
 function policyAnswererOf(decision: Decision): string {
   const predictor = policyPredictorOf(decision);
+  if (predictor === "main") return "the Main";
   return predictor === "orchestrator" ? "the Orchestrator" : predictor === "recommended" ? "your earlier policy" : "your policy";
 }
 
@@ -305,11 +310,11 @@ function decisionDetails(card: ChatCard, seed: DecisionSeed, decision: Decision 
   }
   lines.push(`Status: ${decision.status}${decision.settledAt === null ? "" : ` at ${decision.settledAt}`}`);
   const proposal = proposalOf(decision);
-  if (proposal !== null) lines.push(`Orchestrator suggests: ${proposal.optionKey} at ${decision.prediction!.orchestrator!.at}`);
+  if (proposal !== null) lines.push(`${SUGGESTS_MARKS[proposal.by]}: ${proposal.optionKey} at ${proposal.at}`);
   if (decision.answer !== null) {
     if (decision.answer.by === "orchestrator") lines.push("Answered by: the Orchestrator");
     if (decision.answer.by === "precedent") lines.push(`Answered by: your precedent ${decision.answer.precedentId ?? ""}`.trimEnd());
-    if (decision.answer.by === "policy") {
+    if (decision.answer.by === "policy" || decision.answer.by === "main") {
       const predictor = policyPredictorOf(decision);
       const cls = decision.answer.class ?? decisionClassOf(decision);
       lines.push(`Answered by: ${policyAnswererOf(decision)} (${predictor === "recommended" ? `recommended option, ${cls}` : cls})`);
@@ -444,7 +449,7 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
           ? "answered by the Orchestrator"
           : answer.by === "precedent"
             ? "answered by your precedent"
-            : answer.by === "policy"
+            : answer.by === "policy" || answer.by === "main"
               ? `decided for you by ${policyAnswererOf(decision)}`
               : `answered by you${VIA_WHERE[answer.via]}`;
       return {
@@ -470,35 +475,52 @@ export function decisionCardView(input: DecisionViewInput): DecisionCardView {
 
 /** The mark at the right of the asker's recommended option (drawn in capitals). */
 export const RECOMMENDED_MARK = "Recommended";
-/** The mark at the right of the option the Orchestrator suggests (Co-pilot and up, ADR-025). */
-export const SUGGESTS_MARK = "Orchestrator suggests";
+/** Who proposed the option a card puts first: the request's Main, or the Orchestrator on an older record. */
+export type Proposer = "main" | "orchestrator";
+
+/** The proposer's name, as the card's lines say it. */
+const PROPOSER_WORDS: Readonly<Record<Proposer, string>> = { main: "Main", orchestrator: "Orchestrator" };
+
+/** The mark at the right of the option proposed (Co-pilot and up, ADR-025), by who proposed it. */
+export const SUGGESTS_MARKS: Readonly<Record<Proposer, string>> = {
+  main: `${PROPOSER_WORDS.main} suggests`,
+  orchestrator: `${PROPOSER_WORDS.orchestrator} suggests`,
+};
 
 /**
- * The Orchestrator's proposal on a decision that can still be answered
- * (`prediction.orchestrator`, returned only at a level of 1 or more), when it
- * names one of the options; null otherwise.
+ * The proposal on a decision that can still be answered, when it names one
+ * of the options; null otherwise: the request's Main's (`prediction.main`,
+ * its recommendation in a `shadow` cell, missions design §8) when present,
+ * else an older record's Orchestrator's (`prediction.orchestrator`, returned
+ * only at a level of 1 or more; `bm_predict` retired on 2026-10-10).
  */
-export function proposalOf(decision: Decision): { optionKey: string; reason: string } | null {
-  const predicted = decision.prediction?.orchestrator ?? null;
-  if (predicted === null || !isAnswerable(decision)) return null;
-  return decision.options.some((option) => option.key === predicted.optionKey) ? { optionKey: predicted.optionKey, reason: predicted.reason } : null;
+export function proposalOf(decision: Decision): { by: Proposer; optionKey: string; reason: string; at: string } | null {
+  if (!isAnswerable(decision)) return null;
+  const main = decision.prediction?.main ?? null;
+  const by: Proposer = main === null ? "orchestrator" : "main";
+  const predicted = main ?? decision.prediction?.orchestrator ?? null;
+  if (predicted === null) return null;
+  return decision.options.some((option) => option.key === predicted.optionKey)
+    ? { by, optionKey: predicted.optionKey, reason: predicted.reason, at: predicted.at }
+    : null;
 }
 
 /** The answer buttons, Own words… and the in-place confirmation of a decision that can still be answered. */
 function answerControls(decision: Decision, ui: DecisionUi): Pick<DecisionCardView, "options" | "ownWords" | "confirm" | "proposal"> {
   const proposal = proposalOf(decision);
+  const suggestsMark = proposal === null ? null : SUGGESTS_MARKS[proposal.by];
   const held = decisionKindOf(decision.id) === "held";
   const options = decision.options.map(
     (option): DecisionButton => {
       const effects = realEffects(option.effects);
       const suggested = proposal?.optionKey === option.key;
-      const marks = [...(suggested ? [SUGGESTS_MARK] : []), ...(option.recommended ? [RECOMMENDED_MARK] : [])];
-      const why = [...(suggested ? ["the Orchestrator suggests it"] : []), ...(option.recommended ? ["recommended"] : [])];
+      const marks = [...(suggested && suggestsMark !== null ? [suggestsMark] : []), ...(option.recommended ? [RECOMMENDED_MARK] : [])];
+      const why = [...(suggested && suggestsMark !== null ? [`the ${suggestsMark} it`] : []), ...(option.recommended ? ["recommended"] : [])];
       return {
         key: option.key,
         label: option.label,
         mark: marks.length === 0 ? null : marks.join(" · "),
-        // The Orchestrator's proposal is the primary action; the asker's recommendation keeps its mark but is secondary when they differ.
+        // The proposal (the Main's, or an older record's Orchestrator's) is the primary action; the asker's recommendation keeps its mark but is secondary when they differ.
         // A held request recommends nothing: Allow once is its primary button, Deny beside it (§D.2).
         primary: held ? option.key === "allow" : proposal === null ? option.recommended : suggested,
         confirm: needsOwnerConfirmation(effects),
@@ -524,7 +546,7 @@ function answerControls(decision: Decision, ui: DecisionUi): Pick<DecisionCardVi
     // A held request is allowed or denied, never answered in words (§D.2).
     ownWords: confirm === null && decisionKindOf(decision.id) !== "held",
     confirm,
-    proposal: shown && proposal !== null ? `Orchestrator: ${shorten(proposal.reason, 200)}` : null,
+    proposal: shown && proposal !== null ? `${PROPOSER_WORDS[proposal.by]}: ${shorten(proposal.reason, 200)}` : null,
   };
 }
 

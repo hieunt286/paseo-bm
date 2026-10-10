@@ -76,7 +76,7 @@ import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, shell,
  * | Autonomy design §B.8 (the F2 exemption retired): a stop naming the push un-negated is gated like any command, even to the Worker whose danger allowance is open; one whose stop word negates the push passes | the `bm_direct_worker` "stopping a Worker's open danger" path |
  * | REQ-086 a: `bm_repo` stays in the project's folder and never writes | the `bm_repo` path, "bm_repo never writes" |
  * | REQ-083 a (Phase 2, change-007 C1): the Worker watch refreshes and reads only running `bm-*` Workers, of every project for the Inbox alerts; its events and the danger allowance only for a project with a class above `owner` in the policy | "the live watch of running Workers" |
- * | REQ-079 b, REQ-115 b: the Orchestrator gets only `BM-EVENTS` (a decision opened that the policy asks it to decide or predict; for a project in the policy's scope a request finished or stalled, a Worker signal — batched) and `BM-ANSWER`; stalls and Worker signals are Inbox alerts, never messages | `PATHS` (`sendsTo`), "the event bus", "the stall pass" |
+ * | REQ-079 b, REQ-115 b: the Orchestrator gets only `BM-EVENTS` (a decision opened that the policy asks it to decide; for a project in the policy's scope a request finished or stalled, a Worker signal — batched) and `BM-ANSWER`; stalls and Worker signals are Inbox alerts, never messages | `PATHS` (`sendsTo`), "the event bus", "the stall pass" |
  * | Loop guard (design §6A): a 13th command for one request in 24 hours is refused and sends nothing | the `bm_direct_worker` loop-guard path |
  * | Autonomy design §B.9: a command answering no decision goes out on the owner's policy only when every class of its effects is delegated for its project (`policy:<class>`), never with a hard-owner effect, and the backstop holds whatever the policy | the policy paths of `bm_direct_worker` |
  * | Autonomy design §B.5, ADR-025: the owner's policy never answers an Orchestrator question as it opens; an owner's answer to one grants nothing (missions design §9.1): its prepared command approves no effect | the `bm_ask_owner` paths |
@@ -1486,7 +1486,7 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "tool bm_ask_owner with prepared changes of the owner's settings (a review budget among them) stores the decision and writes no setting; the policy, bm_decide and bm_predict never answer it (autonomy design §G.4)",
+    name: "tool bm_ask_owner with prepared changes of the owner's settings (a review budget among them) stores the decision and writes no setting; neither the policy nor bm_decide answers it (autonomy design §G.4)",
     rpc: null,
     tool: "bm_ask_owner",
     run: async () => {
@@ -1512,7 +1512,6 @@ const PATHS: BoundaryPath[] = [
       expect(asked.isError).toBe(false);
       const id = (JSON.parse(asked.text.slice(asked.text.indexOf("\n{") + 1)) as { decisionId: string }).decisionId;
       expect((await callTool("bm_decide", { decisionId: id, optionKey: "a", reason: "Less often." })).isError).toBe(true);
-      expect((await callTool("bm_predict", { decisionId: id, optionKey: "a", reason: "Less often." })).isError).toBe(true);
       expect(createDecisionStore(home).get(id, WORKSPACE_ID)).toMatchObject({ status: "open", answer: null });
       expect(allCommands()).toEqual([]);
     },
@@ -1550,40 +1549,6 @@ const PATHS: BoundaryPath[] = [
       expect(listed.isError).toBe(false);
       expect(JSON.parse(listed.text)).toMatchObject({ decisions: [{ status: "open", askedBy: "orchestrator" }], total: 1, truncated: false });
       expect(readFileSync(join(home, "decisions", `${WORKSPACE_ID}.json`), "utf8")).toBe(stored);
-      expect(fake.reads).toEqual([]);
-    },
-  },
-  {
-    name: "tool bm_predict records the challenger's prediction on the decision and answers, sends and delivers nothing (autonomy design §B.3)",
-    rpc: null,
-    tool: "bm_predict",
-    run: async () => {
-      clearDecisionStoreCache();
-      // The owner turns the project's challenger on; what the path itself writes is checked from here on.
-      createAutonomyStore(home).setChallenger({ workspaceId: WORKSPACE_ID, enabled: true });
-      before = { ...before, data: dataOutsideStores() };
-      // A fallback incident: a Worker's question is its Main's or the owner's (missions design §9.1).
-      const qid = "f:fb-0123456789ab";
-      createDecisionStore(home).open(
-        makeDecision({
-          id: qid,
-          workspaceId: WORKSPACE_ID,
-          requestId: null,
-          askedBy: { role: "plugin", agentId: null },
-          round: null,
-          subject: null,
-          options: [
-            { key: "a", label: "Wait for the reset", recommended: true, effects: ["none"] },
-            { key: "b", label: "I'll handle it", recommended: false, effects: ["none"] },
-          ],
-          prediction: { recommended: { optionKey: "a" }, orchestrator: null },
-        }),
-      );
-      expect(await callTool("bm_predict", { decisionId: `q:${REQUEST_ID}:Q1`, optionKey: "a", reason: "The owner asked for dd/mm/yyyy before." })).toMatchObject({ isError: true });
-      expect(await callTool("bm_predict", { decisionId: qid, optionKey: "a", reason: "The reset is soon." })).toMatchObject({ isError: false });
-      expect(createDecisionStore(home).get(qid, WORKSPACE_ID)).toMatchObject({ status: "open", answer: null, prediction: { orchestrator: { optionKey: "a" } } });
-      expect(await callTool("bm_predict", { decisionId: qid, optionKey: "b", reason: "Again." })).toMatchObject({ isError: true });
-      expect(allCommands()).toEqual([]);
       expect(fake.reads).toEqual([]);
     },
   },

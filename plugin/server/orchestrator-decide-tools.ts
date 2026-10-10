@@ -32,21 +32,16 @@
  *   with its reason, and hands it to the delivery the owner's answers take
  *   (`onSettled`); it is logged as an `answer` intervention
  *   (`recordInterventionOf`). The log never holds back or fails the tool.
- * - `bm_predict` (autonomy design §B.3, §B.9) records the challenger's
- *   prediction of the owner's answer (`prediction.orchestrator`) on an open
- *   fallback incident (`f:`), of any class in an `owner` or
- *   `shadow` cell, where the project's prediction switch is on (a level of 1
- *   or more), once (`predictionRefusalOf`). The owner sees it as the
- *   Orchestrator's proposal on the decision's card (ADR-025). It answers
- *   nothing, sends nothing and is no intervention; A-7 counts it as its
- *   wake's action.
+ *   `bm_predict` is retired (owner, 2026-10-10): nothing writes the
+ *   Orchestrator's prediction any more; one stored before
+ *   (`prediction.orchestrator`) is still read and shown.
  *
- * Neither decides nor predicts a Worker's question (`q:`): that is its Main's
+ * `bm_decide` never decides a Worker's question (`q:`): that is its Main's
  * (`bm_answer_worker`) or the owner's (missions design §8, §9.1;
  * `notAQuestion`). The Orchestrator's own `o:` decisions are the owner's.
  *
- * `bm_decide` and `bm_predict` write through one step, `transitionUnderPolicy`.
- * Nothing here sends to an agent.
+ * `bm_decide` writes through one step, `transitionUnderPolicy`. Nothing here
+ * sends to an agent.
  */
 import { randomUUID } from "node:crypto";
 import { currentPolicy } from "./autonomy-store";
@@ -76,7 +71,7 @@ import {
 } from "./orchestrator-tool-context";
 import { resolveAtOpen } from "./policy-resolve";
 import { undeclaredCategoriesOf } from "../shared/decision-gate";
-import { decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../shared/autonomy";
+import { decideRefusalOf, type AutonomyPolicy } from "../shared/autonomy";
 import {
   MAX_ANSWER_REASON_CHARS,
   MAX_ASK_OWNER_OPTIONS,
@@ -406,7 +401,7 @@ export function bmDecisions(input: DecisionsQuery, context: ToolContext): Server
 }
 
 // ---------------------------------------------------------------------------
-// bm_decide and bm_predict (autonomy design §B.3, §B.5, §B.9).
+// bm_decide (autonomy design §B.5, §B.9).
 // ---------------------------------------------------------------------------
 
 export interface DecideInput {
@@ -429,7 +424,7 @@ function notAQuestion(rule: (policy: AutonomyPolicy, decision: Decision) => stri
     decisionKindOf(decision.id) === "question" ? questionIsTheMainsText(decision.id) : rule(policy, decision);
 }
 
-/** What one tool writes under the owner's policy (`transitionUnderPolicy`). */
+/** What `bm_decide` writes under the owner's policy (`transitionUnderPolicy`). */
 interface PolicyTransition {
   /** The rule of the owner's policy that must allow the write, on the decision as read and again as stored; null when it does. */
   refusalOf: (policy: AutonomyPolicy, decision: Decision) => string | null;
@@ -442,7 +437,7 @@ interface PolicyTransition {
 }
 
 /**
- * The one write of `bm_decide` and `bm_predict` (autonomy design §B.5, §B.9;
+ * The one write of `bm_decide` (autonomy design §B.5, §B.9;
  * code review 2026-09-30 §3.4): the Orchestrator's reason, redacted and on one
  * line (refused when empty); the decision read; the owner's policy read now
  * and its rule checked; the option checked; then the change written in one
@@ -559,32 +554,3 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
   return { ok: true, text: `${said}\n${json(facts)}` };
 }
 
-/**
- * `bm_predict` (autonomy design §B.3, §B.9; change-007 C1): records the option
- * the Orchestrator expects the owner to choose, with its reason (redacted, one
- * line), as the decision's `prediction.orchestrator` — only as far as
- * `predictionRefusalOf` allows, with the owner's policy read now, and for an
- * option the decision has. From the read to the write nothing awaits, and the
- * write checks again, so a decision gets one prediction
- * (`transitionUnderPolicy`). It answers nothing, delivers nothing and logs no
- * intervention: the owner decides, and sees the prediction on the decision's
- * card as the Orchestrator's proposal while the project's level is 1 or more
- * (`ownerViewOfDecision`, ADR-025). A refusal writes nothing.
- */
-export function bmPredict(input: DecideInput, context: ToolContext): ServerToolResult {
-  const { decision: predicted } = transitionUnderPolicy(input, context, {
-    refusalOf: notAQuestion(predictionRefusalOf),
-    idsFrom: "bm_decisions gave",
-    what: "the prediction for",
-    change: (current, { reason, at }) => {
-      const orchestrator = { optionKey: input.optionKey, reason, at };
-      return { ok: true, decision: { ...current, prediction: { recommended: current.prediction?.recommended ?? null, orchestrator } } };
-    },
-  });
-  const said = [
-    `Recorded your prediction for ${predicted.id}: option ${input.optionKey}.`,
-    "It answers nothing and went to no agent: the owner decides, and sees it on the decision as your proposal, with your reason.",
-    "Send nothing for it.",
-  ].join(" ");
-  return { ok: true, text: `${said}\n${json({ decisionId: predicted.id, optionKey: input.optionKey, class: decisionClassOf(predicted) })}` };
-}

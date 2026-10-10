@@ -19,7 +19,6 @@ import {
   actsOnFinish,
   commandActsOnFinish,
   decideRefusalOf,
-  predictionRefusalOf,
   unverifiedFinishRefusalOf,
   type AutonomyPolicy,
 } from "../plugin/shared/autonomy";
@@ -229,7 +228,6 @@ describe("an Orchestrator decision opening in a delegated class", () => {
     expect(stored("o:0b6f-1")).toMatchObject({ status: "open", answer: null, grant: null });
     // The Orchestrator's own decision is the owner's: nothing asks it to decide it.
     expect(decideRefusalOf(autonomy().read(), stored("o:0b6f-1"))).not.toBeNull();
-    expect(predictionRefusalOf(autonomy().read(), stored("o:0b6f-1"))).not.toBeNull();
     expect(enqueued).toEqual([]);
     expect(sends).toEqual([]);
   });

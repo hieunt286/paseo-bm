@@ -23,7 +23,7 @@ import { answerNoticeOf, createOrchestratorDecisionDelivery } from "../plugin/se
 import { createOverrideDelivery, overrideAnswersMessageOf, overrideKindOf } from "../plugin/server/override-delivery";
 import { resolveAtOpen } from "../plugin/server/policy-resolve";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
-import { decideRefusalOf, levelOf, modeOf, predictionRefusalOf } from "../plugin/shared/autonomy";
+import { decideRefusalOf, levelOf, modeOf } from "../plugin/shared/autonomy";
 import { agreementLedger } from "../plugin/shared/autonomy-ledger";
 import { DashboardError, INBOX_DIGEST_MAX, decisionsOverrideRpc, inboxDigestRpc, inboxSeenRpc } from "../plugin/shared/contracts";
 import { isDecidedForOwner, overrideDecisionOf, overrideIdOf, overrideRefusalOf } from "../plugin/shared/decision-override";
@@ -135,6 +135,15 @@ const BY_POLICY: Omit<AnswerInput, "at"> = {
   reason: "The owner writes dates day first.",
 };
 
+/** A mission Main's answer, as `bm_answer_worker` stores it (missions design §8). */
+const BY_MAIN: Omit<AnswerInput, "at"> = {
+  by: "main",
+  via: "main",
+  optionKey: "a",
+  class: "scope",
+  reason: "The mission's charter writes dates day first.",
+};
+
 /** Opens `decision` and answers it in the store; the delegated answer is marked delivered, as the Worker got it. */
 function storeAnswered(decision: Decision, answer: Omit<AnswerInput, "at">, minutesAgo = 20): Decision {
   const store = decisions();
@@ -205,7 +214,7 @@ describe("the override record (shared/decision-override.ts)", () => {
     expect(isDecidedForOwner(owner.decision)).toBe(false);
     expect(overrideRefusalOf(owner.decision)).toEqual({
       refusal: "not-delegated",
-      message: `decision q:${REQUEST}:Q1 was answered by the owner; only an answer the policy or a precedent gave for the owner can be overridden`,
+      message: `decision q:${REQUEST}:Q1 was answered by the owner; only an answer the policy, a precedent or the mission's Main gave for the owner can be overridden`,
     });
     expect(overrideRefusalOf(scopeQuestion())?.refusal).toBe("not-delegated");
     const superseded = supersedeDecision(scopeQuestion(), { by: `q:${REQUEST}:Q2`, at: minutesBefore(1) });
@@ -214,6 +223,16 @@ describe("the override record (shared/decision-override.ts)", () => {
     const policy = answerDecision(scopeQuestion(), { ...BY_POLICY, at: minutesBefore(5) });
     if (!policy.ok) throw new Error("fixture");
     expect(overrideRefusalOf(policy.decision)).toBeNull();
+  });
+
+  it("takes a mission Main's answer as decided for the owner, overridable as the policy's is (missions design §8)", () => {
+    const main = answerDecision(scopeQuestion(), { ...BY_MAIN, at: minutesBefore(5) });
+    if (!main.ok) throw new Error("fixture");
+    expect(isDecidedForOwner(main.decision)).toBe(true);
+    expect(overrideRefusalOf(main.decision)).toBeNull();
+    // The Main's recommendation is no prediction of the override: the owner's correction is theirs alone.
+    const recommended = { ...main.decision, prediction: { ...main.decision.prediction!, main: { optionKey: "a", reason: "Day first.", at: minutesBefore(6) } } };
+    expect(overrideDecisionOf(recommended, { id: "r:override-1", at: NOW.toISOString() }).prediction).toEqual({ recommended: { optionKey: "a" }, orchestrator: null });
   });
 });
 
@@ -286,6 +305,16 @@ describe("decisions.override (autonomy design §B.7, §B.9)", () => {
     expect(createPrecedentStore(home).active(NOW, WORKSPACE_ID)).toEqual([]);
   });
 
+  it("overrides a mission Main's answer: the override supersedes it, open for the owner; the Main's answer stands, delivered", () => {
+    const delegated = storeAnswered(scopeQuestion(), BY_MAIN);
+    const out = handleDecisionsOverride({ id: delegated.id }, deps());
+    expect(out.created).toBe(true);
+    expect(out.decision).toMatchObject({ id: "r:override-1", status: "open", supersedes: delegated.id, class: "scope", answer: null });
+    expect(stored(delegated.id)).toMatchObject({ status: "answered", answer: { by: "main", via: "main", optionKey: "a" }, delivery: { outcome: "sent" } });
+    expect(stored(delegated.id).reversals).toEqual([{ kind: "overridden", at: NOW.toISOString(), ref: "r:override-1" }]);
+    expect(handleDecisionsOverride({ id: delegated.id }, deps())).toMatchObject({ created: false, decision: { id: "r:override-1" } });
+  });
+
   it("is refused, writing nothing, for a decision the owner answered (negative)", () => {
     delegate("scope");
     const owners = storeAnswered(scopeQuestion(), { via: "inbox", optionKey: "b" });
@@ -338,7 +367,6 @@ describe("the override is the owner's own: never answered for them", () => {
     delegate("scope");
     const policy = { ...createAutonomyStore(home).read(), challenger: { [WORKSPACE_ID]: true } };
     expect(decideRefusalOf(policy, override)).toContain("is the owner's override of an answer made for them");
-    expect(predictionRefusalOf(policy, override)).toContain("only the owner answers it");
   });
 });
 
@@ -400,6 +428,22 @@ describe("the owner's answer to an override reaches the agent concerned", () => 
     );
     expect(stored(override.id).delivery).toEqual({ to: WORKER, kind: overrideKindOf(override.id), at: NOW.toISOString(), outcome: "sent" });
     // The delegated answer is not delivered again.
+    expect(stored(delegated.id).delivery?.kind).toBe(`answers:${REQUEST}`);
+  });
+
+  it("a Worker's question a mission Main answered: the Worker gets the owner's corrected answer, naming the Main's as the earlier one", async () => {
+    const delegated = storeAnswered(scopeQuestion(), BY_MAIN);
+    const { decision: override } = handleDecisionsOverride({ id: delegated.id }, deps());
+    const { fake, answer } = world();
+
+    const out = await answer({ id: override.id, optionKey: "b" });
+    expect(out.decision).toMatchObject({ status: "answered", answer: { by: "owner", optionKey: "b" }, grant: { effects: ["commit"] } });
+    expect(fake.sends).toHaveLength(1);
+    expect(fake.sends[0]!.id).toBe(WORKER);
+    expect(fake.sends[0]!.text).toContain("The owner changed the answer to Q1; this answer replaces the earlier one (Q1: a — dd/mm/yyyy).");
+    expect(fake.sends[0]!.text).toContain(`BM-ANSWERS\nrequestId: ${REQUEST}\nQ1: b — yyyy-mm-dd`);
+    expect(stored(override.id).delivery).toEqual({ to: WORKER, kind: overrideKindOf(override.id), at: NOW.toISOString(), outcome: "sent" });
+    // The Main's answer is not delivered again.
     expect(stored(delegated.id).delivery?.kind).toBe(`answers:${REQUEST}`);
   });
 
@@ -668,6 +712,16 @@ describe("inbox.digest: what was decided for the owner since they last looked (�
     expect(handleInboxDigest({ since: minutesBefore(15) }, rpcDeps()).decisions.map((decision) => decision.id)).toEqual([`q:${REQUEST}:Q3`, `q:${REQUEST}:Q2`]);
     expect(handleInboxDigest({ since: minutesBefore(1) }, rpcDeps()).decisions).toEqual([]);
     expect(handleInboxDigest({ workspaceId: "wks_other" }, rpcDeps()).decisions).toEqual([]);
+  });
+
+  it("lists a mission Main's answer (missions design §8) beside the policy's, as stored", () => {
+    storeAnswered(scopeQuestion(1), BY_POLICY, 30);
+    storeAnswered(scopeQuestion(2), BY_MAIN, 10);
+    storeAnswered(scopeQuestion(3), { via: "inbox", optionKey: "b" }, 5);
+    const out = handleInboxDigest({}, rpcDeps());
+    expect(inboxDigestRpc.output.parse(out)).toEqual(out);
+    expect(out.decisions.map((decision) => decision.id)).toEqual([`q:${REQUEST}:Q2`, `q:${REQUEST}:Q1`]);
+    expect(out.decisions[0]!.answer).toMatchObject({ by: "main", via: "main", reason: "The mission's charter writes dates day first." });
   });
 
   it("keeps an overridden decision, naming its override; the override itself is the owner's", () => {

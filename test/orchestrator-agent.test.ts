@@ -142,9 +142,11 @@ describe("orchestrator.open", () => {
     expect(request.title).toBe("Beads Orchestrator");
     expect(request.config.provider).toBe("bm-orchestrator/claude-opus-5-5");
     expect(request.prompt).toBe(ORCHESTRATOR_FIRST_PROMPT);
-    for (const tool of ["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_decisions", "bm_govern", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note"]) {
+    for (const tool of ["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_decisions", "bm_govern", "bm_ask_owner", "bm_decide", "bm_direct_worker", "bm_repo", "bm_note"]) {
       expect(request.prompt).toContain(tool);
     }
+    // Retired (owner, 2026-10-10).
+    expect(request.prompt).not.toContain("bm_predict");
     expect(request.prompt).toMatch(/wait for the user/);
   });
 

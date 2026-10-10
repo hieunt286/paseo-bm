@@ -22,6 +22,8 @@
 
 ## 2. Architecture
 
+> **Since 2026-10-10:** `bm_predict` is retired (the owner's decision; missions design §19). A stored Orchestrator prediction is still read and shown; the Main's `prediction.main` is the proposal at Co-pilot and up, and the Orchestrator decides only `f:` incidents delegated to it (`bm_decide`).
+
 ```
                  ┌─────────────────────── plugin server ───────────────────────────────┐
  agent.turn_ended│ collector ──► trace store (ADR-007) ──► decision materialiser         │
@@ -384,3 +386,4 @@ Rows up to 2026-10-02 are archived in [paseo-bm-orchestrator-revision-history-to
 | 2026-10-04 | Codex (owner request) | Require a real tool-call failure before a fresh Orchestrator may report a named `bm_` tool unavailable |
 | 2026-10-02 | Claude (owner request) | Documentation restructure: earlier rows moved to the archive; stale, retired and duplicated content condensed to the current state (section numbers and REQ ids kept) |
 | 2026-10-09 | Claude (owner's delegation) | §6B.3: the danger signal's here-document reading and the role file's peer-link and review-budget lines (ADR-028) |
+| 2026-10-10 | Claude (owner's decision) | `bm_predict` retired (missions design §19): a note where this document first names it |

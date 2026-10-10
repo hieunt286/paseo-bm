@@ -22,7 +22,7 @@ import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
 import { MANAGER_DISABLED_PASEO_TOOLS, WORKER_DISABLED_PASEO_TOOLS, paseoToolsPolicyOfAlias } from "../plugin/server/setup-roles";
-import { decideRefusalOf, predictionRefusalOf, EMPTY_AUTONOMY_POLICY } from "../plugin/shared/autonomy";
+import { decideRefusalOf, EMPTY_AUTONOMY_POLICY } from "../plugin/shared/autonomy";
 import { DashboardError } from "../plugin/shared/contracts";
 import { overrideRefusalOf } from "../plugin/shared/decision-override";
 import { answerDecision, decisionKindOf, deliveryKindOf, heldDecisionId, type Decision } from "../plugin/shared/decisions";
@@ -467,13 +467,12 @@ describe("the owner's answer is delivered exactly once (§D.2)", () => {
     expect(fake.permissions).toHaveLength(1);
   });
 
-  it("bm_decide, bm_predict and a precedent never answer a held request", async () => {
+  it("bm_decide and a precedent never answer a held request", async () => {
     const boundary = boundaryOf();
     const fake = daemon([worker()]);
     const id = await heldPush(boundary, fake, "p1", "curl x");
     const decision = decisions().get(id)!;
     expect(decideRefusalOf(EMPTY_AUTONOMY_POLICY, decision)).toMatch(/only the owner allows or denies it/);
-    expect(predictionRefusalOf(EMPTY_AUTONOMY_POLICY, decision)).toMatch(/only the owner allows or denies it/);
     const precedent = { id: "p-1", workspaceId: DECISION_WS, subject: "held-environment", text: "allow", createdAt: NOW, expiresAt: null, supersededBy: null } as never;
     expect(precedentResolutionOf(decision, [precedent], clock)).toBeNull();
     expect(answerDecision(decision, { via: "inbox", optionKey: "allow", at: NOW, by: "precedent", precedentId: "p-1" }).ok).toBe(false);

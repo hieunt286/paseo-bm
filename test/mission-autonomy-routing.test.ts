@@ -31,7 +31,6 @@ import {
   mainAnswerRuleOf,
   missionAnswerCellOf,
   missionQuestionRefusalOf,
-  predictionRefusalOf,
   type AutonomyPolicy,
 } from "../plugin/shared/autonomy";
 import { agreementLedger } from "../plugin/shared/autonomy-ledger";
@@ -176,13 +175,11 @@ describe("ownerOnly: the guard and the answer (missions design §5)", () => {
     }
   });
 
-  it("the policy, the Orchestrator's decision and its prediction refuse it", () => {
+  it("the policy and the Orchestrator's decision refuse it", () => {
     const asked = question({ ownerOnly: true });
     expect(decideRefusalOf(policyWith({ scope: "delegate" }), asked)).toBe(`${ownerOnlyRefusalText(asked.id)}; leave it to the owner`);
-    expect(predictionRefusalOf(policyWith({ scope: "shadow" }), asked)).toBe(`${ownerOnlyRefusalText(asked.id)}; it is not predicted`);
-    // Without it, both stand as before.
+    // Without it, it stands as before.
     expect(decideRefusalOf(policyWith({ scope: "delegate" }), question())).toBeNull();
-    expect(predictionRefusalOf(policyWith({ scope: "shadow" }), question())).toBeNull();
   });
 
   it("a question opened through a BM-QUESTIONS block with an owner fact is ownerOnly, logged, and its precedent does not answer it", async () => {
@@ -347,7 +344,7 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// bm_decide and bm_predict on a mission request (§8).
+// bm_decide on a mission request (§8).
 // ---------------------------------------------------------------------------
 
 describe("the Orchestrator on a mission request's question (missions design §8)", () => {
@@ -359,7 +356,7 @@ describe("the Orchestrator on a mission request's question (missions design §8)
     return created;
   }
 
-  it("bm_decide and bm_predict refuse every Worker's question — ownerOnly, of a mission request, or of a request of no mission (missions design §9.1)", async () => {
+  it("bm_decide refuses every Worker's question — ownerOnly, of a mission request, or of a request of no mission (missions design §9.1); bm_predict is retired", async () => {
     delegateRepo("scope");
     createAutonomyStore(home).setChallenger({ workspaceId: WS, enabled: true });
     const store = createDecisionStore(home);
@@ -373,7 +370,7 @@ describe("the Orchestrator on a mission request's question (missions design §8)
     mission();
     expect(await tools.call("bm_decide", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." })).toEqual(refusal(2));
     delegateRepo("scope", "shadow");
-    expect(await tools.call("bm_predict", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." })).toEqual(refusal(2));
+    expect(await tools.call("bm_predict", { decisionId: `q:${REQ}:Q2`, optionKey: "a", reason: "Fits." })).toEqual({ ok: false, text: "Unknown tool: bm_predict" });
     expect(store.get(`q:${REQ}:Q2`, WS)).toMatchObject({ status: "open", prediction: { orchestrator: null } });
   });
 });

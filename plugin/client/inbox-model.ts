@@ -515,13 +515,15 @@ export function needsYouGroups(input: Pick<InboxInput, "decisions" | "settledHer
 
 /**
  * Who answered for the owner, in the line's words (ADR-025): a precedent;
- * the Orchestrator, the policy's only predictor; "your earlier policy" for an
- * answer an older build stored with the recommended option as predictor;
- * "your policy" for a held request the action boundary allowed.
+ * the request's Main (missions design §8); the Orchestrator, the policy's
+ * only predictor; "your earlier policy" for an answer an older build stored
+ * with the recommended option as predictor; "your policy" for a held request
+ * the action boundary allowed.
  */
 export function decidedByWords(decision: Pick<Decision, "id" | "answer">): string {
   if (decision.answer?.by === "precedent") return "your precedent";
   const predictor = policyPredictorOf(decision);
+  if (predictor === "main") return "the Main";
   return predictor === "orchestrator" ? "the Orchestrator" : predictor === "recommended" ? "your earlier policy" : "your policy";
 }
 

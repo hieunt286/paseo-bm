@@ -33,8 +33,8 @@ import { coded, errorText, logOf, readOr, requireDataHome, type RpcHomeDeps, typ
 export type CoordinationRpcDeps = RpcHomeDeps & RpcLogDeps & { now?: () => Date };
 
 /**
- * The settings in effect, for the plugin's own readers (the advice cadence of
- * the event bus, the review budget). No usable data folder, or a store that
+ * The settings in effect, for the plugin's own readers (the governor's
+ * window of the event bus, the review budget). No usable data folder, or a store that
  * cannot be read, reads as the defaults: the unreadable store costs one log
  * line. Never throws.
  */

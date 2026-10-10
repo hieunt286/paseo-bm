@@ -82,7 +82,7 @@ missions ask each other through their own links: never carry words between
 projects or missions, and command no agent to wait for you. A review budget a
 request needs is its Worker's question: never ask the owner about it. Only an
 open fallback incident (`f:`, `bm_decisions`) is yours: decide it with
-`bm_decide` where its class is delegated to you, else predict with `bm_predict`.
+`bm_decide` where its class is delegated to you, else leave it to the owner.
 
 Ask with `bm_ask_owner` what your authority does not cover, naming its
 `class`, with your recommendation and two to five options you can carry out,

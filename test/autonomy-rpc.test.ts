@@ -280,8 +280,8 @@ describe("autonomy.set-level (ADR-025)", () => {
     for (const input of [{ workspaceId: "w1", level: 3 }, { workspaceId: "w1", level: 4, confirmed: false }, { workspaceId: "w2", level: 4 }]) {
       expect(codeOf(() => handleAutonomySetLevel(input, deps)), JSON.stringify(input)).toBe("E_AUTONOMY_NOT_CONFIRMED");
     }
-    expect(() => handleAutonomySetLevel({ workspaceId: "w1", level: 3 }, deps)).toThrow(/Turbo lets the Orchestrator decide cost, release and data for you/);
-    expect(() => handleAutonomySetLevel({ workspaceId: "w1", level: 4 }, deps)).toThrow(/Full auto lets the Orchestrator decide every class, security included/);
+    expect(() => handleAutonomySetLevel({ workspaceId: "w1", level: 3 }, deps)).toThrow(/Turbo lets the Main decide cost, release and data for you/);
+    expect(() => handleAutonomySetLevel({ workspaceId: "w1", level: 4 }, deps)).toThrow(/Full auto lets the Main decide every class, security included/);
     for (const input of [{}, { workspaceId: "w1" }, { workspaceId: "w1", level: 5 }, { workspaceId: "w1", level: -1 }, { workspaceId: "w1", level: "2" }, { workspaceId: "w1", level: 1.5 }, { workspaceId: "__proto__", level: 1 }, { workspaceId: "w1", level: 1, confirmed: "yes" }, null]) {
       expect(codeOf(() => handleAutonomySetLevel(input, deps)), JSON.stringify(input)).toBe("E_AUTONOMY_INVALID");
     }

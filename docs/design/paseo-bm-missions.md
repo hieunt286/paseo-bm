@@ -285,7 +285,7 @@ Requests without a mission keep today's rule (the Orchestrator under the repo po
 
 | | Change |
 |---|---|
-| `bm_decide`, `bm_predict` on `q:` decisions | **Retired** from the Orchestrator (the Main decides, §8); `o:` decisions are the owner's |
+| `bm_decide`, `bm_predict` on `q:` decisions (`bm_predict` retired altogether on 2026-10-10, §19) | **Retired** from the Orchestrator (the Main decides, §8); `o:` decisions are the owner's |
 | `bm_direct_worker` | **Narrowed** to `intent: stop` with `interrupt`, while a danger or a governor `stop` step is open |
 | `bm_send_command` | **Replaced** by `bm_govern` to a Main (§9.4) |
 | `bm_ask_owner` | Kept; prepared commands go to a Main only |
@@ -501,14 +501,14 @@ Built by beads `bm-missions-9qc3.1`–`.17` and `.27`; acceptance: [operations r
   
   Extra Managers raise `outdated-agent` with `EXTRA_MANAGER_DETAIL` and the mission's id; the Inbox offers "Replace Main" / "Open Main" through `mission.ensure` (alerts carry an optional `missionId`).
 - **§4 tools.**
-  - The bound Manager's list is `bm_create_worker`, `bm_tell_worker`, `bm_answers`, `bm_peers`, `bm_ask_project`, `bm_peer_reply`, `bm_mission`, `bm_mission_start`, `bm_mission_update`, `bm_answer_worker`, `bm_memory`, `bm_repo`, `bm_link_workers`, `bm_ask_mission`, `bm_decisions`; the Worker gains `bm_memory`.
+  - The bound Manager's list is `bm_create_worker`, `bm_tell_worker`, `bm_answers`, `bm_peers`, `bm_peer_reply`, `bm_mission`, `bm_mission_start`, `bm_mission_update`, `bm_answer_worker`, `bm_memory`, `bm_repo`, `bm_link_workers`, `bm_ask_mission`, `bm_decisions`; the Worker gains `bm_memory`.
   - `bm_create_worker` gains `project` and `planStep` (≤ 300); Workers of a Main are created through `workspaces.ref(<repo>).agents.create`, with the staffing rule (one live Worker per repo, at most `budget.workers`) unless `staffing` is delegated. The brief adds `mission:`, `plan:`, `Mission contracts touching <repo>:` and `Project memory (<repo>):` (`BRIEF_MEMORY_ENTRIES` 30 plus every contract).
   - `bm_mission_start` is settled at the turn's end (`proposed-mission-starts.ts`). `bm_mission_update` turns each sensitive change into one `m:` card (options `apply` / `keep`); applying or keeping it is told to the current Main by an outbox `message` whose `requestId` is the `m:` id.
   - `bm_answer_worker` (`MAIN_ANSWER_MINUTES` 10, all-or-nothing) records `by: main`, `via: main`, or `prediction.main` in a `shadow` cell.
   - `bm_memory` / `bm_repo`: `memory-tools.ts`, `repo-tool.ts` `repoIn` (actions status, diff-stat, log, show, read; `REPO_READ_LINES` 400, at most 2,000). Automatic memory entries come from `decision-store.ts` `rememberOwnerAnswer` for owner answers.
 - **§5 / §2.6 links.**
   - `peer-tools.ts` `askMainText`, `bm_link_workers` (turns the newest open `ask-main` into a `worker` link, else creates a taken one; intros are `peer-message`s in each Worker's repo outbox), `bm_ask_mission` (`missionAskText`).
-  - A Main's `bm_ask_project` for a repo of its own mission is refused with "give the work a Worker there (bm_create_worker project: …) or link the Workers on it (bm_link_workers)".
+  - A Main has no `bm_ask_project` since 2026-10-10 (§19): it gives the work a Worker in a mission repo, adds the repo, or asks another mission (`bm_ask_mission`).
   - Cards: "From mission <CODE> <name>", "Your Main linked you with another Worker".
 - **§6 lookups.**
   - The materialiser's `inRepoOf`; proposed answers carry their repo; `bm_answers` reads the repo's decisions; `bm_tell_worker` stores in the repo outbox.
@@ -521,7 +521,7 @@ Built by beads `bm-missions-9qc3.1`–`.17` and `.27`; acceptance: [operations r
 - **ADR-030.** The entries are built with `minifyIdentifiers` and `keepNames`: 1,596,602 of 2,000,000 bytes at the end of Phase 1.
 - **Tests and safety.**
   - `test/setup/no-real-installers.ts` points `PASEO_HOME` at a worker's temporary folder and drops the agent's `PASEO_*` variables, so no test reaches a real daemon. Before this, a suite run inside a Paseo agent could reach the owner's daemon through the `paseo` CLI with fake agent ids.
-  - Not yet built: Main answers in the Inbox "Decided for you" digest.
+  - Main answers are in the Inbox "Decided for you" digest as "<project> · the Main", with Override (built 2026-10-10, §19).
 
 ## 17. As built — Phase 2 (2026-10-09)
 
@@ -540,10 +540,10 @@ Built by beads `bm-missions-9qc3.18`–`.24` and `.28`; acceptance: [operations 
 - **§9.3 the ladder.** `governor-store.ts` keeps `orchestrator/governor.json`, one ladder per mission and family; `ladderStepOf` moves a crossed family 0 → 1 (a `governor` journal line), 1 → 2 (a nudge at the next recomputation), and 2 → 3 (`replan-due`) once both `windowMinutes` and `windowTurns` have passed; a family back under its threshold resets to 0. Steps 1 and 2 run in code: `nudgeCommandOf` is a `BM-COMMAND` with authority `governor:nudge`, no effect, sent to the current Main through `sendCommand` (backstop off, loop guard on); a failed nudge is retried after 10 minutes (`NUDGE_RETRY_MS`). `createGovernor` recomputes at the stall watcher's pass and at each recorded turn.
   - Every step 2–4 writes an intervention entry: kind `govern` with its `step`, trigger `governor`, expected outcome `figures-clear` (every family the step concerns back at step 0 within 30 minutes). A stop that only the stop step allowed is `kind: stop`, `trigger: governor`. An escalation through `bm_ask_owner` is not a `govern` entry.
 - **§9.4 commands.** `bm_govern { missionId, step: nudge | replan | arbitrate, text ≤ 4000, figures? ≤ 20 }` (`command-authority.ts`): `from: orchestrator`, `to: manager`, `requestId` null, `re: Governor: <step>, mission <code>`, no effect, authority `governor:<step>`, then a `Figures:` block of the named figures read now. It goes only to the current Main of an open mission (`governorTargetRefusalOf`); the loop guard counts per mission (12 in 24 hours, `MISSION_COMMAND_LIMIT_MESSAGE`). The backstop reads the Orchestrator's own words only (`CommandSend.backstopText`): a mission the owner named "Billing" does not read as cost. A replan at step 3 moves the families to `GOVERNOR_STOP_STEP` 4.
-- **§9.1 tools.** The Orchestrator's list, in order: `bm_projects`, `bm_missions`, `bm_request`, `bm_agent_messages`, `bm_govern`, `bm_arbitrate`, `bm_create_main`, `bm_decisions`, `bm_ask_owner`, `bm_decide`, `bm_predict`, `bm_direct_worker`, `bm_repo`, `bm_note`, `bm_findings`, `bm_why`, `bm_reply` (17). `bm_send_command`, `bm_compact` and `bm_handoff` are gone (`orchestrator-coordination-tools.ts` deleted).
+- **§9.1 tools.** The Orchestrator's list, in order: `bm_projects`, `bm_missions`, `bm_request`, `bm_agent_messages`, `bm_govern`, `bm_arbitrate`, `bm_create_main`, `bm_decisions`, `bm_ask_owner`, `bm_decide`, `bm_direct_worker`, `bm_repo`, `bm_note`, `bm_findings`, `bm_why`, `bm_reply` (16 since `bm_predict` was retired, §19). `bm_send_command`, `bm_compact` and `bm_handoff` are gone (`orchestrator-coordination-tools.ts` deleted).
   - `bm_missions { missionId?, closed? }`: each mission's charter, roster, figures (`crossed`, `under`), ladder, open `m:` cards and notes.
   - `bm_direct_worker` only stops (`intent: stop`, `interrupt: true`, no effect), while a danger signal of the Worker is open or a family of its mission is at the stop step; its Main gets a copy.
-  - `bm_decide` and `bm_predict` answer only `f:` fallback incidents; a `q:` question is the Main's or the owner's.
+  - `bm_decide` answers only `f:` fallback incidents whose class is delegated to it; a `q:` question is the Main's or the owner's.
   - `bm_ask_owner` prepares a command to a Main only; its effects are information.
   - `bm_note { workspaceId | missionId, text, replace? }`, exactly one id; mission notes in `orchestrator/notes/missions/<missionId>.json`.
 - **ADR-031.** An answer to an `o:` decision grants nothing (`answerDecision`, `shared/decisions.ts`): `BM-ANSWER` names no grant and a prepared command goes with `approved: none`.
@@ -637,6 +637,15 @@ Four read-only reviews of Phases 1–3, then fixes and simplifications (beads `b
   - `clockText` lives in `format.ts`.
   - The screen's internal pieces (`MissionChip`, `LevelCells`, …) are file-private.
 - **Role files:** the Orchestrator's stop and split rules are each said once; the Worker reports to "your Main"; the Main names `bm_repo` once.
+
+- **The owner's answers of 2026-10-10:**
+  - **`f:` incidents:** no wake; they wait for the owner in the Inbox unless `bm_decide` is delegated their class and the Orchestrator meets one.
+  - **`bm_predict` is retired:** the Orchestrator has 16 tools. A stored `prediction.orchestrator` is still read and shown, and the Main's `prediction.main` is the proposal at Co-pilot and up.
+  - **`bm_ask_project` is the Worker's only:** a Main calling it gets "Unknown tool", and peer tools run per role only what that role lists.
+  - **The re-plan window:** a `bm_govern` step on a family at step 1 or 2 restarts both its minutes and its Main-turn count (`governedLadderOf`); `bm_govern` reads the Main's turns for a nudge, a re-plan or named figures (`governSend`).
+  - **Release notes in one shape** (Dashboard design §11.4).
+  - **The dead advice setting removed** (found while checking Settings): `advice.due` has not woken anyone since ADR-029, so the "Orchestrator advice" card, the event bus's counting and `advice-store.ts` are gone; `advice.everyFinished` is kept as a stored no-op. The Coordination copy says paseo-bm compacts and hands over, and names the Main.
+  - **The Main's answers in the owner's view** (so the words above hold): `isDecidedForOwner` counts `by: main`, so a Main's answer is in "Decided for you" and the owner overrides it like a policy answer (the corrected answer reaches the Worker through `override:<id>`); every view names it "the Main", never "you" or "your policy"; `prediction.main` is hidden below Co-pilot as the Orchestrator's was. Settings → Autonomy and the decision card say "Main" where a Worker's question is decided or proposed ("Main suggests"; an older "Orchestrator suggests" still shows).
 
 ## 14. Revision History
 

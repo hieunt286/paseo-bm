@@ -38,11 +38,12 @@ export interface CoordinationBounds {
 }
 
 /**
- * `advice.everyFinished`: after this many of a project's requests have
- * finished since its last advice, the Orchestrator reviews that project's
- * figures and advises (§G.4). 0 turns advice off. The maximum is a bound, not
- * a recommendation: far above the finished requests a project sees in a
- * window, a higher value would never advise.
+ * `advice.everyFinished`: after this many of a project's requests had
+ * finished since its last advice, the Orchestrator reviewed that project's
+ * figures and advised (§G.4). 0 turned advice off. Retired (ADR-029 decision
+ * 9; the governor's `mission.review` is the periodic review): still stored,
+ * read and accepted by `coordination.set` with these bounds, so no file or
+ * caller breaks, but nothing reads it and Settings no longer shows it.
  */
 export const ADVICE_EVERY_FINISHED = { min: 0, max: 50, default: 5 } as const;
 

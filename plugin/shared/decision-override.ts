@@ -2,9 +2,10 @@
  * The Inbox's Decided for you and its Override (autonomy design §B.7, §B.9;
  * PRD REQ-125): the rules both sides read.
  *
- * - **Decided for you** is a decision answered by the owner's policy or by an
- *   owner precedent (`isDecidedForOwner`); an owner's answer, and a Phase 1
- *   answer of the Orchestrator, never are.
+ * - **Decided for you** is a decision answered by the owner's policy, by an
+ *   owner precedent or by a mission's Main (`isDecidedForOwner`; missions
+ *   design §8: the Main's answer counts as the policy's); an owner's answer,
+ *   and a Phase 1 answer of the Orchestrator, never are.
  * - **Override** takes one of them back as a new owner decision `r:<uuid>`
  *   (`overrideDecisionOf`): the same question, options, subject, class and
  *   request, `supersedes` the delegated one, open until the owner answers it.
@@ -21,9 +22,10 @@
  */
 import { OVERRIDE_ID_PREFIX, answeredByText, decisionClassOf, decisionKindOf, isAnswerable, type Decision } from "./decisions";
 
-/** True for a decision answered for the owner: by the policy (§B.5) or an owner precedent (§B.6). */
+/** True for a decision answered for the owner: by the policy (§B.5), an owner precedent (§B.6) or a mission's Main (missions design §8). */
 export function isDecidedForOwner(decision: Pick<Decision, "status" | "answer">): boolean {
-  return decision.status === "answered" && (decision.answer?.by === "policy" || decision.answer?.by === "precedent");
+  const by = decision.answer?.by;
+  return decision.status === "answered" && (by === "policy" || by === "precedent" || by === "main");
 }
 
 /** The override already made of `decision` (its `overridden` reversal's id), or null. */
@@ -39,10 +41,10 @@ export interface OverrideRefusal {
 
 /**
  * Why `decision` cannot be overridden, or null when it can: only a decision
- * answered for the owner by the policy or a precedent can. One still open is
- * the owner's to answer; one the owner (or, in Phase 1, the Orchestrator)
- * answered was never decided for them; a superseded, withdrawn or expired one
- * has no answer to take back.
+ * answered for the owner by the policy, a precedent or a mission's Main can.
+ * One still open is the owner's to answer; one the owner (or, in Phase 1, the
+ * Orchestrator) answered was never decided for them; a superseded, withdrawn
+ * or expired one has no answer to take back.
  */
 export function overrideRefusalOf(decision: Pick<Decision, "id" | "status" | "answer">): OverrideRefusal | null {
   // Autonomy design §D.2: a held request the policy allowed already ran; there is nothing to take back.
@@ -56,7 +58,7 @@ export function overrideRefusalOf(decision: Pick<Decision, "id" | "status" | "an
   if (decision.status === "answered") {
     return {
       refusal: "not-delegated",
-      message: `decision ${decision.id} was answered by ${answeredByText(decision.answer?.by ?? "owner")}; only an answer the policy or a precedent gave for the owner can be overridden`,
+      message: `decision ${decision.id} was answered by ${answeredByText(decision.answer?.by ?? "owner")}; only an answer the policy, a precedent or the mission's Main gave for the owner can be overridden`,
     };
   }
   return { refusal: "settled", message: `decision ${decision.id} is ${decision.status}; it has no answer to override` };

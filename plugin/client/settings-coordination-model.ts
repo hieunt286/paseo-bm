@@ -57,9 +57,9 @@ const MECHANISM_WORDS: Readonly<
     title: "Compaction",
     heading: "Compact",
     word: "compaction",
-    meaning: "Shrink a Manager's or Worker's conversation at a safe point, then restore what matters from the records.",
+    meaning: "Shrink a Main's or Worker's conversation at a safe point, then restore what matters from the records.",
     note: "A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is.",
-    onBody: "The Orchestrator may then have a Manager or a Worker compact its conversation without asking you.",
+    onBody: "paseo-bm may then compact a Main's or a Worker's conversation without asking you, when it crosses your thresholds.",
   },
   handoff: {
     title: "Handoff",
@@ -67,12 +67,12 @@ const MECHANISM_WORDS: Readonly<
     word: "handoff",
     meaning: "Move a heavy request to a fresh Worker with a brief and the old Worker's note.",
     note: null,
-    onBody: "The Orchestrator may then have the Manager hand a heavy request to a fresh Worker without asking you.",
+    onBody: "paseo-bm may then hand a heavy request to a fresh Worker under its Main without asking you, when it crosses your thresholds.",
   },
 };
 
 const THRESHOLD_WORDS: Readonly<Record<ThresholdKey, { label: string; spoken: string }>> = {
-  "compact.managerTokensPerTurn": { label: "Manager reads more than, per turn", spoken: "Manager turn threshold" },
+  "compact.managerTokensPerTurn": { label: "Main reads more than, per turn", spoken: "Main turn threshold" },
   "compact.workerTokensPerTurn": { label: "Worker reads more than, per turn", spoken: "Worker turn threshold" },
   "compact.contextShare": { label: "Or its context window is fuller than", spoken: "Context threshold" },
   "compact.maxPerAgent": { label: "At most, per agent", spoken: "Compactions per agent" },
@@ -117,7 +117,6 @@ export function coordinationInputText(key: CoordinationNumberKey, value: number)
 
 /** What a field's label says, for a refusal: its own label, or the setting in a few words. */
 const FIELD_NAMES: Readonly<Partial<Record<CoordinationNumberKey, string>>> = {
-  "advice.everyFinished": "Review the workflow every",
   "review.smallBudget": "Small",
   "review.mediumBudget": "Medium",
   "review.largeBudget": "Large",
@@ -469,18 +468,16 @@ export function reviewBudgetCardView(input: {
 
 /** What the Coordination group is, in one line under its title. */
 export const COORDINATION_MEANING =
-  "When the Orchestrator compacts an agent or hands a request to a fresh Worker, for every project. Each switches itself off if it stops helping.";
+  "When paseo-bm compacts an agent or hands a request to a fresh Worker, for every project. Each switches itself off if it stops helping.";
 
-/** The drafts of the whole group, every value at its default: the advice cadence, the thresholds of both mechanisms, the review budget. */
+/** The drafts of the whole group, every value at its default: the thresholds of both mechanisms, the review budget. */
 export interface CoordinationDefaultsDraft {
-  advice: number;
   thresholds: ThresholdDraft;
   review: ReviewBudgetDraft;
 }
 
 export function coordinationDefaultsDraft(defaults: CoordinationSettings): CoordinationDefaultsDraft {
   return {
-    advice: defaults.advice.everyFinished,
     thresholds: Object.assign({}, ...COORDINATION_MECHANISMS.map((mechanism) => defaultsDraft(mechanism, defaults))) as ThresholdDraft,
     review: reviewBudgetDefaultsDraft(defaults),
   };

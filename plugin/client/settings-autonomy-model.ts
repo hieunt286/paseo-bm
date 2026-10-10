@@ -3,12 +3,14 @@
  * experience concept §4.4; change-014 outcome 5): one **level** per project on
  * a control of five stops — Hands-on, Co-pilot, Cruise, Turbo, Full auto —
  * with one sentence on what the selected level means and, for each of the
- * nine classes, who decides it there: the Orchestrator, the Orchestrator's
- * proposal for the owner's approval, or the owner.
+ * nine classes, who decides a Worker's question of it there: the request's
+ * Main (ADR-029 decision 6; missions design §8), the Main's proposal for the
+ * owner's approval, or the owner. The Orchestrator decides only a provider
+ * fallback (`f:`, of the class `environment`) where that class is delegated.
  *
  * A level is set at once (`autonomy.set-level`), except Turbo and Full auto:
- * they open an in-place confirmation that says what the Orchestrator will
- * decide without the owner, Cancel first and the default, then
+ * they open an in-place confirmation that says what the Main will decide
+ * without the owner, Cancel first and the default, then
  * `autonomy.set-level` with `confirmed: true` (ADR-025 decision 3). Cells that
  * match no level read as **Custom**: the classes then show their current
  * cells, read-only, and no stop is selected until a level is chosen.
@@ -67,18 +69,18 @@ export const MODE_LABELS: Readonly<Record<AutonomyMode, string>> = { owner: "Own
 
 /** What the levels are for, in one line, above the project tabs. */
 export const AUTONOMY_MEANING =
-  "How much the Orchestrator may decide for you, per project. You can change it at any time. Your overrides are recorded; they never change the level.";
+  "How much a request's Main may decide for you, per project. A mission's own level can let its Main answer more; the Orchestrator decides only provider fallbacks, where environment is delegated. You can change it at any time. Your overrides are recorded; they never change the level.";
 
 /** The group's body when there is no project to show. */
 export const AUTONOMY_NO_PROJECTS = "No project yet. Each workspace you open in Paseo gets its own level here.";
 
 /** What each level means, in one sentence (ADR-025 decision 1). */
 export const LEVEL_SUMMARIES: Readonly<Record<AutonomyLevel, string>> = {
-  0: "Hands-on. The Orchestrator never decides. Every question is yours, as asked.",
-  1: "Co-pilot. The Orchestrator prepares an answer to every question; nothing runs until you approve it in the Inbox.",
-  2: "Cruise. The Orchestrator decides technical, preference, scope, environment and dependency questions on its own; it proposes the rest for your approval.",
+  0: "Hands-on. The Main decides nothing at this level. Every question is yours, as asked.",
+  1: "Co-pilot. The Main prepares an answer to every question; nothing runs until you approve it in the Inbox.",
+  2: "Cruise. The Main decides technical, preference, scope, environment and dependency questions on its own; it proposes the rest for your approval.",
   3: "Turbo. As Cruise, plus cost, release and data. Security still waits for your approval.",
-  4: "Full auto. The Orchestrator decides every question, security included. You see each one under Decided for you and can override it.",
+  4: "Full auto. The Main decides every question, security included. You see each one under Decided for you and can override it.",
 };
 
 /** The project's cells match no level. */
@@ -87,19 +89,19 @@ export const CUSTOM_LABEL = "Custom";
 export const CUSTOM_SUMMARY =
   "Custom. These classes were set one by one and match no level. Choose a level to replace them; until then they stay as shown.";
 
-/** Who decides a class: the Orchestrator, the Orchestrator's proposal for your approval, or you. */
-export type ClassDecider = "orchestrator" | "approve" | "owner";
+/** Who decides a Worker's question of a class: the request's Main, the Main's proposal for your approval, or you. */
+export type ClassDecider = "main" | "approve" | "owner";
 
 export const DECIDER_WORDS: Readonly<Record<ClassDecider, string>> = {
-  orchestrator: "Orchestrator",
+  main: "Main",
   approve: "You approve",
   owner: "You",
 };
 
 /** What the three words of the class list mean, one entry each, in the legend under it (the approved mockup). */
 export const DECIDER_LEGEND_ENTRIES: ReadonlyArray<{ decider: ClassDecider; text: string }> = [
-  { decider: "orchestrator", text: "Orchestrator decides, you can override" },
-  { decider: "approve", text: "Orchestrator proposes, you approve" },
+  { decider: "main", text: "Main decides, you can override" },
+  { decider: "approve", text: "Main proposes, you approve" },
   { decider: "owner", text: "You decide" },
 ];
 
@@ -115,16 +117,16 @@ export const AUTONOMY_CLASS_ORDER: readonly DecisionClass[] = [
   ...DECISION_CLASSES.filter((decisionClass) => !LEVELS[3]!.delegated.includes(decisionClass)),
 ];
 
-/** Who decides `decisionClass` at `level`: Hands-on the owner; else the Orchestrator where the level delegates it, its proposal elsewhere. */
+/** Who decides `decisionClass` at `level`: Hands-on the owner; else the Main where the level delegates it, its proposal elsewhere. */
 export function deciderAtLevel(level: AutonomyLevel, decisionClass: DecisionClass): ClassDecider {
   if (level === 0) return "owner";
-  return LEVELS[level]!.delegated.includes(decisionClass) ? "orchestrator" : "approve";
+  return LEVELS[level]!.delegated.includes(decisionClass) ? "main" : "approve";
 }
 
 /** Who decides `decisionClass` by the project's own cell (a Custom project): delegated, a shadow cell with predictions on, or the owner. */
 export function deciderOfCell(policy: AutonomyPolicy, workspaceId: string, decisionClass: DecisionClass): ClassDecider {
   const mode = modeOf(policy, workspaceId, decisionClass);
-  if (mode === "delegate") return "orchestrator";
+  if (mode === "delegate") return "main";
   return mode === "shadow" && challengerOf(policy, workspaceId) ? "approve" : "owner";
 }
 
@@ -133,11 +135,11 @@ export function levelText(reading: AutonomyLevelReading): string {
   return reading === "custom" ? CUSTOM_LABEL : LEVELS[reading]!.name;
 }
 
-/** The confirmation of Turbo or Full auto (ADR-025 decision 3): what the Orchestrator will decide without the owner, Cancel first and the default. */
+/** The confirmation of Turbo or Full auto (ADR-025 decision 3): what the Main will decide without the owner, Cancel first and the default. */
 export function levelConfirmDialog(level: AutonomyLevel, projectLabel: string): ConfirmDialog {
   const name = LEVELS[level]!.name;
   return {
-    title: level === 4 ? "Let the Orchestrator decide security questions too?" : "Let the Orchestrator decide cost, release and data?",
+    title: level === 4 ? "Let the Main decide security questions too?" : "Let the Main decide cost, release and data?",
     body:
       level === 4
         ? "Security trade-offs, permissions and credentials questions will be answered without you. Each one still shows under Decided for you, where you can override it."
@@ -177,7 +179,7 @@ export function boundaryOnDialog(projectLabel: string): ConfirmDialog {
     title: `Hold risky actions for approval in ${projectLabel}?`,
     body: [
       "• Workers and Reviewers created from now on in this project run in the least permissive mode (Claude: default; Codex: auto with its creation options).",
-      "• Each action the boundary holds — a release, real data, a dependency install, the network, a write outside the workspace, or a request it cannot read — waits for you, unless your answer to the Worker's question (a grant: one use, 60 minutes) or the project's level lets the Orchestrator decide it.",
+      "• Each action the boundary holds — a release, real data, a dependency install, the network, a write outside the workspace, or a request it cannot read — waits for you, unless your answer to the Worker's question (a grant: one use, 60 minutes) or the project's level allows it.",
       "• Agents that already exist keep their mode.",
     ].join("\n"),
     confirmLabel: "Turn on",

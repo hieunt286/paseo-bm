@@ -20,10 +20,10 @@
  *   one; a split without the source mission's `split` cell is the owner's
  *   `m:` card.
  * - `orchestrator-decide-tools.ts`: `bm_ask_owner` (prepared commands to a
- *   Main only), `bm_decisions`, and `bm_decide` and `bm_predict` for a
- *   fallback incident only — a Worker's question is its Main's or the
- *   owner's (autonomy design §A.3, §A.6, §A.9, §B.3, §B.5, §B.9; missions
- *   design §9.1).
+ *   Main only), `bm_decisions`, and `bm_decide` for a fallback incident
+ *   only — a Worker's question is its Main's or the owner's (autonomy design
+ *   §A.3, §A.6, §A.9, §B.5, §B.9; missions design §9.1). `bm_predict` is
+ *   retired (owner, 2026-10-10).
  * - `repo-tool.ts`: `bm_repo` (§6B.4), read-only `git` in the project's folder.
  * - `orchestrator-findings.ts`: `bm_findings` (autonomy design §G.4), a
  *   project's measured findings for advice, read-only.
@@ -58,7 +58,6 @@ import {
   bmAskOwner,
   bmDecide,
   bmDecisions,
-  bmPredict,
   type AskOwnerInput,
   type DecideInput,
   type DecideToolDeps,
@@ -158,8 +157,6 @@ export function createOrchestratorTools(deps: OrchestratorToolsDeps = {}): Orche
         return bmAskOwner(input as AskOwnerInput, context, deps);
       case "bm_decide":
         return bmDecide(input as DecideInput, context, deps);
-      case "bm_predict":
-        return bmPredict(input as DecideInput, context);
       case "bm_direct_worker":
         return bmDirectWorker(input as DirectInput, context, deps);
       case "bm_repo":

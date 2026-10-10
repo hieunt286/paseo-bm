@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,6 @@ import {
   eventLineOf,
   eventScopeOf,
   eventsMessageOf,
-  finishedRequestKeysOf,
   isInEventScope,
   isWakeAct,
   missionReviewEventsOf,
@@ -35,14 +34,13 @@ import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { missionCardOf } from "../plugin/server/mission-tools";
 import { WORKER_SIGNALS } from "../plugin/shared/orchestrator";
-import { createAdviceStore } from "../plugin/server/advice-store";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { EVENTS_NOTICE_MARKER, isPluginNotice, noticeMarkerOf } from "../plugin/server/notices";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { alertKeyOf } from "../plugin/shared/alerts";
-import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, predictionRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../plugin/shared/autonomy";
+import { EMPTY_AUTONOMY_POLICY, decideRefusalOf, projectsAboveOwner, type AutonomyPolicy } from "../plugin/shared/autonomy";
 import type { Decision, DecisionClass } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo } from "./helpers/fake-paseo";
@@ -52,8 +50,8 @@ import { MANAGER, WORKER, at, report, turn } from "./fixtures/orchestrator-trace
  * The event bus to the Orchestrator (autonomy design §A.8, REQ-115 b;
  * missions design §9.7, §9.1): typed events with dedupe keys and lines; only
  * the governor's `mission.*` events and a `danger` signal wake the
- * Orchestrator, every other event is retired as a wake while the advice
- * count stays; at most one wake per mission per 15 minutes, danger excepted,
+ * Orchestrator, every other event is retired as a wake, and a recorded
+ * turn counts no advice (ADR-029 decision 9); at most one wake per mission per 15 minutes, danger excepted,
  * held events kept by a publish that fails; every event pending at the Orchestrator's idle moment delivered
  * as ONE `BM-EVENTS` message through the notice queue's batch kind; an event
  * dropped when its subject settled before delivery; each wake recorded with
@@ -505,51 +503,11 @@ describe("the policy's scope (design §A.8 Scope, §B.2; change-007 C1)", () => 
 
 /**
  * What a decision asks of the Orchestrator by the owner's policy per cell (design §B.5, §B.9): a decision
- * (`decideRefusalOf`, `bm_decide`) or a prediction (`predictionRefusalOf`, `bm_predict`), never both.
- * `decision.opened` no longer wakes it (missions design §9.1); the rule stands for the tools.
+ * (`decideRefusalOf`, `bm_decide`), or nothing — `bm_predict` is retired (owner, 2026-10-10).
+ * `decision.opened` no longer wakes it (missions design §9.1); the rule stands for the tool.
  */
 const asksOf = (decisions: readonly Decision[], policy: AutonomyPolicy = EMPTY_AUTONOMY_POLICY): string[] =>
-  decisions.flatMap((decision) => (decideRefusalOf(policy, decision) === null ? ["decision"] : predictionRefusalOf(policy, decision) === null ? ["prediction"] : []));
-
-describe("the challenger's predictions (design §B.3, §B.9; change-007 C1)", () => {
-  const OPENED_WITH_PREDICTIONS = { prediction: { recommended: { optionKey: "a" }, orchestrator: null } } satisfies Partial<Decision>;
-  /** A Worker question opened by this build: its recommended prediction recorded, none of the Orchestrator's yet. */
-  const predictable = (n: number, over: Partial<Decision> = {}) => question(n, { ...OPENED_WITH_PREDICTIONS, ...over });
-  const policy = (over: Partial<AutonomyPolicy> = {}): AutonomyPolicy => ({ projects: {}, challenger: { [WS]: true }, ...over });
-
-  it("asks for a prediction for an owner or shadow cell of any class with the challenger on", () => {
-    // Every cell owner (nothing stored), the challenger on.
-    expect(asksOf([predictable(1)], policy())).toEqual(["prediction"]);
-    const shadow = policy({ projects: { [WS]: { scope: { mode: "shadow", at: "T" } } } });
-    expect(asksOf([predictable(2, { class: "scope" })], shadow)).toEqual(["prediction"]);
-    // A fallback incident is predicted too (the Orchestrator did not ask it); its own decision never is.
-    const incident = makeDecision({ id: "f:fb-1", workspaceId: WS, requestId: null, askedBy: { role: "plugin", agentId: null }, options: LOCAL_OPTIONS, ...OPENED_WITH_PREDICTIONS });
-    const own = makeDecision({ id: "o:1", workspaceId: WS, options: LOCAL_OPTIONS, ...OPENED_WITH_PREDICTIONS });
-    expect(asksOf([incident, own], policy())).toEqual(["prediction"]);
-  });
-
-  it("asks none with the challenger off, for a delegate cell, or for a decision opened before predictions; a release, data, security or cost class is predicted too (ADR-025)", () => {
-    // The challenger off (the default, DQ-4), or on for another project: an owner or shadow cell asks nothing.
-    const shadowOff = policy({ projects: { [WS]: { "reversible-technical": { mode: "shadow", at: "T" } } }, challenger: {} });
-    for (const off of [EMPTY_AUTONOMY_POLICY, policy({ challenger: { [WS]: false } }), policy({ challenger: { [OTHER_WS]: true } }), shadowOff]) {
-      expect(asksOf([predictable(1)], off)).toEqual([]);
-    }
-    // A delegate cell is decided by the Orchestrator, not predicted.
-    const delegated = policy({ projects: { [WS]: { "reversible-technical": { mode: "delegate", at: "T" } } } });
-    expect(asksOf([predictable(1)], delegated)).toEqual(["decision"]);
-    // Release, data, security, cost: predicted like any class with the challenger on, by an option's effect or the proposed class.
-    const release = predictable(3, { options: [...LOCAL_OPTIONS, { key: "c", label: "Deploy", recommended: false, effects: ["deploy"] }] });
-    expect(asksOf([release], policy())).toEqual(["prediction"]);
-    for (const decisionClass of ["release", "data", "security", "cost"] as const) {
-      expect(asksOf([predictable(4, { class: decisionClass })], policy()), decisionClass).toEqual(["prediction"]);
-      expect(asksOf([predictable(4, { class: decisionClass })], EMPTY_AUTONOMY_POLICY), decisionClass).toEqual([]);
-    }
-    // A settled decision, one the Orchestrator predicted already, one opened before predictions: none.
-    expect(asksOf([predictable(5, { status: "withdrawn", settledAt: at(1) })], policy())).toEqual([]);
-    const predicted = predictable(6, { prediction: { recommended: { optionKey: "a" }, orchestrator: { optionKey: "b", reason: "r", at: at(1) } } });
-    expect(asksOf([predicted, question(7)], policy())).toEqual([]);
-  });
-});
+  decisions.flatMap((decision) => (decideRefusalOf(policy, decision) === null ? ["decision"] : []));
 
 describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)", () => {
   const OPENED_WITH_PREDICTIONS = { prediction: { recommended: { optionKey: "a" }, orchestrator: null } } satisfies Partial<Decision>;
@@ -571,13 +529,13 @@ describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)
     expect(asksOf([makeDecision({ id: "o:1", workspaceId: WS, options: LOCAL_OPTIONS })], delegated)).toEqual([]);
   });
 
-  it("per cell: delegate asks bm_decide; owner or shadow asks bm_predict with the challenger on and nothing with it off", () => {
+  it("per cell: delegate asks bm_decide; owner or shadow asks nothing, the challenger on or off (bm_predict is retired)", () => {
     const cases: Array<[string, AutonomyPolicy["projects"][string][DecisionClass] | null, boolean, string[]]> = [
       ["delegate, challenger off", { mode: "delegate", at: "T" }, false, ["decision"]],
       ["delegate, challenger on", { mode: "delegate", at: "T" }, true, ["decision"]],
-      ["owner (absent), challenger on", null, true, ["prediction"]],
-      ["owner (set), challenger on", { mode: "owner", at: "T" }, true, ["prediction"]],
-      ["shadow, challenger on", { mode: "shadow", at: "T" }, true, ["prediction"]],
+      ["owner (absent), challenger on", null, true, []],
+      ["owner (set), challenger on", { mode: "owner", at: "T" }, true, []],
+      ["shadow, challenger on", { mode: "shadow", at: "T" }, true, []],
       ["owner (absent), challenger off", null, false, []],
       ["owner (set), challenger off", { mode: "owner", at: "T" }, false, []],
       ["shadow, challenger off", { mode: "shadow", at: "T" }, false, []],
@@ -771,54 +729,9 @@ describe("each wake recorded for A-7 (evaluation design §4) and M-26 (missions 
   });
 });
 
-describe("advice.due: after every N finished requests of a project (design §G.4, §G.7; bead t9lm.25)", () => {
-  /** A Manager turn that recorded the Worker's `finished` report of `requestId`, clean (no work left: no request.finished). */
-  const finishedTurn = (requestId: string, minute: number, over: Partial<Parameters<typeof turn>[0]> = {}) =>
-    turn({ workspaceId: WS, requestId, reports: [report({ at: at(minute), requestId, phase: "finished", buildAndTests: "npm test passed" })], ...over });
-  const cadence = (value: number) => createCoordinationStore(home).set({ key: "advice.everyFinished", value });
-  const request = (n: number) => `req-20260929T0${String(n).padStart(5, "0")}Z`;
-
-  it("has its own key per project and count", () => {
+describe("advice.due is retired (design §G.4; ADR-029 decision 9)", () => {
+  it("keeps its own key per project and count, so an older wake's events still read", () => {
     expect(eventKeyOf({ type: "advice.due", workspaceId: WS, finished: 5, at: at(9) })).toBe(`advice.due:${WS}@${at(9)}`);
-  });
-
-  it("counts one key per finished request of a Manager's or a Worker's turn; a Reviewer's turn, a blocked report or no report counts nothing", () => {
-    const record = turn({
-      workspaceId: WS,
-      requestId: null,
-      reports: [
-        report({ at: at(5), requestId: request(1), phase: "finished" }),
-        report({ at: at(7), requestId: request(1), phase: "finished" }),
-        report({ at: at(6), requestId: request(2), phase: "finished" }),
-        report({ at: at(8), requestId: request(3), phase: "blocked" }),
-      ],
-    });
-    expect(finishedRequestKeysOf(record)).toEqual({ workspaceId: WS, keys: [request(1), request(2)], at: at(7) });
-    expect(finishedRequestKeysOf({ ...record, agentId: WORKER, role: "worker" })).toEqual({ workspaceId: WS, keys: [request(1), request(2)], at: at(7) });
-    expect(finishedRequestKeysOf({ ...record, role: "reviewer" })).toBeNull();
-    expect(finishedRequestKeysOf(turn({ workspaceId: WS }))).toBeNull();
-    expect(finishedRequestKeysOf(undefined)).toBeNull();
-  });
-
-  it("none with N = 0: nothing is counted, nothing written, nothing sent", async () => {
-    cadence(0);
-    const fake = daemon();
-    const events = bus();
-    for (let n = 1; n <= 12; n += 1) await events.turnRecorded(finishedTurn(request(n), n), fake.paseo);
-    expect(fake.sends).toEqual([]);
-    expect(createAdviceStore(home).read()).toEqual({});
-  });
-
-  it("a count that cannot be written costs one log line and no event", async () => {
-    cadence(1);
-    mkdirSync(join(home, "orchestrator"), { recursive: true });
-    writeFileSync(join(home, "orchestrator", "advice.json"), JSON.stringify({ version: 2, entries: {} }));
-    const lines: string[] = [];
-    const fake = daemon();
-    const events = createEventBus({ home: () => home, queue, now: () => clock, log: (line) => lines.push(line) });
-    expect(await events.turnRecorded(finishedTurn(request(1), 1), fake.paseo)).toMatchObject({ status: "none" });
-    expect(fake.sends).toEqual([]);
-    expect(lines.join("\n")).toContain("could not count the finished requests toward the advice");
   });
 });
 
@@ -845,54 +758,20 @@ describe("writers.observed: two agents wrote one file in overlapping turns (desi
   });
 });
 
-describe("the advice count stays, with no wake (design §G.4, §7.17.8 i; REQ-183 i; missions design §9.1)", () => {
-  const cadence = (value: number) => createCoordinationStore(home).set({ key: "advice.everyFinished", value });
-  /** A finish with work left, as a Worker's record holds it: stored by `bm_report` (with its record id), or the Worker's own block the plugin relays. */
-  const finish = (over: Parameters<typeof report>[0] = {}) =>
-    report({ agentId: WORKER, at: at(5), requestId: REQUEST, phase: "finished", beadsReady: ["bd-1"], ...over });
-  const workerTurn = (finished = finish()) =>
-    turn({ agentId: WORKER, role: "worker", parentAgentId: MANAGER, workspaceId: WS, requestId: REQUEST, at: at(6), endedAt: at(6), reports: [finished] });
-  /** The same report as a Manager's record holds it: sent to it by hand, read at its own time. */
-  const managerTurn = () => turn({ workspaceId: WS, requestId: REQUEST, at: at(8), endedAt: at(8), reports: [finish({ agentId: MANAGER, at: at(7) })] });
-  const request = (n: number) => `req-20260929T0${String(n).padStart(5, "0")}Z`;
-
-  it("after N finished requests the count starts again, and the Orchestrator is not woken: advice.due is retired as a wake", async () => {
-    cadence(3);
+describe("a recorded turn counts no advice (ADR-029 decision 9; missions design §9.1)", () => {
+  it("finished requests, at any cadence, write nothing and wake nothing", async () => {
+    createCoordinationStore(home).set({ key: "advice.everyFinished", value: 1 });
     inScope();
     const fake = daemon();
     const events = bus();
     for (const n of [1, 2, 3]) {
-      const record = turn({ workspaceId: WS, requestId: request(n), reports: [report({ at: at(n), requestId: request(n), phase: "finished", beadsReady: ["bd-1"] })] });
+      const requestId = `req-20260929T0${String(n).padStart(5, "0")}Z`;
+      const record = turn({ workspaceId: WS, requestId, reports: [report({ at: at(n), requestId, phase: "finished", beadsReady: ["bd-1"] })] });
       expect(await events.turnRecorded(record, fake.paseo), `request ${n}`).toMatchObject({ status: "none", published: [] });
     }
-    expect(createAdviceStore(home).read()[WS]).toEqual({ counted: [], at: at(3), dueAt: at(3) });
-    // The default cadence is 5, with no Settings file.
-    rmSync(home, { recursive: true, force: true });
-    for (const n of [1, 2, 3, 4]) await events.turnRecorded(turn({ workspaceId: WS, requestId: request(n), reports: [report({ at: at(n), requestId: request(n), phase: "finished" })] }), fake.paseo);
-    expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [1, 2, 3, 4].map(request), dueAt: null });
+    expect(existsSync(join(home, "orchestrator", "advice.json"))).toBe(false);
     expect(fake.sends).toEqual([]);
     expect(fake.paseo.agents.list).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["a bound Worker's bm_report", finish({ recordId: "rec-1" })],
-    ["an unbound Worker's relayed block", finish()],
-  ])("%s: one advice count, and no duplicate with a Manager-record finish of the same request, in either order", async (_, finished) => {
-    cadence(2);
-    const fake = daemon();
-    const events = bus();
-    expect(await events.turnRecorded(workerTurn(finished), fake.paseo)).toMatchObject({ status: "none", published: [] });
-    await events.turnRecorded(managerTurn(), fake.paseo);
-    expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [REQUEST], dueAt: null });
-
-    const reverse = bus();
-    rmSync(home, { recursive: true, force: true });
-    cadence(2);
-    await reverse.turnRecorded(managerTurn(), fake.paseo);
-    await reverse.turnRecorded(workerTurn(finished), fake.paseo);
-    await reverse.turnRecorded(managerTurn(), fake.paseo);
-    expect(createAdviceStore(home).read()[WS]).toMatchObject({ counted: [REQUEST], dueAt: null });
-    expect(fake.sends).toEqual([]);
   });
 });
 

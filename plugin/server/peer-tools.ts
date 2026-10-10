@@ -6,16 +6,18 @@
  * | Tool | Does |
  * |---|---|
  * | `bm_peers` | reads the other projects (each with its live Manager) and this workspace's links both ways, newest first, at most `PEERS_LINKS_SHOWN` |
- * | `bm_ask_project` | resolves the project and its bound Manager (opening one when it has none), writes the link `open`, stores a `peer` record in the asker's outbox and delivers it |
+ * | `bm_ask_project` | a Worker only: resolves the project and its bound Manager (opening one when it has none), writes the link `open`, stores a `peer` record in the asker's outbox and delivers it |
  * | `bm_peer_reply` | a party of the link stores a `peer-message` record in its own outbox and delivers it to the other side; `close: true` closes the link after it |
  * | `bm_link_workers` | a Main opens a `worker` link between two live Workers of its mission (an open `ask-main` of one of them becomes it) and tells each the other and the topic |
  * | `bm_ask_mission` | a Main opens a `mission` link to another open mission's Main and delivers the ask to it |
  *
  * **Missions** (missions design §2.6, §4, §5): a Worker whose request is in a
  * mission asks through `bm_ask_project` its own Main (`ask-main`), never
- * another project's Manager, and no Manager is opened for it; a Main's
- * `bm_ask_project` is refused (it adds the repo to its mission or asks the
- * other mission). `ask-main` and `mission` links route by mission: their
+ * another project's Manager, and no Manager is opened for it. A Main lists
+ * no `bm_ask_project` (owner, 2026-10-10): it gives the work a Worker in a
+ * repo of its mission, adds the repo to its mission or asks the other
+ * mission (`bm_ask_mission`). A link a Manager asked before stays readable
+ * and writable on its asking side. `ask-main` and `mission` links route by mission: their
  * answerer is the live Worker that took the link, else the mission's current
  * Main (`answererOf`). A request without a mission keeps ADR-028 exactly.
  *
@@ -28,7 +30,7 @@
  *
  * Common rules (§7.15): a refusal is one line per reason and stores or sends
  * nothing; a pending binding is refused by the shared guard; the caller's
- * request comes from its binding, or for a Manager from the registry. Every
+ * request comes from its binding. Every
  * carried text is masked with `redactText` (the outbox and the link store
  * mask what they keep). Nothing here throws into the endpoint.
  */
@@ -342,7 +344,6 @@ interface AskInput {
   request: string;
   kind?: "work" | "question";
   context?: Array<{ fact: string; source: string }>;
-  requestId?: string;
 }
 
 export function createPeerTools(deps: PeerToolDeps): PeerTools {
@@ -504,53 +505,28 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     return stored;
   };
 
-  /** A Main asks no project (missions design §4): the repo joins its mission, or its own mission asks. */
-  const mainAsk = async (mission: Mission, project: string, caller: BoundCaller, home: string): Promise<ServerToolAnswer> => {
-    const paseo = paseoOf();
-    if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
-    const listed = await listedWorkspaces(paseo as DashboardPaseo);
-    const target = resolveProjectIn(listed, project, caller.workspaceId, home);
-    if (!target.ok) return why(target.reasons);
-    const named = projectOf(titleIn(listed, target.workspaceId), target.workspaceId);
-    return why([
-      mission.charter.repos.includes(target.workspaceId)
-        ? `${named} is a repo of mission ${mission.code}: give the work a Worker there (bm_create_worker project: ${target.workspaceId}) or link the Workers on it (bm_link_workers)`
-        : `${named} is outside mission ${mission.code}'s scope: add the repo to the mission (bm_mission_update repos) or ask its mission (bm_ask_mission)`,
-    ]);
-  };
-
+  /** A Worker's ask (missions design §5): only a Worker lists `bm_ask_project`, for its own request. */
   const ask = async (raw: unknown, toolCaller: ToolCaller | null): Promise<ServerToolAnswer> => {
-    const caller = peerCaller(toolCaller);
+    const caller = boundAs(toolCaller, "worker");
     if (caller === null) return refused(DELIVERY_NOT_BOUND_MESSAGE);
     const input = withoutNulls(raw);
     const shape = schemaIssues(faceOf(caller.role, "bm_ask_project").inputSchema, input);
     if (shape.length > 0) return fixThese("bm_ask_project", shape);
-    const { project, request, kind = "work", context = [], requestId: given } = input as AskInput;
+    const { project, request, kind = "work", context = [] } = input as AskInput;
     const home = deps.home();
-    // The binding is the authority for a Worker's request; a Manager's must be one of its own (§7.15).
-    let requestId: string;
-    let mission: Mission | null = null;
-    if (caller.role === "worker") {
-      if (caller.requestId === null) return refused(`paseo-bm does not know your request, so it cannot ask for it; tell the owner in one line. ${NOTHING}`);
-      requestId = caller.requestId;
-      // Missions design §5: the roster says whether the request is a mission's (the binding's is a cache).
-      const missionId = requestIndexOf(home, requestId)?.missionId ?? caller.missionId ?? null;
-      mission = missionId === null ? null : createMissionStore(home).get(missionId);
-    } else {
-      const main = missionOfMain(home, caller);
-      if (main !== null) return mainAsk(main, project, caller, home);
-      const registered = createRequestRegistry(home, { log }).get(caller.workspaceId, given!);
-      if (registered === null) return refused(`paseo-bm knows no request ${given} in this workspace; use the requestId bm_create_worker gave you. ${NOTHING}`);
-      if (registered.managerId !== caller.agentId) return refused(`request ${given} is not one of yours: another Manager created its Worker. ${NOTHING}`);
-      requestId = registered.requestId;
-    }
+    // The binding is the authority for a Worker's request (§7.15).
+    if (caller.requestId === null) return refused(`paseo-bm does not know your request, so it cannot ask for it; tell the owner in one line. ${NOTHING}`);
+    const requestId = caller.requestId;
+    // Missions design §5: the roster says whether the request is a mission's (the binding's is a cache).
+    const missionId = requestIndexOf(home, requestId)?.missionId ?? caller.missionId ?? null;
+    const mission: Mission | null = missionId === null ? null : createMissionStore(home).get(missionId);
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     const listed = await listedWorkspaces(paseo as DashboardPaseo);
     const target = resolveProjectIn(listed, project, caller.workspaceId, home);
     if (!target.ok) return why(target.reasons);
     const links = linksOf(home);
-    const from = { workspaceId: caller.workspaceId, requestId, agentId: caller.agentId, role: caller.role as "manager" | "worker" };
+    const from = { workspaceId: caller.workspaceId, requestId, agentId: caller.agentId, role: "worker" as const };
     const route = mission === null ? "project" : "ask-main";
     // The bounds first (§7.17.6): nothing is opened for an ask the chain refuses.
     const bounds = chainFor(links.list(), from, target.workspaceId, route);
@@ -762,11 +738,10 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
   };
 
   const runs = { bm_peers: peers, bm_ask_project: ask, bm_peer_reply: reply, bm_link_workers: linkWorkers, bm_ask_mission: askMission };
-  const toolsOf = (role: "manager" | "worker"): ServerTools =>
-    actingTools(
-      boundToolFacesFor(role).filter((face) => Object.hasOwn(runs, face.name)),
-      runs,
-      "Nothing was stored or sent",
-    );
+  // A role runs only the tools it lists: a Main has no bm_ask_project (owner, 2026-10-10).
+  const toolsOf = (role: "manager" | "worker"): ServerTools => {
+    const faces = boundToolFacesFor(role).filter((face) => Object.hasOwn(runs, face.name));
+    return actingTools(faces, Object.fromEntries(faces.map((face) => [face.name, runs[face.name as keyof typeof runs]])), "Nothing was stored or sent");
+  };
   return { manager: toolsOf("manager"), worker: toolsOf("worker") };
 }

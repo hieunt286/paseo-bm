@@ -661,6 +661,15 @@ describe("Decided for you: what the policy and precedents answered since the own
     expect(digestRowOf(asked, input()).what).toBe("Merge the fix now? → dd/mm/yyyy");
   });
 
+  it("lists an answer the request's Main gave (missions design §8) as the Main's, and offers its Override", () => {
+    const byMain = decided(7, 3, { by: "main", via: "main", reason: "Day first, as the mission's charter says." });
+    const section = decidedForYouOf(input({ digest: [byMain], digestSince: minutesAgo(30) }));
+    expect(section.rows.map((row) => decisionRow(row).decisionId)).toEqual([byMain.id]);
+    const row = digestRowOf(byMain, input());
+    expect({ what: row.what, where: row.where, reason: row.reason }).toEqual({ what: "Which date format on the invoices? → dd/mm/yyyy", where: "shop · the Main", reason: "Day first, as the mission's charter says." });
+    expect(row.override?.state).toBe("offered");
+  });
+
   it("never lists an owner's answer, nor one answered before the owner last looked", () => {
     const owners = answerDecision(question("req-A", 5, 60), { via: "inbox", optionKey: "c", at: minutesAgo(1) });
     if (!owners.ok) throw new Error("fixture");

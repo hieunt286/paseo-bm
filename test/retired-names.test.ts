@@ -210,6 +210,29 @@ describe("the workflow assessment, its suggestions and its rule flags (autonomy 
   });
 });
 
+describe("bm_predict and the Main's bm_ask_project (owner, 2026-10-10)", () => {
+  it("bm_predict is no tool: no role lists it, the server answers it as unknown, and its rule is gone", async () => {
+    expect(ORCHESTRATOR_SERVER_TOOLS.map((face) => face.name)).not.toContain("bm_predict");
+    for (const role of ["orchestrator", "manager", "worker", "reviewer"] as const) expect(toolFacesFor(role, true).map((face) => face.name), role).not.toContain("bm_predict");
+    const { tools } = orchestratorTools();
+    expect(tools.has("bm_predict")).toBe(false);
+    expect(await tools.call("bm_predict", { decisionId: "f:fb-0123456789ab", optionKey: "a", reason: "Because." })).toEqual({ ok: false, text: "Unknown tool: bm_predict" });
+    expect(readdirSync(home, { recursive: true })).toEqual([]);
+    expect(autonomy).not.toHaveProperty("predictionRefusalOf");
+  });
+
+  it("bm_predict is offered by no first prompt and named by no role text", () => {
+    expect(ORCHESTRATOR_FIRST_PROMPT).not.toContain("bm_predict");
+    for (const name of ROLE_FILES) expect(roleFile(name), name).not.toContain("bm_predict");
+    expect(ORCHESTRATOR_INSTRUCTIONS).not.toContain("bm_predict");
+  });
+
+  it("a Main lists no bm_ask_project; a Worker still does", () => {
+    expect(toolFacesFor("manager", true).map((face) => face.name)).not.toContain("bm_ask_project");
+    expect(toolFacesFor("worker", true).map((face) => face.name)).toContain("bm_ask_project");
+  });
+});
+
 describe("the additional instructions and role-extras.json (autonomy design §B.8)", () => {
   it("are no RPC and no error code; the read-only roles.instructions is back (base PRD REQ-032 d)", () => {
     const names = registeredRpcNames();

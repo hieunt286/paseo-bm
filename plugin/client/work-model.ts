@@ -155,8 +155,9 @@ function reviewing(detail: TraceDetail, lastReport: ParsedReport | undefined): b
  * Done is finished-unverified (`unverified`) when the row's `verification`
  * says so (autonomy design §C.3).
  */
-/** Who answered for the owner's policy (ADR-025): the Orchestrator, a policy of an earlier build, or the policy itself for a held request. */
+/** Who answered for the owner's policy (ADR-025): the request's Main (missions design §8), the Orchestrator, a policy of an earlier build, or the policy itself for a held request. */
 function policyByWords(predictor: ReturnType<typeof policyPredictorOf>): string {
+  if (predictor === "main") return "the Main";
   if (predictor === "orchestrator") return "the Orchestrator";
   if (predictor === "recommended") return "your earlier policy";
   return "your policy";
@@ -704,11 +705,11 @@ function decisionEvents(decision: Decision, nameOf: (agentId: string | null) => 
   if (answer !== null) {
     const option = answer.optionKey === null ? undefined : decision.options.find((entry) => entry.key === answer.optionKey);
     const to = decision.delivery === null ? "" : ` → ${nameOf(decision.delivery.to)}`;
-    // The Orchestrator answers only with an option (bm_decide, change-004); so does the policy (autonomy design §B.5).
+    // The Orchestrator answers only with an option (bm_decide, change-004); so do the policy (autonomy design §B.5) and a Main (missions design §8).
     const who = answer.by === "orchestrator" ? "The Orchestrator" : "You";
     const text =
       option !== undefined
-        ? answer.by === "policy"
+        ? answer.by === "policy" || answer.by === "main"
           ? `Decided for you by ${policyByWords(policyPredictorOf(decision))}: "${shorten(option.label, 80)}"${to}`
           : answer.via === "paseo"
             ? `You chose "${shorten(option.label, 80)}" in Paseo's own prompt`

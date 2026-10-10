@@ -26,7 +26,7 @@ const DANGER_OPEN_KEY = /::danger-open@/;
 const COORDINATION_ACTION_KINDS: ReadonlySet<InterventionKind> = new Set(["compact", "handoff"]);
 
 /**
- * What the Orchestrator did, and when: a command, a decision, an answer (`bm_decide`), a prediction (`bm_predict`),
+ * What the Orchestrator did, and when: a command, a decision, an answer (`bm_decide`), a prediction (stored by the retired `bm_predict`),
  * a note, or a compaction or handoff it asked for (the intervention log).
  */
 function orchestratorActionsOf(stores: EvalStores, notes: readonly EvalNote[] | undefined, interventions: readonly unknown[] | undefined): Array<{ workspaceId: string; at: number }> {
@@ -67,7 +67,7 @@ function orchestratorActionsOf(stores: EvalStores, notes: readonly EvalNote[] | 
 }
 
 /**
- * A-7: wakes, and whether an Orchestrator command, decision, answer (`bm_decide`), prediction (`bm_predict`),
+ * A-7: wakes, and whether an Orchestrator command, decision, answer (`bm_decide`), prediction (the retired `bm_predict`'s),
  * note, compaction (`bm_compact`) or handoff (`bm_handoff`) followed: within the wake's own turn for a recorded
  * wake, within 10 minutes for a stall key (or a recorded wake without its end).
  */

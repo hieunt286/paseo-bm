@@ -124,7 +124,8 @@ export type AnswerBy = z.infer<typeof answerBySchema>;
 
 /**
  * The predictions the agreement ledger measures (§B.3): the option the asker
- * marked recommended, the Orchestrator's (`bm_predict`), and a mission
+ * marked recommended, the Orchestrator's (stored by `bm_predict`, retired on
+ * 2026-10-10, so only on older records), and a mission
  * Main's (`bm_answer_worker` in a `shadow` cell it may not decide, missions
  * design §8). Measured, not chosen: no cell names a predictor.
  */
@@ -290,7 +291,7 @@ export type PreparedAction = z.infer<typeof preparedActionSchema>;
  * The prepared changes of the owner's settings (autonomy design §G.4): a
  * precedent, an autonomy cell, a coordination setting. Unlike a command, the
  * plugin applies one only on the owner's own answer — never the policy's, a
- * precedent's or the Orchestrator's (`bm_decide`, `bm_predict`) — so nothing
+ * precedent's or the Orchestrator's (`bm_decide`) — so nothing
  * but the owner ever changes the owner's settings.
  */
 export const PREPARED_CHANGE_KINDS = ["precedent.save", "autonomy.set", "coordination.set"] as const;
@@ -305,8 +306,7 @@ export function isPreparedChange(action: PreparedAction | undefined): action is 
 /**
  * True when an option of the decision carries a prepared change: then only
  * the owner answers it (`answerDecision`, `decideRefusalOf`,
- * `predictionRefusalOf`, `recommendedDelegationOf`, `precedentResolutionOf`,
- * `resolveAtOpen`).
+ * `recommendedDelegationOf`, `precedentResolutionOf`, `resolveAtOpen`).
  */
 export function carriesPreparedChange(decision: Pick<Decision, "options">): boolean {
   // A mission change, a split and an arbitration (missions design §4.1, §9.6) are the owner's alone too.
@@ -409,8 +409,9 @@ const reasonedPredictionSchema = z.object({
 /**
  * What was predicted for a decision (§B.3), stored on the record: the option
  * marked recommended, set when it opens (null with none recommended), and the
- * Orchestrator challenger's prediction (`bm_predict`), null until it gives
- * one. The owner sees `orchestrator` before answering only as the
+ * Orchestrator challenger's prediction, null unless `bm_predict` (retired on
+ * 2026-10-10) stored one: nothing writes it now, and an older record keeps
+ * and shows it. The owner sees `orchestrator` before answering only as the
  * Orchestrator's proposal, at a level of 1 or more (`ownerViewOfDecision`).
  * `main` (additive, missions design §8): a mission Main's recommendation in a
  * `shadow` cell it may not decide (`bm_answer_worker`).
@@ -683,14 +684,16 @@ export function openingPrediction(options: readonly Pick<DecisionOption, "key" |
 
 /**
  * A decision as the owner's screens may read it (§B.3; ADR-025): while it can
- * still be answered, the Orchestrator's prediction is shown only as its
+ * still be answered, the Orchestrator's prediction and a mission Main's
+ * recommendation (`prediction.main`, missions design §8) are shown only as a
  * proposal — `proposalShown`, true when the decision's project is at a level
  * of 1 or more (its prediction switch on) — and left out otherwise. A settled
  * decision is returned as it is.
  */
 export function ownerViewOfDecision(decision: Decision, proposalShown = false): Decision {
-  if (proposalShown || !isAnswerable(decision) || decision.prediction?.orchestrator == null) return decision;
-  return { ...decision, prediction: { ...decision.prediction, orchestrator: null } };
+  const prediction = decision.prediction;
+  if (proposalShown || !isAnswerable(decision) || prediction === undefined || (prediction.orchestrator == null && prediction.main == null)) return decision;
+  return { ...decision, prediction: { ...prediction, orchestrator: null, ...(prediction.main == null ? {} : { main: null }) } };
 }
 
 // ---------------------------------------------------------------------------
@@ -755,7 +758,7 @@ export interface NotOpenWords {
  * Why a decision is not `open`, in the caller's words, or null while it is:
  * the one ladder over a decision's status that every refusal goes down (code
  * review 2026-09-30 §3.5) — the transitions (`refuseSettled`), `bm_decide`
- * and `bm_predict` (`shared/autonomy.ts`) and a command's `BM-ANSWERS` line
+ * (`shared/autonomy.ts`) and a command's `BM-ANSWERS` line
  * (`server/command-authority.ts`). Pure.
  */
 export function notOpenRefusalOf(decision: Pick<Decision, "status" | "answer" | "settledAt" | "supersededBy">, words: NotOpenWords): string | null {

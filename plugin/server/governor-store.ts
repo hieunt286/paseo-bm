@@ -26,7 +26,9 @@
  *     (`nudge-failed`), tried again after `NUDGE_RETRY_MS`.
  *   - 2 → 3 *re-plan due*: still crossed `governor.windowMinutes` after the
  *     nudge **and** `governor.windowTurns` Main turns after it; a journal
- *     line. Steps 3 and 4 are the model's.
+ *     line. A `bm_govern` step on a family at step 1 or 2 restarts both
+ *     (`governedLadderOf`, `command-authority.ts`). Steps 3 and 4 are the
+ *     model's.
  *   - Any step → 0 *reset*: no figure of the family crossed any more; a
  *     journal line.
  * - **Journal lines** are kind `governor`, by `governor`, in the mission's
@@ -87,7 +89,7 @@ const familyStateSchema = z.object({
   figures: z.array(figureSchema),
   /** `id`: the nudge's command id; null for every other action. */
   lastAction: z.object({ at: z.string(), kind: z.enum(LADDER_ACTIONS), id: z.string().nullable() }).nullable(),
-  /** How many Main turns the mission had when the nudge went: the window's turns count from there. */
+  /** How many Main turns the mission had when the nudge (or a later `bm_govern` step at step 1 or 2) went: the window's turns count from there. */
   mainTurnsAt: z.number().int().nonnegative().nullable(),
 });
 

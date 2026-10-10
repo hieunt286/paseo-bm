@@ -134,11 +134,13 @@ describe("settings-section.tsx: the Settings screen", () => {
   });
 
   it("shows the Coordination group, saving one key through coordination.set, and resets every draft to the defaults", () => {
-    expect(section).toContain("<AdviceCadenceRow");
+    // The advice cadence's card is retired (ADR-029 decision 9).
+    expect(section).not.toContain("AdviceCadenceRow");
+    expect(section).not.toContain("advice.everyFinished");
     expect(section).toMatch(/useRpc\(coordinationSettingsRpc\)/);
-    expect(section).toMatch(/save\(\{ key: "advice\.everyFinished", value \}\)/);
+    expect(section).toMatch(/const output = await save\(change\);/);
     expect(section).toContain("<CoordinationGroup");
-    expect(code).toMatch(/const defaults = coordinationDefaultsDraft\(data\.defaults\);\s+setError\(null\);\s+setAdviceDraft\(defaults\.advice\);\s+setThresholds\(defaults\.thresholds\);\s+setReview\(defaults\.review\);/);
+    expect(code).toMatch(/const defaults = coordinationDefaultsDraft\(data\.defaults\);\s+setThresholds\(defaults\.thresholds\);\s+setReview\(defaults\.review\);/);
   });
 
   it("draws the Autonomy group from autonomy.policy with the surface's named projects, and counts the precedents from their own query", () => {

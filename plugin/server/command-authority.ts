@@ -14,7 +14,8 @@
  *   mission and records itself as the `lastAction` of each family it
  *   concerns on the ladder (`governor-store.ts`): a nudge takes a family at
  *   step 1 to 2 (its window counts from now), a re-plan one at step 3 to 4
- *   (escalate or stop).
+ *   (escalate or stop); any other step on a family at step 1 or 2 restarts
+ *   its window, both its minutes and its Main turns.
  * - `bm_direct_worker` (§6B.4, ADR-016; narrowed by missions design §9.1)
  *   only stops a paseo-bm Worker at once (`intent: stop`, `interrupt: true`,
  *   no effect), and only while a danger signal of that Worker is open or a
@@ -362,9 +363,10 @@ export interface GovernInput {
  * The ladder after a governor command (missions design §9.3): each family it
  * concerns — the families of the figures it names, else (but for an
  * arbitration) every family above step 0 — records it as its `lastAction`; a
- * nudge takes a family at step 1 to 2 with its window counted from
- * `mainTurns`, a re-plan one at step 3 to the stop step. A family at step 0
- * is left as it is. Pure.
+ * nudge takes a family at step 1 to 2, a re-plan one at step 3 to the stop
+ * step. A family at step 1 or 2 counts its window from the step: from its
+ * `at` (the minutes) and from `mainTurns` (the Main's turns), whatever the
+ * step. A family at step 0 is left as it is. Pure.
  */
 export function governedLadderOf(ladder: MissionLadder, step: GovernorStep, figures: readonly GovernorFigureId[], action: { at: string; id: string; mainTurns: number }): MissionLadder {
   const named = new Set(figures.map((id) => GOVERNOR_FIGURES[id]));
@@ -376,6 +378,8 @@ export function governedLadderOf(ladder: MissionLadder, step: GovernorStep, figu
     const lastAction = { at: action.at, kind: step, id: action.id };
     if (step === "nudge" && state.step === 1) next[family] = { ...state, step: 2, lastAction, mainTurnsAt: action.mainTurns };
     else if (step === "replan" && state.step === 3) next[family] = { ...state, step: GOVERNOR_STOP_STEP, lastAction };
+    // In the window (§9.3): the step restarts its minutes (`lastAction.at`) and its Main turns alike.
+    else if (state.step <= 2) next[family] = { ...state, lastAction, mainTurnsAt: action.mainTurns };
     else next[family] = { ...state, lastAction };
   }
   return next;
@@ -400,7 +404,8 @@ export type GovernSent =
  * `bm_arbitrate`'s two): `from: orchestrator`, `authority: governor:<step>`,
  * `effects: none`, `re: Governor: <step>, mission <code>` — its text, then the
  * figures it names (read now, with their thresholds; the snapshot is read
- * only for named figures or a nudge, whose window counts the Main's turns).
+ * only for named figures, a nudge or a re-plan, whose families' windows
+ * count the Main's turns — an arbitration naming none concerns no family).
  * The send checks the target (the current Main of an open mission), the
  * backstop and the loop guard per mission. Once delivered: a `governor`
  * journal line by `orchestrator`, its command id as `ref`, the ladder's
@@ -419,7 +424,7 @@ export async function governSend(input: GovernInput, context: ToolContext, deps:
   const named = [...new Set(input.figures ?? [])] as GovernorFigureId[];
   let snapshot: ReturnType<typeof readGovernorSnapshot> | null = null;
   let figures: GovernorFigure[] = [];
-  if (named.length > 0 || input.step === "nudge") {
+  if (named.length > 0 || input.step !== "arbitrate") {
     const settings = readCoordinationSettings({ home: context.home, log });
     snapshot = readGovernorSnapshot(context.home, mission, { now: context.now, agents: await bmAgentsOf(context.paseo), settings, log });
     figures = governorFiguresOf(snapshot, settings.governor).filter((entry) => named.includes(entry.id));

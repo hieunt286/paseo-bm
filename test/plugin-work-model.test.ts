@@ -513,6 +513,22 @@ describe("the timeline of a request", () => {
     expect(event.text).not.toContain("You");
   });
 
+  it("says the request's Main decided a question it answered (missions design §8), never that the owner chose", () => {
+    const scope = makeDecision({
+      id: "q:req-1:Q3",
+      requestId: "req-1",
+      class: "scope",
+      askedAt: at(60),
+      options: [{ key: "a", label: "dd/mm/yyyy", recommended: true, effects: ["none"] }, { key: "b", label: "yyyy-mm-dd", recommended: false, effects: ["commit"] }],
+    });
+    const result = answerDecision(scope, { by: "main", via: "main", optionKey: "a", class: "scope", reason: "Day first, as the mission's charter says.", at: at(59) });
+    if (!result.ok) throw new Error(result.message);
+    const decided = { ...result.decision, delivery: { to: "wrk-aaaaaaaa1", kind: "answers:req-1", at: at(59), outcome: "sent" } } as Decision;
+    const event = timelineEvents(trace, [decided], NOW).find((entry) => entry.kind === "decision-answered")!;
+    expect(event).toMatchObject({ text: 'Decided for you by the Main: "dd/mm/yyyy" → Worker', tag: null });
+    expect(event.text).not.toMatch(/You|your policy/);
+  });
+
   it("shows a held permission request: held by paseo-bm, then allowed in Paseo's prompt or withdrawn (autonomy design §D.2)", () => {
     const heldOpen = makeDecision({
       id: "h:wrk-aaaaaaaa1:perm-1",

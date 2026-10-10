@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // Generates the client-side release-note catalog from docs/releases/, the
-// single authored changelog source (Dashboard design §11.4).
+// single authored changelog source (Dashboard design §11.4). The client
+// carries one shape per version: its summary paragraph and section headings;
+// the full note stays in docs/releases and on GitHub. A prerelease folds into
+// the stable version of the same core when that stable exists.
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -62,16 +65,11 @@ function paragraph(lines, blocks) {
   lines.length = 0;
 }
 
-export function parseReleaseNote(version, markdown) {
-  semver(version);
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
-  const expected = new RegExp(`^#\\s+paseo-bm(?:\\s+release notes\\s+[—-])?\\s+${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i");
-  if (!expected.test(lines[0] ?? "")) throw new Error(`${version}: first heading must name the same release version`);
-  const title = plainInline((lines[0] ?? "").replace(/^#\s+/, ""));
+function parseBlocks(version, lines) {
   const blocks = [];
   const pending = [];
   let code = null;
-  for (const line of lines.slice(1)) {
+  for (const line of lines) {
     if (line.startsWith("```")) {
       paragraph(pending, blocks);
       if (code === null) code = [];
@@ -98,24 +96,47 @@ export function parseReleaseNote(version, markdown) {
   }
   if (code !== null) throw new Error(`${version}: unclosed fenced code block`);
   paragraph(pending, blocks);
-  const summary = blocks.find((block) => block.kind === "paragraph")?.text ?? title;
+  return blocks;
+}
+
+export function parseReleaseNote(version, markdown) {
+  semver(version);
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const expected = new RegExp(`^#\\s+paseo-bm(?:\\s+release notes\\s+[—-])?\\s+${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i");
+  if (!expected.test(lines[0] ?? "")) throw new Error(`${version}: first heading must name the same release version`);
+  const blocks = parseBlocks(version, lines.slice(1));
+  // The first paragraph, without a closing sentence that only introduces a
+  // block the client does not carry ("Update with:" before a command).
+  const first = blocks.find((block) => block.kind === "paragraph")?.text ?? "";
+  const summary = first.replace(/(?:^|\s+)[^.!?]*:$/, "").trim() || `paseo-bm ${version}`;
   return {
     version,
-    title,
     summary,
-    blocks,
+    sections: blocks.filter((block) => block.kind === "heading").map((block) => block.text),
+    prereleases: [],
     gitUrl: `https://github.com/hieunt286/paseo-bm/blob/v${version}/docs/releases/paseo-bm-release-notes-${version}.md`,
   };
 }
 
+function coreOf(version) {
+  return semver(version).core.join(".");
+}
+
 export function generateCatalog(entries) {
   const seen = new Set();
-  const notes = entries.map(({ version, markdown }) => {
+  const parsed = entries.map(({ version, markdown }) => {
     if (seen.has(version)) throw new Error(`duplicate release-note version: ${version}`);
     seen.add(version);
     return parseReleaseNote(version, markdown);
   }).sort((a, b) => compareVersions(b.version, a.version));
-  return `// GENERATED FILE — do not edit.\n// Source: docs/releases/*.md via scripts/generate-release-notes.mjs.\n\nexport type ReleaseNoteBlock = { kind: "heading" | "paragraph" | "bullet" | "code"; text: string };\nexport interface ReleaseNote { version: string; title: string; summary: string; blocks: readonly ReleaseNoteBlock[]; gitUrl: string }\n\nexport const RELEASE_NOTES: readonly ReleaseNote[] = ${JSON.stringify(notes, null, 2)};\n`;
+  const stable = new Map(parsed.filter((note) => semver(note.version).prerelease.length === 0).map((note) => [coreOf(note.version), note]));
+  const notes = [];
+  for (const note of parsed) {
+    const folded = semver(note.version).prerelease.length === 0 ? undefined : stable.get(coreOf(note.version));
+    if (folded === undefined) notes.push(note);
+    else folded.prereleases.unshift(note.version);
+  }
+  return `// GENERATED FILE — do not edit.\n// Source: docs/releases/*.md via scripts/generate-release-notes.mjs.\n\n/** One version: its summary paragraph and section headings; the prereleases folded into it, oldest first. */\nexport interface ReleaseNote { version: string; summary: string; sections: readonly string[]; prereleases: readonly string[]; gitUrl: string }\n\nexport const RELEASE_NOTES: readonly ReleaseNote[] = ${JSON.stringify(notes, null, 2)};\n`;
 }
 
 export function catalogFromDirectory(dir = releasesDir) {
@@ -134,7 +155,7 @@ function main() {
       console.error("plugin/client/release-notes.generated.ts is stale; run `npm run generate:release-notes`");
       process.exit(1);
     }
-    console.log(`release notes: ${readdirSync(releasesDir).filter((name) => FILE.test(name)).length} entries current`);
+    console.log(`release notes: ${readdirSync(releasesDir).filter((name) => FILE.test(name)).length} files current`);
     return;
   }
   if (current !== next) {

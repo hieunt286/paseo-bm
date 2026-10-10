@@ -19,7 +19,7 @@ import { resolveByPrecedent, supersedePrecedentsBy } from "../plugin/server/prec
 import { applyPreparedChange } from "../plugin/server/prepared-changes";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
-import { AUTONOMY_MODES, decideRefusalOf, modeOf, predictionRefusalOf } from "../plugin/shared/autonomy";
+import { AUTONOMY_MODES, decideRefusalOf, modeOf } from "../plugin/shared/autonomy";
 import { FINDINGS_MAX_CHARS, ORCHESTRATOR_SERVER_TOOLS } from "../plugin/shared/bm-tools";
 import { alertKeyOf } from "../plugin/shared/alerts";
 import { ADVICE_EVERY_FINISHED, DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
@@ -353,7 +353,7 @@ describe("the owner's answer applies the prepared change of the option chosen, a
   });
 });
 
-describe("only the owner answers a decision that carries a prepared change: not the policy, a precedent, bm_decide or bm_predict (design §G.4)", () => {
+describe("only the owner answers a decision that carries a prepared change: not the policy, a precedent or bm_decide (design §G.4)", () => {
   it("the policy at open: a delegate cell of its class leaves it open for the owner, and the policy's answer is refused", async () => {
     createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     const { tools } = toolsWith();
@@ -411,17 +411,6 @@ describe("only the owner answers a decision that carries a prepared change: not 
     // The guard is its own line, not only the rule that an o: decision is the owner's: a question carrying a change is refused too.
     const question = { ...makeDecision({ subject: null, options: [{ key: "a", label: "Advise less", recommended: true, effects: ["none"], action: { kind: "coordination.set", change: { key: "advice.everyFinished", value: 10 } } }] }), class: "reversible-technical" as const };
     expect(decideRefusalOf(policyNow(), question)).toBe(`decision ${question.id} carries a prepared change of the owner's settings; only the owner answers it; leave it to the owner`);
-  });
-
-  it("bm_predict: refused with the challenger on; nothing is recorded", async () => {
-    createAutonomyStore(home).setChallenger({ workspaceId: WORKSPACE_ID, enabled: true });
-    const { tools } = toolsWith();
-    const id = await asked(tools, [cadence(10), KEEP]);
-    const predicted = await tools.call("bm_predict", { decisionId: id, optionKey: "a", reason: "The owner never answered the last one." });
-    expect(predicted).toEqual({ ok: false, text: `Refused: decision ${id} carries a prepared change of the owner's settings; only the owner answers it; it is not predicted.` });
-    expect(stored(id)).not.toHaveProperty("prediction");
-    const question = makeDecision({ subject: null, prediction: { recommended: null, orchestrator: null }, options: [{ key: "a", label: "Advise less", recommended: false, effects: ["none"], action: { kind: "coordination.set", change: { key: "advice.everyFinished", value: 10 } } }] });
-    expect(predictionRefusalOf(policyNow(), question)).toMatch(/carries a prepared change of the owner's settings; only the owner answers it; it is not predicted$/);
   });
 
   it("an answer that is not the owner's applies nothing, whatever wrote it", async () => {

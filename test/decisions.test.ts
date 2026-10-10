@@ -506,6 +506,19 @@ describe("delegated answers, predictions and reversals (autonomy design §B.3, �
     const plain = makeDecision();
     expect(ownerViewOfDecision(plain)).toBe(plain);
   });
+
+  it("hides a Main's recommendation (prediction.main, missions design §8) the same way: shown only at a level of 1 or more, until it is settled", () => {
+    const main = { optionKey: "b", reason: "The charter asks for the smaller change.", at: AT };
+    const open = makeDecision({ prediction: { recommended: { optionKey: "a" }, orchestrator: null, main } });
+    expect(ownerViewOfDecision(open, true)).toBe(open);
+    expect(ownerViewOfDecision(open).prediction).toEqual({ recommended: { optionKey: "a" }, orchestrator: null, main: null });
+    expect(open.prediction?.main).toEqual(main);
+    expect(ownerViewOfDecision(ok(markNeedsConfirmation(open, { via: "chat-worker", at: AT }))).prediction?.main).toBeNull();
+    const both = makeDecision({ prediction: { ...predicted, main } });
+    expect(ownerViewOfDecision(both).prediction).toEqual({ recommended: { optionKey: "a" }, orchestrator: null, main: null });
+    const answered = ok(answerDecision(open, { via: "inbox", optionKey: "b", at: AT }));
+    expect(ownerViewOfDecision(answered)).toBe(answered);
+  });
 });
 
 describe("the other transitions", () => {

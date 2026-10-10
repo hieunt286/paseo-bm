@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAlertStore } from "../plugin/server/alert-store";
+import { governedLadderOf } from "../plugin/server/command-authority";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { familyFiguresOf, type GovernorFigure } from "../plugin/server/governor-figures";
 import {
@@ -75,6 +76,31 @@ describe("ladderStepOf: the steps code takes (§9.3)", () => {
     const failed: FamilyState = { step: 1, since: T0.toISOString(), figures: [], lastAction: { at: T0.toISOString(), kind: "nudge-failed", id: null }, mainTurnsAt: null };
     expect(ladderStepOf(failed, [stalled(true)], facts(new Date(T0.getTime() + NUDGE_RETRY_MS - 1))).action).toBe("none");
     expect(ladderStepOf(failed, [stalled(true)], facts(new Date(T0.getTime() + NUDGE_RETRY_MS))).action).toBe("nudge");
+  });
+
+  it("counts the window again from a bm_govern step on a family at step 1 or 2: both its minutes and its Main turns (governedLadderOf)", () => {
+    const nudged = ladderStepOf(ladderStepOf(null, [stalled(true)], facts(T0, 10)).state, [stalled(true)], facts(minutes(1), 10)).state;
+    expect(nudged).toMatchObject({ step: 2, mainTurnsAt: 10 });
+    // A re-plan 20 minutes and 3 Main turns after the nudge: the family stays at 2, its window restarts.
+    const replanned = governedLadderOf({ stuck: nudged }, "replan", [], { at: minutes(21).toISOString(), id: "cmd-gov", mainTurns: 13 }).stuck!;
+    expect(replanned).toEqual({ ...nudged, lastAction: { at: minutes(21).toISOString(), kind: "replan", id: "cmd-gov" }, mainTurnsAt: 13 });
+    // Due after 30 minutes and 5 Main turns from the nudge, but not from the re-plan.
+    expect(ladderStepOf(replanned, [stalled(true)], facts(minutes(40), 16)).action).toBe("none");
+    // 30 minutes from the re-plan, 4 turns: not yet; 5 turns, 29 minutes: not yet.
+    expect(ladderStepOf(replanned, [stalled(true)], facts(minutes(51), 17)).action).toBe("none");
+    expect(ladderStepOf(replanned, [stalled(true)], facts(minutes(50), 18)).action).toBe("none");
+    expect(ladderStepOf(replanned, [stalled(true)], facts(minutes(51), 18))).toMatchObject({ action: "replan-due", state: { step: 3, mainTurnsAt: 13 } });
+
+    // An arbitration naming the family's figure, and a nudge at step 2, restart it the same way; at step 1 the family waits for code's nudge.
+    const arbitrated = governedLadderOf({ stuck: nudged }, "arbitrate", ["stalled"], { at: minutes(21).toISOString(), id: "cmd-arb", mainTurns: 13 }).stuck!;
+    expect(arbitrated).toMatchObject({ step: 2, lastAction: { at: minutes(21).toISOString(), kind: "arbitrate" }, mainTurnsAt: 13 });
+    expect(governedLadderOf({ stuck: nudged }, "nudge", [], { at: minutes(21).toISOString(), id: "cmd-n", mainTurns: 13 }).stuck).toMatchObject({ step: 2, mainTurnsAt: 13 });
+    const recorded = ladderStepOf(null, [stalled(true)], facts(T0, 10)).state;
+    expect(governedLadderOf({ stuck: recorded }, "replan", [], { at: minutes(1).toISOString(), id: "cmd-gov", mainTurns: 11 }).stuck).toMatchObject({ step: 1, lastAction: { kind: "replan" }, mainTurnsAt: 11 });
+    // At step 3 and above the turns stay as they were: a re-plan moves 3 to 4.
+    const due = { ...nudged, step: 3 };
+    expect(governedLadderOf({ stuck: due }, "replan", [], { at: minutes(40).toISOString(), id: "cmd-gov", mainTurns: 20 }).stuck).toMatchObject({ step: 4, mainTurnsAt: 10 });
+    expect(governedLadderOf({ stuck: { ...due, step: 4 } }, "arbitrate", ["stalled"], { at: minutes(40).toISOString(), id: "cmd-arb", mainTurns: 20 }).stuck).toMatchObject({ step: 4, mainTurnsAt: 10 });
   });
 });
 

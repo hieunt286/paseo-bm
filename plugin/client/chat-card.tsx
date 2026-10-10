@@ -26,8 +26,9 @@
  * ADR-025) reads **Decided**, "decided for you by the Orchestrator", with no
  * answer buttons and no Save as precedent (it was not the owner's answer).
  *
- * Change-014: an open decision the Orchestrator predicted shows its proposal
- * as the primary option, its reason under the options; a Worker's question
+ * Change-014: an open decision the request's Main (or, on an older record,
+ * the Orchestrator) proposed an answer to shows that proposal as the primary
+ * option, its reason under the options; a Worker's question
  * or an Orchestrator's decision offers **Ask back** (`decisions.ask`) and
  * shows the conversation (`decisions.thread`, one query per decision,
  * `decisionThreadQueryKey`), read again while the owner's question waits.
@@ -629,7 +630,7 @@ export function PrecedentOffer({ view, on, styles, theme }: { view: PrecedentOff
 /**
  * One option as the mockup draws it: a full-width row — the key letter in
  * mono, the label (wrapping), and at the right its mark ("Recommended",
- * "Orchestrator suggests") in small capitals. The primary option is filled
+ * "Main suggests", "Orchestrator suggests") in small capitals. The primary option is filled
  * with the accent; the others are outlined. Hook-free.
  *
  * On a phone (`compact`, the MobileInbox artboard) the label gets the whole

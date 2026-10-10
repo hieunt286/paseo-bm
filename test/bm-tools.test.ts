@@ -373,8 +373,9 @@ describe("the tool list", () => {
   });
 
   it("lists the Orchestrator's server-run tools only, the Worker's bm_reply after bm_report, the Manager's bm_decisions after bm_answers, and nothing new for the Reviewer (orchestrator design §5, autonomy design §A.9, change-014)", () => {
-    // Missions design §9.1: bm_send_command replaced by bm_govern, bm_compact and bm_handoff retired from the model.
-    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_govern", "bm_arbitrate", "bm_create_main", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_why", "bm_reply"]);
+    // Missions design §9.1: bm_send_command replaced by bm_govern, bm_compact and bm_handoff retired from the model;
+    // bm_predict retired (owner, 2026-10-10).
+    expect(toolFacesFor("orchestrator").map((tool) => tool.name)).toEqual(["bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_govern", "bm_arbitrate", "bm_create_main", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_why", "bm_reply"]);
     expect(toolFacesFor("reviewer")).toEqual(toolsFor("reviewer"));
     expect(toolFacesFor("worker").map((tool) => tool.name)).toEqual(["bm_report", "bm_reply"]);
     expect(toolFacesFor("manager").map((tool) => tool.name)).toEqual(["bm_answers", "bm_decisions"]);
@@ -510,24 +511,11 @@ describe("the tool list", () => {
     expect(face.description).toMatch(/An incident you leave stays open for the owner/);
   });
 
-  it("bm_predict (autonomy design §B.3, §B.9): a decision, the option expected and a one-line reason, nothing else", () => {
-    const face = ORCHESTRATOR_SERVER_TOOLS.find((tool) => tool.name === "bm_predict")!;
-    expect(face.role).toBe("orchestrator");
-    expect(face.inputSchema.required).toEqual(["decisionId", "optionKey", "reason"]);
-    expect(Object.keys(face.inputSchema.properties ?? {})).toEqual(["decisionId", "optionKey", "reason"]);
-    expect(schemaIssues(face.inputSchema, { decisionId: "q:req-20260930T031055Z:Q1", optionKey: "a", reason: "The owner kept the layout last time." })).toEqual([]);
-    expect(schemaIssues(face.inputSchema, { decisionId: "f:fb-1", optionKey: "b", reason: "Waiting is cheaper." })).toEqual([]);
-    expect(schemaIssues(face.inputSchema, { decisionId: "q:req-20260930T031055Z:Q1", optionKey: "Use PDF", reason: "x".repeat(301), words: "PDF" })).toEqual([
-      "input.optionKey: must match ^[a-z0-9][a-z0-9-]{0,31}$",
-      "input.reason: must be at most 300 characters",
-      "input.words: is not a field of this tool",
-    ]);
-    // What it is and what it is not, where the model reads it: it answers and sends nothing; the owner sees it as the proposal (ADR-025).
-    expect(face.description).toMatch(/It answers nothing and sends nothing: the owner still decides, and sees your option and reason on the incident as your proposal/);
-    expect(face.description).toMatch(/a Worker's question \(q:…\) is its Main's or the owner's/);
-    expect(face.description).toMatch(/autonomy level is 1 or more \(Co-pilot and up\)/);
-    expect(face.description).toMatch(/you have not predicted it yet/);
-    expect(face.description).not.toMatch(/Do not tell the owner/);
+  it("bm_predict is retired (owner, 2026-10-10): no role lists it", () => {
+    for (const role of ["orchestrator", "manager", "worker", "reviewer"] as const) {
+      expect(toolFacesFor(role, true).map((tool) => tool.name)).not.toContain("bm_predict");
+    }
+    expect(ORCHESTRATOR_SERVER_TOOLS.map((tool) => tool.name)).not.toContain("bm_predict");
   });
 
   it("the workspace id rule is the trace store's", () => {

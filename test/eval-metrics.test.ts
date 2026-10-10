@@ -1505,7 +1505,7 @@ describe("A-7 from the wake records (Phase 1)", () => {
     expect(metrics([askedAt(at(5), Q1)], { decisions: [recommendedQ1] }).a1.all).toMatchObject({ answeredByAgents: 1, answeredByAgentsViaCommand: 0 });
   });
 
-  it("a prediction the Orchestrator recorded (bm_predict, autonomy design §B.3) in the wake's turn is its action, whatever the owner answered later; a wake with nothing in it is not", () => {
+  it("a prediction the Orchestrator stored (by bm_predict, retired 2026-10-10: older records keep it; autonomy design §B.3) in the wake's turn is its action, whatever the owner answered later; a wake with nothing in it is not", () => {
     const predicted = (id: string, when: string): Decision =>
       storedQuestion({
         id,

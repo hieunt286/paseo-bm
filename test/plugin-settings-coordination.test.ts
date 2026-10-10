@@ -97,10 +97,9 @@ describe("the fields' text (the approved mockup's number inputs)", () => {
     expect(parseCoordinationInput("review.largeBudget", "6")).toEqual({ value: 6, error: null });
     expect(parseCoordinationInput("advice.everyFinished", "0")).toEqual({ value: 0, error: null });
     expect(parseCoordinationInput("compact.maxPerAgent", "9")).toEqual({ value: null, error: "At most, per agent: a number from 1 to 5." });
-    expect(parseCoordinationInput("compact.managerTokensPerTurn", "lots").error).toBe("Manager reads more than, per turn: a number from 50 K to 100 M.");
+    expect(parseCoordinationInput("compact.managerTokensPerTurn", "lots").error).toBe("Main reads more than, per turn: a number from 50 K to 100 M.");
     expect(parseCoordinationInput("compact.contextShare", "95").error).toBe("Or its context window is fuller than: a number from 10 % to 90 %.");
     expect(parseCoordinationInput("review.smallBudget", "1").error).toBe("Small: a number from 2 to 8.");
-    expect(parseCoordinationInput("advice.everyFinished", "2.5").error).toBe("Review the workflow every: a number from 0 to 50.");
     expect(inputErrorsOf(["compact.maxPerAgent", "compact.contextShare"], { "compact.maxPerAgent": "3", "compact.contextShare": "x" })).toEqual([
       "Or its context window is fuller than: a number from 10 % to 90 %.",
     ]);
@@ -116,18 +115,18 @@ describe("a mechanism's card (autonomy design §G.7)", () => {
   it("at the defaults: On, Turn off, each threshold with − and +, nothing to save, no defaults to restore", () => {
     const card = view();
     expect(card).toMatchObject({ title: "Compact", helped: "helped —", status: { text: "On", tone: "success" }, save: { enabled: false, label: "Save" }, reset: null });
-    expect(card.meaning).toBe("Shrink a Manager's or Worker's conversation at a safe point, then restore what matters from the records.");
+    expect(card.meaning).toBe("Shrink a Main's or Worker's conversation at a safe point, then restore what matters from the records.");
     expect(card.note).toBe("A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is.");
     expect(card.toggle).toEqual({ turnsOn: false, enabled: true, label: "Turn off", accessibilityLabel: "Turn compaction off now" });
     expect(card.rows.map((row) => [row.label, row.valueText, row.inputText])).toEqual([
-      ["Manager reads more than, per turn", "390k tokens read", "390 K"],
+      ["Main reads more than, per turn", "390k tokens read", "390 K"],
       ["Worker reads more than, per turn", "5.7M tokens read", "5.7 M"],
       ["Or its context window is fuller than", "50% of the window", "50 %"],
       ["At most, per agent", "at most 2", "2"],
     ]);
-    expect(card.rows[0]!.accessibilityLabel).toBe("Manager turn threshold: 390k tokens read");
-    expect(card.rows[0]!.decrease).toEqual({ enabled: true, label: "−", accessibilityLabel: "Manager turn threshold: lower to 300k tokens read" });
-    expect(card.rows[0]!.increase).toEqual({ enabled: true, label: "+", accessibilityLabel: "Manager turn threshold: raise to 400k tokens read" });
+    expect(card.rows[0]!.accessibilityLabel).toBe("Main turn threshold: 390k tokens read");
+    expect(card.rows[0]!.decrease).toEqual({ enabled: true, label: "−", accessibilityLabel: "Main turn threshold: lower to 300k tokens read" });
+    expect(card.rows[0]!.increase).toEqual({ enabled: true, label: "+", accessibilityLabel: "Main turn threshold: raise to 400k tokens read" });
     const handoff = view({ mechanism: "handoff" });
     expect(handoff.title).toBe("Handoff");
     expect(handoff.note).toBeNull();
@@ -169,7 +168,7 @@ describe("a mechanism's card (autonomy design §G.7)", () => {
     expect(card.toggle).toEqual({ turnsOn: true, enabled: true, label: "Turn on…", accessibilityLabel: "Turn handoff on, after a confirmation" });
     expect(turnOnDialog("handoff", switchedOff("handoff"))).toEqual({
       title: "Turn handoff on?",
-      body: "The Orchestrator may then have the Manager hand a heavy request to a fresh Worker without asking you. paseo-bm switched it off because only 6 of its last 10 met their goal (target 8). Its record counts afresh from now.",
+      body: "paseo-bm may then hand a heavy request to a fresh Worker under its Main without asking you, when it crosses your thresholds. paseo-bm switched it off because only 6 of its last 10 met their goal (target 8). Its record counts afresh from now.",
       confirmLabel: "Turn on",
       cancelLabel: "Cancel",
       confirmAccessibilityLabel: "Turn handoff on",
@@ -177,32 +176,34 @@ describe("a mechanism's card (autonomy design §G.7)", () => {
       defaultAction: "cancel",
     });
     expect(turnOnDialog("compact", ownerOff("compact")).body).toBe(
-      "The Orchestrator may then have a Manager or a Worker compact its conversation without asking you. Its record counts afresh from now.",
+      "paseo-bm may then compact a Main's or a Worker's conversation without asking you, when it crosses your thresholds. Its record counts afresh from now.",
     );
   });
 });
 
 describe("the Coordination group's line", () => {
-  it("names the cadence and both switches, and puts a mechanism paseo-bm switched off first, as a warning", () => {
+  it("names both switches, and puts a mechanism paseo-bm switched off first, as a warning; the retired advice cadence is not named", () => {
     // Coordination is open on the screen (change-014): not one of More's folded groups.
     expect(SETTINGS_GROUPS.map((group) => group.key)).not.toContain("coordination");
     expect(COORDINATION_MEANING.split("\n")).toHaveLength(1);
+    // Compaction and handoff run in the plugin's code (missions design §9.5, §17), not the Orchestrator's.
+    expect(COORDINATION_MEANING).toBe("When paseo-bm compacts an agent or hands a request to a fresh Worker, for every project. Each switches itself off if it stops helping.");
     expect(mechanismsText(D)).toBe("compaction and handoff on");
     expect(mechanismsText(ownerOff("handoff"))).toBe("compaction on, handoff off");
     expect(mechanismsText({ ...ownerOff("compact"), handoff: { ...D.handoff, enabled: false } })).toBe("compaction and handoff off");
-    expect(coordinationGroupState(ownerOff("compact"))).toEqual({ text: "Advice after every 5 finished requests · compaction off, handoff on", tone: "muted" });
+    expect(coordinationGroupState(ownerOff("compact"))).toEqual({ text: "compaction off, handoff on", tone: "muted" });
     expect(switchedOffMechanisms(switchedOff("compact"))).toEqual(["compact"]);
-    expect(coordinationGroupState(switchedOff("compact"))).toEqual({ text: "Compaction switched off below its target · Advice after every 5 finished requests", tone: "warning" });
+    expect(coordinationGroupState(switchedOff("compact"))).toEqual({ text: "Compaction switched off below its target", tone: "warning" });
     const both: CoordinationSettings = { ...switchedOff("compact"), handoff: { ...D.handoff, enabled: false }, guard: { ...switchedOff("compact").guard, handoff: switchedOff("handoff").guard.handoff } };
-    expect(coordinationGroupState(both).text).toBe("Compaction and handoff switched off below their target · Advice after every 5 finished requests");
+    expect(coordinationGroupState(both).text).toBe("Compaction and handoff switched off below their target");
   });
 });
 
 describe("Reset coordination to defaults (change-014 outcome 5)", () => {
-  it("fills every card's draft with the defaults — the cadence, both mechanisms' thresholds, the review budget — and saves nothing itself", () => {
+  it("fills every card's draft with the defaults — both mechanisms' thresholds, the review budget — and saves nothing itself", () => {
     const changed: CoordinationSettings = { ...D, advice: { everyFinished: 9 } };
     const drafts = coordinationDefaultsDraft(D);
-    expect(drafts.advice).toBe(D.advice.everyFinished);
+    expect(Object.keys(drafts).sort()).toEqual(["review", "thresholds"]);
     expect(drafts.thresholds).toEqual({ ...defaultsDraft("compact", D), ...defaultsDraft("handoff", D) });
     expect(Object.keys(drafts.thresholds).sort()).toEqual([...MECHANISM_THRESHOLDS.compact, ...MECHANISM_THRESHOLDS.handoff].sort());
     expect(drafts.review).toEqual(reviewBudgetDefaultsDraft(D));
@@ -244,7 +245,7 @@ describe("MechanismCard (hook-free)", () => {
       "Compact",
       view().meaning,
       "helped —",
-      "Manager reads more than, per turn",
+      "Main reads more than, per turn",
       "Worker reads more than, per turn",
       "Or its context window is fuller than",
       "At most, per agent",

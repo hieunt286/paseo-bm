@@ -8,11 +8,11 @@
  * Pure: no imports.
  */
 export const BM_TOOL_NAMES = {
-  manager: ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"],
+  manager: ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"],
   worker: ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"],
   reviewer: ["bm_review"],
   orchestrator: [
-    "bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_govern", "bm_arbitrate", "bm_create_main", "bm_decisions", "bm_ask_owner", "bm_decide", "bm_predict",
+    "bm_projects", "bm_missions", "bm_request", "bm_agent_messages", "bm_govern", "bm_arbitrate", "bm_create_main", "bm_decisions", "bm_ask_owner", "bm_decide",
     "bm_direct_worker", "bm_repo", "bm_note", "bm_findings", "bm_why", "bm_reply",
   ],
 } as const satisfies Record<"manager" | "worker" | "reviewer" | "orchestrator", readonly string[]>;

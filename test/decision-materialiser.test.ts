@@ -22,7 +22,7 @@ import { createRequestRegistry } from "../plugin/server/request-registry";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { applyReviewBudgetGrants, policyGrantCapAt } from "../plugin/server/review-tools";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
-import { decideRefusalOf, predictionRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
+import { decideRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
 import { GRANT_TTL_MS, answerDecision, confirmDecision, markNeedsConfirmation, type Decision } from "../plugin/shared/decisions";
 import type { TraceRecord } from "../plugin/shared/contracts";
 import { MANAGER, WORKER, WORKSPACE_ID, at, msg, turn } from "./fixtures/orchestrator-traces";
@@ -480,16 +480,13 @@ describe("expiry at a finished report (§A.3)", () => {
     ]);
   });
 
-  it("bm_decide and bm_predict refuse an expired question as any settled one (their rules)", async () => {
+  it("bm_decide refuses an expired question as any settled one (its rule)", async () => {
     await ask();
-    // Q2 is `dependency` by its effects: delegated to the Orchestrator, or predicted with the challenger on.
+    // Q2 is `dependency` by its effects: delegated to the Orchestrator.
     const delegated: AutonomyPolicy = { projects: { [WORKSPACE_ID]: { dependency: { mode: "delegate", at: NOW } } }, challenger: {} };
-    const challenger: AutonomyPolicy = { projects: {}, challenger: { [WORKSPACE_ID]: true } };
     expect(decideRefusalOf(delegated, get("Q2")!)).toBeNull();
-    expect(predictionRefusalOf(challenger, get("Q2")!)).toBeNull();
     await materialiseTurn(finishedTurn(), deps());
     expect(decideRefusalOf(delegated, get("Q2")!)).toBe(`decision ${idOf("Q2")} is expired; it can no longer be answered`);
-    expect(predictionRefusalOf(challenger, get("Q2")!)).toBe(`decision ${idOf("Q2")} is expired; only an open decision is predicted`);
   });
 
   it("a question asked after the report stays open, and reading the turn again changes nothing", async () => {

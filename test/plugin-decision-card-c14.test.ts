@@ -8,7 +8,7 @@ import {
   DECISION_POLL_MS,
   DECISION_UI_IDLE,
   RECOMMENDED_MARK,
-  SUGGESTS_MARK,
+  SUGGESTS_MARKS,
   decisionCardView,
   runDecisionAsk,
   threadPollMs,
@@ -21,7 +21,8 @@ import type { DecisionThread } from "../plugin/shared/decision-threads";
 
 /**
  * Change-014 on the decision card (outcomes 2 and 3, ADR-025): the
- * Orchestrator's proposal as the primary option at Co-pilot and up; Ask back
+ * proposal as the primary option at Co-pilot and up — the request's Main's
+ * (missions design §8), else an older record's Orchestrator's; Ask back
  * with its conversation on a Worker's question or an Orchestrator's decision;
  * and "decided for you by the Orchestrator" for an answer made on the policy.
  */
@@ -41,7 +42,7 @@ const AT = new Date("2026-09-29T07:40:00.000Z");
 const NOW = new Date("2026-09-29T07:45:00.000Z");
 const O_ID = "o:3f1c2b9a-0d4e-4c55-9f00-1234567890ab";
 
-/** An open Worker question the Orchestrator predicted `c` for (Hold; the recommended option is `a`). */
+/** An open Worker question the Orchestrator predicted `c` for on an older record (`bm_predict`, retired; Hold; the recommended option is `a`). */
 function predicted(optionKey = "c", overrides: Partial<Decision> = {}): Decision {
   return makeDecision({
     prediction: { recommended: { optionKey: "a" }, orchestrator: { optionKey, reason: "Hold until the contract tests pass.", at: "2026-09-29T07:41:00.000Z" } },
@@ -91,13 +92,42 @@ function thread(id: string, ...entries: Array<["owner" | "asker", string]>): Dec
   return { decisionId: id, entries: entries.map(([by, text], index) => ({ by, text, at: `2026-09-29T07:4${index + 1}:00.000Z` })) };
 }
 
-describe("the Orchestrator's proposal on the card (change-014 outcome 2)", () => {
+describe("the proposal on the card (change-014 outcome 2)", () => {
+  it("shows a Main's prediction as \"Main suggests\", before an older Orchestrator one; an old Orchestrator one alone still reads \"Orchestrator suggests\"", () => {
+    expect(SUGGESTS_MARKS).toEqual({ main: "Main suggests", orchestrator: "Orchestrator suggests" });
+    const mainPrediction = { optionKey: "c", reason: "Hold: the mission's contract lands first.", at: "2026-09-29T07:42:00.000Z" };
+    const byMain = view(makeDecision({ prediction: { recommended: { optionKey: "a" }, orchestrator: null, main: mainPrediction } }));
+    expect(byMain.options.map(({ key, mark, primary }) => ({ key, mark, primary }))).toEqual([
+      { key: "a", mark: RECOMMENDED_MARK, primary: false },
+      { key: "b", mark: null, primary: false },
+      { key: "c", mark: "Main suggests", primary: true },
+    ]);
+    expect(byMain.options[2]!.accessibilityLabel).toBe("Answer: Hold (the Main suggests it)");
+    expect(byMain.proposal).toBe("Main: Hold: the mission's contract lands first.");
+    expect(byMain.details).toContain("Main suggests: c at 2026-09-29T07:42:00.000Z");
+    expect(byMain.details.some((line) => line.startsWith("Orchestrator suggests"))).toBe(false);
+    expect(texts(draw(byMain))).toEqual(expect.arrayContaining(["Main suggests", "Main: Hold: the mission's contract lands first."]));
+
+    // Both stored: the Main's is the proposal; the Orchestrator's older one is not shown beside it.
+    const both = view(predicted("a", { prediction: { recommended: { optionKey: "a" }, orchestrator: { optionKey: "a", reason: "Push it.", at: "2026-09-29T07:41:00.000Z" }, main: mainPrediction } }));
+    expect(both.options.find((option) => option.primary)).toMatchObject({ key: "c", mark: "Main suggests" });
+    expect(both.options[0]!.mark).toBe(RECOMMENDED_MARK);
+    expect(both.proposal).toBe("Main: Hold: the mission's contract lands first.");
+
+    // An old record with the Orchestrator's prediction only.
+    const old = view(predicted());
+    expect(old.options[2]).toMatchObject({ mark: "Orchestrator suggests", primary: true, accessibilityLabel: "Answer: Hold (the Orchestrator suggests it)" });
+    expect(old.proposal).toBe("Orchestrator: Hold until the contract tests pass.");
+    expect(old.details).toContain("Orchestrator suggests: c at 2026-09-29T07:41:00.000Z");
+  });
+
+
   it("makes the suggested option the primary one, marked, with its reason under the options; the recommended keeps its mark as secondary", () => {
     const shown = view(predicted());
     expect(shown.options.map(({ key, label, mark, primary }) => ({ key, label, mark, primary }))).toEqual([
       { key: "a", label: "Push contract only", mark: RECOMMENDED_MARK, primary: false },
       { key: "b", label: "Push both and publish", mark: null, primary: false },
-      { key: "c", label: "Hold", mark: SUGGESTS_MARK, primary: true },
+      { key: "c", label: "Hold", mark: SUGGESTS_MARKS.orchestrator, primary: true },
     ]);
     expect(shown.options[2]!.accessibilityLabel).toBe("Answer: Hold (the Orchestrator suggests it)");
     expect(shown.options[0]!.accessibilityLabel).toBe("Answer: Push contract only (recommended); allows push");
@@ -109,7 +139,7 @@ describe("the Orchestrator's proposal on the card (change-014 outcome 2)", () =>
 
   it("marks both on one button when the Orchestrator suggests the recommended option", () => {
     const shown = view(predicted("a"));
-    expect(shown.options[0]).toMatchObject({ label: "Push contract only", mark: `${SUGGESTS_MARK} · ${RECOMMENDED_MARK}`, primary: true, accessibilityLabel: "Answer: Push contract only (the Orchestrator suggests it; recommended); allows push" });
+    expect(shown.options[0]).toMatchObject({ label: "Push contract only", mark: `${SUGGESTS_MARKS.orchestrator} · ${RECOMMENDED_MARK}`, primary: true, accessibilityLabel: "Answer: Push contract only (the Orchestrator suggests it; recommended); allows push" });
     expect(shown.options.filter((option) => option.primary)).toHaveLength(1);
   });
 
@@ -284,6 +314,16 @@ describe("decided for you by the Orchestrator (change-014, ADR-025)", () => {
     expect(shown.frame.authority?.startsWith("decided for you by your earlier policy · ")).toBe(true);
     expect(shown.details).toContain("Answered by: your earlier policy (recommended option, scope)");
     expect(decidedByWords(old)).toBe("your earlier policy");
+  });
+
+  it("names the Main for an answer the request's Main gave (missions design §8), never the owner or the policy", () => {
+    const result = answerDecision(makeDecision({ class: "scope" }), { by: "main", via: "main", optionKey: "c", class: "scope", reason: "Hold until the contract tests pass.", at: "2026-09-29T07:42:00.000Z" });
+    if (!result.ok) throw new Error(result.message);
+    const shown = view(result.decision);
+    expect(shown.frame.authority?.startsWith("decided for you by the Main · ")).toBe(true);
+    expect(shown.details).toContain("Answered by: the Main (scope)");
+    expect(JSON.stringify(shown)).not.toMatch(/answered by you|your policy/);
+    expect(decidedByWords(result.decision)).toBe("the Main");
   });
 });
 

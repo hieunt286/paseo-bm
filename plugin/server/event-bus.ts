@@ -46,14 +46,14 @@
  *   The events a wake carried stay in memory until that turn end
  *   (`wakeEventsOf`), so a command the Orchestrator sends in it is logged as
  *   the intervention on those events (design §G.3, `intervention-store.ts`).
- * - **The advice count** (design §G.4): each recorded Manager's or Worker's
- *   turn counts its finished requests toward its project's advice
- *   (`advice-store.ts`); it wakes nothing.
+ * - **No advice count** (ADR-029 decision 9): `advice.due` is retired as a
+ *   wake and nothing counts toward it; the periodic review is the
+ *   governor's `mission.review`. `advice.everyFinished` stays a stored,
+ *   accepted setting that does nothing.
  *
  * Nothing here throws into the plugin: a failure is one log line.
  */
 import { resolveDataHome } from "./data-home";
-import { createAdviceStore } from "./advice-store";
 import { createAlertStore } from "./alert-store";
 import { currentPolicy } from "./autonomy-store";
 import { readCoordinationSettings } from "./coordination-rpc";
@@ -68,7 +68,7 @@ import { familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure, 
 import type { WakeUsage, WorkerSignal } from "../shared/orchestrator";
 import type { TraceRecord } from "../shared/contracts";
 import { isPluginHome } from "./plugin-homes";
-import { createMissionRoster, requestIndexOf } from "./mission-roster";
+import { createMissionRoster } from "./mission-roster";
 import type { GovernorOutcome } from "./governor-store";
 import { createMissionStore, openSplitSuggestionsOf, type Mission } from "./mission-store";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
@@ -87,7 +87,7 @@ export interface DecisionOpenedEvent {
   decisionId: string;
   /** The Worker that asked, when known; null for a fallback incident. */
   askedBy: string | null;
-  /** What it asks of the Orchestrator (design §B.5, §B.9): a decision (`bm_decide`), or a prediction (`bm_predict`). */
+  /** What it asks of the Orchestrator (design §B.5, §B.9): a decision (`bm_decide`); `prediction`, for the retired `bm_predict`, only on an older event. */
   asks: "decision" | "prediction";
 }
 
@@ -137,8 +137,10 @@ export interface WorkerSignalEvent {
 }
 
 /**
- * Advice is due for a project (design §G.4): its finished requests since its
- * last advice reached the cadence of Settings → Coordination.
+ * Advice was due for a project (design §G.4): its finished requests since its
+ * last advice reached the cadence of Settings → Coordination. Retired (ADR-029
+ * decision 9): nothing raises it any more; the type stays so an older wake's
+ * events and the interventions they triggered still read.
  */
 export interface AdviceDueEvent {
   type: "advice.due";
@@ -397,35 +399,6 @@ export function eventsMessageOf(lines: readonly string[]): string {
   ].join("\n");
 }
 
-/**
- * The turns whose `finished` reports the advice count reads (design §7.17.8
- * i): a Manager's (a report sent to it by hand), and a Worker's own — what its
- * `bm_report` stored (with its `recordId`, `outboxBlocksOf`) or the block the
- * plugin relays for an unbound Worker — since the collector skips every
- * `BM-DELIVERY` in the Manager's turn.
- */
-const readsFinishes = (record: TraceRecord | null | undefined): record is TraceRecord =>
-  record !== null && record !== undefined && (record.role === "manager" || record.role === "worker");
-
-/** The Manager a finish without a request id is keyed by: the recording Manager, else the Worker's parent, else the Worker. */
-const managerOf = (record: TraceRecord): string => (record.role === "manager" ? record.agentId : (record.parentAgentId ?? record.agentId));
-
-/**
- * The finished requests of a recorded Manager or Worker turn
- * (`readsFinishes`), for the advice cadence (design §G.4): one key per
- * request that sent a `finished` report — its request id, else the Manager
- * and the report's time — with the latest such
- * report's time. Every finished report counts, work left or not. Pure.
- */
-export function finishedRequestKeysOf(record: TraceRecord | null | undefined): { workspaceId: string; keys: string[]; at: string } | null {
-  if (!readsFinishes(record)) return null;
-  const finished = record.reports.filter((report) => report.phase === "finished");
-  if (finished.length === 0) return null;
-  const keys = [...new Set(finished.map((report) => report.requestId ?? record.requestId ?? `manager:${managerOf(record)}@${report.at}`))];
-  const at = finished.map((report) => report.at).reduce((latest, next) => (Date.parse(next) > Date.parse(latest) ? next : latest));
-  return { workspaceId: record.workspaceId, keys, at };
-}
-
 // ---------------------------------------------------------------------------
 // The governor's events (missions design §9.7).
 // ---------------------------------------------------------------------------
@@ -607,9 +580,8 @@ export interface EventBus {
    */
   publish(events: readonly BmEvent[], paseo?: unknown, found?: OrchestratorAgentSnapshot | null): Promise<PublishResult>;
   /**
-   * One recorded turn (the collector's `onRecorded`): its finished requests
-   * count toward the project's advice (design §G.4, `advice-store.ts`), and
-   * any event a mission's window held is published. Never rejects.
+   * One recorded turn (the collector's `onRecorded`): any event a mission's
+   * window held is published. Never rejects.
    */
   turnRecorded(record: TraceRecord | null | undefined, paseo?: unknown): Promise<PublishResult>;
   /**
@@ -644,30 +616,6 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
   let lastPaseo: OrchestratorAgentPaseo | null = null;
   /** Keys published in this run, oldest first. */
   const published = new Set<string>();
-  /** Finishes read in this run (project, request, the report without its sender and time) → the role whose turn held it first. */
-  const finishes = new Map<string, TraceRecord["role"]>();
-  /**
-   * The turn without the finishes already read in the other role's turns: a
-   * Worker's report sent to its Manager by hand is one finish in both records,
-   * counted once (REQ-183 i). Repeats in one role's turns keep the advice
-   * count's own dedupe.
-   */
-  const unseenFinishesOf = (record: TraceRecord | null | undefined): TraceRecord | null | undefined => {
-    if (!readsFinishes(record)) return record;
-    const reports = record.reports.filter((report) => {
-      if (report.phase !== "finished") return true;
-      const requestId = report.requestId ?? record.requestId;
-      // Missions design §6: the request's workspace, so a Main's copy in the home and its Worker's in the repo are one finish.
-      const home = requestId === null ? null : homeOf();
-      const workspaceId = (home === null || requestId === null ? null : requestIndexOf(home, requestId))?.workspaceId ?? record.workspaceId;
-      const key = JSON.stringify([workspaceId, requestId, { ...report, agentId: null, at: null, recordId: null }]);
-      const first = finishes.get(key);
-      if (first === undefined) finishes.set(key, record.role);
-      if (finishes.size > PUBLISHED_KEYS_LIMIT) finishes.delete(finishes.keys().next().value!);
-      return first === undefined || first === record.role;
-    });
-    return { ...record, reports };
-  };
   /** Published keys → their project, until the wake that carried them is recorded (A-7). */
   const workspaceOfKey = new Map<string, string>();
   /** Each mission's last publish that queued one of its events (§9.7), in ms. */
@@ -873,25 +821,6 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
   }
 
   /**
-   * Counts the finished requests of a recorded Manager's or Worker's turn
-   * toward its project's advice (design §G.4), which starts the count again
-   * when it reaches the cadence. Nothing with advice off. Its `advice.due` is
-   * retired as a wake (§9.1). Never throws: a store failure is one log line.
-   */
-  const countAdvice = (record: TraceRecord | null | undefined): void => {
-    const finished = finishedRequestKeysOf(record);
-    const home = finished === null ? null : homeOf();
-    if (finished === null || home === null) return;
-    const everyFinished = readCoordinationSettings({ home, log }).advice.everyFinished;
-    if (everyFinished === 0) return;
-    try {
-      createAdviceStore(home).count(finished.workspaceId, finished.keys, everyFinished, finished.at);
-    } catch (error) {
-      log(`[paseo-bm] could not count the finished requests toward the advice: ${errorText(error)}`);
-    }
-  };
-
-  /**
    * The governor's events of one recomputation (§9.7): `mission.signal` for
    * a family due for step 3, `mission.review` for a mark passed since the
    * last one, `mission.scope` for work outside the charter first seen
@@ -928,8 +857,7 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       if (isPaseo(paseo)) lastPaseo = paseo;
     },
     publish,
-    turnRecorded(record, paseo) {
-      countAdvice(unseenFinishesOf(record));
+    turnRecorded(_record, paseo) {
       return publish([], paseo);
     },
     governed(outcomes, paseo) {

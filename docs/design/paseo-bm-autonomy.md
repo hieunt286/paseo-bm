@@ -75,6 +75,8 @@ Does not own: decision classes, policy and delegation (Part B); evidence classif
 
 Rules: a Worker question may re-ask with `supersedes: "Q3"` (new optional field of the `bm_report` question schema) or with the same normalised text → the old one becomes `superseded`. An Orchestrator decision supersedes the open Orchestrator decision of the same request unless it passes `separate: true`. A superseded, withdrawn or expired decision is never answerable; the tool that caused it returns the id it replaced.
 
+> **Since 2026-10-10:** `bm_predict` is retired (the owner's decision; missions design §19). A stored Orchestrator prediction is still read and shown; the Main's `prediction.main` is the proposal at Co-pilot and up, and the Orchestrator decides only `f:` incidents delegated to it (`bm_decide`). A mission's Main answering for the owner (`by: main`) is "decided for you" as well: listed in the digest and overridable (§B.7, missions design §19).
+
 **Expiry of a Worker question.** A `q:` decision that is `open` or `needs-confirmation` expires when its request's `finished` report is recorded: at a Manager's turn end, a `BM-REPORT` with `phase: finished`, in an incoming message that is neither the owner's nor a plugin notice, expires every such question of the request the report names that was asked no later than the report (`settledAt` = the report's message time). The materialiser (`expireFinished`) writes each in its own store transition after the turn's openings and answers (§A.5), so an answer given meanwhile, or by the owner in the same turn, stands; a question asked after the report stays open. `o:` and `f:` decisions never expire this way; the owner's open overrides (`r:`, §B.7) of a request's questions expire with them, overrides of `o:` and `f:` decisions never do. An expired decision leaves the Inbox, is refused by `decisions.answer` (`E_DECISION_SETTLED`), `bm_decide` and `bm_predict`, and is never delivered; its card reads **Expired** with "The request finished."
 
 `PreparedAction` is a union: `answer-worker` (implicit for Worker questions: deliver the answer), `command { to: manager | worker, agentId, intent, body, effects }` (Orchestrator decisions; P5), `fallback { action: switch | wait | resend | dismiss, target }` (fallback incidents).
@@ -794,6 +796,8 @@ Every `bm_decide` answer is an `answer` to the Worker that asked, with trigger `
 
 *Since 2026-10-09 (ADR-028):* the advice count reads the `finished` reports of Manager and Worker turn records (base design §7.17.8 (i)).
 
+> **Since 2026-10-10:** the advice cadence is retired. ADR-029 decision 9 stopped `advice.due` as a wake, and the periodic review is the governor's `mission.review` (missions design §9.7). The event bus counts nothing, `advice-store.ts` is gone, the Settings card is removed, and `advice.everyFinished` stays stored and accepted as a no-op (missions design §19). `bm_findings` still answers the owner's own question.
+
 **The trigger.**
 - Each `finished` report the collector records counts toward its project.
 - When the count since the last advice reaches `advice.everyFinished` (Settings, G.7; default 5; 0 = off), the event bus publishes `advice.due` for that project. It is a judgement wake.
@@ -953,7 +957,7 @@ Stored in `<data>/coordination/settings.json` (`version: 1`, the store rules) an
   - `coordination.settings {}` → `{ settings, defaults }`, reads only.
   - `coordination.set { key, value }` → `{ settings }`, one setting per call (the same `{ key, value }` a prepared change carries). An unknown key or a value out of its bounds → `E_COORDINATION_INVALID`, checked before the data folder is looked at; no usable data folder → `E_DATA_HOME_UNAVAILABLE`; a newer or unwritable store → `E_COORDINATION_WRITE_FAILED`. Every refusal writes nothing.
   - No agent tool sets these settings.
-- **Settings → Coordination** (`plugin/client/settings-section.tsx`, `settings-model.ts`): the group after Autonomy, open by default. Its line is the cadence in words ("Advice after every 5 finished requests", "Advice off"). The advice card, titled "Orchestrator advice", has its meaning in one line, − and + within the bounds, Save (enabled only for a changed value) and "Use the default (5)". The Compaction, Handoff and Review budget cards follow it in the same group. **Reset coordination to defaults** (change-014) fills every card's draft with its default — each card's own Save sends it — and leaves the switches as they are.
+- **Settings → Coordination** (`plugin/client/settings-section.tsx`, `settings-model.ts`): the group after Autonomy, open by default. (Since 2026-10-10: no advice card and no cadence in the group line; the Compaction and Handoff cards, then Review budget in a full-width row. The meaning is "When paseo-bm compacts an agent or hands a request to a fresh Worker…", and the Main is named where the Manager was.) Its line is the cadence in words ("Advice after every 5 finished requests", "Advice off"). The advice card, titled "Orchestrator advice", has its meaning in one line, − and + within the bounds, Save (enabled only for a changed value) and "Use the default (5)". The Compaction, Handoff and Review budget cards follow it in the same group. **Reset coordination to defaults** (change-014) fills every card's draft with its default — each card's own Save sends it — and leaves the switches as they are.
 
 ### G.8 Guardrails and measures
 
@@ -1010,3 +1014,5 @@ Rows up to 2026-10-02 are archived in [paseo-bm-autonomy-revision-history-to-202
 | 2026-10-09 | Claude (owner's delegation) | ADR-028 as built: pointer lines in §A.3, §A.8, §B.5, §G.4 and §G.6 to base design §7.17.8 |
 | 2026-10-09 | Claude (owner's delegation) | §F.1: files written by a shell command (redirection, `tee`) count as written, found in the missions governor acceptance run (missions design §17) |
 | 2026-10-10 | Claude (owner's delegation) | Pointers: the retired wakes' helpers (`decisionsOpened`, the unverified-finish helpers) removed in the missions review (missions design §19) |
+| 2026-10-10 | Claude (owner's decision) | `bm_predict` retired (missions design §19): a note where this document first names it |
+| 2026-10-10 | Claude (owner's delegation) | §G.4/§G.7: the advice cadence retired (no wake since ADR-029; `mission.review` replaces it); the Coordination copy names paseo-bm and the Main (missions design §19) |

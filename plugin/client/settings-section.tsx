@@ -61,7 +61,7 @@ import { errorMessageOf } from "./errors";
 import type { InsightsProject } from "./insights-model";
 import { AutonomyGroup } from "./settings-autonomy";
 import { AUTONOMY_MEANING, AUTONOMY_POLICY_KEY, PRECEDENTS_QUERY_KEY, autonomyProjects } from "./settings-autonomy-model";
-import { CardFooter, MechanismCard, NumberField, ReviewBudgetCard, coordinationCardStyle } from "./settings-coordination";
+import { MechanismCard, ReviewBudgetCard } from "./settings-coordination";
 import {
   COORDINATION_MEANING,
   MECHANISM_THRESHOLDS,
@@ -69,7 +69,6 @@ import {
   coordinationDefaultsDraft,
   coordinationResetView,
   changedThresholds,
-  inputErrorsOf,
   mechanismCardView,
   parseCoordinationInput,
   reviewBudgetCardView,
@@ -80,18 +79,15 @@ import {
   type ThresholdDraft,
 } from "./settings-coordination-model";
 import {
-  ADVICE_FIELD,
   DEFAULT_OPEN_GROUPS,
   SETTINGS_GROUPS,
   THRESHOLD_NOTE,
-  adviceCadenceView,
   agentsGroupState,
   dataGroupState,
   groupHeaderView,
   precedentsGroupState,
   storageSummary,
   toggleGroup,
-  type AdviceCadenceView,
   type GroupHeaderView,
   type GroupState,
   type SettingsGroupKey,
@@ -223,16 +219,10 @@ export function ReleaseNotesBlock({ installedVersion, latestVersion, selectedVer
           <ToneText tone="warning" styles={styles} theme={theme}>Release notes for {view.selectedVersion ?? "this version"} are not bundled.</ToneText>
         ) : (
           <View style={{ gap: 7 }}>
-            <Text style={styles.sectionTitle}>{view.selected.title}</Text>
-            {view.selected.blocks.map((block, index) => (
-              <Text
-                key={`${block.kind}-${index}`}
-                selectable
-                style={block.kind === "heading" ? styles.sectionTitle : [styles.body, block.kind === "code" ? { fontFamily: "monospace" } : {}, block.kind === "bullet" ? { paddingLeft: 10 } : {}]}
-              >
-                {block.kind === "bullet" ? `• ${block.text}` : block.text}
-              </Text>
-            ))}
+            <Text style={styles.sectionTitle}>{`paseo-bm ${view.selected.version}`}</Text>
+            <Text selectable style={styles.body}>{view.selected.summary}</Text>
+            {view.includes === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{view.includes}</Text>}
+            {view.sections === null ? null : <Text style={[styles.body, { fontSize: 11 }]}>{view.sections}</Text>}
           </View>
         )}
         <Button
@@ -373,49 +363,6 @@ export function StorageRowView({ row, open, onToggle, styles, children }: {
 }
 
 /**
- * Orchestrator advice (the approved mockup; autonomy design §G.7): "Review
- * the workflow every [n] finished requests", what 0 does, and Save at the foot
- * while the value changed. A refused value or a failed save says why there.
- * Hook-free.
- */
-export function AdviceCadenceRow({ view, input, busy, error, narrow = false, onInput, onSave, styles, theme }: {
-  view: AdviceCadenceView;
-  /** A phone: 14 padding, Save across the card. */
-  narrow?: boolean;
-  /** The field's text while it is being typed in; null shows the value. */
-  input: string | null;
-  busy: boolean;
-  error: string | null;
-  onInput: (text: string) => void;
-  onSave: () => void;
-  styles: Styles;
-  theme: Theme;
-}) {
-  const { colors } = theme;
-  const refusals = inputErrorsOf(["advice.everyFinished"], input === null ? {} : { "advice.everyFinished": input });
-  return (
-    <View style={[coordinationCardStyle(theme), narrow ? { gap: 10, padding: 14 } : { flex: 1, gap: 12, paddingVertical: 16, paddingHorizontal: 20 }]}>
-      <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>{view.title}</Text>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: narrow ? 10 : 12 }}>
-        <Text style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: narrow ? 13 : 14 }}>{ADVICE_FIELD.before}</Text>
-        <NumberField
-          value={input ?? view.inputText}
-          invalid={refusals.length > 0}
-          accessibilityLabel={view.accessibilityLabel}
-          editable={!busy}
-          width={56}
-          onChange={onInput}
-          theme={theme}
-        />
-        <Text style={{ color: colors.foregroundMuted, fontSize: narrow ? 13 : 14 }}>{ADVICE_FIELD.after}</Text>
-      </View>
-      <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.meaning}</Text>
-      <CardFooter save={view.save} refusals={refusals} error={error} narrow={narrow} onSave={onSave} styles={styles} theme={theme} />
-    </View>
-  );
-}
-
-/**
  * One of compaction and handoff (autonomy design §G.7): its switch saves at
  * once (turning on after a confirmation), its thresholds stay a draft (held
  * by the group, so its reset can fill them) until Save, which sends one
@@ -545,9 +492,9 @@ function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, narrow, 
 /**
  * Settings → Coordination (autonomy design §G.7; change-014 outcome 5),
  * open on the screen: compaction and handoff, each a card of its own, the
- * review budget, the Orchestrator's advice cadence, then **Reset coordination
- * to defaults**, which fills every card's draft with the defaults. An edit
- * stays a draft until its card's Save.
+ * review budget, then **Reset coordination to defaults**, which fills every
+ * card's draft with the defaults. An edit stays a draft until its card's Save.
+ * The advice cadence's card is retired (ADR-029 decision 9).
  */
 function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
   data: CoordinationSettingsOutput;
@@ -556,24 +503,16 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
   styles: Styles;
   theme: Theme;
 }) {
-  const save = useRpc(coordinationSetRpc);
-  const [adviceDraft, setAdviceDraft] = useState<number | null>(null);
   const [thresholds, setThresholds] = useState<ThresholdDraft>({});
   const [review, setReview] = useState<ReviewBudgetDraft>({});
   // The text of the fields being typed in; a valid one is also in its draft.
   const [inputs, setInputs] = useState<CoordinationInputs>({});
-  const { busy: saving, run } = useBusyAction();
-  const [error, setError] = useState<string | null>(null);
-  const stored = data.settings.advice.everyFinished;
-  const value = adviceDraft ?? stored;
-  const view = adviceCadenceView({ stored, draft: value, defaultValue: data.defaults.advice.everyFinished, saving });
-  const reset = coordinationResetView(saving);
+  const reset = coordinationResetView(false);
   const onInput = (key: CoordinationNumberKey, text: string) => {
     setInputs((current) => ({ ...current, [key]: text }));
     const parsed = parseCoordinationInput(key, text);
     if (parsed.error !== null) return;
-    if (key === "advice.everyFinished") setAdviceDraft(parsed.value);
-    else if (key.startsWith("review.")) setReview((current) => ({ ...current, [key]: parsed.value }));
+    if (key.startsWith("review.")) setReview((current) => ({ ...current, [key]: parsed.value }));
     else setThresholds((current) => ({ ...current, [key]: parsed.value }));
   };
   const clearInputs = (keys: readonly CoordinationNumberKey[]) =>
@@ -596,7 +535,8 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
           theme={theme}
         />
       ))}
-      <View style={{ flexDirection: narrow ? "column" : "row", gap: narrow ? 12 : 14, alignItems: "stretch" }}>
+      {/* The review budget alone in its row, as wide as the mechanism cards above (its wide card is `flex: 1`). */}
+      <View style={{ flexDirection: narrow ? "column" : "row", alignItems: "stretch" }}>
         <ReviewBudgetGroup
           data={data}
           narrow={narrow}
@@ -609,31 +549,6 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
           styles={styles}
           theme={theme}
         />
-        <AdviceCadenceRow
-          view={view}
-          input={inputs["advice.everyFinished"] ?? null}
-          busy={saving}
-          error={error}
-          narrow={narrow}
-          onInput={(text) => {
-            setError(null);
-            onInput("advice.everyFinished", text);
-          }}
-          onSave={() =>
-            run(
-              async () => {
-                setError(null);
-                const output = await save({ key: "advice.everyFinished", value });
-                onSaved(output.settings);
-                setAdviceDraft(null);
-                clearInputs(["advice.everyFinished"]);
-              },
-              (failure) => setError(errorMessageOf(failure)),
-            )
-          }
-          styles={styles}
-          theme={theme}
-        />
       </View>
       <Pressable
         accessibilityRole="button"
@@ -642,8 +557,6 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
         disabled={!reset.enabled}
         onPress={() => {
           const defaults = coordinationDefaultsDraft(data.defaults);
-          setError(null);
-          setAdviceDraft(defaults.advice);
           setThresholds(defaults.thresholds);
           setReview(defaults.review);
           setInputs({});

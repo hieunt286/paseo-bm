@@ -7,8 +7,8 @@
  *   the stored answer: `by: owner`, an option, and that option's change.
  *   Nothing else can reach it either: `answerDecision` refuses any other
  *   answerer on such a decision, `resolveAtOpen` leaves it open, and
- *   `bm_decide` and `bm_predict` refuse it (`decideRefusalOf`,
- *   `predictionRefusalOf`). No agent tool writes a setting.
+ *   `bm_decide` refuses it (`decideRefusalOf`). No agent tool writes a
+ *   setting.
  * - **Through the owner's own code.** A precedent goes through
  *   `precedents.save`'s handler, an autonomy cell through `autonomy.set`'s
  *   (with the owner's confirmation, which the tap on the option is: the

@@ -40,8 +40,9 @@ import {
  * (`server/autonomy-rpc.ts`). `boundary` is the action boundary's switch per
  * project (§D.2, change-010: off by default, set only by the owner with a
  * confirmation, untouched by a reset and by a level). The challenger switch
- * (§B.3, the prediction switch) says whether the Orchestrator is asked to
- * predict the owner's answers in that project (`predictionRefusalOf`). A file
+ * (§B.3, the prediction switch) is part of the project's level; it shows a
+ * prediction the Orchestrator stored before `bm_predict` was retired (owner,
+ * 2026-10-10) as its proposal, and nothing writes a new one. A file
  * of an older build may hold `demotions` and cells naming a predictor: both
  * are read past (a `recommended` cell reads as the Orchestrator's) and
  * dropped by the next write. An override is only recorded (ADR-025 decision 4).
@@ -104,10 +105,11 @@ const CRUISE_CLASSES: readonly DecisionClass[] = ["reversible-technical", "prefe
 const TURBO_CLASSES: readonly DecisionClass[] = [...CRUISE_CLASSES, "cost", "release", "data"];
 
 /**
- * The levels (ADR-025 decision 1): Hands-on — the owner decides everything,
- * no prediction; Co-pilot — the Orchestrator proposes, the owner decides;
- * Cruise — it decides the five technical classes; Turbo — also cost, release
- * and data; Full auto — every class, security included.
+ * The levels (ADR-025 decision 1; missions design §8): Hands-on — the owner
+ * decides everything, no prediction; Co-pilot — the request's Main proposes,
+ * the owner decides; Cruise — the Main decides the five technical classes;
+ * Turbo — also cost, release and data; Full auto — every class, security
+ * included. The owner can override each answer the Main gives.
  */
 export const LEVELS: readonly LevelDefinition[] = [
   { level: 0, key: "hands-on", name: "Hands-on", delegated: [] },
@@ -265,47 +267,6 @@ export function levelOf(policy: AutonomyPolicy, workspaceId: string): AutonomyLe
 export function levelsOf(policy: AutonomyPolicy): Record<string, AutonomyLevelReading> {
   const projects = new Set([...Object.keys(policy.projects), ...Object.keys(policy.challenger), ...Object.keys(policy.boundary ?? {})]);
   return Object.fromEntries([...projects].filter(isPolicyWorkspaceId).map((workspaceId) => [workspaceId, levelOf(policy, workspaceId)]));
-}
-
-/**
- * Why the Orchestrator challenger may not predict `decision` now (§B.3, §B.9;
- * change-007 C1), or null when it may: a decision it did not ask — a Worker's
- * question (`q:`) or a fallback incident (`f:`) —, still `open`, of any class
- * in an `owner` or `shadow` cell of a project whose challenger is on (a level
- * of 1 or more), opened with its predictions recorded, and not predicted by
- * the Orchestrator yet. The owner sees the prediction as its proposal. The rest of the project's policy does not matter: a
- * project whose cells are all `owner` is asked too. Pure: the event bus asks
- * by it (`decision.opened`), and `bm_predict` records by it.
- */
-export function predictionRefusalOf(policy: AutonomyPolicy, decision: Decision): string | null {
-  // Autonomy design §B.7: an override is the owner's correction of an answer made for them.
-  if (decisionKindOf(decision.id) === "override") return overrideIsTheOwners(decision.id);
-  // Autonomy design §D.2 (change-009 C6): a held request is not predicted.
-  if (decisionKindOf(decision.id) === "held") return heldIsTheOwners(decision.id);
-  // Autonomy design §G.4: a change of the owner's settings is theirs alone, whoever asked it.
-  if (carriesPreparedChange(decision)) return `${preparedChangeRefusalText(decision.id)}; it is not predicted`;
-  // Missions design §5: a fact only the owner knows is not predicted.
-  if (decision.ownerOnly === true) return `${ownerOnlyRefusalText(decision.id)}; it is not predicted`;
-  if (decisionKindOf(decision.id) === "orchestrator") {
-    return `${decision.id} is your own decision; a prediction is for a Worker's question (q:…) or a fallback incident (f:…)`;
-  }
-  const settled = `decision ${decision.id} is ${decision.status}; only an open decision is predicted`;
-  const notOpen = notOpenRefusalOf(decision, {
-    needsConfirmation: `decision ${decision.id} waits for the owner to confirm an answer typed in a chat; it is not predicted`,
-    answered: () => settled,
-    superseded: () => settled,
-    closed: () => settled,
-  });
-  if (notOpen !== null) return notOpen;
-  const decisionClass = decisionClassOf(decision);
-  if (modeOf(policy, decision.workspaceId, decisionClass) === "delegate") {
-    return `${decisionClass} is delegated in project ${decision.workspaceId}; a delegated decision is not predicted`;
-  }
-  if (!challengerOf(policy, decision.workspaceId)) return `the owner has not turned your predictions on for project ${decision.workspaceId}`;
-  if (decision.prediction === undefined) return `decision ${decision.id} was opened before predictions were recorded; it is not predicted`;
-  const predicted = decision.prediction.orchestrator;
-  if (predicted !== null) return `you predicted decision ${decision.id} already, at ${predicted.at}; one prediction per decision`;
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +563,7 @@ export function checkAutonomySetLevel(input: unknown): { change: AutonomySetLeve
     return {
       refusal: {
         code: "E_AUTONOMY_NOT_CONFIRMED",
-        detail: `${LEVELS[level]!.name} lets the Orchestrator decide ${level === 4 ? "every class, security included" : "cost, release and data"} for you and needs the owner's confirmation; nothing was saved`,
+        detail: `${LEVELS[level]!.name} lets the Main decide ${level === 4 ? "every class, security included" : "cost, release and data"} for you and needs the owner's confirmation; nothing was saved`,
       },
     };
   }

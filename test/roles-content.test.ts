@@ -657,7 +657,7 @@ describe("bound role files and the unbound hand path (ADR-027 decisions 8–9)",
   it("each role names each of its bound tools", () => {
     // bm_reply answers a BM-ASK, whose notice says so: the role file need not (D5).
     for (const name of ["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory"]) verbatim(W, `\`${name}\``);
-    for (const name of ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_decisions"]) verbatim(M, `\`${name}\``);
+    for (const name of ["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_decisions"]) verbatim(M, `\`${name}\``);
     // Missions design §4, §11: a Main's own tools.
     for (const name of ["bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission"]) verbatim(M, `\`${name}\``);
   });
@@ -722,7 +722,7 @@ describe("orchestrator.md — the governor: reads the figures and the charter, a
     for (const name of named) expect(served, name).toContain(name);
     for (const name of served) expect(named.has(name), `${name} served but not named`).toBe(true);
     // The governor's retired tools (§9.1) are named nowhere, backticked or not.
-    expect(O).not.toMatch(/bm_send_command|bm_compact|bm_handoff|bm_questions|bm_ask_project|bm_peer_reply/);
+    expect(O).not.toMatch(/bm_send_command|bm_compact|bm_handoff|bm_predict|bm_questions|bm_ask_project|bm_peer_reply/);
     // What the descriptions do not say: how much to read, verify first, what to note, and without tools.
     rule(O, "summaries by default, full on demand", /`detail: "full"` only when (one|a summary) does not answer/);
     rule(O, "verifies a claim with bm_repo", /check a claim with (it|`bm_repo`) before acting on it/);
@@ -803,10 +803,9 @@ describe("orchestrator.md — the governor: reads the figures and the charter, a
     keys(O, "a Worker is its Main's", "never brief, correct or answer a Worker", "never", "decide a Worker's question", "its Main or the owner");
     keys(O, "never carries words between projects or missions", "ask each other through their own links", "never carry words between", "projects or missions", "command no agent to wait for you");
     keys(O, "a review budget is the Worker's question", "review budget a", "request needs", "Worker's question", "never ask the owner");
-    // §9.1: bm_decide and bm_predict are for fallback incidents only.
-    keys(O, "only a fallback incident is its to decide or predict", "fallback incident (`f:`", "`bm_decide`", "delegated to you", "`bm_predict`");
+    // §9.1: bm_decide is for fallback incidents only; bm_predict is retired (owner, 2026-10-10): the rest is the owner's.
+    keys(O, "only a fallback incident is its to decide, else the owner's", "fallback incident (`f:`", "`bm_decide`", "delegated to you", "leave it to the owner");
     expect(orchestratorFace("bm_decide").description).toContain("a Worker's question (q:…) is its Main's or the owner's");
-    expect(orchestratorFace("bm_predict").description).toContain("sees your option and reason on the incident as your proposal");
     expect(O, "no answer to a stored question in a command").not.toMatch(/answer with `bm_direct_worker`|intent `answer`, a `BM-ANSWERS` block/);
   });
 

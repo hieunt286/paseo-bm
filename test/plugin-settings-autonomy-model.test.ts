@@ -121,6 +121,8 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
     expect(shown.fill).toBe(0);
     expect(radios[0]!.props.accessibilityState).toEqual({ selected: true, checked: true, disabled: true });
     expect(AUTONOMY_MEANING).toMatch(/Your overrides are recorded; they never change the level\.$/);
+    // ADR-029 decision 6: a delegated Worker's question is the request's Main's; the Orchestrator keeps only provider fallbacks (f:).
+    expect(AUTONOMY_MEANING).toMatch(/^How much a request's Main may decide for you, per project\. A mission's own level can let its Main answer more; the Orchestrator decides only provider fallbacks, where environment is delegated\./);
   });
 
   it("says what each level means and who decides each class at it, in the order the levels add them", () => {
@@ -131,34 +133,40 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
     const approve = Array(9).fill("You approve");
     expect(whoOf(view(atLevel(0)))).toEqual(you);
     expect(whoOf(view(atLevel(1)))).toEqual(approve);
-    expect(whoOf(view(atLevel(2)))).toEqual([...Array(5).fill("Orchestrator"), ...Array(4).fill("You approve")]);
-    expect(whoOf(view(atLevel(3)))).toEqual([...Array(8).fill("Orchestrator"), "You approve"]);
-    expect(whoOf(view(atLevel(4)))).toEqual(Array(9).fill("Orchestrator"));
+    expect(whoOf(view(atLevel(2)))).toEqual([...Array(5).fill("Main"), ...Array(4).fill("You approve")]);
+    expect(whoOf(view(atLevel(3)))).toEqual([...Array(8).fill("Main"), "You approve"]);
+    expect(whoOf(view(atLevel(4)))).toEqual(Array(9).fill("Main"));
     for (const level of AUTONOMY_LEVELS) {
       const shown = view(atLevel(level));
       expect(shown.reading).toBe(level);
       expect(shown.summary).toBe(LEVEL_SUMMARIES[level]);
       expect(shown.stops.filter((stop) => stop.selected).map((stop) => stop.level)).toEqual([level]);
       for (const decisionClass of DECISION_CLASSES) {
-        expect(deciderAtLevel(level, decisionClass) === "orchestrator").toBe(LEVELS[level]!.delegated.includes(decisionClass));
+        expect(deciderAtLevel(level, decisionClass) === "main").toBe(LEVELS[level]!.delegated.includes(decisionClass));
       }
     }
-    expect(LEVEL_SUMMARIES[3]).toBe("Turbo. As Cruise, plus cost, release and data. Security still waits for your approval.");
+    expect(LEVEL_SUMMARIES).toEqual({
+      0: "Hands-on. The Main decides nothing at this level. Every question is yours, as asked.",
+      1: "Co-pilot. The Main prepares an answer to every question; nothing runs until you approve it in the Inbox.",
+      2: "Cruise. The Main decides technical, preference, scope, environment and dependency questions on its own; it proposes the rest for your approval.",
+      3: "Turbo. As Cruise, plus cost, release and data. Security still waits for your approval.",
+      4: "Full auto. The Main decides every question, security included. You see each one under Decided for you and can override it.",
+    });
 
     const nodes = draw(view(atLevel(2)));
     expect(texts(nodes)).toEqual(expect.arrayContaining([LEVEL_SUMMARIES[2], ...DECIDER_LEGEND_ENTRIES.map((entry) => entry.text), ...Object.values(LEVEL_CLASS_LABELS)]));
-    expect(DECIDER_LEGEND).toBe("Orchestrator decides, you can override · Orchestrator proposes, you approve · You decide");
+    expect(DECIDER_LEGEND).toBe("Main decides, you can override · Main proposes, you approve · You decide");
     // Below the level shown the knobs are outlined in the accent; the track is filled half way at Cruise.
     const cruise = view(atLevel(2));
     expect(cruise.stops.map((stop) => stop.place)).toEqual(["below", "below", "selected", "above", "above"]);
     expect(cruise.fill).toBe(0.5);
-    // Who decides is coloured: the Orchestrator in the accent, your approval in full contrast, you muted.
+    // Who decides is coloured: the Main in the accent, your approval in full contrast, you muted.
     const who = (text: string) => allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0] === text)!;
-    expect(JSON.stringify(who("Orchestrator").props.style)).toContain("#accent");
+    expect(JSON.stringify(who("Main").props.style)).toContain("#accent");
     expect(JSON.stringify(who("You approve").props.style)).toContain("#foreground");
     // Three columns: each class a third of the row.
     const cells = allNodes(nodes).filter((node) => node.type === "View" && typeof node.props.accessibilityLabel === "string" && String(node.props.accessibilityLabel).includes(": "));
-    expect(cells.map((cell) => cell.props.accessibilityLabel).slice(0, 2)).toEqual(["Technical: Orchestrator", "Preference: Orchestrator"]);
+    expect(cells.map((cell) => cell.props.accessibilityLabel).slice(0, 2)).toEqual(["Technical: Main", "Preference: Main"]);
     expect(cells.every((cell) => (cell.props.style as { width: string }).width === "33.33%")).toBe(true);
   });
 
@@ -183,9 +191,9 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
     expect(texts(nodes)).not.toContain("Cancel");
   });
 
-  it("confirms Turbo and Full auto in place with what the Orchestrator will decide, Cancel first and the default", () => {
+  it("confirms Turbo and Full auto in place with what the Main will decide, Cancel first and the default", () => {
     expect(levelConfirmDialog(3, "paseo-bm")).toEqual({
-      title: "Let the Orchestrator decide cost, release and data?",
+      title: "Let the Main decide cost, release and data?",
       body: "Releases, pushes, deploys, migrations on real data and spending will be decided without you. Each one shows under Decided for you, where you can override it.",
       confirmLabel: "Switch to Turbo",
       cancelLabel: "Cancel",
@@ -193,7 +201,7 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
       defaultAction: "cancel",
     });
     expect(levelConfirmDialog(4, "paseo-bm")).toMatchObject({
-      title: "Let the Orchestrator decide security questions too?",
+      title: "Let the Main decide security questions too?",
       body: "Security trade-offs, permissions and credentials questions will be answered without you. Each one still shows under Decided for you, where you can override it.",
       confirmLabel: "Switch to Full auto",
     });
@@ -205,7 +213,7 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
     expect(asked.stops.map((stop) => stop.selected)).toEqual([false, false, false, false, true]);
     expect(asked.stops[2]!.enabled).toBe(true);
     expect(asked.summary).toBe(LEVEL_SUMMARIES[4]);
-    expect(whoOf(asked)).toEqual(Array(9).fill("Orchestrator"));
+    expect(whoOf(asked)).toEqual(Array(9).fill("Main"));
     expect(asked.confirm).toEqual({ level: 4, dialog: levelConfirmDialog(4, "paseo-bm") });
 
     const onConfirm = vi.fn();
@@ -232,7 +240,7 @@ describe("the level control of one project (ADR-025, change-014 outcome 5)", () 
     expect(shown.summary).toBe(CUSTOM_SUMMARY);
     expect(shown.stops.every((stop) => !stop.selected && stop.enabled)).toBe(true);
     expect(Object.fromEntries(shown.classes.map((entry) => [entry.decisionClass, entry.who]))).toMatchObject({
-      release: "Orchestrator",
+      release: "Main",
       scope: "You approve",
       preference: "You",
     });
@@ -280,7 +288,7 @@ describe("the action boundary switch (change-010 C2–C4)", () => {
     expect(dialog).toMatchObject({ title: "Hold risky actions for approval in paseo-bm?", confirmLabel: "Turn on", cancelLabel: "Cancel", defaultAction: "cancel" });
     expect(dialog.body).toMatch(/created from now on in this project run in the least permissive mode \(Claude: default; Codex: auto with its creation options\)/);
     expect(dialog.body).toMatch(/a release, real data, a dependency install, the network, a write outside the workspace, or a request it cannot read — waits for you/);
-    expect(dialog.body).toMatch(/unless your answer to the Worker's question \(a grant: one use, 60 minutes\) or the project's level lets the Orchestrator decide it/);
+    expect(dialog.body).toMatch(/unless your answer to the Worker's question \(a grant: one use, 60 minutes\) or the project's level allows it\./);
     expect(dialog.body).toMatch(/Agents that already exist keep their mode\./);
     // Pressing the side already chosen asks nothing.
     expect(boundaryView(on, PROJECT, false, true).confirm).toBeNull();
@@ -542,7 +550,7 @@ describe("Autonomy on a phone (MobileSettings.dc.html)", () => {
     expect([styleOf(knob).width, styleOf(knob).height]).toEqual([32, 32]);
     const name = allNodes([radios[4]!]).filter((node) => node.type === "Text")[1]!;
     expect([name.props.numberOfLines, styleOf(name).fontSize, styleOf(name).textAlign]).toEqual([2, 11, "center"]);
-    const classes = allNodes(nodes).filter((node) => node.type === "View" && /^[A-Za-z ]+: (You|Orchestrator)/.test(String(node.props.accessibilityLabel)));
+    const classes = allNodes(nodes).filter((node) => node.type === "View" && /^[A-Za-z ]+: (You|Main)/.test(String(node.props.accessibilityLabel)));
     expect(classes).toHaveLength(9);
     expect(classes.every((row) => styleOf(row).width === "100%")).toBe(true);
     const [cancel, confirm] = pressables(nodes).filter((node) => node.props.accessibilityRole === "button");

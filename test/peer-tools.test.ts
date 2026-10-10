@@ -191,18 +191,14 @@ describe("bm_ask_project", () => {
     }
   });
 
-  it("a Manager asks for one of its own requests only", async () => {
-    const { home, call } = setup();
-    const refusedWith = async (input: unknown) => (await call("manager", "bm_ask_project", input, MANAGER_A)).text;
-    expect(await refusedWith(ASK)).toContain("input.requestId");
-    expect(await refusedWith({ ...ASK, requestId: "req-20261008T090000Z" })).toBe(
-      "paseo-bm knows no request req-20261008T090000Z in this workspace; use the requestId bm_create_worker gave you. Nothing was stored or sent.",
-    );
-    expect(await refusedWith({ ...ASK, requestId: REQ_A2 })).toBe(`request ${REQ_A2} is not one of yours: another Manager created its Worker. Nothing was stored or sent.`);
+  it("a Manager lists and runs no bm_ask_project (owner, 2026-10-10): only a Worker asks another project", async () => {
+    const { home, fake, tools, call } = setup();
+    expect(tools.manager.faces.map((face) => face.name)).not.toContain("bm_ask_project");
+    expect(tools.worker.faces.map((face) => face.name)).toContain("bm_ask_project");
+    expect(tools.manager.has("bm_ask_project")).toBe(false);
+    expect(await call("manager", "bm_ask_project", { ...ASK, requestId: REQ_A }, MANAGER_A)).toEqual({ ok: false, text: "Unknown tool: bm_ask_project" });
     expect(links(home).list()).toEqual([]);
-    const answer = parsed(await call("manager", "bm_ask_project", { ...ASK, requestId: REQ_A }, MANAGER_A));
-    expect(answer["linkId"]).toBe(LINK);
-    expect(links(home).get(LINK)!.from).toEqual({ workspaceId: A, requestId: REQ_A, agentId: "mgr-a", role: "manager" });
+    expect(fake.sends).toEqual([]);
   });
 
   it("refuses, storing and sending nothing: unbound, pending, no Paseo, no request, a bad input, a project it cannot ask", async () => {
@@ -701,14 +697,10 @@ describe("links of a mission (missions design §2.6, §4, §5)", () => {
     expect(links(home).list()).toEqual([]);
   });
 
-  it("a Main's bm_ask_project is refused: outside its scope with the §4 text, inside it towards its own Workers", async () => {
+  it("a Main has no bm_ask_project (owner, 2026-10-10): the call is an unknown tool, storing and sending nothing", async () => {
     const { home, fake, call } = missionSetup();
-    expect((await call("manager", "bm_ask_project", { project: "/repo/ops", request: "x", requestId: REQ_M }, mainCaller("main-1"))).text).toBe(
-      `project "ops" (${C}) is outside mission SHOP's scope: add the repo to the mission (bm_mission_update repos) or ask its mission (bm_ask_mission)\nNothing was stored or sent.`,
-    );
-    expect((await call("manager", "bm_ask_project", { project: B, request: "x", requestId: REQ_M }, mainCaller("main-1"))).text).toBe(
-      `project "back" (${B}) is a repo of mission SHOP: give the work a Worker there (bm_create_worker project: ${B}) or link the Workers on it (bm_link_workers)\nNothing was stored or sent.`,
-    );
+    expect(await call("manager", "bm_ask_project", { project: "/repo/ops", request: "x", requestId: REQ_M }, mainCaller("main-1"))).toEqual({ ok: false, text: "Unknown tool: bm_ask_project" });
+    expect(await call("manager", "bm_ask_project", { project: B, request: "x" }, mainCaller("main-1"))).toEqual({ ok: false, text: "Unknown tool: bm_ask_project" });
     expect(links(home).list()).toEqual([]);
     expect(fake.sends).toEqual([]);
   });

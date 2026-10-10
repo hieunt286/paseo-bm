@@ -6,7 +6,7 @@
  *
  * The groups reuse the Setup screen's pieces and wording
  * (`settings-roles-model.ts`, `settings-machine-model.ts`); this file only decides the one-line state of each folded group, the Data group's
- * storage rows, the Coordination group's advice cadence, and which groups are
+ * storage rows, the Coordination group's line, and which groups are
  * open; the Autonomy level is `settings-autonomy-model.ts`,
  * the Coordination group's compaction and handoff cards
  * `settings-coordination-model.ts`. Tools & skills is a section of its own
@@ -18,7 +18,7 @@
  * Pure: no React, no React Native, no `server/` import.
  */
 import type { SetupStatus, StoreSize, WorkspaceState } from "../shared/contracts";
-import { ADVICE_EVERY_FINISHED, type CoordinationSettings } from "../shared/coordination";
+import type { CoordinationSettings } from "../shared/coordination";
 import type { Precedent } from "../shared/precedents";
 import { formatBytes } from "./format";
 import { storageView } from "./history-model";
@@ -205,93 +205,23 @@ export function dataGroupState(
 }
 
 // ---------------------------------------------------------------------------
-// Coordination (autonomy design §G.7): the advice cadence. The compaction and
-// handoff cards of Phase 3 are `settings-coordination-model.ts`.
+// Coordination (autonomy design §G.7): the group's line. Its compaction,
+// handoff and review budget cards are `settings-coordination-model.ts`; the
+// advice cadence is retired (ADR-029 decision 9: the governor's
+// `mission.review` is the periodic review).
 // ---------------------------------------------------------------------------
 
-/** What the advice cadence means, in one line. */
-export const ADVICE_MEANING = "0 turns advice off. Advice comes to the Inbox as a proposal you accept or not.";
-
-/** The advice field's words, around its value (the approved mockup). */
-export const ADVICE_FIELD = { before: "Review the workflow every", after: "finished requests" } as const;
-
-/** The cadence in words. */
-export function adviceCadenceText(everyFinished: number): string {
-  if (everyFinished <= 0) return "Advice off";
-  return everyFinished === 1 ? "Advice after every finished request" : `Advice after every ${everyFinished} finished requests`;
-}
-
 /**
- * The Coordination group's line: the cadence and the two switches in words; a
- * mechanism paseo-bm switched off below A-12's target first, as a warning; or
- * that the settings could not be read.
+ * The Coordination group's line: the two switches in words; a mechanism
+ * paseo-bm switched off below A-12's target first, as a warning; or that the
+ * settings could not be read.
  */
 export function coordinationGroupState(settings: CoordinationSettings | undefined, failed = false): GroupState {
   if (failed) return { text: "The coordination settings could not be read", tone: "danger" };
   if (settings === undefined) return GROUP_LOADING;
-  const advice = adviceCadenceText(settings.advice.everyFinished);
   const switchedOff = switchedOffMechanisms(settings);
-  if (switchedOff.length > 0) return { text: `${switchedOffText(switchedOff)} · ${advice}`, tone: "warning" };
-  return { text: `${advice} · ${mechanismsText(settings)}`, tone: "muted" };
-}
-
-/** The cadence one step down or up, kept within its bounds. */
-export function stepAdviceCadence(value: number, step: -1 | 1): number {
-  return Math.min(ADVICE_EVERY_FINISHED.max, Math.max(ADVICE_EVERY_FINISHED.min, value + step));
-}
-
-/** A button of the cadence row: whether it can be pressed and what a screen reader says. */
-export interface CadenceButton {
-  enabled: boolean;
-  label: string;
-  accessibilityLabel: string;
-}
-
-/** The advice cadence row: its meaning, the value being edited with − and +, Save, and the default. */
-export interface AdviceCadenceView {
-  title: string;
-  meaning: string;
-  /** The value being edited, in words. */
-  valueText: string;
-  /** The value as its field shows it. */
-  inputText: string;
-  /** What a screen reader says for the field. */
-  accessibilityLabel: string;
-  decrease: CadenceButton;
-  increase: CadenceButton;
-  /** Enabled while the edited value differs from the stored one. */
-  save: CadenceButton;
-  /** Offered while the edited value is not the default. */
-  reset: CadenceButton | null;
-}
-
-export function adviceCadenceView(input: { stored: number; draft: number; defaultValue: number; saving: boolean }): AdviceCadenceView {
-  const { stored, draft, defaultValue, saving } = input;
-  const lower = stepAdviceCadence(draft, -1);
-  const higher = stepAdviceCadence(draft, 1);
-  const spoken = (value: number) => (value === 0 ? "0, off" : String(value));
-  return {
-    title: "Orchestrator advice",
-    meaning: ADVICE_MEANING,
-    valueText: adviceCadenceText(draft),
-    inputText: String(draft),
-    accessibilityLabel: `Advice cadence: ${adviceCadenceText(draft)}`,
-    decrease: { enabled: !saving && lower !== draft, label: "−", accessibilityLabel: `Advice cadence: lower to ${spoken(lower)}` },
-    increase: { enabled: !saving && higher !== draft, label: "+", accessibilityLabel: `Advice cadence: raise to ${spoken(higher)}` },
-    save: {
-      enabled: !saving && draft !== stored,
-      label: saving ? "Saving…" : "Save",
-      accessibilityLabel: `Save the advice cadence: ${adviceCadenceText(draft)}`,
-    },
-    reset:
-      draft === defaultValue
-        ? null
-        : {
-            enabled: !saving,
-            label: `Use the default (${defaultValue})`,
-            accessibilityLabel: `Set the advice cadence back to its default: ${adviceCadenceText(defaultValue)}`,
-          },
-  };
+  if (switchedOff.length > 0) return { text: switchedOffText(switchedOff), tone: "warning" };
+  return { text: mechanismsText(settings), tone: "muted" };
 }
 
 /** The header of a group: what it shows and what a screen reader says. */

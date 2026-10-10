@@ -3,19 +3,15 @@ import type { RoleSetting, RolesOptions, SetupStatus } from "../plugin/shared/co
 import { DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
 import { dashboardStyles } from "../plugin/client/styles";
 import {
-  ADVICE_MEANING,
   DEFAULT_OPEN_GROUPS,
   GROUP_LOADING,
   SETTINGS_GROUPS,
   THRESHOLD_NOTE,
-  adviceCadenceText,
-  adviceCadenceView,
   agentsGroupState,
   coordinationGroupState,
   dataGroupState,
   groupHeaderView,
   precedentsGroupState,
-  stepAdviceCadence,
   storageSummary,
   toggleGroup,
   type StoredWorkspaceBytes,
@@ -44,9 +40,8 @@ import { allNodes, pressables, renderTree, texts, type RNode } from "./helpers/e
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const sectionPath = "../plugin/client/settings-section.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { AdviceCadenceRow, SettingsGroupHeader, SettingsSectionHeading, RolesLineView, StorageRowView, UpdatesBlock, sectionContentStyle } = (await import(sectionPath)) as {
+const { SettingsGroupHeader, SettingsSectionHeading, RolesLineView, StorageRowView, UpdatesBlock, sectionContentStyle } = (await import(sectionPath)) as {
   sectionContentStyle: (maxWidth: number, compact: boolean) => Record<string, unknown>;
-  AdviceCadenceRow: Component;
   SettingsGroupHeader: Component;
   SettingsSectionHeading: Component;
   RolesLineView: Component;
@@ -312,92 +307,11 @@ describe("the Data group", () => {
 });
 
 describe("the Coordination group (autonomy design §G.7)", () => {
-  const settings = (everyFinished: number) => ({ ...DEFAULT_COORDINATION_SETTINGS, advice: { everyFinished } });
-
-  it("reads 'Checking…' until the settings answer, then the advice cadence in words (0 is off) and the two switches", () => {
+  it("reads 'Checking…' until the settings answer, then the two switches; the retired advice cadence is not named (ADR-029 decision 9)", () => {
     expect(coordinationGroupState(undefined)).toEqual(GROUP_LOADING);
-    expect(coordinationGroupState(settings(5))).toEqual({ text: "Advice after every 5 finished requests · compaction and handoff on", tone: "muted" });
-    expect(coordinationGroupState(settings(1)).text).toBe("Advice after every finished request · compaction and handoff on");
-    expect(coordinationGroupState(settings(0)).text).toBe("Advice off · compaction and handoff on");
+    expect(coordinationGroupState(DEFAULT_COORDINATION_SETTINGS)).toEqual({ text: "compaction and handoff on", tone: "muted" });
+    expect(coordinationGroupState({ ...DEFAULT_COORDINATION_SETTINGS, advice: { everyFinished: 0 } }).text).toBe("compaction and handoff on");
     expect(coordinationGroupState(undefined, true)).toEqual({ text: "The coordination settings could not be read", tone: "danger" });
-    expect(adviceCadenceText(12)).toBe("Advice after every 12 finished requests");
-  });
-
-  it("says what the cadence means in one line", () => {
-    expect(ADVICE_MEANING.split("\n")).toHaveLength(1);
-    expect(ADVICE_MEANING).toBe("0 turns advice off. Advice comes to the Inbox as a proposal you accept or not.");
-  });
-
-  it("steps within 0 and 50", () => {
-    expect(stepAdviceCadence(5, 1)).toBe(6);
-    expect(stepAdviceCadence(5, -1)).toBe(4);
-    expect(stepAdviceCadence(0, -1)).toBe(0);
-    expect(stepAdviceCadence(50, 1)).toBe(50);
-  });
-
-  it("offers Save only for a changed value, the default only away from it, and nothing while saving", () => {
-    const unchanged = adviceCadenceView({ stored: 5, draft: 5, defaultValue: 5, saving: false });
-    expect(unchanged.save).toMatchObject({ enabled: false, label: "Save" });
-    expect(unchanged.reset).toBeNull();
-    expect(unchanged.valueText).toBe("Advice after every 5 finished requests");
-    expect(unchanged.decrease).toEqual({ enabled: true, label: "−", accessibilityLabel: "Advice cadence: lower to 4" });
-    expect(unchanged.increase).toEqual({ enabled: true, label: "+", accessibilityLabel: "Advice cadence: raise to 6" });
-
-    const off = adviceCadenceView({ stored: 5, draft: 0, defaultValue: 5, saving: false });
-    expect(off.valueText).toBe("Advice off");
-    expect(off.decrease.enabled).toBe(false);
-    expect(off.save).toEqual({ enabled: true, label: "Save", accessibilityLabel: "Save the advice cadence: Advice off" });
-    expect(off.reset).toEqual({
-      enabled: true,
-      label: "Use the default (5)",
-      accessibilityLabel: "Set the advice cadence back to its default: Advice after every 5 finished requests",
-    });
-    expect(adviceCadenceView({ stored: 5, draft: 1, defaultValue: 5, saving: false }).decrease.accessibilityLabel).toBe(
-      "Advice cadence: lower to 0, off",
-    );
-    expect(adviceCadenceView({ stored: 5, draft: 50, defaultValue: 5, saving: false }).increase.enabled).toBe(false);
-
-    const saving = adviceCadenceView({ stored: 5, draft: 7, defaultValue: 5, saving: true });
-    expect(saving.save).toMatchObject({ enabled: false, label: "Saving…" });
-    expect([saving.decrease.enabled, saving.increase.enabled, saving.reset?.enabled]).toEqual([false, false, false]);
-  });
-
-  it("is a card: Review the workflow every [n] finished requests, what 0 does, and Save only once the value changed (hook-free)", () => {
-    const onInput = vi.fn();
-    const onSave = vi.fn();
-    const atRest = renderTree(
-      AdviceCadenceRow({ view: adviceCadenceView({ stored: 5, draft: 5, defaultValue: 5, saving: false }), input: null, busy: false, error: null, onInput, onSave, styles, theme }),
-    );
-    expect(texts(atRest)).toEqual(["Orchestrator advice", "Review the workflow every", "finished requests", ADVICE_MEANING]);
-    expect(pressables(atRest)).toHaveLength(0);
-    const [field] = allNodes(atRest).filter((node) => node.type === "TextInput");
-    expect(field!.props).toMatchObject({ value: "5", accessibilityLabel: "Advice cadence: Advice after every 5 finished requests", editable: true });
-    (field!.props.onChangeText as (text: string) => void)("3");
-    expect(onInput.mock.calls).toEqual([["3"]]);
-
-    const view = adviceCadenceView({ stored: 5, draft: 3, defaultValue: 5, saving: false });
-    const changed = renderTree(AdviceCadenceRow({ view, input: "3", busy: false, error: null, onInput, onSave, styles, theme }));
-    const [save] = pressables(changed);
-    expect(texts([save!])).toEqual(["Save"]);
-    expect(save!.props.accessibilityLabel).toBe("Save the advice cadence: Advice after every 3 finished requests");
-    expect(save!.props.accessibilityState).toEqual({ disabled: false });
-    (save!.props.onPress as () => void)();
-    expect(onSave).toHaveBeenCalledOnce();
-  });
-
-  it("refuses a value out of 0 to 50 with Save off, and shows a failed save in the danger colour", () => {
-    const view = adviceCadenceView({ stored: 5, draft: 5, defaultValue: 5, saving: false });
-    const refused = renderTree(AdviceCadenceRow({ view, input: "99", busy: false, error: null, onInput: noop, onSave: noop, styles, theme }));
-    expect(texts(refused)).toContain("Review the workflow every: a number from 0 to 50.");
-    expect(pressables(refused)[0]!.props.disabled).toBe(true);
-    const nodes = renderTree(
-      AdviceCadenceRow({ view, input: null, busy: false, error: "E_COORDINATION_INVALID: nothing was saved", onInput: noop, onSave: noop, styles, theme }),
-    );
-    const save = pressables(nodes).find((button) => texts([button])[0] === "Save")!;
-    expect(save.props.disabled).toBe(true);
-    expect(save.props.accessibilityState).toEqual({ disabled: true });
-    const error = allNodes(nodes).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("E_COORDINATION_INVALID"))!;
-    expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
   });
 });
 
@@ -686,11 +600,5 @@ describe("Settings on a phone (MobileSettings.dc.html)", () => {
     const sizeOf = (props: Record<string, unknown>) =>
       (allNodes(renderTree(SettingsSectionHeading({ title: "T", meaning: "M", state: null, styles, theme, ...props }))).find((node) => node.type === "Text")!.props.style as { fontSize: number }).fontSize;
     expect([sizeOf({ size: "page", compact: true }), sizeOf({ compact: true }), sizeOf({ size: "page" }), sizeOf({})]).toEqual([20, 17, 22, 18]);
-  });
-
-  it("puts the advice cadence's Save across the card", () => {
-    const view = adviceCadenceView({ stored: 5, draft: 3, defaultValue: 5, saving: false });
-    const nodes = renderTree(AdviceCadenceRow({ view, input: "3", busy: false, error: null, narrow: true, onInput: noop, onSave: noop, styles, theme }));
-    expect(JSON.stringify(pressables(nodes)[0]!.props.style)).toContain('"alignSelf":"stretch"');
   });
 });

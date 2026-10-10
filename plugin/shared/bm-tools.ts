@@ -6,9 +6,9 @@
  *
  * The Orchestrator's tools (design §5.2–§5.3, §6A, §6B.4; missions design
  * §9.1: `bm_projects`, `bm_missions`, `bm_request`, `bm_agent_messages`,
- * `bm_govern`, `bm_arbitrate`, `bm_create_main`, `bm_decisions`, `bm_ask_owner`, `bm_decide`, `bm_predict`,
+ * `bm_govern`, `bm_arbitrate`, `bm_create_main`, `bm_decisions`, `bm_ask_owner`, `bm_decide`,
  * `bm_direct_worker`, `bm_repo`, `bm_note`, `bm_findings`, `bm_why`) read
- * plugin data and repositories, record, answer and predict decisions, record
+ * plugin data and repositories, record and answer decisions, record
  * commands and notes, and send commands, so they cannot be
  * pure: only their
  * faces — name, description, input schema — live here
@@ -1022,32 +1022,6 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     },
   },
   {
-    name: "bm_predict",
-    role: "orchestrator",
-    description:
-      "Predict the owner's answer to an open fallback incident (f:…): the option you expect the owner to choose, and why. It answers nothing and sends nothing: the owner still decides, and sees your option and reason on the incident as your proposal; how often you foresee their answers is measured per class. Refused unless the project's autonomy level is 1 or more (Co-pilot and up), the incident is still open, its class is not delegated already, and you have not predicted it yet; a Worker's question (q:…) is its Main's or the owner's. A refusal changes nothing.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["decisionId", "optionKey", "reason"],
-      properties: {
-        decisionId: {
-          type: "string",
-          minLength: 1,
-          maxLength: MAX_COMMAND_DECISION_ID_CHARS,
-          description: "The incident, f:<incidentId>, as bm_decisions gave it.",
-        },
-        optionKey: { type: "string", pattern: OPTION_KEY_PATTERN.source, description: "The key of the option you expect the owner to choose (a, b, …)." },
-        reason: {
-          type: "string",
-          minLength: 1,
-          maxLength: MAX_ANSWER_REASON_CHARS,
-          description: `Why you expect it, in one line; kept with the prediction. 1-${MAX_ANSWER_REASON_CHARS} characters.`,
-        },
-      },
-    },
-  },
-  {
     name: "bm_direct_worker",
     role: "orchestrator",
     description:
@@ -1556,9 +1530,32 @@ const PROJECT: JsonSchema = {
 };
 
 /**
+ * A Worker's ask of another project (design §7.17.3, ADR-028; missions design
+ * §5), for its own request. A Main lists none (owner, 2026-10-10): it gives
+ * the work a Worker in a repo of its mission, adds the repo, or asks another
+ * mission (`bm_ask_mission`).
+ */
+const ASK_PROJECT_FACE: ToolFace = {
+  name: "bm_ask_project",
+  role: "worker",
+  description: `Ask another project for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that project's Manager (opening one when it has none) — or, for a Worker of a mission, to its own Main, who links it with the Worker on that work or gives it one there. Never message another project's agents yourself. Its reply reaches you as a BM-DELIVERY peer-reply; talk on the link with bm_peer_reply. Returns JSON { linkId, project, managerId, delivery, openedManager }. ${DELIVERED}`,
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["project", "request"],
+    properties: {
+      project: PROJECT,
+      request: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.request, description: "The ask in full: what is needed, why, and the contract you expect back." },
+      kind: { type: "string", enum: ["work", "question"], description: "work (the default): the project does something; question: what reading answers." },
+      context: { type: "array", maxItems: CREATE_WORKER_LIMITS.contextItems, items: CONTEXT_ITEM, description: "Facts the other project needs, each with its source." },
+    },
+  },
+};
+
+/**
  * The peer tools of a bound Manager or Worker (design §7.17.3, ADR-028): one
- * project asks another through paseo-bm, never with a raw agent message. A
- * Manager names which of its requests asks; a Worker asks for its own.
+ * project asks another through paseo-bm, never with a raw agent message. Only
+ * a Worker lists `bm_ask_project`.
  */
 function peerFaces(role: "manager" | "worker"): ToolFace[] {
   return [
@@ -1569,23 +1566,7 @@ function peerFaces(role: "manager" | "worker"): ToolFace[] {
         "Read the other projects you can ask (Paseo workspaces, each with its live Manager) and this project's peer links both ways, newest first: who asked whom, the requests, the state and the newest message; a Main also reads the other open missions and its mission's links of every kind. project narrows the links to one project. Read-only. Returns JSON { projects, links } (a Main: and missions).",
       inputSchema: { type: "object", additionalProperties: false, properties: { project: PROJECT } },
     },
-    {
-      name: "bm_ask_project",
-      role,
-      description: `Ask another project for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that project's Manager (opening one when it has none) — or, for a Worker of a mission, to its own Main, who links it with the Worker on that work or gives it one there. A Main asks no project: it adds the repo to its mission or asks its mission (bm_ask_mission). Never message another project's agents yourself. Its reply reaches you as a BM-DELIVERY peer-reply; talk on the link with bm_peer_reply. Returns JSON { linkId, project, managerId, delivery, openedManager }. ${DELIVERED}`,
-      inputSchema: {
-        type: "object",
-        additionalProperties: false,
-        required: role === "manager" ? ["project", "request", "requestId"] : ["project", "request"],
-        properties: {
-          project: PROJECT,
-          request: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.request, description: "The ask in full: what is needed, why, and the contract you expect back." },
-          kind: { type: "string", enum: ["work", "question"], description: "work (the default): the project does something; question: what reading answers." },
-          context: { type: "array", maxItems: CREATE_WORKER_LIMITS.contextItems, items: CONTEXT_ITEM, description: "Facts the other project needs, each with its source." },
-          ...(role === "manager" ? { requestId: { ...REQUEST_ID, description: "The request of yours that asks, as bm_create_worker gave it." } } : {}),
-        },
-      },
-    },
+    ...(role === "worker" ? [ASK_PROJECT_FACE] : []),
     {
       name: "bm_peer_reply",
       role,

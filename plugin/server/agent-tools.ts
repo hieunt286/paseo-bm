@@ -58,8 +58,8 @@
  * send line. A bound Manager also has `bm_create_worker` (`create-worker.ts`),
  * a bound Worker `bm_create_reviewer` and `bm_rereview` (`review-tools.ts`,
  * design §16.8). A bound Manager and Worker also have the peer tools
- * (`peer-tools.ts`, design §7.17.3): `bm_peers`, `bm_ask_project`,
- * `bm_peer_reply`. A bound Manager also has the mission tools
+ * (`peer-tools.ts`, design §7.17.3): `bm_peers` and `bm_peer_reply`, and a
+ * Worker `bm_ask_project` too. A bound Manager also has the mission tools
  * (`mission-tools.ts`, missions design §4): `bm_mission`,
  * `bm_mission_start`, `bm_mission_update`, which only a Main can use, and
  * with a bound Worker `bm_memory` (`memory-tools.ts`, missions design §2.5),
@@ -597,7 +597,7 @@ export interface StartOptions {
   reviewTools?: ServerTools;
   /**
    * The bound Manager's and Worker's peer tools (design §7.17.3: `bm_peers`,
-   * `bm_ask_project`, `bm_peer_reply`); `createPeerTools` with this endpoint's
+   * `bm_peer_reply`, and the Worker's `bm_ask_project`); `createPeerTools` with this endpoint's
    * binder, Paseo handle and data folder by default.
    */
   peerTools?: PeerTools;

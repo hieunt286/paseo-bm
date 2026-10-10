@@ -53,9 +53,9 @@ import { MONO } from "./text-tabs";
 import { ConfirmBlock, ToneText, type Styles, type Theme } from "./ui";
 import type { ConfirmDialog } from "./ui-types";
 
-/** The colour of who decides a class: the Orchestrator in the accent, your approval in full contrast, you muted. */
+/** The colour of who decides a class: the Main in the accent, your approval in full contrast, you muted. */
 function deciderColor(theme: Theme, decider: ClassDecider): string {
-  if (decider === "orchestrator") return theme.colors.accent;
+  if (decider === "main") return theme.colors.accent;
   return decider === "approve" ? theme.colors.foreground : theme.colors.foregroundMuted;
 }
 
