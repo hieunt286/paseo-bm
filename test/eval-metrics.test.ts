@@ -1576,6 +1576,103 @@ describe("A-7 from the wake records (Phase 1)", () => {
   });
 });
 
+describe("A-14 the Mains' turns by what started them (mission runtime design §10, M-33)", () => {
+  const HOME = "wks_missions_home";
+  const R = "out-0123456789ab";
+  const main = (minute: number, text: string | null, origin: "user" | "agent" = "agent") =>
+    turn({ workspaceId: HOME, turnId: `m-${minute}`, at: at(minute), endedAt: at(minute), sent: text === null ? [] : [msg(MANAGER, at(minute), text, origin), msg(MANAGER, at(minute, 30), "later words", "user")] });
+
+  it("counts each Main turn of the Missions home by its first inbound message; a BM-UPDATES message by its first item", () => {
+    const records = [
+      main(1, "Please plan G14.", "user"),
+      main(2, "Open the MR.", "user"),
+      main(3, `BM-DELIVERY report ${R}\nBM-REPORT\nrequestId: req-1\nphase: implementing`),
+      main(4, `BM-DELIVERY message ${R}\nContinue req-1.`),
+      main(5, `BM-DELIVERY peer-reply ${R}\nfrom: project "web" (wks_web)`),
+      main(6, "BM-COMMAND\nfrom: orchestrator\nto: manager\nintent: redirect"),
+      main(7, "BM-STATE\nFrom the paseo-bm plugin, not the owner."),
+      main(8, `BM-UPDATES 2\nFrom the paseo-bm plugin, not the owner: 2 items, oldest first. Act on each as its block says.\nBM-ITEM 1\nBM-DELIVERY report ${R}\nBM-REPORT\nBM-ITEM 2\nBM-SIGNAL danger`),
+      main(9, "BM-BRIEF manager requestId: none\nYou are the Main."),
+      main(10, "a relayed message, no client message id"),
+      main(11, null),
+      // Not a Main's turn: a Manager in a repo, a Worker in the home.
+      turn({ turnId: "repo-1", at: at(12), sent: [msg(MANAGER, at(12), "hi", "user")] }),
+      turn({ workspaceId: HOME, agentId: WORKER, role: "worker", turnId: "w-1", at: at(13), sent: [msg(WORKER, at(13), "hi", "user")] }),
+    ];
+    const m = metrics(records, { missionsWorkspaceIds: [HOME] });
+    expect(m.a14).toEqual({ homeKnown: true, turns: 11, byTrigger: { owner: 2, report: 2, message: 1, peer: 1, command: 1, state: 1, other: 3 }, ownerShare: 2 / 11, batched: 1 });
+    // Without the home's id nothing is counted, and it says so.
+    expect(metrics(records).a14).toMatchObject({ homeKnown: false, turns: 0, ownerShare: null });
+  });
+});
+
+describe("A-13 the governor's scale (missions design §20, ADR-032 decision 6)", () => {
+  const A = "mis-000000000a";
+  const B = "mis-000000000b";
+  const usage = (tokens: number) => ({ inputTokens: tokens, cachedInputTokens: 0, outputTokens: 1 });
+  const danger = (raisedAt: string, times: { mainToldAt?: string; governorToldAt?: string; endedAt?: string } = {}) => ({
+    alertKey: `danger:${raisedAt}`,
+    workspaceId: WORKSPACE_ID,
+    workerId: "agent-worker",
+    requestId: null,
+    missionId: A,
+    raisedAt,
+    mainId: "main-1",
+    mainToldAt: times.mainToldAt ?? null,
+    governorToldAt: times.governorToldAt ?? null,
+    endedAt: times.endedAt ?? null,
+  });
+
+  it("counts wakes per mission, off-mission acts and tokens read per wake, from the wake records", () => {
+    const m = metrics([], {
+      wakes: [
+        wake(at(1), at(2), { missionIds: [A], offMission: 0, usage: usage(100_000) }),
+        wake(at(3), at(4), { missionIds: [A], offMission: 2, usage: usage(300_000) }),
+        wake(at(5), at(6), { missionIds: [A, B], usage: usage(500_000) }),
+        // Before missions were named: a wake, of no mission, its acts unknown.
+        wake(at(7), null),
+      ],
+    });
+    expect(m.a13).toMatchObject({
+      wakeRecordsIncluded: true,
+      dangerLogIncluded: false,
+      wakes: 4,
+      wakesWithMissions: 3,
+      missions: 2,
+      wakesPerMission: { median: 2, max: 3 },
+      offMissionActs: 2,
+      wakesWithOffMissionKnown: 2,
+      tokensReadPerWake: { wakes: 3, median: 300_000, max: 500_000 },
+    });
+    // 2 off-mission acts: more than one reopens; 300,000 tokens is under twice 175,000.
+    expect(m.a13.reopen).toMatchObject({ offMission: true, tokens: false, dangerBackup: null });
+  });
+
+  it("follows each danger to its end: Main told within a minute, the backup, the time to end; a bad entry is unknown", () => {
+    const m = metrics([], {
+      dangers: [
+        danger(at(1), { mainToldAt: at(1, 20), endedAt: at(2) }),
+        danger(at(3), { mainToldAt: at(5), governorToldAt: at(6), endedAt: at(13) }),
+        danger(at(20)),
+        { alertKey: "broken" },
+      ],
+    });
+    expect(m.a13.dangerLogIncluded).toBe(true);
+    expect(m.a13.dangers).toEqual({
+      raised: 3,
+      ended: 2,
+      mainTold: 2,
+      mainToldWithinMinute: 1,
+      backupNeeded: 1,
+      toEndMs: { median: 330_000, max: 600_000 },
+      backupToEndMs: { median: 600_000, max: 600_000 },
+    });
+    // The backup's median, 10 minutes, is above 5.
+    expect(m.a13.reopen.dangerBackup).toBe(true);
+    expect(m.unknowns.invalidDangerEntries).toBe(1);
+  });
+});
+
 describe("A-12 coordination interventions, per kind (autonomy design §G.3)", () => {
   const entry = (n: number, kind: InterventionEntry["kind"], outcome: InterventionEntry["outcome"], when = at(n)): InterventionEntry => ({
     id: `i-${n}`,
@@ -1827,6 +1924,7 @@ describe("a 0.4.1 store is read as before", () => {
       ...withEmpty,
       a7: { ...withEmpty.a7, approximate: true, wakeRecordsIncluded: false },
       a8: { ...withEmpty.a8, orchestrator: STORE_METRICS.a8.orchestrator },
+      a13: { ...withEmpty.a13, wakeRecordsIncluded: STORE_METRICS.a13.wakeRecordsIncluded },
     }).toEqual(STORE_METRICS);
   });
 });
@@ -1980,6 +2078,20 @@ const STORE_METRICS: EvalMetrics = {
       INTERVENTION_KINDS.map((kind) => [kind, { recorded: 0, met: 0, missed: 0, unknown: 0, pending: 0, share: null }]),
     ) as EvalMetrics["a12"]["byKind"],
   },
+  a13: {
+    wakeRecordsIncluded: false,
+    dangerLogIncluded: false,
+    wakes: 0,
+    wakesWithMissions: 0,
+    missions: 0,
+    wakesPerMission: { median: null, max: null },
+    offMissionActs: 0,
+    wakesWithOffMissionKnown: 0,
+    tokensReadPerWake: { wakes: 0, median: null, max: null },
+    dangers: { raised: 0, ended: 0, mainTold: 0, mainToldWithinMinute: 0, backupNeeded: 0, toEndMs: { median: null, max: null }, backupToEndMs: { median: null, max: null } },
+    reopen: { offMission: null, dangerBackup: null, noAction: null, tokens: null },
+  },
+  a14: { homeKnown: false, turns: 0, byTrigger: { owner: 0, report: 0, message: 0, peer: 0, command: 0, state: 0, other: 0 }, ownerShare: null, batched: 0 },
   // No model id: every turn's provider is unknown, read as input + cached; no context and no tool calls recorded.
   context: {
     turns: { withUsage: 12, byProvider: { claude: 0, codex: 0, opencode: 0, unknown: 12 }, repeated: 0, withToolCalls: 0 },
@@ -2065,6 +2177,7 @@ const STORE_METRICS: EvalMetrics = {
     wakesWithoutTime: 0,
     wakesWithoutEnd: 0,
     invalidInterventions: 0,
+    invalidDangerEntries: 0,
     effectfulWithoutTime: 0,
     rmTargetsNotJudged: 0,
     processWeightWithoutTier: 0,

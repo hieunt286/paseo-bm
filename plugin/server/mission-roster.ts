@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { redactText } from "./collector";
 import { assertNoSymlink, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
-import { MISSIONS_DIR_NAME, MISSIONS_VERSION, MISSION_ID_PATTERN } from "./mission-store";
+import { MISSIONS_DIR_NAME, MISSIONS_VERSION, MISSION_ID_PATTERN, createMissionStore, journalQuietly } from "./mission-store";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { REQUEST_ID_PATTERN, createRequestRegistry } from "./request-registry";
 import { errorText } from "./rpc-kit";
@@ -40,6 +40,8 @@ const rosterEntrySchema = z.object({
   workerIds: z.array(z.string().min(1)),
   topic: z.string(),
   state: z.enum(ROSTER_STATES),
+  /** The newest follow-up the Main told the request's Worker (`bm_tell_worker`, mission runtime design §2.3); absent when none. */
+  followUpAt: z.string().optional(),
 });
 
 export type RosterEntry = z.infer<typeof rosterEntrySchema>;
@@ -145,14 +147,48 @@ export function missionManagerOf(home: string | null, requestId: string | null):
  * request of no mission is left alone. Called by `bm_report` and the unbound
  * relay. Never throws: a failure is one log line.
  */
-export function noteRosterReport(home: string, requestId: string, phase: string, log: (message: string) => void = () => {}): void {
+export function noteRosterReport(home: string, requestId: string, phase: string, log: (message: string) => void = () => {}, reportText?: string): void {
   try {
     const place = requestIndexOf(home, requestId);
     if (place === null) return;
     const state: RosterState = phase === "finished" || phase === "stopped" ? phase : "active";
     createMissionRoster(home).setState(place.missionId, requestId, state);
+    // Mission runtime design §2.3: the phases that change what the mission waits on are its history.
+    if (reportText !== undefined && (phase === "blocked" || phase === "finished" || phase === "stopped")) {
+      const summary = reportSummaryOf(reportText);
+      journalQuietly(createMissionStore(home), place.missionId, { kind: "worker", by: "plugin", text: `${requestId} ${phase}${summary === "" ? "" : `: ${summary}`}`, ref: requestId }, log);
+    }
   } catch (error) {
     log(`[paseo-bm] could not note the ${phase} report of request ${requestId} in its mission's roster: ${errorText(error)}`);
+  }
+}
+
+/** A report's one-line summary for the journal: the text after "—" on its `tier:` line, else its `blockers:` line; at most 160 characters. Pure. */
+export function reportSummaryOf(text: string): string {
+  const field = (key: string) => new RegExp(`^${key}:[ \\t]*(.*)$`, "m").exec(text)?.[1]?.trim() ?? null;
+  const tier = field("tier");
+  const dash = tier === null ? -1 : tier.indexOf("—");
+  const blockers = field("blockers");
+  const line = tier !== null && dash >= 0 ? tier.slice(dash + 1).trim() : blockers !== null && !/^none\b/i.test(blockers) ? blockers : "";
+  const flat = redactText(line).replace(/\s+/g, " ").trim();
+  return flat.length <= 160 ? flat : `${flat.slice(0, 159)}…`;
+}
+
+/**
+ * The Main told a request's Worker more work (`bm_tell_worker`, mission
+ * runtime design §2.3): the roster entry is `active` again with `followUpAt`,
+ * and the journal gets "Follow-up to <request>: <first line>". A request of no
+ * mission is left alone. Never throws: a failure is one log line.
+ */
+export function noteFollowUp(home: string, requestId: string, text: string, at: string, log: (message: string) => void = () => {}): void {
+  try {
+    const place = requestIndexOf(home, requestId);
+    if (place === null) return;
+    createMissionRoster(home).noteFollowUp(place.missionId, requestId, at);
+    const first = redactText(text.split("\n").find((line) => line.trim() !== "") ?? "").replace(/\s+/g, " ").trim();
+    journalQuietly(createMissionStore(home), place.missionId, { kind: "worker", by: "main", text: `Follow-up to ${requestId}: ${first.length <= 160 ? first : `${first.slice(0, 159)}…`}`, ref: requestId }, log);
+  } catch (error) {
+    log(`[paseo-bm] could not note the follow-up of request ${requestId} in its mission: ${errorText(error)}`);
   }
 }
 
@@ -168,6 +204,36 @@ export async function runningRequestsOf(home: string, paseo: unknown, missionId:
   const registry = createRequestRegistry(home);
   const live = new Set((await bmAgentsOf(paseo as DashboardPaseo, { home })).filter(({ facts }) => facts.role === "worker" && !facts.archived).map(({ facts }) => facts.id));
   return active.filter((entry) => (registry.get(entry.workspaceId, entry.requestId)?.finishedAt ?? null) === null && entry.workerIds.some((id) => live.has(id)));
+}
+
+/**
+ * The mission's requests whose Worker is running a turn now (mission runtime
+ * design §5.4): `active` in the roster with a Worker Paseo lists as `running`
+ * or `initializing`. An idle Worker, or one Paseo does not list, runs nothing:
+ * closing or merging the mission does not wait for it. None when Paseo
+ * cannot be read.
+ */
+export async function busyRequestsOf(home: string, paseo: unknown, missionId: string): Promise<RosterEntry[]> {
+  const active = createMissionRoster(home).list(missionId).filter((entry) => entry.state === "active");
+  if (active.length === 0) return [];
+  const busy = new Set(
+    (await bmAgentsOf(paseo as DashboardPaseo, { home })).filter(({ facts }) => facts.role === "worker" && !facts.archived && (facts.status === "running" || facts.status === "initializing")).map(({ facts }) => facts.id),
+  );
+  return active.filter((entry) => entry.workerIds.some((id) => busy.has(id)));
+}
+
+/** A closed mission's `active` requests become `stopped` (mission runtime design §5.4); returns them. Never throws: a failure is one log line. */
+export function stopActiveRequests(home: string, missionId: string, log: (message: string) => void): string[] {
+  const roster = createMissionRoster(home);
+  const stopped: string[] = [];
+  for (const entry of roster.list(missionId).filter((candidate) => candidate.state === "active")) {
+    try {
+      if (roster.setState(missionId, entry.requestId, "stopped")) stopped.push(entry.requestId);
+    } catch (error) {
+      log(`[paseo-bm] request ${entry.requestId} of the closed mission ${missionId} could not be marked stopped: ${errorText(error)}`);
+    }
+  }
+  return stopped;
 }
 
 export interface MissionRosterDeps {
@@ -190,6 +256,8 @@ export interface MissionRoster {
   add(missionId: string, init: { requestId: string; workspaceId: string; topic: string; workerId?: string | null }): RosterEntry | null;
   /** Sets a listed request's state; false when it is not listed. Throws when the file cannot be written. */
   setState(missionId: string, requestId: string, state: RosterState): boolean;
+  /** A follow-up was told (mission runtime design §2.3): the entry becomes `active` with `followUpAt = at`; false when it is not listed. Throws when the file cannot be written. */
+  noteFollowUp(missionId: string, requestId: string, at: string): boolean;
   /**
    * A split (missions design §9.6): the entries of `requestIds` leave the
    * roster of `fromMissionId` and join that of `toMissionId` as they are.
@@ -251,6 +319,16 @@ export function createMissionRoster(home: string, deps: MissionRosterDeps = {}):
         found = true;
         if (current.requests[index]!.state === state) return null;
         return { requests: current.requests.map((request, at) => (at === index ? { ...request, state } : request)) };
+      });
+      return found;
+    },
+    noteFollowUp(missionId, requestId, at) {
+      let found = false;
+      rosterFile(home, missionId).update((current) => {
+        const index = current.requests.findIndex((request) => request.requestId === requestId);
+        if (index === -1) return null;
+        found = true;
+        return { requests: current.requests.map((request, position) => (position === index ? { ...request, state: "active" as const, followUpAt: at } : request)) };
       });
       return found;
     },

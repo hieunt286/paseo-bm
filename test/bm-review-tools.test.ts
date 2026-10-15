@@ -493,7 +493,7 @@ describe("the review-budget grant (design §16.8)", () => {
     expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => grant.calls)).toEqual([1]);
   });
 
-  it("the owner's policy grants at most { calls: 2 } under the default Small budget: a larger or untilClean option is never its choice, and such an answer grants nothing", () => {
+  it("the owner's policy grants at most { calls: 2 } under the default Small budget; past it nothing; a delegated untilClean becomes the calls left (mission runtime design §4.3)", () => {
     const home = dataFolder();
     register(home, "Small");
     const policy: AutonomyPolicy = { projects: { [WS]: { cost: { mode: "delegate", at: T0.toISOString() } } }, challenger: {} };
@@ -505,11 +505,16 @@ describe("the review-budget grant (design §16.8)", () => {
       expect(decideRefusalOf(policy, question, { optionKey: "a", finishedUnverified: false })).toMatch(/grants more review calls than the owner's policy may .*leave decision .* to the owner/);
       expect(decideRefusalOf(policy, question, { optionKey: "b", finishedUnverified: false })).toBeNull();
     }
-    // Should a policy answer ever carry one, it grants nothing; the owner's own answer grants it.
+    // A policy answer past its cap grants nothing; an untilClean it chose is bounded to the calls its cap leaves (2); the owner's own answer grants in full.
     expect(applyReviewBudgetGrants([answered(budgetQuestion({ calls: 3 }), "a", "policy")], { home })).toEqual([]);
-    expect(applyReviewBudgetGrants([answered(budgetQuestion({ untilClean: "b1" }, `q:${REQ}:Q2`), "a", "policy")], { home })).toEqual([]);
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ untilClean: "b1" }, `q:${REQ}:Q2`), "a", "policy")], { home })).toEqual([`q:${REQ}:Q2`]);
     expect(applyReviewBudgetGrants([answered(budgetQuestion({ calls: 3 }, `q:${REQ}:Q3`), "a")], { home })).toEqual([`q:${REQ}:Q3`]);
-    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => grant.calls)).toEqual([3]);
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.grants.map((grant) => [grant.calls, grant.untilCleanBatch])).toEqual([
+      [2, null],
+      [3, null],
+    ]);
+    // The cap spent, a second delegated untilClean grants nothing.
+    expect(applyReviewBudgetGrants([answered(budgetQuestion({ untilClean: "b2" }, `q:${REQ}:Q4`), "a", "policy")], { home })).toEqual([]);
   });
 
   it("the policy's cap is the request tier's own budget (design §7.17.8 a): 8 of a Large budget of 8 at both check points, 9 refused, untilClean never", () => {

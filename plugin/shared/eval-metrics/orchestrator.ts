@@ -8,8 +8,8 @@
  */
 import { decisionKindOf, policyPredictorOf } from "../decisions";
 import { INTERVENTION_KINDS, a12ShareOf, interventionEntrySchema, type InterventionKind } from "../interventions";
-import { stallEntrySchema, type WakeEntry } from "../orchestrator";
-import { compareText, ratio, within, workspaceOfStallKey, type Bounds } from "./helpers";
+import { dangerEntrySchema, stallEntrySchema, type WakeEntry } from "../orchestrator";
+import { compareText, median, ratio, within, workspaceOfStallKey, type Bounds } from "./helpers";
 import { isOrchestratorCommand, type EvalStores } from "./scope";
 import type { EvalInput, EvalMetrics, EvalNote, EvalUnknowns, InterventionCounts } from "./types";
 import { timeOrNull } from "../time";
@@ -175,4 +175,94 @@ export function a12Of(interventions: readonly unknown[] | undefined, bounds: Bou
   }
   for (const counts of Object.values(byKind)) counts.share = a12ShareOf(counts.met, counts.missed);
   return { logIncluded: interventions !== undefined, byKind };
+}
+
+/** ADR-032 decision 6: the figures that reopen a per-mission governor. */
+export const A13_REOPEN = {
+  /** More off-mission acts than this. */
+  offMissionActs: 1,
+  /** A median danger-to-end time above this, on dangers that needed the backup. */
+  dangerBackupMs: 5 * 60_000,
+  /** M-26 above this share. */
+  noActionShare: 0.2,
+  /** Twice the 2026-10-09 acceptance's tokens read per wake (697,034 over 4 wakes, rounded). */
+  tokensReadPerWake: 2 * 175_000,
+} as const;
+
+const spread = (values: readonly number[]): { median: number | null; max: number | null } => ({ median: median(values), max: values.length === 0 ? null : Math.max(...values) });
+
+/**
+ * A-13 (missions design §20, ADR-032 decision 6): the governor's scale, from
+ * the wake records in the window and the danger log entries raised in it.
+ * `noActionShare` is A-7's, for the M-26 reopen figure.
+ */
+export function a13Of(
+  dangersRaw: readonly unknown[] | undefined,
+  wakes: readonly WakeEntry[],
+  wakeRecordsIncluded: boolean,
+  noActionShare: number | null,
+  bounds: Bounds,
+  unknowns: EvalUnknowns,
+): EvalMetrics["a13"] {
+  const inWindow = wakes.filter((wake) => within(timeOrNull(wake.at), bounds));
+  const perMission = new Map<string, number>();
+  let wakesWithMissions = 0;
+  let offMissionActs = 0;
+  let wakesWithOffMissionKnown = 0;
+  const tokens: number[] = [];
+  for (const wake of inWindow) {
+    const missions = wake.missionIds ?? [];
+    if (missions.length > 0) wakesWithMissions += 1;
+    for (const missionId of new Set(missions)) perMission.set(missionId, (perMission.get(missionId) ?? 0) + 1);
+    if (wake.offMission !== undefined) {
+      wakesWithOffMissionKnown += 1;
+      offMissionActs += wake.offMission;
+    }
+    if (wake.usage !== undefined && wake.usage !== null) tokens.push(wake.usage.inputTokens + wake.usage.cachedInputTokens);
+  }
+  const dangers = { raised: 0, ended: 0, mainTold: 0, mainToldWithinMinute: 0, backupNeeded: 0 };
+  const toEnd: number[] = [];
+  const backupToEnd: number[] = [];
+  for (const raw of dangersRaw ?? []) {
+    const parsed = dangerEntrySchema.safeParse(raw);
+    if (!parsed.success) {
+      unknowns.invalidDangerEntries += 1;
+      continue;
+    }
+    const raisedAt = timeOrNull(parsed.data.raisedAt);
+    if (raisedAt === null || !within(raisedAt, bounds)) continue;
+    dangers.raised += 1;
+    const mainToldAt = timeOrNull(parsed.data.mainToldAt);
+    if (mainToldAt !== null) {
+      dangers.mainTold += 1;
+      if (mainToldAt - raisedAt <= 60_000) dangers.mainToldWithinMinute += 1;
+    }
+    const backup = parsed.data.governorToldAt !== null;
+    if (backup) dangers.backupNeeded += 1;
+    const endedAt = timeOrNull(parsed.data.endedAt);
+    if (endedAt === null) continue;
+    dangers.ended += 1;
+    toEnd.push(Math.max(0, endedAt - raisedAt));
+    if (backup) backupToEnd.push(Math.max(0, endedAt - raisedAt));
+  }
+  const tokenSpread = spread(tokens);
+  const backupSpread = spread(backupToEnd);
+  return {
+    wakeRecordsIncluded,
+    dangerLogIncluded: dangersRaw !== undefined,
+    wakes: inWindow.length,
+    wakesWithMissions,
+    missions: perMission.size,
+    wakesPerMission: spread([...perMission.values()]),
+    offMissionActs,
+    wakesWithOffMissionKnown,
+    tokensReadPerWake: { wakes: tokens.length, ...tokenSpread },
+    dangers: { ...dangers, toEndMs: spread(toEnd), backupToEndMs: backupSpread },
+    reopen: {
+      offMission: wakesWithOffMissionKnown === 0 ? null : offMissionActs > A13_REOPEN.offMissionActs,
+      dangerBackup: backupSpread.median === null ? null : backupSpread.median > A13_REOPEN.dangerBackupMs,
+      noAction: noActionShare === null ? null : noActionShare > A13_REOPEN.noActionShare,
+      tokens: tokenSpread.median === null ? null : tokenSpread.median > A13_REOPEN.tokensReadPerWake,
+    },
+  };
 }

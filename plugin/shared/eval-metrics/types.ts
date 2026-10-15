@@ -76,6 +76,10 @@ export interface EvalInput {
   wakes?: readonly unknown[];
   /** `orchestrator/interventions.json` → `entries`, unvalidated (A-12); absent means they were not read. */
   interventions?: readonly unknown[];
+  /** `orchestrator/dangers.json` → `entries`, unvalidated (A-13); absent means they were not read. */
+  dangers?: readonly unknown[];
+  /** The Missions places' workspace ids (ADR-034: the Mission-List root, the earlier shared home, each mission's workspace), whose `manager` records are the Mains' turns (A-14); absent or empty when unknown. */
+  missionsWorkspaceIds?: readonly string[];
   window: EvalWindow;
   /** Workspace directory by workspace id, for the `rm -rf` outside-the-workspace rule of A-6. */
   workspaceDirectories?: Readonly<Record<string, string>>;
@@ -468,6 +472,59 @@ export interface EvalMetrics {
     byKind: Record<InterventionKind, InterventionCounts>;
   };
   /**
+   * The governor's scale (missions design §20, ADR-032 decision 6): its wakes
+   * per mission, the acts aimed at a mission a wake did not carry (M-28), the
+   * tokens read per wake (M-30), and each danger's path to its end (M-29).
+   * `reopen` names which of ADR-032's figures crossed (null: not measurable
+   * here); the field period's length and open missions are the reader's.
+   */
+  a13: {
+    /** False when no wake records were supplied. */
+    wakeRecordsIncluded: boolean;
+    /** False when no danger log was supplied (a build before it). */
+    dangerLogIncluded: boolean;
+    /** Recorded wakes in the window, and those that named their missions. */
+    wakes: number;
+    wakesWithMissions: number;
+    /** Distinct missions over those wakes, and the wakes per mission. */
+    missions: number;
+    wakesPerMission: { median: number | null; max: number | null };
+    /** M-28: the off-mission acts summed over the ended wakes that recorded them. */
+    offMissionActs: number;
+    wakesWithOffMissionKnown: number;
+    /** M-30: input + cached tokens of each wake's closing turn, as recorded. */
+    tokensReadPerWake: { wakes: number; median: number | null; max: number | null };
+    /** M-29: danger alerts raised in the window. */
+    dangers: {
+      raised: number;
+      ended: number;
+      mainTold: number;
+      /** Main told within 60 seconds of the alert. */
+      mainToldWithinMinute: number;
+      /** The governor was told: its Main did not end it within the backup window, or there was no Main. */
+      backupNeeded: number;
+      toEndMs: { median: number | null; max: number | null };
+      /** Over the dangers that needed the backup. */
+      backupToEndMs: { median: number | null; max: number | null };
+    };
+    reopen: { offMission: boolean | null; dangerBackup: boolean | null; noAction: boolean | null; tokens: boolean | null };
+  };
+  /**
+   * The Mains' turns by what started them (mission runtime design §10, M-33;
+   * `eval-metrics/mains.ts`): the `manager` records of the Missions home, by
+   * their first inbound message. `ownerShare` is M-33 (≥ 50 % on the
+   * acceptance scenario); `batched` counts the turns a `BM-UPDATES` message
+   * started.
+   */
+  a14: {
+    /** False when no Missions place's id was supplied: nothing is counted. */
+    homeKnown: boolean;
+    turns: number;
+    byTrigger: Record<"owner" | "report" | "message" | "peer" | "command" | "state" | "other", number>;
+    ownerShare: number | null;
+    batched: number;
+  };
+  /**
    * Context and tokens (autonomy design §G.2 Derived): tokens read per turn,
    * per request by role and per agent, a context figure per turn, and the
    * compaction and handoff candidates the §G.7 defaults would have raised.
@@ -619,6 +676,8 @@ export interface EvalMetrics {
     wakesWithoutEnd: number;
     /** Intervention log entries that did not validate (A-12). */
     invalidInterventions: number;
+    /** Danger log entries that did not validate (A-13). */
+    invalidDangerEntries: number;
     effectfulWithoutTime: number;
     /** `rm -rf` of a target that cannot be judged: a variable, or a path while the workspace directory is unknown. */
     rmTargetsNotJudged: number;

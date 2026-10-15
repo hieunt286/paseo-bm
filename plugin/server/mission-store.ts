@@ -110,6 +110,10 @@ export const missionSchema = z.object({
   parentMissionId: z.string().regex(MISSION_ID_PATTERN).nullable(),
   splitReason: z.string().nullable(),
   legacyWorkspaceId: z.string().min(1).nullable(),
+  /** The mission a legacy one was merged into (mission runtime design §5.2); absent or null otherwise. */
+  mergedInto: z.string().regex(MISSION_ID_PATTERN).nullable().optional(),
+  /** Its own workspace in the Mission-List project (ADR-034), as last found; absent or null before one was made. */
+  workspaceId: z.string().min(1).nullable().optional(),
   mainId: z.string().min(1).nullable(),
   mainHistory: z.array(z.object({ agentId: z.string().min(1), from: z.string(), to: isoOrNull, reason: z.enum(MAIN_CHANGE_REASONS) })),
   charter: z.object({
@@ -134,6 +138,8 @@ const indexEntrySchema = z.object({
   state: z.enum(["open", "closed"]),
   mainId: z.string().nullable(),
   repos: z.array(z.string()),
+  /** Its workspace (ADR-034); absent from an index written before it. */
+  workspaceId: z.string().nullable().optional(),
 });
 
 export type MissionIndexEntry = z.infer<typeof indexEntrySchema>;
@@ -218,7 +224,7 @@ function boundedSplit(split: SplitSuggestionFields, env: NodeJS.ProcessEnv): Spl
 /** The index entry of a mission. Pure. */
 export function indexEntryOf(mission: Mission): MissionIndexEntry {
   const { missionId, code, name, state, mainId } = mission;
-  return { missionId, code, name, state, mainId, repos: [...mission.charter.repos] };
+  return { missionId, code, name, state, mainId, repos: [...mission.charter.repos], workspaceId: mission.workspaceId ?? null };
 }
 
 /** What a new mission starts with; the rest is empty. */

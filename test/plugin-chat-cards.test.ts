@@ -32,6 +32,7 @@ import {
 } from "../plugin/client/chat-card-decision";
 import { fallbackMarkdown, markdownOf } from "../plugin/client/chat-card-markdown";
 import { parseMarkdown } from "../plugin/client/markdown";
+import { updatesNoticeOf } from "../plugin/shared/notices";
 import { handleChatPeers } from "../plugin/server/chat-rpc";
 import { fallbackNotice } from "../plugin/server/fallback-rpc";
 import { answerNoticeOf } from "../plugin/server/orchestrator-decisions";
@@ -292,6 +293,22 @@ describe("outbox deliveries (design §16.7)", () => {
     const review = delivered(`BM-DELIVERY review ${RECORD}\n${REVIEW}`)!;
     expect(review[0]).toMatchObject({ type: "verdict", direction: "received", review: { verdict: "pass", batchId: "b1", blocking: 0 } });
     for (const c of [...report, ...review]) expect(chatCardSchema.parse(c)).toEqual(c);
+  });
+
+  it("split a BM-UPDATES message into the card each item would be alone, in order (mission runtime design §6.2)", () => {
+    const text = updatesNoticeOf([`BM-DELIVERY report ${RECORD}\n${REPORT}`, `BM-DELIVERY message out-0123456789ac\nContinue ${REQ}. Please fix the failing test.`, "BM-SIGNAL danger\nFrom the paseo-bm plugin, not the owner: your Worker w1 ran a command."]);
+    expect(text.split("\n")[0]).toBe("BM-UPDATES 3");
+    const split = delivered(text)!;
+    expect(split.map((c) => [c.type, c.notice?.marker ?? null])).toEqual([
+      ["progress", null],
+      ["notice", "BM-DELIVERY"],
+      ["notice", "BM-SIGNAL"],
+    ]);
+    expect(split[0]).toMatchObject({ direction: "received", requestId: REQ, text: REPORT });
+    for (const c of split) expect(chatCardSchema.parse(c)).toEqual(c);
+    // One item alone is its block; a BM-UPDATES whose items do not parse is still one notice line, never the owner's words.
+    expect(updatesNoticeOf([`BM-DELIVERY report ${RECORD}\n${REPORT}`])).toBe(`BM-DELIVERY report ${RECORD}\n${REPORT}`);
+    expect(delivered("BM-UPDATES 2\nFrom the paseo-bm plugin, not the owner.")!.map((c) => [c.type, c.notice?.what])).toEqual([["notice", "Updates from paseo-bm"]]);
   });
 
   it("draw a message, a no-verdict and a report whose block does not parse as a notice line", () => {

@@ -17,6 +17,7 @@
  * | (the same) | a `BM-DELIVERY report` or `review` of the outbox (design §16.7): the card of the block after its marker line, `received` |
  * | `brief` | another agent's message that names a request (a request brief, a review request) |
  * | `action` | a delivered `BM-COMMAND` (v2, v1 still read) |
+ * | (each in order) | a `BM-UPDATES` message (mission runtime design §6.2): the cards of each item's block |
  * | `notice` | every other plugin notice (a `BM-DELIVERY message`, `no-verdict` or peer delivery included), and a Manager's copy of a Worker command: one compact line |
  *
  * There is no other question UI: no reply box, no answered chip, no "Mark as
@@ -53,8 +54,10 @@ import {
   HANDOFF_NOTICE_MARKER,
   REPLACED_NOTICE_MARKER,
   STATE_NOTICE_MARKER,
+  UPDATES_NOTICE_MARKER,
   noticeMarkerOf,
   parseDelivery,
+  updatesItemsOf,
   type PEER_DELIVERY_KINDS,
 } from "../shared/notices";
 import {
@@ -233,11 +236,9 @@ export function toChatCards(item: ChatItem, phase: "streaming" | "complete"): Ch
     // its first line, as the plugin writes it, before that test.
     const origin = originOf({ text, clientMessageId: item.clientMessageId });
     if (origin === "plugin-notice") {
-      // An outbox report or review (design §16.7): the cards of the block after its marker line.
-      const delivered = deliveredBlockCardsOf(text);
-      if (delivered !== undefined) return delivered;
-      const own = pluginCardOf(text);
-      return own === undefined ? undefined : [own];
+      // The Main's channel (mission runtime design §6.2): each item is drawn as the card it would be alone, in order.
+      const items = updatesItemsOf(text)?.flatMap((item) => noticeCardsOf(item) ?? []) ?? [];
+      return items.length > 0 ? items : noticeCardsOf(text);
     }
     // A plugin-created agent's first prompt is a request brief: draw it with
     // the same readable card as an agent-relayed brief, while keeping its
@@ -253,6 +254,14 @@ export function toChatCards(item: ChatItem, phase: "streaming" | "complete"): Ch
     return undefined;
   }
   return blockCardsOf(text, direction, false);
+}
+
+/** The cards of one plugin notice: an outbox report or review (design §16.7) is the cards of the block after its marker line. */
+function noticeCardsOf(text: string): ChatCard[] | undefined {
+  const delivered = deliveredBlockCardsOf(text);
+  if (delivered !== undefined) return delivered;
+  const own = pluginCardOf(text);
+  return own === undefined ? undefined : [own];
 }
 
 /**
@@ -526,6 +535,7 @@ const NOTICE_WORDS: Readonly<Record<string, string>> = {
   "BM-STOP": "Asked to stop",
   STOP: "Asked to stop",
   "BM-COMMAND": "A command",
+  [UPDATES_NOTICE_MARKER]: "Updates from paseo-bm",
 };
 
 const NOTICE_TONES: Readonly<Record<string, Tone>> = {

@@ -193,7 +193,7 @@ export interface RequestRegistry {
    * the file cannot be written. A split (§9.6) passes the request's new
    * `missionId` too, so the entry's cache names it.
    */
-  reassignManager(workspaceId: string, requestId: string, managerId: string, missionId?: string): boolean;
+  reassignManager(workspaceId: string, requestId: string, managerId: string | null, missionId?: string): boolean;
   /**
    * A report of the request was stored (design §16.6, `bm_report`): `tier`
    * becomes the report's, and `finishedAt` is `at` for a `finished` report and

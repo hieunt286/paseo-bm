@@ -28,13 +28,12 @@ import {
   checkMissionSetCell,
   checkMissionSetLevel,
   decideRefusalOf,
-  mainAnswerRuleOf,
   missionAnswerCellOf,
-  missionQuestionRefusalOf,
+  modeOf,
   type AutonomyPolicy,
 } from "../plugin/shared/autonomy";
+import { deciderOf, type AuthorityFacts } from "../plugin/shared/authority";
 import { agreementLedger } from "../plugin/shared/autonomy-ledger";
-import { MAIN_ANSWER_MINUTES } from "../plugin/shared/bm-tools";
 import { autonomyPolicyRpc, autonomySetMissionLevelRpc } from "../plugin/shared/contracts";
 import {
   ANSWER_VIA,
@@ -208,25 +207,24 @@ describe("ownerOnly: the guard and the answer (missions design §5)", () => {
 // §8: the rule, pure.
 // ---------------------------------------------------------------------------
 
-describe("the two layers (missions design §8), pure", () => {
-  const never = () => false;
-  const only = (name: string) => (candidate: string) => candidate === name;
+describe("the two layers (missions design §8; mission runtime design §4.1), pure", () => {
+  /** The resolver's facts over a policy and the mission cells delegated. */
+  const factsOf = (policy: AutonomyPolicy, cells: readonly string[] = []): AuthorityFacts => ({
+    modeOf: (workspaceId, decisionClass) => modeOf(policy, workspaceId, decisionClass),
+    missionOf: () => "mis-0123456789",
+    missionDelegates: (_missionId, cell) => cells.includes(cell),
+    reviewCaps: () => ({ codeLeft: 2, mainLeft: 2 }),
+  });
 
   it("a repo-delegated class is the Main's; an owner or shadow cell only through the mission cell of its group", () => {
     expect(missionAnswerCellOf("scope")).toBe("answer-technical");
     expect(missionAnswerCellOf("reversible-technical")).toBe("answer-technical");
     expect(missionAnswerCellOf("release")).toBe("answer-effects");
-    expect(mainAnswerRuleOf(policyWith({ scope: "delegate" }), question(), never)).toEqual({ rule: "answer" });
-    expect(mainAnswerRuleOf(policyWith({}), question(), only("answer-technical"))).toEqual({ rule: "answer" });
-    expect(mainAnswerRuleOf(policyWith({}), question({ class: "release" }), only("answer-technical"))).toMatchObject({ refusal: expect.stringContaining("the owner decides it") });
-    expect(mainAnswerRuleOf(policyWith({ scope: "shadow" }), question(), never)).toEqual({ rule: "predict" });
-    expect(mainAnswerRuleOf(policyWith({ scope: "delegate" }), question({ ownerOnly: true }), () => true)).toEqual({ refusal: ownerOnlyRefusalText(`q:${REQ}:Q1`) });
-  });
-
-  it("the Orchestrator refuses a Worker question of a mission request, not an o: or f: decision, nor a request of no mission", () => {
-    expect(missionQuestionRefusalOf(question(), "mis-0123456789")).toContain("its Main decides it (bm_answer_worker)");
-    expect(missionQuestionRefusalOf(question(), null)).toBeNull();
-    expect(missionQuestionRefusalOf({ id: "o:abc", requestId: REQ }, "mis-0123456789")).toBeNull();
+    expect(deciderOf(question(), factsOf(policyWith({ scope: "delegate" })))).toMatchObject({ decider: "main" });
+    expect(deciderOf(question(), factsOf(policyWith({}), ["answer-technical"]))).toMatchObject({ decider: "main" });
+    expect(deciderOf(question({ class: "release" }), factsOf(policyWith({}), ["answer-technical"]))).toMatchObject({ decider: "owner" });
+    expect(deciderOf(question(), factsOf(policyWith({ scope: "shadow" })))).toMatchObject({ decider: "owner", recommend: true });
+    expect(deciderOf(question({ ownerOnly: true }), factsOf(policyWith({ scope: "delegate" }), ["answer-technical", "answer-effects"]))).toMatchObject({ decider: "owner", rule: "owner-only" });
   });
 
   it("the mission level inputs: levels 3–4 and a delegate cell need the owner's confirmation", () => {
@@ -294,9 +292,9 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
     // Level 2 (the default): neither.
     const refused = await call([{ qn: "Q1", option: "a", why: "x" }]);
     expect(refused.ok).toBe(false);
-    expect(refused.text).toContain("neither its repo nor your mission level (answer-technical) delegates");
+    expect(refused.text).toContain("Q1 is the owner's (scope is not delegated)");
     createMissionAutonomyStore(home).setLevel(created.missionId, 3);
-    expect((await call([{ qn: "Q2", option: "a", why: "x" }])).text).toContain("(answer-effects) delegates");
+    expect((await call([{ qn: "Q2", option: "a", why: "x" }])).text).toContain("Q2 is the owner's (release is not delegated)");
     expect((await call([{ qn: "Q1", option: "a", why: "Fits the plan." }])).ok).toBe(true);
     expect(stored(1).answer).toMatchObject({ by: "main" });
     expect(stored(2).status).toBe("open");
@@ -313,13 +311,14 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
     expect((await call([{ qn: "Q1", option: "a", why: "again" }])).text).toContain("you recommended an option for Q1 already");
   });
 
-  it("refuses an ownerOnly question, a late one, a settled one, an option with a grant, and a request outside the mission; a refusal writes nothing", async () => {
+  it("refuses an ownerOnly question, a settled one, one code decides, and a request outside the mission; a late one is still the Main's; a refusal writes nothing", async () => {
     const { call } = await setup();
     delegateRepo("scope");
     delegateRepo("cost");
     const store = createDecisionStore(home);
     store.open(question({ ownerOnly: true }));
-    store.open(question({ n: 2, subject: "late", askedAt: new Date(NOW.getTime() - (MAIN_ANSWER_MINUTES + 1) * 60_000).toISOString() }));
+    // Mission runtime design §4.1: no time window — a question asked an hour ago is still the Main's.
+    store.open(question({ n: 2, subject: "late", askedAt: new Date(NOW.getTime() - 60 * 60_000).toISOString() }));
     store.open(question({ n: 3, subject: "done" }));
     store.transition(`q:${REQ}:Q3`, (current) => answerDecision(current, { via: "inbox", optionKey: "a", at: ASKED }), WS);
     const granting = question({ n: 4, subject: "review-budget", class: "cost" });
@@ -335,9 +334,10 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
     ]);
     expect(result.ok).toBe(false);
     expect(result.text).toContain(`input.answers[0]: ${ownerOnlyRefusalText(`q:${REQ}:Q1`)}`);
-    expect(result.text).toContain(`input.answers[1]: Q2 was asked more than ${MAIN_ANSWER_MINUTES} minutes ago`);
+    expect(result.text).not.toContain("input.answers[1]");
     expect(result.text).toContain("input.answers[2]: Q3 was already answered by the owner");
-    expect(result.text).toContain("input.answers[3]: option a of Q4 carries a grant or a change");
+    // A review budget within the code cap where cost is delegated is code's, not the Main's (§4.1 rule 3).
+    expect(result.text).toContain("input.answers[3]: Q4 is paseo-bm's to decide (a review budget within what the owner delegated: paseo-bm decides it)");
     expect(stored(5).status).toBe("open");
     expect((await call([{ qn: "Q1", option: "a", why: "x" }], "req-20261009T090000Z")).text).toContain("is not one of mission WEB");
   });

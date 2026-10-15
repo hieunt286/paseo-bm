@@ -143,6 +143,69 @@ export const missionRowSchema = z.object({
   links: z.array(z.object({ repo: missionRepoSchema, messages: z.number().int().min(0) })),
 });
 
+/** The mission state (mission runtime design §2.1, `shared/mission-state.ts`) as `mission.get` carries it. */
+export const missionStateSchema = z.object({
+  at: z.string(),
+  mission: z.object({
+    missionId: z.string(),
+    code: z.string(),
+    name: z.string(),
+    state: z.enum(["open", "closed"]),
+    goal: z.string(),
+    charterConfirmed: z.boolean(),
+    repos: z.array(z.object({ workspaceId: z.string(), name: z.string().nullable() })),
+    mainId: z.string().nullable(),
+    mainHistory: z.array(z.object({ agentId: z.string(), from: z.string(), to: z.string().nullable(), reason: z.string() })),
+  }),
+  criteria: z.object({ met: z.number().int().min(0), total: z.number().int().min(0), open: z.array(z.object({ id: z.string(), text: z.string() })) }),
+  requests: z.array(
+    z.object({
+      requestId: z.string(),
+      workspaceId: z.string(),
+      repo: z.string().nullable(),
+      topic: z.string(),
+      workerId: z.string().nullable(),
+      state: z.enum(["working", "waiting-owner", "waiting-main", "waiting-other", "finished", "stopped"]),
+      lastReport: z.object({ phase: z.string(), at: z.string(), line: z.string() }).nullable(),
+      followUpAt: z.string().nullable(),
+      waitingOn: z.string().nullable(),
+    }),
+  ),
+  questions: z.array(
+    z.object({
+      id: z.string(),
+      requestId: z.string().nullable(),
+      qn: z.string().nullable(),
+      class: z.string(),
+      subject: z.string().nullable(),
+      decider: z.enum(["code", "main", "orchestrator", "owner"]),
+      recommend: z.boolean(),
+      askedAt: z.string(),
+      question: z.string(),
+      recommended: z.string().nullable(),
+    }),
+  ),
+  asks: z.array(
+    z.object({ id: z.string(), askedAt: z.string(), question: z.string(), options: z.array(z.string()), recommended: z.string().nullable().optional(), byMain: z.boolean().optional() }),
+  ),
+  links: z.array(
+    z.object({
+      linkId: z.string(),
+      route: z.string(),
+      kind: z.string(),
+      direction: z.enum(["out", "in"]),
+      partner: z.string(),
+      state: z.string(),
+      waitingSince: z.string().nullable(),
+      gist: z.string(),
+    }),
+  ),
+  owner: z.array(z.object({ at: z.string(), from: z.enum(["owner", "main"]), text: z.string() })),
+  governor: z.array(z.object({ family: z.string(), step: z.number().int(), since: z.string().nullable(), crossed: z.array(z.string()) })),
+  journal: z.array(z.object({ at: z.string(), kind: z.string(), by: z.string(), text: z.string() })),
+  unknown: z.array(z.string()),
+});
+
 /** `mission.get` — one mission's page (§10.2, artboards B and D). Unknown → `E_MISSION_INVALID`. Reads only. */
 export const missionGetRpc = defineRpc({
   name: "mission.get",
@@ -165,6 +228,10 @@ export const missionGetRpc = defineRpc({
     /** The newest journal lines, newest first (at most 50). */
     journal: z.array(z.object({ at: z.string(), kind: z.string(), by: z.string(), text: z.string() })),
     plan: z.object({ text: z.string(), updatedAt: z.string().nullable() }),
+    /** What is in flight and whom it waits on (mission runtime design §2, §7); absent from an older server. */
+    inFlight: missionStateSchema.optional(),
+    /** The mission's Mains with when and why each changed (mission runtime design §7); absent from an older server. */
+    mainHistory: z.array(z.object({ agentId: z.string(), from: z.string(), to: z.string().nullable(), reason: z.string() })).optional(),
   }),
 });
 

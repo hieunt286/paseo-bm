@@ -409,7 +409,7 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   if (view === "missions") {
     // Missions (missions design §10): the projects as Projects lists them, plugin homes left out.
     return framed(
-      <MissionsScreen {...props} projects={projectNames} status={status} />,
+      <MissionsScreen {...props} projects={projectNames} status={status} onOpenInbox={() => setView("inbox")} />,
     );
   }
 

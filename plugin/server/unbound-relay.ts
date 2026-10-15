@@ -237,7 +237,7 @@ export async function relayUnboundBlocks(event: TurnEndedEvent, deps: RelayDeps)
         openOf(report, at);
         if (report.phase === "finished") expireQuestionsOf({ store, workspaceId, log }, report.requestId, at);
         if (report.phase === "finished" || report.phase === "stopped") clearDroppedAlert(deps.home, workspaceId, report.requestId, null, { now });
-        noteRosterReport(deps.home, report.requestId, report.phase, log);
+        noteRosterReport(deps.home, report.requestId, report.phase, log, report.text);
       });
       outcome.relayed.push(record.id);
     }

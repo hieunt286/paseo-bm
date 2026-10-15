@@ -106,8 +106,9 @@ export interface FakeApi {
   };
   workspaces: {
     list: Mock<(options?: unknown) => Promise<{ requestId: string; entries: Array<Record<string, unknown>>; pageInfo: { nextCursor: string | null; hasMore: boolean } }>>;
-    open: Mock<(input: string | { cwd: string }) => Promise<{ id: string; directory: string }>>;
+    open: Mock<(input: string | { cwd: string }) => Promise<{ id: string; directory: string; projectId?: string }>>;
     ref: Mock<(workspaceId: string) => FakeWorkspaceHandle>;
+    create: Mock<(options: { source: { kind: string; path?: string; projectId?: string }; title?: string }) => Promise<{ id: string; directory: string | null; projectId: string | null }>>;
   };
   providers: {
     listAvailable: Mock<() => Answer>;
@@ -149,8 +150,10 @@ export interface FakePaseoOptions {
   timelines?: Record<string, FakeTimeline>;
   /** Statuses an agent reports on successive `refresh()` calls; the last one repeats. */
   statuses?: Record<string, readonly string[]>;
-  /** What `workspaces.list` answers. */
+  /** What `workspaces.list` answers; `workspaces.create` adds to it (`wks-new-<n>`). */
   workspaces?: ReadonlyArray<Record<string, unknown>>;
+  /** The project id `workspaces.open` answers (ADR-034); none by default, as an older host. */
+  workspaceProject?: string;
   /** The daemon configuration `config.get` answers and `config.patch` changes, or an Error `config.get` rejects with. Default `{}`. */
   config?: Record<string, unknown> | Error;
   /** `config.patch` rejects with this Error; or `"ignore"`: it answers as if applied and changes nothing. */
@@ -427,7 +430,13 @@ export function fakePaseo<T = FakeApi>(options: FakePaseoOptions = {}): FakePase
         record.calls.push("workspaces.open");
         const cwd = typeof input === "string" ? input : input.cwd;
         const known = workspaces.find((workspace) => workspace.directory === cwd);
-        return { id: typeof known?.id === "string" ? known.id : "wks-own", directory: cwd };
+        return { id: typeof known?.id === "string" ? known.id : "wks-own", directory: cwd, ...(options.workspaceProject === undefined ? {} : { projectId: options.workspaceProject }) };
+      }),
+      create: vi.fn(async (input: { source: { kind: string; path?: string; projectId?: string }; title?: string }) => {
+        record.calls.push("workspaces.create");
+        const id = `wks-new-${workspaces.filter((workspace) => String(workspace["id"]).startsWith("wks-new-")).length + 1}`;
+        workspaces.push({ id, directory: input.source.path ?? null, projectId: input.source.projectId ?? null, title: input.title ?? null });
+        return { id, directory: input.source.path ?? null, projectId: input.source.projectId ?? null };
       }),
       ref: vi.fn((workspaceId: string) => {
         const existing = workspaceHandles.get(workspaceId);

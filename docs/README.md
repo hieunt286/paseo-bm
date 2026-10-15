@@ -13,7 +13,7 @@ A PRD states **the outcome the user gets**; colours, labels, limits and numbers 
 | [paseo-bm-prd.md](product/paseo-bm-prd.md) | Install and machine set-up, the Manager / Worker / Reviewer loop, safety boundaries, review, reporting, provider fallback |
 | [paseo-bm-dashboard-prd.md](product/paseo-bm-dashboard-prd.md) | The trace store and the history it keeps (its screen requirements are replaced by the autonomy PRD, REQ-118) |
 | [paseo-bm-autonomy-prd.md](product/paseo-bm-autonomy-prd.md) | Calibrated autonomy: the Orchestrator, decisions as stored objects, autonomy levels per project, evidence, the action boundary, traceability, specialisation on evidence |
-| [paseo-bm-missions-prd.md](product/paseo-bm-missions-prd.md) | Missions and their Mains: one owner-facing Main per goal across repositories, a shared home, project memory, two autonomy layers, the Orchestrator as process governor (ADR-029) |
+| [paseo-bm-missions-prd.md](product/paseo-bm-missions-prd.md) | Missions and their Mains: one owner-facing Main per goal across repositories, a shared home, project memory, two autonomy layers, the Orchestrator as process governor (ADR-029); one governor at mission scale (ADR-032) |
 
 ## How the product does it — `design/`
 
@@ -26,7 +26,8 @@ Code cites designs by name and section ("autonomy design §G.2", "design §7.13"
 | [paseo-bm-orchestrator.md](design/paseo-bm-orchestrator.md) | The Orchestrator agent: role and tools, rules and signals, the stall pass, Autopilot, `BM-COMMAND`, live coordination, the gate, the `orchestrator.*` RPCs |
 | [paseo-bm-autonomy.md](design/paseo-bm-autonomy.md) | The autonomy programme, Parts A–G: decision objects and typed handoffs, autonomy per class and level, evidence, the action boundary, traceability, specialisation, coordination control |
 | [paseo-bm-evaluation.md](design/paseo-bm-evaluation.md) | Metric definitions A-1 → A-11, the replay over the trace store, the evaluation suite on an isolated daemon |
-| [paseo-bm-missions.md](design/paseo-bm-missions.md) | Missions: the stores (mission, journal, roster, mission level, project memory), the home and the Main, the Main's tools, Main-side lookups, the two autonomy layers, the governor (figures, ladder, arbitration, splits), the Missions screen |
+| [paseo-bm-mission-runtime.md](design/paseo-bm-mission-runtime.md) | The mission runtime (ADR-033): the mission state, a long-lived Main, the authority resolver, transfers and merges, the Main's channel |
+| [paseo-bm-missions.md](design/paseo-bm-missions.md) | Missions: the stores (mission, journal, roster, mission level, project memory), the home and the Main, the Main's tools, Main-side lookups, the two autonomy layers, the governor (figures, ladder, arbitration, splits), the Missions screen, a mission per wake and danger to the Main first (§20) |
 
 Each role's behaviour lives in its own instructions, which the designs do not copy: [`manager.md`](../plugin/roles/manager.md), [`worker.md`](../plugin/roles/worker.md), [`reviewer.md`](../plugin/roles/reviewer.md), [`orchestrator.md`](../plugin/roles/orchestrator.md).
 
@@ -67,6 +68,9 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [029](adr/ADR-029-missions-mains-and-a-process-governor.md) | Missions and their Mains in a shared home; the Orchestrator governs the process | Accepted |
 | [030](adr/ADR-030-published-bundle-minifies-identifiers.md) | The published bundle minifies identifiers and keeps names | Accepted |
 | [031](adr/ADR-031-orchestrator-decisions-grant-no-effects.md) | An answer to an Orchestrator decision grants no effect (amends ADR-017 decision 4) | Accepted |
+| [032](adr/ADR-032-one-governor-a-mission-per-wake.md) | One governor for the machine, a mission per wake, a disposable conversation; `danger` goes to the Main first; measured before splitting | Accepted; decisions 2 and 4 amended by 033 |
+| [033](adr/ADR-033-the-mission-is-the-system-of-record.md) | The mission is the system of record; the Main is long-lived; one authority, one owner, a signal budget | Accepted |
+| [034](adr/ADR-034-each-mission-has-its-own-workspace.md) | Each mission has its own workspace in the Mission-List project | Accepted |
 
 ## Work in progress — `plans/`
 

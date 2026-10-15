@@ -484,6 +484,35 @@ describe("enqueueBatch: the batch kind (autonomy design §A.8)", () => {
     expect(queue.pending("orc")).toEqual([]);
   });
 
+  it("sends one message per group, one turn apart, each composed with its group; items without a group are one group (missions design §20)", async () => {
+    const grouped = { name: "BM-EVENTS", compose: (lines: readonly string[], group: string) => [`BM-EVENTS ${group || "-"}`, ...lines].join("\n") };
+    const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
+    await queue.enqueueBatch("orc", grouped, [{ ...item("a1"), group: "mission:A" }, { ...item("b1"), group: "mission:B" }, item("plain")], paseo);
+    await queue.enqueueBatch("orc", grouped, [{ ...item("a2"), group: "mission:A" }], paseo);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS mission:A\n- a1\n- a2"]);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS mission:A\n- a1\n- a2", "orc:BM-EVENTS mission:B\n- b1", "orc:BM-EVENTS -\n- plain"]);
+    expect(queue.pending("orc")).toEqual([]);
+  });
+
+  it("a group holding a first item goes before every older notice of the target (missions design §20: a danger wake)", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
+    await queue.enqueue("orc", "BM-ANSWER", "BM-ANSWER older", paseo);
+    await queue.enqueueBatch("orc", batch, [{ ...item("review"), group: "mission:A" }], paseo);
+    await queue.enqueueBatch("orc", batch, [{ ...item("danger"), group: "project:wks", first: true }], paseo);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- danger"]);
+    set("orc", { status: "idle" });
+    await turnEnded("orc");
+    expect(texts(sends)[1]).toBe("orc:BM-ANSWER older");
+  });
+
   it("never sends into a running turn: the batch waits while the target still reads running at its turn end", async () => {
     const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
     await queue.enqueueBatch("orc", batch, [item("a")], paseo);

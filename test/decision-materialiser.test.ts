@@ -801,6 +801,35 @@ describe("owner precedents (autonomy design §B.6)", () => {
     expect(logs).toEqual([]);
   });
 
+  it("the XAI case (mission runtime design §4.1 rule 3, §4.3): an untilClean recommended where cost is delegated is code's, granted as the calls its cap leaves; past the cap it waits", () => {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Small", phase: "blocked", at: NOW });
+    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "cost", mode: "delegate", confirmed: true }, NOW);
+    const untilClean = (id: string, batch: string) => ({
+      id,
+      text: `Review batch ${batch} again until it is clean?`,
+      subject: "review-budget",
+      class: "cost" as const,
+      options: [
+        { key: "a", text: "Review until clean", recommended: true, effects: ["none" as const], grant: { untilClean: batch } },
+        { key: "b", text: "Commit as it is", recommended: false, effects: ["commit" as const] },
+      ],
+    });
+    const open = (question: ReturnType<typeof untilClean>) => {
+      const outcome = { opened: [] as Decision[], superseded: [] as Decision[], answered: [] as Decision[], reversed: [] as Decision[] };
+      openQuestions({ home, store: store(), workspaceId: WORKSPACE_ID, now: NOW, log: (message) => logs.push(message), outcome }, { requestId: REQUEST, questions: [question], askedBy: WORKER, askedAt: NOW });
+      return outcome;
+    };
+    expect(open(untilClean("Q1", "b2")).answered.map((decision) => decision.id)).toEqual([idOf("Q1")]);
+    expect(get("Q1")?.answer).toMatchObject({ by: "policy", optionKey: "a", reason: expect.stringContaining("paseo-bm decides it") });
+    // Bounded: the Small cap's 2 calls, not an open-ended until-clean.
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.reviews.grants).toEqual([{ decisionId: idOf("Q1"), calls: 2, untilCleanBatch: null }]);
+    // The cap spent: the next one is no longer code's; it opens (for the request's Main, or the owner outside a mission).
+    expect(open(untilClean("Q2", "b3")).answered).toEqual([]);
+    expect(get("Q2")?.status).toBe("open");
+  });
+
   it("the policy grants a request at most its tier's budget in all: past it a review-budget question waits; the owner's grants do not count (design §7.17.8 a)", () => {
     const registry = createRequestRegistry(home, { backfill: () => [] });
     registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });

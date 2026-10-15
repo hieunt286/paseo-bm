@@ -56,6 +56,15 @@ export function replacedMainTitleOf(code: string, name: string): string {
   return `${titleWithin(code, name, MAX_AGENT_TITLE_CHARS - REPLACED_MAIN_SUFFIX.length)}${REPLACED_MAIN_SUFFIX}`;
 }
 
+/**
+ * A merged legacy Main's title (mission runtime design §5.2): `mainTitleOf` +
+ * ` · merged into <code>`, the name cut so the whole fits. Pure.
+ */
+export function mergedMainTitleOf(code: string, name: string, intoCode: string): string {
+  const suffix = ` · merged into ${intoCode}`;
+  return `${titleWithin(code, name, MAX_AGENT_TITLE_CHARS - suffix.length)}${suffix}`;
+}
+
 /** `🟣 M · <code> <name>` in at most `limit` characters, the name on one line and cut at a word end. */
 function titleWithin(code: string, name: string, limit: number): string {
   const prefix = withRoleMarker("manager", code);

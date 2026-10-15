@@ -48,6 +48,7 @@
  * and the Worker come from the binding, never from the input. Nothing here
  * throws into the endpoint.
  */
+import { reviewCapsOf } from "./authority-facts";
 import { join } from "node:path";
 import { NO_BINDER, PENDING_TTL_MS, createBound, creationMayExist, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
@@ -70,7 +71,7 @@ import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, ref
 import type { ReconstructedTrace } from "./traces";
 import { CREATE_REVIEWER_FACE, REREVIEW_FACE, createReviewerRules, schemaIssues, type CreateReviewerInput } from "../shared/bm-tools";
 import type { Tier } from "../shared/contracts";
-import { REVIEW_BUDGET_SUBJECT, policyGrantCapOf, policyMayGrant, type Decision } from "../shared/decisions";
+import { MAX_REVIEW_GRANT_CALLS, REVIEW_BUDGET_SUBJECT, policyGrantCapOf, type Decision } from "../shared/decisions";
 import { overReviewCeiling, reviewCeilingOf } from "../shared/orchestrator-rules";
 import type { RuleReviewGrant } from "../shared/rule-input";
 import { reviewerBriefLineOf } from "../shared/notices";
@@ -468,12 +469,18 @@ export function applyReviewBudgetGrants(
     // A precedent never answers it (design §16.8): should one ever have, it grants nothing.
     if (decision.answer === null || decision.answer.by === "precedent") continue;
     const key = decision.answer.optionKey;
-    const grant = key === null ? undefined : decision.options.find((option) => option.key === key)?.grant;
+    let grant = key === null ? undefined : decision.options.find((option) => option.key === key)?.grant;
     if (grant === undefined) continue;
-    // The owner's policy grants at most the request tier's budget in all (bm_decide refuses more); should one ever have, it grants nothing.
-    if (decision.answer.by === "policy" && !policyMayGrant(grant, policyGrantCapAt(home, decision.workspaceId, decision.requestId, log, decision.id))) {
-      log(`[paseo-bm] the review-budget answer of ${decision.id} by the owner's policy grants more than it may; nothing was granted.`);
-      continue;
+    // Mission runtime design §4.3: code (`by: policy`) and the Main grant within their own caps; a delegated
+    // `untilClean` becomes the calls left of the grantor's cap, so it is bounded. The owner's grant is not.
+    if (decision.answer.by === "policy" || decision.answer.by === "main") {
+      const caps = reviewCapsOf(home, decision.workspaceId, decision.requestId, log, decision.id);
+      const left = caps === null ? 0 : decision.answer.by === "policy" ? caps.codeLeft : caps.mainLeft;
+      if ("untilClean" in grant) grant = { calls: Math.min(left, MAX_REVIEW_GRANT_CALLS) };
+      if (grant.calls < 1 || grant.calls > left) {
+        log(`[paseo-bm] the review-budget answer of ${decision.id} by ${decision.answer.by === "policy" ? "paseo-bm" : "the Main"} grants more than its cap leaves (${left}); nothing was granted.`);
+        continue;
+      }
     }
     try {
       const outcome = createRequestRegistry(home, { log }).addGrant(decision.workspaceId, decision.requestId!, {

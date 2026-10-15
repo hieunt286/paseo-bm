@@ -177,6 +177,21 @@ describe("the review budget notice of a mission's request (§6)", () => {
     expect(pending.size).toBe(0);
     expect(told.claim(location, `${REPO}::${REQ}`, 3)).toBe("told");
   });
+
+  it("is never sent to the Main of an open mission (mission runtime design §4.3, §6.1)", async () => {
+    const home = missionHome();
+    const created = createMissionStore(home).create({ code: "CRM", name: "Contacts export", goal: "Export", repos: [REPO], createdBy: "owner", mainId: MAIN });
+    expect(created.ok).toBe(true);
+    const location = { tracesDir: join(home, "traces") };
+    const { paseo, sends } = fakePaseo<BudgetPaseo>({ agents: [{ id: MAIN, workspaceId: HOME_WS, status: "idle", provider: "bm-manager", labels: { "bm.role": "manager" } }] });
+    const over: BudgetOverrun = { requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MAIN };
+    const pending = new Map([[`${REPO}::${REQ}`, over]]);
+    const told = createBudgetTold(() => {});
+    const ended = { agent: { id: MAIN, workspaceId: HOME_WS, parentAgentId: null, provider: "bm-manager", cwd: "/home", title: null }, turnId: "t", outcome: { kind: "completed" }, timeline: [] } as never;
+    expect(await checkReviewBudget(ended, { location, paseo, told, pending, home, log: () => {} })).toBe("ignored");
+    expect(sends).toEqual([]);
+    expect(pending.size).toBe(0);
+  });
 });
 
 describe("a Main's compaction brief reads its mission (§6)", () => {
@@ -207,8 +222,9 @@ describe("a Main's compaction brief reads its mission (§6)", () => {
       home,
       {},
     );
-    expect(brief).toContain("mission: CRM Contacts export");
-    expect(brief).toContain(`- ${OTHER}: no report yet, in ${REPO}, Worker ${WORKER}, open decisions 0; asked: Import the contacts`);
+    // Mission runtime design §2.2: the Main's BM-STATE is its mission state's rendering.
+    expect(brief).toContain("role: manager, the Main of mission CRM");
+    expect(brief).toContain(`In flight:\n- ${OTHER} in ${REPO}: working; Worker ${WORKER}; no report yet; asked: Import the contacts`);
     expect(brief).toContain("Read the whole mission with bm_mission.");
     expect(brief).not.toContain("requests: none recorded");
   });

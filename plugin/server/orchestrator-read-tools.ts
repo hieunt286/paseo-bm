@@ -44,6 +44,7 @@ import { createGovernorStore } from "./governor-store";
 import { createMissionDecisionStore } from "./mission-decisions";
 import { createMissionRoster } from "./mission-roster";
 import { createMissionStore, openSplitSuggestionsOf } from "./mission-store";
+import { createMemoryStore } from "./memory-store";
 import type { NotesOwner } from "./orchestrator-store";
 import { createPeerLinkStore, isLiveLink, linkViewsOf } from "./peer-links";
 import {
@@ -289,10 +290,17 @@ export interface NoteInput {
   replace?: boolean;
 }
 
+/** How an Orchestrator's note in project memory names its source (missions design §20); also how `replace` finds its own entries. */
+export const ORCHESTRATOR_MEMORY_SOURCE = "The owner, in the Orchestrator's chat";
+
 /**
- * `bm_note` (design §6B.4; missions design §9.1): one note about a project, or
- * about the mission `missionId` names, kept for later Orchestrators too;
- * sends nothing.
+ * `bm_note` (design §6B.4; missions design §9.1, §20, ADR-032 decision 5):
+ * one note about the mission `missionId` names, kept for later Orchestrators
+ * too; or the owner's word about a project, written to that repo's project
+ * memory as a `decision` entry by the owner (source
+ * `ORCHESTRATOR_MEMORY_SOURCE` and the date), which `replace` makes supersede
+ * the newest active entry of that source. Older project notes stay readable
+ * (`bm_projects`) and are no longer written. Sends nothing.
  */
 export async function bmNote(input: NoteInput, context: ToolContext): Promise<ServerToolResult> {
   const replaced = input.replace === true;
@@ -304,10 +312,21 @@ export async function bmNote(input: NoteInput, context: ToolContext): Promise<Se
   }
   if (input.workspaceId === undefined) refuse("give workspaceId (a project's note) or missionId (a mission's)");
   await requireProject(input.workspaceId, context);
-  const notes = context.store.appendNote(input.workspaceId, input.text, { replace: replaced });
+  const memory = createMemoryStore(context.home, { env: context.env, now: () => context.now });
+  const supersedes = replaced
+    ? ([...memory.active(input.workspaceId)].reverse().find((entry) => entry.by.role === "owner" && entry.source.startsWith(ORCHESTRATOR_MEMORY_SOURCE))?.id ?? null)
+    : null;
+  const added = memory.add(input.workspaceId, {
+    kind: "decision",
+    text: input.text,
+    source: `${ORCHESTRATOR_MEMORY_SOURCE}, ${context.now.toISOString().slice(0, 10)}`,
+    by: { role: "owner", agentId: null, missionId: null },
+    supersedes,
+  });
+  if (!added.ok) refuse(`the project memory refused the note: ${added.reasons.join("; ")}`);
   return {
     ok: true,
-    text: `Noted. bm_projects returns this project's notes, also to a new Orchestrator.\n${json({ workspaceId: input.workspaceId, notes: notes.length, replaced })}`,
+    text: `Noted in the project memory: its Mains and Workers carry it in their briefs.\n${json({ workspaceId: input.workspaceId, memoryId: added.entry.id, supersedes })}`,
   };
 }
 

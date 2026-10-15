@@ -35,8 +35,11 @@
  * - `enqueueBatch(targetId, batch, items, paseo?)` → one `NoticeOutcome` per
  *   item, never rejects: the **batch kind** (autonomy design §A.8). Each item
  *   is one line (an event for the Orchestrator); every batched item of the same
- *   `batch.name` still pending for the target when it is idle goes out as ONE
- *   message, `batch.compose(lines)`, oldest first. An item whose `isCurrent()`
+ *   `batch.name` and the same `group` still pending for the target when it is
+ *   idle goes out as ONE message, `batch.compose(lines, group)`, oldest first
+ *   (missions design §20: one mission per wake). Another group of the batch
+ *   waits for the turn end that message starts. A group holding a `first` item
+ *   goes before every other notice of the target. An item whose `isCurrent()`
  *   says false at that moment — its subject settled meanwhile — is dropped
  *   (`"dropped"`); when none is left, nothing is sent. An item's kind is
  *   `<batch.name>:<item.key>`, so a newer item of the same key replaces a
@@ -44,7 +47,11 @@
  *   burst from one source is one message too. Once the message went out,
  *   `batch.onSent(targetId, keys)` is told which items it carried, and the
  *   target's next turn end calls `batch.onTurnEnded(targetId, paseo)` once,
- *   first, and waits for it.
+ *   first, and waits for it. An item may carry its own `callbacks`, told of
+ *   that item as a single notice's are (mission runtime design §6.2: the
+ *   Main's channel settles each outbox record it carries): `onSent` once its
+ *   message went out, `onDropped` when it is dropped (target gone, send
+ *   failed, or its subject settled before delivery).
  * - `registerNoticeQueue(host)` → `{ host, remove }`: the queue does not add a
  *   lifecycle hook of its own. It rides on an existing `agent.turn_ended` hook:
  *   pass the returned `host` to the module that registers one (index.server.ts
@@ -59,8 +66,9 @@
  *   just before, says the target is neither `running` nor `initializing`.
  * - **One notice per idle moment.** The notice sent starts a turn on the
  *   target, and a second `send()` would replace that turn; so each chance
- *   sends the oldest queued notice only — a batch counts as one notice, at the
- *   place of its oldest item — and that turn's end carries the next
+ *   sends the oldest queued notice only — a batch group counts as one notice,
+ *   at the place of its oldest item, and a `first` group goes ahead of the
+ *   rest — and that turn's end carries the next
  *   (the lesson `review-budget.ts` records). Queued notices therefore go out
  *   in order, one turn apart. A send that fails costs one log line and drops
  *   that notice; the next queued one is tried at once, after a fresh
@@ -110,10 +118,10 @@ export interface QueuedNotice {
 
 /** How the items of one batch become one message (autonomy design §A.8). */
 export interface NoticeBatch {
-  /** The batch's name, for example `"BM-EVENTS"`; items of one name are merged. */
+  /** The batch's name, for example `"BM-EVENTS"`; items of one name and group are merged. */
   name: string;
-  /** The one message for these lines, oldest first; never called with none. */
-  compose(lines: readonly string[]): string;
+  /** The one message for these lines, oldest first, of one `group` (`""` for items without one); never called with none. */
+  compose(lines: readonly string[], group: string): string;
   /**
    * Called once the message went out, with the target and the keys of the
    * items it carried, oldest first (the event bus records the wake, A-7). A
@@ -141,6 +149,12 @@ export interface BatchItem {
    * as false. Always current when absent.
    */
   isCurrent?: () => boolean;
+  /** Items of one group go as one message; items of other groups wait for their own (missions design §20). `""` when absent. */
+  group?: string;
+  /** The item's group goes before every other notice queued for the target (a `danger` wake, §20). */
+  first?: boolean;
+  /** What this item's sender is told of it, as for a single notice (mission runtime design §6.2). */
+  callbacks?: NoticeCallbacks;
 }
 
 /** What a single notice's sender is told about it later (design §16.7). */
@@ -182,7 +196,9 @@ interface Entry extends QueuedNotice {
   batch?: NoticeBatch;
   itemKey?: string;
   isCurrent?: () => boolean;
-  /** Set on a single notice whose sender wants its outcome. */
+  group?: string;
+  first?: boolean;
+  /** Set on a notice, single or batched, whose sender wants its outcome. */
   callbacks?: NoticeCallbacks;
 }
 
@@ -242,11 +258,12 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     return first;
   }
 
-  /** Takes every queued item of `name` for the target, in order; other notices stay. */
-  function takeBatch(targetId: string, name: string): Entry[] {
+  /** Takes every queued item of `name` and `group` for the target, in order; other notices stay. */
+  function takeBatch(targetId: string, name: string, group: string): Entry[] {
     const list = queued.get(targetId) ?? [];
-    const taken = list.filter((entry) => entry.batch?.name === name);
-    const kept = list.filter((entry) => entry.batch?.name !== name);
+    const inIt = (entry: Entry) => entry.batch?.name === name && (entry.group ?? "") === group;
+    const taken = list.filter(inIt);
+    const kept = list.filter((entry) => !inIt(entry));
     if (kept.length === 0) queued.delete(targetId);
     else queued.set(targetId, kept);
     return taken;
@@ -283,9 +300,15 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     for (const entry of list) tell(targetId, entry, "dropped", "the target is archived, closed or gone");
   }
 
-  /** One look at the target: sends its oldest notice when it is idle. */
+  /** The notice that goes next: the oldest item of a `first` group, else the oldest notice. */
+  function headOf(targetId: string): Entry | undefined {
+    const list = queued.get(targetId);
+    return list?.find((entry) => entry.first === true && entry.batch !== undefined) ?? list?.[0];
+  }
+
+  /** One look at the target: sends its next notice (`headOf`) when it is idle. */
   async function step(targetId: string, paseo: NoticePaseo): Promise<DeliveryStep> {
-    const head = queued.get(targetId)?.[0];
+    const head = headOf(targetId);
     if (head === undefined) return "empty";
     let agent: NoticeAgentSnapshot | null;
     try {
@@ -299,20 +322,23 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       return "gone";
     }
     if (isBusy(agent.status)) return "busy";
-    const batch = queued.get(targetId)?.[0]?.batch;
-    // A batch: every item of it pending now, less those whose subject settled, as one message.
+    const next = headOf(targetId);
+    const batch = next?.batch;
+    const group = next?.group ?? "";
+    // A batch: every item of its group pending now, less those whose subject settled, as one message.
     // Taken and judged synchronously right after the idle read, so nothing is added or settles in between.
-    const entries = batch === undefined ? [take(targetId)].filter((entry): entry is Entry => entry !== undefined) : takeBatch(targetId, batch.name);
+    const entries = batch === undefined ? [take(targetId)].filter((entry): entry is Entry => entry !== undefined) : takeBatch(targetId, batch.name, group);
     const sending = entries.filter((entry) => {
       if (stillCurrent(entry)) return true;
       entry.state = "dropped";
+      tell(targetId, entry, "dropped", "its subject settled before delivery");
       return false;
     });
     if (entries.length === 0) return "empty";
     if (sending.length === 0) return "settled";
     // Taken off the queue BEFORE the await: a turn end handled meanwhile never sends it twice.
     for (const entry of sending) entry.state = "sending";
-    const text = batch === undefined ? sending[0]!.text : batch.compose(sending.map((entry) => entry.text));
+    const text = batch === undefined ? sending[0]!.text : batch.compose(sending.map((entry) => entry.text), group);
     const what = batch === undefined ? sending[0]!.kind : `${batch.name} (${sending.length})`;
     // Before the await, so a turn end handled meanwhile finds it.
     const awaiting = batch?.onTurnEnded === undefined ? null : batch;
@@ -320,7 +346,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     try {
       await paseo.agents.ref(targetId).send(text);
       for (const entry of sending) entry.state = "sent";
-      if (batch === undefined) tell(targetId, sending[0]!, "sent");
+      for (const entry of sending) tell(targetId, entry, "sent");
       if (batch?.onSent !== undefined) {
         try {
           batch.onSent(targetId, sending.map((entry) => entry.itemKey ?? entry.kind));
@@ -337,7 +363,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         else awaitingEnd.set(targetId, list);
       }
       log(`[paseo-bm] could not send the ${what} notice to ${targetId}: ${errorText(error)}; dropped it.`);
-      if (batch === undefined) tell(targetId, sending[0]!, "dropped", `the send failed: ${errorText(error)}`);
+      for (const entry of sending) tell(targetId, entry, "dropped", `the send failed: ${errorText(error)}`);
       return "failed";
     }
   }
@@ -400,6 +426,9 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         if (!nonEmpty(item?.key) || !nonEmpty(item.line)) return null;
         const entry: Entry = { kind: `${batch.name}:${item.key}`, text: item.line, state: "queued", batch, itemKey: item.key };
         if (typeof item.isCurrent === "function") entry.isCurrent = item.isCurrent;
+        if (nonEmpty(item.group)) entry.group = item.group;
+        if (item.first === true) entry.first = true;
+        if (item.callbacks !== undefined) entry.callbacks = item.callbacks;
         put(targetId, entry);
         return entry;
       });

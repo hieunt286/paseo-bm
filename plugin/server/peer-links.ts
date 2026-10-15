@@ -49,6 +49,7 @@ import { listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./p
 import { isPluginHomeIn } from "./plugin-homes";
 import { REQUEST_ID_PATTERN } from "./request-registry";
 import { timeOrZero } from "../shared/time";
+import { journalLinkEvent, type LinkEvent } from "./mission-events";
 
 /** The links' folder in the data folder (§7.17.1); the cleanup button deletes it (§7.13.7). */
 export const PEERS_DIR_NAME = "peers";
@@ -288,6 +289,12 @@ export interface PeerLinkDeps {
   newId?: () => string;
   /** Secrets to mask in a link's text and gists; the process's own by default. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Told after each change written (mission runtime design §2.3): a link
+   * asked, taken (or turned to a Worker), answered, closed. The journals of
+   * the missions it concerns by default (`journalLinkEvent`).
+   */
+  onEvent?: (event: LinkEvent, link: PeerLink) => void;
 }
 
 /** One message of a link: the outbox record it was stored as, and its text, kept as a masked gist. */
@@ -352,6 +359,15 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
   const now = deps.now ?? (() => new Date());
   const newId = deps.newId ?? newLinkId;
   const env = deps.env ?? process.env;
+  const tell = (event: LinkEvent, result: PeerLinkResult, changed: boolean): PeerLinkResult => {
+    if (!result.ok || !changed) return result;
+    try {
+      (deps.onEvent ?? ((name, link) => journalLinkEvent(home, name, link)))(event, result.link);
+    } catch {
+      // The journal is history: the link stands.
+    }
+    return result;
+  };
 
   const file: JsonFileStore<PeerLinksFile> = createJsonFileStore<PeerLinksFile>({
     home,
@@ -377,8 +393,11 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
   };
 
   /** One read-modify-write of one link: `change` returns the link as it is now, null when unchanged, or the refusal. */
+  /** Whether the last `change` wrote the link. */
+  let changedLast = false;
   const change = (linkId: string, step: (link: PeerLink) => PeerLink | null | { reasons: string[] }): PeerLinkResult => {
     let result: PeerLinkResult = { ok: false, reasons: [`unknown link ${linkId}`] };
+    changedLast = false;
     file.update((current) => {
       const index = current.links.findIndex((link) => link.linkId === linkId);
       if (index === -1) return null;
@@ -393,6 +412,7 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
         return null;
       }
       result = { ok: true, link: next };
+      changedLast = true;
       return { links: current.links.map((link, at) => (at === index ? next : link)) };
     });
     return result;
@@ -438,10 +458,11 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
         result = { ok: true, link };
         return { links: [...current.links, link] };
       });
-      return result;
+      const written = result as PeerLinkResult;
+      return tell(written.ok && written.link.state === "taken" ? "taken" : "asked", written, true);
     },
     takeLink(linkId, by) {
-      return change(linkId, (link) => {
+      const result = change(linkId, (link) => {
         if (link.to.workspaceId !== by.workspaceId) return { reasons: [`link ${linkId} asks another project (${link.to.workspaceId}), not this one`] };
         if (link.state === "closed") return { reasons: [`link ${linkId} is closed`] };
         if (link.to.requestId !== null && link.to.requestId !== by.requestId) {
@@ -455,12 +476,14 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
         if (by.workerId === null || link.to.workerId === by.workerId) return null;
         return { ...link, to: { ...link.to, workerId: by.workerId } };
       });
+      return tell("taken", result, changedLast);
     },
     turnToWorker(linkId, to) {
-      return change(linkId, (link) => {
+      const result = change(linkId, (link) => {
         if (routeOf(link) !== "ask-main" || link.state !== "open") return { reasons: [`link ${linkId} is not an open ask of a Worker to its Main`] };
         return { ...link, route: "worker", state: "taken", to: { ...to }, takenAt: now().toISOString() };
       });
+      return tell("taken", result, changedLast);
     },
     appendMessage(linkId, message) {
       return change(linkId, (link) => {
@@ -480,17 +503,19 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
       });
     },
     markAnswered(linkId) {
-      return change(linkId, (link) => {
+      const result = change(linkId, (link) => {
         if (link.state === "answered") return null;
         if (link.state !== "taken") return { reasons: [`link ${linkId} is ${link.state}; only a taken link is answered`] };
         return { ...link, state: "answered", answeredAt: now().toISOString() };
       });
+      return tell("answered", result, changedLast);
     },
     closeLink(linkId, by) {
-      return change(linkId, (link) => {
+      const result = change(linkId, (link) => {
         if (link.state === "closed") return { reasons: [`link ${linkId} is closed already`] };
         return { ...link, state: "closed", closedAt: now().toISOString(), closedBy: by };
       });
+      return tell("closed", result, changedLast);
     },
     setWaiting(workspaceId, requestId, linkIds, at) {
       const named = new Set(linkIds);

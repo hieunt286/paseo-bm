@@ -102,6 +102,15 @@ export function selectSectionFromCommandCenter(
   context.openSurface(surfaceId);
 }
 
+/** "New mission" from the Command Center (ADR-034 decision 4): the Missions section opens its New mission form. */
+export const newMissionRequests: Slot<true> = createSlot<true>();
+
+/** Queues the New mission form and opens the surface on the Missions section. */
+export function openNewMissionFromCommandCenter(context: { openSurface(id: string): void }, surfaceId: string, requests: Slot<true> = newMissionRequests): void {
+  requests.put(true);
+  selectSectionFromCommandCenter(context, surfaceId, "missions");
+}
+
 /** How often the per-workspace figures are refreshed while the Projects list shows. */
 export const OVERVIEW_POLL_MS = 10_000;
 

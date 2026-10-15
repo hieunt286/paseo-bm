@@ -710,40 +710,6 @@ export function missionAnswerCellOf(decisionClass: DecisionClass): "answer-techn
   return TECHNICAL_ANSWER_CLASSES.includes(decisionClass) ? "answer-technical" : "answer-effects";
 }
 
-/**
- * What the Main may do with an open Worker question of its mission (§8):
- * `answer` — the repo cell of its class delegates (rule 2), or the mission
- * cell of its group does (rule 3); `predict` — a `shadow` repo cell it may not
- * decide: its recommendation is recorded as a prediction; else why it is the
- * owner's. An `ownerOnly` question is the owner's (rule 1). The other checks
- * (kind, status, options) are the caller's. Pure.
- */
-export function mainAnswerRuleOf(
-  policy: AutonomyPolicy,
-  decision: Pick<Decision, "id" | "workspaceId" | "options" | "class" | "ownerOnly">,
-  missionDelegates: (name: MissionClass) => boolean,
-): { rule: "answer" | "predict" } | { refusal: string } {
-  if (decision.ownerOnly === true) return { refusal: ownerOnlyRefusalText(decision.id) };
-  const decisionClass = decisionClassOf(decision);
-  const repoMode = modeOf(policy, decision.workspaceId, decisionClass);
-  if (repoMode === "delegate" || missionDelegates(missionAnswerCellOf(decisionClass))) return { rule: "answer" };
-  if (repoMode === "shadow") return { rule: "predict" };
-  return {
-    refusal: `${decision.id} is ${decisionClass}, which neither its repo nor your mission level (${missionAnswerCellOf(decisionClass)}) delegates: the owner decides it; give your recommendation in your reply to the owner`,
-  };
-}
-
-/**
- * Why the Orchestrator does not decide or predict `decision` (§8): a Worker's
- * question of a request of a mission is its Main's (`bm_answer_worker`) or the
- * owner's. Null for any other decision. Pure; the caller reads `missionId`
- * from the request index.
- */
-export function missionQuestionRefusalOf(decision: Pick<Decision, "id" | "requestId">, missionId: string | null): string | null {
-  if (missionId === null || decisionKindOf(decision.id) !== "question") return null;
-  return `${decision.id} is a question of request ${decision.requestId ?? ""} of mission ${missionId}: its Main decides it (bm_answer_worker), or the owner does; leave it`;
-}
-
 /** Why nobody but the owner predicts or decides an override (§B.7, §B.9): it is the owner's correction of an answer made for them. */
 function overrideIsTheOwners(id: string): string {
   return `${id} is the owner's override of an answer made for them; only the owner answers it, so leave it to the owner`;

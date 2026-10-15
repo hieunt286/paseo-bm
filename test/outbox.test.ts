@@ -440,13 +440,14 @@ describe("after a reload", () => {
     const withheld = createOutbox(home, d).add(WS, { kind: "no-verdict", requestId: REQ, batchId: "b1", from: "rev-1", to: "wrk-1", text: "no verdict" }, "canceled");
     const pending = createOutbox(home, d).add("wks_2", { kind: "review", requestId: REQ, batchId: "b1", from: "rev-1", to: "wrk-2", text: "BM-REVIEW\nverdict: pass" });
     const done = createOutbox(home, d).add(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Done." });
-    createOutbox(home).settle(WS, done.id, "delivered");
+    // The test's own clock throughout: settled records are kept 7 days from now (OUTBOX_SETTLED_MS), so a real clock past T0 + 7 days would drop them.
+    createOutbox(home, d).settle(WS, done.id, "delivered");
     expect(stored(home, queued.id)?.state).toBe("pending");
 
     // The reload: the queue forgot what it held; the outbox did not.
     before.queue.clear();
     const after = world({ "mgr-1": { status: "idle" }, "wrk-2": { status: "idle" } });
-    const resend = createOutboxResend({ home: () => home, queue: after.queue, log: () => {} });
+    const resend = createOutboxResend({ home: () => home, queue: after.queue, log: () => {}, now: () => T0 });
     await resend.run(after.paseo);
     expect(after.sends.map((send) => parseDelivery(send.text)?.recordId).sort()).toEqual([queued.id, pending.id].sort());
     expect(stored(home, queued.id)?.state).toBe("delivered");

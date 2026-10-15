@@ -237,6 +237,8 @@ export const notesFileSchema = z.object({
 
 /** At most this many workspaces are named on one wake. */
 export const MAX_WAKE_WORKSPACES = 50;
+/** At most this many missions are named on one wake (missions design §20). */
+export const MAX_WAKE_MISSIONS = 20;
 
 /**
  * The tokens of the Orchestrator turn that closed a wake (change-007 C6,
@@ -285,11 +287,49 @@ export const wakeEntrySchema = z.object({
    * Absent while open, and on a wake written before it.
    */
   acted: z.boolean().optional(),
+  /** The missions whose events the message carried, each once, sorted (missions design §20). Absent on a wake written before them, or one of no mission. */
+  missionIds: z.array(z.string().min(1)).max(MAX_WAKE_MISSIONS).optional(),
+  /**
+   * How many acts of the wake's turn aimed at a mission the wake did not carry
+   * (M-28, missions design §20, `actMissionsOf`), written with `endedAt`.
+   * Absent while open, and on a wake written before it.
+   */
+  offMission: z.number().int().nonnegative().optional(),
 });
 export type WakeEntry = z.infer<typeof wakeEntrySchema>;
+
+// ── dangers.json (missions design §20, A-13) ───────────────────────────────
+
+/**
+ * One `danger` alert of a Worker and what followed (missions design §20,
+ * ADR-032 decisions 4 and 6): when it was raised, when its Main was told
+ * (`BM-SIGNAL`) and when the governor was (its backup `BM-EVENTS`), and when
+ * the alert ended (the Worker stopped running, or its turn was recorded).
+ * Ids and times only: never the evidence.
+ */
+export const dangerEntrySchema = z.object({
+  /** The alert's key: one entry per raised alert. */
+  alertKey: z.string().min(1),
+  workspaceId: z.string().min(1),
+  workerId: z.string().min(1),
+  requestId: z.string().min(1).nullable(),
+  /** The mission of its request; null for a Worker of no mission. */
+  missionId: z.string().min(1).nullable(),
+  raisedAt: z.string().min(1),
+  /** The Main told; null when there was none to tell. */
+  mainId: z.string().min(1).nullable(),
+  mainToldAt: z.string().min(1).nullable(),
+  /** When the governor's `BM-EVENTS` carrying it went out; null when it never did. */
+  governorToldAt: z.string().min(1).nullable(),
+  endedAt: z.string().min(1).nullable(),
+});
+export type DangerEntry = z.infer<typeof dangerEntrySchema>;
 
 /** The file's frame; each wake is validated on its own. */
 export const wakeLogSchema = z.object({
   version: z.literal(1),
   entries: z.array(z.unknown()),
 });
+
+/** `dangers.json`'s frame (missions design §20); each entry is validated on its own (A-13). */
+export const dangerLogSchema = wakeLogSchema;

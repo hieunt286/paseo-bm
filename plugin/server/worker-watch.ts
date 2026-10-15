@@ -45,14 +45,22 @@
  * - **Danger.** A newly raised `danger` alert also opens the Worker's interrupt
  *   allowance for 10 minutes (`openDangerAllowance`): the only time the
  *   Orchestrator may interrupt it (design §6B.4). The plugin itself never
- *   interrupts anyone.
+ *   interrupts anyone. Every raised `danger` is one entry of the danger log
+ *   (`openDanger`, missions design §20, A-13), ended when its alert clears.
+ * - **Danger goes to the Main first** (missions design §20, ADR-032 decision
+ *   4). For a Worker of a mission's request, at any repo level: its Main gets
+ *   `BM-SIGNAL` (`dangerSignalNoticeOf`) through the notice queue at once,
+ *   the allowance opens, and the event carries the mission and, when the Main
+ *   was told, `backupAt` — the governor hears of it 3 minutes later, if the
+ *   alert still holds.
  * - **`off-tool-review`** is the seventh signal, not the pass's: a bound
  *   Worker created a Reviewer outside its tools (design §16.8,
  *   `off-tool-reviewer.ts` raises it with its `off-tool-reviewer` alert at the
  *   Reviewer's creation). No pass raises or clears it.
  * - **Events only to the Orchestrator**, through the event bus: batched, never
- *   into a running turn, dropped when settled before delivery. Nothing is ever
- *   sent to the owner, a Manager, a Worker or a Reviewer here.
+ *   into a running turn, dropped when settled before delivery. Besides a
+ *   mission Worker's `BM-SIGNAL` to its Main, nothing is sent to the owner, a
+ *   Manager, a Worker or a Reviewer here.
  *
  * Nothing here throws into the plugin: a failure is one log line and the next
  * pass tries again.
@@ -80,6 +88,11 @@ import type { AlertKind } from "../shared/alerts";
 import type { Tier } from "../shared/contracts";
 import { timeOrZero } from "../shared/time";
 import { errorText } from "./rpc-kit";
+import { missionManagerOf, requestIndexOf } from "./mission-roster";
+import { createMissionStore } from "./mission-store";
+import { enqueueNotice, type ChannelQueue } from "./main-channel";
+import { noticeQueue } from "./notice-queue";
+import { DANGER_BACKUP_MINUTES, SIGNAL_NOTICE_MARKER, dangerSignalNoticeOf } from "../shared/notices";
 
 /** How often the Worker pass runs (design §6B.3). */
 export const WORKER_PASS_MS = 2 * 60_000;
@@ -375,6 +388,39 @@ export interface WorkerWatchDeps extends DataHomeDeps {
   /** Secrets to mask in an alert's detail; the process's own by default. */
   redactEnv?: NodeJS.ProcessEnv;
   log?: (message: string) => void;
+  /** How a Main gets `BM-SIGNAL` (missions design §20); the shared notice queue by default. */
+  signalQueue?: ChannelQueue;
+}
+
+/**
+ * The Main of a Worker's request and its mission (missions design §20): the
+ * registry's `managerId`, else the mission's current Main. Null for a request
+ * of no mission. Never throws.
+ */
+function missionPlaceOf(home: string, requestId: string | null): { missionId: string; mainId: string | null } | null {
+  if (requestId === null) return null;
+  const place = requestIndexOf(home, requestId);
+  if (place === null) return null;
+  let mainId = missionManagerOf(home, requestId);
+  if (mainId === null) {
+    try {
+      mainId = createMissionStore(home).get(place.missionId)?.mainId ?? null;
+    } catch {
+      mainId = null;
+    }
+  }
+  return { missionId: place.missionId, mainId };
+}
+
+/** The danger log entries of these cleared alert keys end now (missions design §20). Never throws. */
+function endDangers(home: string, keys: readonly string[], at: string, log: (message: string) => void): void {
+  if (keys.length === 0) return;
+  try {
+    const store = createOrchestratorStore(home);
+    for (const key of keys) store.noteDanger(key, { endedAt: at });
+  } catch (error) {
+    log(`[paseo-bm] could not end the danger log entries of ${keys.join(", ")}: ${errorText(error)}`);
+  }
 }
 
 /** What one Worker pass did, for the tests and the log. */
@@ -390,6 +436,8 @@ export interface WorkerPassResult {
   events: BmEvent[];
   /** Workers whose interrupt allowance this pass opened. */
   allowances: string[];
+  /** Mains this pass sent `BM-SIGNAL` (missions design §20). */
+  mainsTold: string[];
 }
 
 export const workerPassResult = (status: WorkerPassResult["status"]): WorkerPassResult => ({
@@ -399,6 +447,7 @@ export const workerPassResult = (status: WorkerPassResult["status"]): WorkerPass
   cleared: [],
   events: [],
   allowances: [],
+  mainsTold: [],
 });
 
 /**
@@ -607,20 +656,56 @@ export async function runWorkerPass(
         ),
       );
       const requestKey = trace === undefined ? null : requestKeyOf(trace);
-      // Events, and the danger allowance, only in the policy's scope; the alerts for every project.
-      const inScope = scope.has(workspaceId!);
+      const place = missionPlaceOf(home, trace?.requestId ?? null);
+      // Events, and the danger allowance, in the policy's scope or for a mission's Worker (§20); the alerts for every project.
+      const inScope = scope.has(workspaceId!) || place !== null;
       for (const signal of held) {
         const kind = SIGNAL_ALERT_KINDS[signal.signal];
         if (kind === undefined) {
           if (inScope) done.events.push({ type: "worker.signal", workspaceId: workspaceId!, workerId, requestKey, signal: signal.signal, turnStart, alertKey: null, since: signal.since });
           continue;
         }
-        const raised = alerts.raise({ workspaceId: workspaceId!, kind, subject: workerId, detail: redactText(signal.evidence, env) });
+        const detail = redactText(signal.evidence, env);
+        const raised = alerts.raise({ workspaceId: workspaceId!, kind, subject: workerId, detail });
         if (!raised.raised) continue;
         done.raised.push(raised.alert.key);
+        let mainTold = false;
+        if (signal.signal === "danger") {
+          const alertKey = raised.alert.key;
+          try {
+            store.openDanger({
+              alertKey,
+              workspaceId: workspaceId!,
+              workerId,
+              requestId: trace?.requestId ?? null,
+              missionId: place?.missionId ?? null,
+              raisedAt: raised.alert.since,
+              mainId: place?.mainId ?? null,
+            });
+          } catch (error) {
+            log(`[paseo-bm] could not record the danger of Worker ${workerId}: ${errorText(error)}`);
+          }
+          // §20: the Worker's Main hears of it first, at any repo level.
+          if (place?.mainId != null) {
+            const text = dangerSignalNoticeOf({ workerId, requestId: trace?.requestId ?? null, workspaceId: workspaceId!, since: raised.alert.since, evidence: detail });
+            // On the Main's channel, first (mission runtime design §6.2).
+            const outcome = await enqueueNotice({ home, queue: deps.signalQueue ?? noticeQueue, targetId: place.mainId, kind: `${SIGNAL_NOTICE_MARKER}:${workerId}`, text, paseo: handle as never, first: true, callbacks: {
+              onSent: () => {
+                try {
+                  createOrchestratorStore(home, { now }).noteDanger(alertKey, { mainToldAt: now().toISOString() });
+                } catch (error) {
+                  log(`[paseo-bm] could not note that the Main of Worker ${workerId} was told of its danger: ${errorText(error)}`);
+                }
+              },
+            } });
+            mainTold = outcome === "sent" || outcome === "queued";
+            done.mainsTold.push(place.mainId);
+          }
+        }
         if (!inScope) continue;
         const allowance = signal.signal === "danger" ? store.openDangerAllowance(workspaceId!, workerId) : null;
         if (allowance !== null) done.allowances.push(workerId);
+        const backupAt = mainTold ? new Date(timeOrZero(raised.alert.since) + DANGER_BACKUP_MINUTES * 60_000).toISOString() : null;
         done.events.push({
           type: "worker.signal",
           workspaceId: workspaceId!,
@@ -631,6 +716,7 @@ export async function runWorkerPass(
           alertKey: raised.alert.key,
           since: raised.alert.since,
           interruptUntil: allowance?.until ?? null,
+          ...(place === null ? {} : { missionId: place.missionId, backupAt }),
         });
       }
     } catch (error) {
@@ -641,6 +727,7 @@ export async function runWorkerPass(
   // A Worker that stopped running has no signal any more.
   if (!live()) return done;
   done.cleared.push(...clearWorkerAlerts(alerts, (_workspaceId, workerId) => !runningIds.has(workerId)));
+  endDangers(home, done.cleared, now().toISOString(), log);
   if (done.events.length > 0 && deps.bus !== undefined) await deps.bus.publish(done.events, handle, snapshot.orchestrator);
   return done;
 }
@@ -708,6 +795,8 @@ function deniedHeldOfWorker(decisions: DecisionStore, workspaceId: string, worke
  * autonomy design §A.8): the collector's `onRecorded` of that Worker. Returns
  * the cleared keys.
  */
-export function clearWorkerTurnSignals(home: string, workerId: string, deps: Pick<WorkerWatchDeps, "now"> = {}): string[] {
-  return clearWorkerAlerts(createAlertStore(home, deps.now === undefined ? {} : { now: deps.now }), (_workspaceId, worker) => worker === workerId);
+export function clearWorkerTurnSignals(home: string, workerId: string, deps: Pick<WorkerWatchDeps, "now" | "log"> = {}): string[] {
+  const cleared = clearWorkerAlerts(createAlertStore(home, deps.now === undefined ? {} : { now: deps.now }), (_workspaceId, worker) => worker === workerId);
+  endDangers(home, cleared, (deps.now ?? (() => new Date()))().toISOString(), deps.log ?? ((message) => console.warn(message)));
+  return cleared;
 }

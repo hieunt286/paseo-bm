@@ -433,7 +433,7 @@ export async function governSend(input: GovernInput, context: ToolContext, deps:
   if (body.length > MAX_COMMAND_BODY_CHARS) {
     return fixThese("bm_govern", [`input.text: with the figures' lines (${body.length - input.text.trim().length} characters) it must be at most ${MAX_COMMAND_BODY_CHARS - (body.length - input.text.trim().length)} characters`]);
   }
-  const workspaceId = missionsHomeIdOf(context.home) ?? mission.legacyWorkspaceId ?? mission.missionId;
+  const workspaceId = mission.workspaceId ?? missionsHomeIdOf(context.home) ?? mission.legacyWorkspaceId ?? mission.missionId;
   const command: CommandInput = {
     from: "orchestrator",
     via: "chat",

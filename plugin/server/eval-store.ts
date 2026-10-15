@@ -32,7 +32,7 @@ import { z } from "zod";
 import { traceRecordSchema, traceWorkspaceMetaSchema, type TraceRecord } from "../shared/contracts";
 import { workspaceOfStallKey, type EvalInput, type EvalNote } from "../shared/eval-metrics";
 import { INTERVENTIONS_FILE_VERSION, interventionsFileSchema } from "../shared/interventions";
-import { notesFileSchema, proposalLogSchema, stallRecordSchema, wakeLogSchema } from "../shared/orchestrator";
+import { dangerLogSchema, notesFileSchema, proposalLogSchema, stallRecordSchema, wakeLogSchema } from "../shared/orchestrator";
 import { DECISIONS_FILE_VERSION } from "./decision-store";
 import { dedupeRecords } from "./trace-store";
 
@@ -57,6 +57,10 @@ export interface StoreRead {
   wakes: unknown[] | undefined;
   /** `interventions.json` → `entries`, unvalidated; `undefined` when the file is absent. */
   interventions: unknown[] | undefined;
+  /** `dangers.json` → `entries`, unvalidated; `undefined` when the file is absent (A-13). */
+  dangers: unknown[] | undefined;
+  /** The Missions places' workspace ids (A-14, ADR-034); empty when none is known. */
+  missionsWorkspaceIds: string[];
   unknowns: {
     /** Lines of `events-*.jsonl` that did not parse or validate (a blank last line is not one). */
     malformedLines: number;
@@ -227,6 +231,16 @@ export function readStore(home: string): StoreRead {
     unknowns.unreadableFiles += 1;
   }
 
+  let dangers: unknown[] | undefined;
+  const dangerFile = readJson(join(orchestratorDir, "dangers.json"));
+  if (dangerFile.kind === "ok") {
+    const frame = dangerLogSchema.safeParse(dangerFile.value);
+    if (frame.success) dangers = frame.data.entries;
+    else unknowns.unreadableFiles += 1;
+  } else if (dangerFile.kind === "bad") {
+    unknowns.unreadableFiles += 1;
+  }
+
   let decisions: unknown[] | undefined;
   const decisionsDir = join(home, "decisions");
   const decisionFiles = listDir(decisionsDir);
@@ -249,7 +263,22 @@ export function readStore(home: string): StoreRead {
     }
   }
 
-  return { records, workspaces, proposals, stalls, notes, decisions, wakes, interventions, unknowns };
+  // A-14: the Missions places (ADR-034) — the root and the earlier home from `ui/missions-home.json`, each mission's workspace from the missions index; only ids are read.
+  const missionsWorkspaceIds: string[] = [];
+  const idOf = (value: unknown): string | null => (typeof value === "string" && value !== "" ? value : null);
+  const homeFile = readJson(join(home, "ui", "missions-home.json"));
+  if (homeFile.kind === "ok" && typeof homeFile.value === "object" && homeFile.value !== null) {
+    const record = homeFile.value as { workspaceId?: unknown; legacyWorkspaceId?: unknown };
+    for (const id of [idOf(record.workspaceId), idOf(record.legacyWorkspaceId)]) if (id !== null) missionsWorkspaceIds.push(id);
+  }
+  const indexFile = readJson(join(home, "missions", "index.json"));
+  const entries = indexFile.kind === "ok" && typeof indexFile.value === "object" && indexFile.value !== null ? (indexFile.value as { missions?: unknown }).missions : undefined;
+  if (Array.isArray(entries)) for (const entry of entries) {
+    const id = typeof entry === "object" && entry !== null ? idOf((entry as { workspaceId?: unknown }).workspaceId) : null;
+    if (id !== null && !missionsWorkspaceIds.includes(id)) missionsWorkspaceIds.push(id);
+  }
+
+  return { records, workspaces, proposals, stalls, notes, decisions, wakes, interventions, dangers, missionsWorkspaceIds, unknowns };
 }
 
 /** What a store read holds for some workspaces: the metric module's inputs, filtered. */
@@ -261,6 +290,8 @@ export interface WorkspaceSelection {
   decisions: unknown[] | undefined;
   wakes: unknown[] | undefined;
   interventions: unknown[] | undefined;
+  dangers: unknown[] | undefined;
+  missionsWorkspaceIds: string[];
 }
 
 /** A selection's metric inputs: the records, and each store file's entries, `undefined` when the file was not read. */
@@ -273,7 +304,7 @@ export type StoreInputs = Pick<WorkspaceSelection, "records"> & Partial<Omit<Wor
  * because absent is not empty — A-7 and A-12 report whether their file was
  * read.
  */
-export function evalInputsOf(selection: StoreInputs): Pick<EvalInput, "records" | "proposals" | "stalls" | "notes" | "decisions" | "wakes" | "interventions"> {
+export function evalInputsOf(selection: StoreInputs): Pick<EvalInput, "records" | "proposals" | "stalls" | "notes" | "decisions" | "wakes" | "interventions" | "dangers" | "missionsWorkspaceIds"> {
   return {
     records: selection.records,
     ...(selection.proposals === undefined ? {} : { proposals: selection.proposals }),
@@ -282,6 +313,8 @@ export function evalInputsOf(selection: StoreInputs): Pick<EvalInput, "records" 
     ...(selection.decisions === undefined ? {} : { decisions: selection.decisions }),
     ...(selection.wakes === undefined ? {} : { wakes: selection.wakes }),
     ...(selection.interventions === undefined ? {} : { interventions: selection.interventions }),
+    ...(selection.dangers === undefined ? {} : { dangers: selection.dangers }),
+    ...(selection.missionsWorkspaceIds === undefined || selection.missionsWorkspaceIds.length === 0 ? {} : { missionsWorkspaceIds: selection.missionsWorkspaceIds }),
   };
 }
 
@@ -299,7 +332,7 @@ const workspaceOfEntry = (entry: unknown): string | null => {
 /**
  * The records and Orchestrator entries of the given workspaces; `null` keeps
  * them all. A stall key is attributed by its `<workspaceId>::` prefix, a
- * proposal, a decision and an intervention by its `workspaceId`, a note by
+ * proposal, a decision, an intervention and a danger by its `workspaceId`, a note by
  * its file, a wake by any of the projects whose events it carried.
  */
 export function selectWorkspaces(store: StoreRead, workspaceIds: ReadonlySet<string> | null): WorkspaceSelection {
@@ -313,6 +346,8 @@ export function selectWorkspaces(store: StoreRead, workspaceIds: ReadonlySet<str
     decisions: store.decisions?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
     wakes: store.wakes?.filter((entry) => workspaceIds === null || workspacesOfWake(entry).some((id) => workspaceIds.has(id))),
     interventions: store.interventions?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
+    dangers: store.dangers?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
+    missionsWorkspaceIds: store.missionsWorkspaceIds,
   };
 }
 

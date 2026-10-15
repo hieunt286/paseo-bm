@@ -9,7 +9,7 @@ import { currentInstructionsHash } from "../plugin/server/instructions-label";
 import { adoptComposerManager, createLegacyMigration, handleManagerEnsure, legacyCodeOf, migrateWorkspace } from "../plugin/server/mission-legacy";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
-import { ensureMissionsHome, type MissionsPaseo } from "../plugin/server/missions-home";
+import { ensureMissionsHome, legacyMissionsHomeDirOf, missionWorkspaceDirOf, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
 import { EXTRA_MANAGER_DETAIL, detectOutdatedAgents, openMissionsOf } from "../plugin/server/outdated-agents";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
@@ -138,6 +138,20 @@ describe("the migration of a workspace's Manager (§3.6)", () => {
     expect(createMissionStore(home).list().map((entry) => entry.code)).toEqual(["WEB"]);
   });
 
+  it("never turns a second workspace of a home folder into a mission, even before its first trace (the HOME mission of 2026-10-12)", async () => {
+    const folders = [legacyMissionsHomeDirOf(home), missionsHomeDirOf(home), missionWorkspaceDirOf(home, "mis-0123456789")];
+    const fake = fakePaseo<MissionsPaseo>({
+      agents: folders.map((_, index) => manager(`mgr-home-${index}`, "2026-10-12T05:00:00.000Z", {}, { workspaceId: `wks-home-${index}` })),
+      workspaces: folders.map((directory, index) => ({ id: `wks-home-${index}`, directory })),
+      config: { providers: roleAliases(), agentProfiles: roleProfiles() },
+      omit: ["providers"],
+    });
+    folders.forEach((_, index) => bind(`mgr-home-${index}`, `wks-home-${index}`));
+    const deps = { home, cli: fakeCli().cli, bindings: () => bindings, log: () => {} };
+    for (const index of folders.keys()) expect(await migrateWorkspace(fake.paseo, `wks-home-${index}`, deps)).toBeNull();
+    expect(createMissionStore(home).list()).toEqual([]);
+  });
+
   it("runs once per plugin run, at the first Paseo handle, over every workspace with a Manager", async () => {
     const fake = daemon([manager("mgr-a", "2026-10-01T00:00:00.000Z"), manager("mgr-b", "2026-10-01T00:00:00.000Z", {}, { workspaceId: "wks-b" })]);
     bind("mgr-a");
@@ -213,6 +227,28 @@ describe("manager.ensure opens the mission's Main (§3.6)", () => {
     store.update("mis-0000000002", (mission) => ({ ...mission, createdAt: "2026-10-02T00:00:00.000Z" }));
     const result = await handleManagerEnsure({ workspaceId: REPO }, fake.paseo, { home, cli: fakeCli().cli, bindings: () => bindings, readInstructions, log: () => {} });
     expect(result).toMatchObject({ agentId: "main-web", created: false });
+    expect(fake.creates).toEqual([]);
+  });
+
+  it("prefers the owner's mission to a legacy one holding the workspace, whatever their age; a request opens its own mission's Main (mission runtime design §5.5)", async () => {
+    const fake = daemon([
+      manager("main-xai", "2026-10-02T00:00:00.000Z", { "bm.missionId": "mis-0000000001" }, { workspaceId: "wks-own" }),
+      manager("main-aias", "2026-10-03T00:00:00.000Z", { "bm.missionId": "mis-0000000002" }, { workspaceId: "wks-own" }),
+    ]);
+    let id = 1;
+    const store = createMissionStore(home, { newId: () => `mis-000000000${id++}` });
+    store.create({ code: "XAI", name: "XAI", goal: "Ship XAI.", repos: [REPO, "wks-b"], createdBy: "owner", mainId: "main-xai" });
+    store.create({ code: "AIAS", name: "aias", goal: "", repos: [REPO], createdBy: "legacy", legacyWorkspaceId: REPO, mainId: "main-aias" });
+    // The legacy mission is newer and its journal moved last.
+    store.update("mis-0000000002", (mission) => ({ ...mission, createdAt: "2026-10-09T00:00:00.000Z" }));
+    store.appendJournal("mis-0000000002", { kind: "worker", by: "main", text: "late work" });
+    const REQ = "req-20261009T120000Z";
+    createMissionRoster(home).add("mis-0000000002", { requestId: REQ, workspaceId: REPO, topic: "old work", workerId: "w-old" });
+    const ensureDeps = { home, cli: fakeCli().cli, bindings: () => bindings, readInstructions, log: () => {} };
+    expect(await handleManagerEnsure({ workspaceId: REPO }, fake.paseo, ensureDeps)).toMatchObject({ agentId: "main-xai", created: false });
+    expect(await handleManagerEnsure({ workspaceId: REPO, requestId: REQ }, fake.paseo, ensureDeps)).toMatchObject({ agentId: "main-aias", created: false });
+    // A request of no mission falls back to the workspace's mission.
+    expect(await handleManagerEnsure({ workspaceId: REPO, requestId: "req-20261009T130000Z" }, fake.paseo, ensureDeps)).toMatchObject({ agentId: "main-xai" });
     expect(fake.creates).toEqual([]);
   });
 

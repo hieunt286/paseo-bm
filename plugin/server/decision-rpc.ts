@@ -51,6 +51,7 @@ import { createMissionDecisionStore, isMissionDecisionId } from "./mission-decis
 import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
 import { applyMissionDecision, missionAnswerRefusalsOf } from "./mission-tools";
 import { applyGovernorDecision, governorAnswerRefusalsOf, isGovernorCard, type GovernorMissionDeps } from "./governor-tools";
+import { applyOwnershipDecision, isOwnershipCard, ownershipAnswerRefusalsOf } from "./mission-ownership";
 import type { PaseoCliDeps } from "./paseo-cli";
 import { handleDecisionsOverride, ownerViewsOf } from "./decision-override";
 import { supersedePrecedentsBy } from "./precedent-resolve";
@@ -185,11 +186,15 @@ async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown
   const at = deps.now?.() ?? new Date();
   const current = reading("read the decision", () => store.get(input.id));
   if (current === null) throw new DashboardError("E_DECISION_NOT_FOUND", `no decision ${input.id}`);
-  // Missions design §9.6: a split or an arbitration the governor asked takes its own check and apply.
+  // Missions design §9.6: a split or an arbitration the governor asked takes its own check and apply;
+  // mission runtime design §5.2, §5.3: so does a merge or a transfer of requests.
   const governed = isGovernorCard(current);
+  const owned = !governed && isOwnershipCard(current);
   const refusals = governed
     ? await governorAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home, at)
-    : await missionAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home);
+    : owned
+      ? await ownershipAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home)
+      : await missionAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home);
   if (refusals.length > 0) throw new DashboardError("E_MISSION_INVALID", refusals.join("; "));
   const mutation = writing("answer the decision", () =>
     store.transition(input.id, (decision) =>
@@ -199,7 +204,10 @@ async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown
   const settled = settledOrThrow(input.id, mutation);
   const applyDeps = { home, now: at, log: logOf(deps), paseo, ...(deps.cli === undefined ? {} : { cli: deps.cli }) };
   if (governed) await applyGovernorDecision(settled, { ...applyDeps, ...(deps.missions === undefined ? {} : { missions: deps.missions }) });
-  else await applyMissionDecision(settled, applyDeps);
+  else if (owned) {
+    const bindings = deps.missions?.bindings?.() ?? undefined;
+    await applyOwnershipDecision(settled, { ...applyDeps, ...(bindings ? { bindings } : {}) });
+  } else await applyMissionDecision(settled, applyDeps);
   return { decision: store.get(settled.id) ?? settled };
 }
 

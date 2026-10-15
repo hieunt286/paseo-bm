@@ -1,4 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { tellMainOfQuestions } from "./server/mission-tools";
+import type { Decision } from "./shared/decisions";
 import { MANAGER_INSTRUCTIONS } from "./server/manager-instructions";
 import { listWorkspaceAgents } from "./server/manager";
 import { registerCollector } from "./server/collector";
@@ -156,6 +158,12 @@ export default function contribute(server: PluginServerContext): () => void {
   // that is outdated or has lost its tools before waking it (design §3.3); the check is read when it
   // publishes, after the endpoint below has started.
   const eventBus = createEventBus({ isToolsStale: (agent) => isToolsStale(agent) });
+  /** Mission runtime design §4.4: the Main whose Worker asked a question it decides is told at once. */
+  const tellMainsOf = (opened: readonly Decision[], paseo: unknown): void => {
+    const home = dataHome();
+    if (home === null || opened.length === 0) return;
+    void tellMainOfQuestions(opened, { home, now: new Date(), log: (message: string) => console.warn(message), paseo });
+  };
   // Autonomy design §G.5, missions design §9.5: the compactions the plugin starts itself when a turn
   // crosses its threshold, kept in the data folder; each recorded turn of their target sends the
   // /compact at a safe point, or the BM-STATE brief once the compaction completed, through the notice queue.
@@ -209,7 +217,11 @@ export default function contribute(server: PluginServerContext): () => void {
     }), eventBus),
     // Design §16.6: a bound Worker's bm_questions opens decisions outside a recorded turn. They wake nothing
     // (missions design §9.1); the handle goes to the bus with any event a mission's window held.
-    onDecisionsOpened: (_opened, paseo) => eventBus.publish([], paseo),
+    // Mission runtime design §4.4: a question whose decider is the Main tells that Main at once.
+    onDecisionsOpened: (opened, paseo) => {
+      tellMainsOf(opened, paseo);
+      return eventBus.publish([], paseo);
+    },
     // Missions design §4: a Main's bm_answer_worker answers take the delivery the owner's answers take.
     onDecisionsSettled: (decisions, context) => onDecisionsSettled(decisions, context),
     // Missions design §9.6, §9.7: a Main's bm_split_mission wakes the governor as mission.split.
@@ -335,7 +347,10 @@ export default function contribute(server: PluginServerContext): () => void {
         home,
         paseo,
         bindings: agentTools.bindings,
-        onOpened: (_opened, handle) => eventBus.publish([], handle),
+        onOpened: (opened, handle) => {
+          tellMainsOf(opened, handle);
+          return eventBus.publish([], handle);
+        },
         onSettled: (decisions, context) => onDecisionsSettled(decisions, context),
       });
       return checkNoVerdict(event, { home, paseo, bindings: agentTools.bindings, classified });

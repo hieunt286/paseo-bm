@@ -40,7 +40,9 @@
  * Since ADR-027 a bound Worker's review tools refuse every call past its
  * request's ceiling (design §16.8, `review-tools.ts`); this notice still goes
  * to the Manager for an overrun on every request, bound ones included, by the
- * same comparison (`overrunOf`, `overReviewCeiling`).
+ * same comparison (`overrunOf`, `overReviewCeiling`) — except to the Main of an
+ * open mission (mission runtime design §4.3, §6.1, ADR-033 decision 5): the
+ * notice asked nothing of it, and the review tools hold the caps.
  */
 import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
@@ -57,6 +59,7 @@ import type { BudgetTold } from "./budget-told";
 import type { ReconstructedTrace } from "./traces";
 import { requestTraceOf } from "./request-trace";
 import { ruleReviewGrantOf } from "./review-tools";
+import { isMissionMain } from "./main-channel";
 
 /**
  * Total review calls per request, by tier, by default (PRD delta
@@ -190,6 +193,10 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       // request's workspace: a Main lives in the Missions home, its requests in their repos.
       const flushed = [...pending.entries()].find(([, found]) => found.managerAgentId === agent.id);
       if (flushed === undefined) return "within";
+      if (isMissionMain(dirname(deps.location.tracesDir), agent.id)) {
+        pending.delete(flushed[0]);
+        return "ignored";
+      }
       [key, over] = flushed;
     } else {
       // The same rebuild the Orchestrator's rules read (request-trace.ts), against
@@ -200,6 +207,8 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       const grant = found?.request === null || found?.request === undefined ? null : ruleReviewGrantOf(found.request);
       over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home, log }), grant) ?? undefined);
       if (over === undefined) return "within";
+      // Mission runtime design §4.3, §6.1: a mission's Main is not told; the review tools hold the caps.
+      if (isMissionMain(home, over.managerAgentId)) return "ignored";
       key = `${workspaceId}::${over.requestId}`;
       pending.set(key, over);
     }

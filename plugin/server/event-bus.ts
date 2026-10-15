@@ -12,7 +12,7 @@
  * | `mission.scope` | an active request, or a live link one asked, of a mission is in a repo outside its charter, the mission's `scope-repo` cell is not delegated and no `m:` card asked to add that repo `governor.windowMinutes` after this run first saw it (`outsideCharterOf`) | the repo joined the charter, `scope-repo` was delegated, a card asked for it, or the mission closed |
  * | `mission.review` | the mission's finished requests (roster) reached a next multiple of 10, or a budget field's figure reached 50 % or 100 % (`reviewMarksOf`), between two of the governor's recomputations in this run — a mark already passed when the run first saw the mission raises nothing | the mission closed |
  * | `mission.split` | its Main, on the owner's yes, suggested that work belongs to a new mission (`bm_split_mission`, `mission-split.ts`); one per mission and code | a mission took the code, or the source mission closed (`openSplitSuggestionsOf`) |
- * | `worker.signal` `danger` | always, for a project in the policy's scope (`eventScopeOf`: a class above `owner`, never a plugin home) | its alert is cleared, or the project left the scope |
+ * | `worker.signal` `danger` | for a Worker of a mission's request, always, as its Main's backup: `backupAt` (3 minutes after the alert, when the Main was told) or at once (missions design §20, ADR-032 decision 4); for any other Worker, in the policy's scope (`eventScopeOf`: a class above `owner`, never a plugin home) | its alert is cleared, or (a Worker of no mission) the project left the scope |
  *
  * - **Retired as wakes** (§9.1): every other event type (`request.stalled`,
  *   `worker.signal` other than `danger`, `writers.observed`, and the types
@@ -26,10 +26,14 @@
  *   `governed`); a publish that cannot reach the queue (no data folder, no
  *   Paseo handle, a failure) keeps what it held. Events of one mission
  *   published together are one wake.
- * - **One message per idle moment.** Events go through the notice queue's
- *   batch kind (`enqueueBatch`, `BM-EVENTS`): everything pending when the
- *   Orchestrator is idle goes as ONE `BM-EVENTS` message, one short line per
- *   event with the ids to look up; never into a running turn.
+ * - **A mission per wake** (missions design §20, ADR-032 decision 2). Events
+ *   go through the notice queue's batch kind (`enqueueBatch`, `BM-EVENTS`),
+ *   grouped by `wakeGroupOf`: one mission's events (a conflict's two
+ *   missions together; a Worker of no mission by its project) pending when
+ *   the Orchestrator is idle go as ONE `BM-EVENTS` message, one short line per
+ *   event with the ids to look up, opened by each mission's brief read at that
+ *   moment (`governor-brief.ts`). Another group waits for that turn's end; a
+ *   group carrying a `danger` signal goes first. Never into a running turn.
  * - **Once per event.** Each event has a dedupe key (`eventKeyOf`); a key
  *   queued or sent in this plugin run is not published again.
  * - **Only to the Orchestrator**, the one the plugin may wake
@@ -38,11 +42,13 @@
  *   messages the owner, a Manager, a Worker or a Reviewer.
  * - **Each wake is recorded** (evaluation design §4, A-7): once a `BM-EVENTS`
  *   message went out (the batch's `onSent`), `orchestrator/wakes.json` gets
- *   the Orchestrator's id, the time, the projects, the number of events and
- *   their types; at that Orchestrator's next turn end (the batch's
- *   `onTurnEnded`) its oldest open wake gets its end, that closing turn's
- *   tokens (change-007 C6, `closingTurnUsage`) and whether it acted (M-26: an
- *   act tool called with success in its turn, `WAKE_ACT_TOOLS`, `actsNoted`).
+ *   the Orchestrator's id, the time, the projects, the missions (§20), the
+ *   number of events and their types; at that Orchestrator's next turn end
+ *   (the batch's `onTurnEnded`) its oldest open wake gets its end, that
+ *   closing turn's tokens (change-007 C6, `closingTurnUsage`), whether it
+ *   acted (M-26: an act tool called with success in its turn,
+ *   `WAKE_ACT_TOOLS`, `actsNoted`) and how many of its acts aimed at a mission
+ *   the wake did not carry (`offMission`, M-28, `actMissionsOf`).
  *   The events a wake carried stay in memory until that turn end
  *   (`wakeEventsOf`), so a command the Orchestrator sends in it is logged as
  *   the intervention on those events (design §G.3, `intervention-store.ts`).
@@ -68,7 +74,8 @@ import { familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure, 
 import type { WakeUsage, WorkerSignal } from "../shared/orchestrator";
 import type { TraceRecord } from "../shared/contracts";
 import { isPluginHome } from "./plugin-homes";
-import { createMissionRoster } from "./mission-roster";
+import { missionBriefOf } from "./governor-brief";
+import { createMissionRoster, requestIndexOf } from "./mission-roster";
 import type { GovernorOutcome } from "./governor-store";
 import { createMissionStore, openSplitSuggestionsOf, type Mission } from "./mission-store";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
@@ -134,6 +141,10 @@ export interface WorkerSignalEvent {
   since: string;
   /** A `danger` signal's interrupt allowance: until when the Orchestrator may interrupt that Worker. */
   interruptUntil?: string | null;
+  /** The mission of the Worker's request (missions design §20); null or absent for a Worker of no mission. */
+  missionId?: string | null;
+  /** A mission Worker's `danger` whose Main was told: not published before this time (ADR-032 decision 4). */
+  backupAt?: string | null;
 }
 
 /**
@@ -301,6 +312,35 @@ export function missionsOfEvent(event: BmEvent): string[] {
   return event.type === "mission.conflict" ? [...new Set(event.missions)] : [event.missionId];
 }
 
+/**
+ * The missions a wake carrying this event concerns (missions design §20):
+ * `missionsOfEvent`, and a `danger` signal's mission. Pure.
+ */
+export function wakeMissionsOf(event: BmEvent): string[] {
+  if (event.type === "worker.signal") return typeof event.missionId === "string" ? [event.missionId] : [];
+  return missionsOfEvent(event);
+}
+
+/**
+ * The wake an event goes in (missions design §20, ADR-032 decision 2): one
+ * mission's events together (`mission:<id>`), a conflict's two missions
+ * together (`missions:<id>+<id>`), a Worker of no mission by its project
+ * (`project:<id>`). Pure.
+ */
+export function wakeGroupOf(event: BmEvent): string {
+  const missions = [...new Set(wakeMissionsOf(event))].sort();
+  if (missions.length === 1) return `mission:${missions[0]}`;
+  if (missions.length > 1) return `missions:${missions.join("+")}`;
+  return `project:${workspaceOfEvent(event) ?? "none"}`;
+}
+
+/** The missions a wake group names (`wakeGroupOf`). Pure. */
+export function missionsOfGroup(group: string): string[] {
+  if (group.startsWith("mission:")) return [group.slice("mission:".length)];
+  if (group.startsWith("missions:")) return group.slice("missions:".length).split("+").filter((id) => id !== "");
+  return [];
+}
+
 /** The project an event names, or null (a mission's own event). */
 function workspaceOfEvent(event: BmEvent): string | null {
   return "workspaceId" in event ? event.workspaceId : null;
@@ -390,11 +430,17 @@ export async function closingTurnUsage(agentId: string, paseo: unknown): Promise
   }
 }
 
-/** The one message that carries the lines pending at the Orchestrator's idle moment. */
-export function eventsMessageOf(lines: readonly string[]): string {
+/**
+ * The one message that carries one wake's lines (missions design §20): the
+ * events, oldest first, after the brief of each mission they concern.
+ */
+export function eventsMessageOf(lines: readonly string[], briefs: readonly string[] = []): string {
   return [
     EVENTS_NOTICE_MARKER,
     `From the paseo-bm plugin, not the owner: ${lines.length} event${lines.length === 1 ? "" : "s"}, oldest first. Look before you act; when nothing needs doing, do nothing.`,
+    ...(briefs.length === 0
+      ? []
+      : ["## The mission now (read when this was sent; bm_missions has the rest)", ...briefs, "## Events"]),
     ...lines,
   ].join("\n");
 }
@@ -511,7 +557,7 @@ export function actsNoted<T extends { call(name: string, input: unknown): Promis
  * The batch the notice queue merges the events into. A bus adds its own
  * `onSent`, which records the wake.
  */
-export const EVENTS_BATCH: NoticeBatch = { name: EVENTS_NOTICE_MARKER, compose: eventsMessageOf };
+export const EVENTS_BATCH: NoticeBatch = { name: EVENTS_NOTICE_MARKER, compose: (lines) => eventsMessageOf(lines) };
 
 /**
  * The owner's policy as the events read it, at each publish and delivery. A
@@ -539,12 +585,32 @@ function scopeOfPolicy(policy: AutonomyPolicy, home: string): Set<string> {
 }
 
 /**
- * Whether an event may reach the Orchestrator: a mission event always
- * (missions design §9.7); any other needs its project in `scope`. Whether it
- * wakes the Orchestrator at all is `wakesGovernor`'s.
+ * Whether an event may reach the Orchestrator: a mission event, and a signal
+ * of a mission's Worker, always (missions design §9.7, §20); any other needs
+ * its project in `scope`. Whether it wakes the Orchestrator at all is
+ * `wakesGovernor`'s.
  */
 export function isInEventScope(event: BmEvent, scope: ReadonlySet<string>): boolean {
-  return isMissionEvent(event) || scope.has(event.workspaceId);
+  if (isMissionEvent(event)) return true;
+  if (event.type === "worker.signal" && typeof event.missionId === "string") return true;
+  return scope.has(event.workspaceId);
+}
+
+/**
+ * The missions a successful act aims at (M-28, missions design §20): its
+ * `missionId`, `fromMissionId` or `missions`; for `bm_direct_worker`, the
+ * mission of its `requestId` (`requestOf`). Empty when the act names none —
+ * then it is never off-mission. Pure but for `requestOf`.
+ */
+export function actMissionsOf(name: string, input: unknown, requestOf: (requestId: string) => string | null): string[] {
+  const value = (input ?? {}) as { missionId?: unknown; fromMissionId?: unknown; missions?: unknown; requestId?: unknown };
+  if (name === "bm_arbitrate") return Array.isArray(value.missions) ? value.missions.filter((id): id is string => typeof id === "string") : [];
+  if (name === "bm_create_main") return typeof value.fromMissionId === "string" ? [value.fromMissionId] : [];
+  if (name === "bm_direct_worker") {
+    const mission = typeof value.requestId === "string" ? requestOf(value.requestId) : null;
+    return mission === null ? [] : [mission];
+  }
+  return typeof value.missionId === "string" ? [value.missionId] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +721,13 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     const home = homeOf();
     if (home === null || keys.length === 0) return;
     try {
-      createOrchestratorStore(home, { now: deps.now }).appendWake({ orchestratorId: targetId, workspaceIds, events: keys.length, eventTypes: events.map((event) => event.type) });
+      createOrchestratorStore(home, { now: deps.now }).appendWake({
+        orchestratorId: targetId,
+        workspaceIds,
+        events: keys.length,
+        eventTypes: events.map((event) => event.type),
+        missionIds: events.flatMap(wakeMissionsOf),
+      });
     } catch (error) {
       log(`[paseo-bm] could not record the Orchestrator's wake: ${errorText(error)}`);
     }
@@ -666,34 +738,53 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
    * wake ends now (A-7), with that turn's tokens (change-007 C6) and whether
    * it acted (M-26; unknown for a wake a reload forgot).
    */
-  const endWake = async (targetId: string, paseo: unknown, acted: boolean | undefined): Promise<void> => {
+  const endWake = async (targetId: string, paseo: unknown, acted: boolean | undefined, offMission: number | undefined): Promise<void> => {
     const home = homeOf();
     if (home === null) return;
     const usage = await closingTurnUsage(targetId, paseo);
     try {
-      createOrchestratorStore(home, { now: deps.now }).endWake(targetId, usage, acted);
+      createOrchestratorStore(home, { now: deps.now }).endWake(targetId, usage, acted, offMission);
     } catch (error) {
       log(`[paseo-bm] could not record the end of the Orchestrator's wake: ${errorText(error)}`);
     }
   };
 
+  /** The danger log (missions design §20, A-13): the governor was told of these `danger` signals now. */
+  const noteDangersTold = (events: readonly BmEvent[]): void => {
+    const keys = events.flatMap((event) => (event.type === "worker.signal" && event.signal === "danger" && event.alertKey !== null ? [event.alertKey] : []));
+    const home = keys.length === 0 ? null : homeOf();
+    if (home === null) return;
+    try {
+      const store = createOrchestratorStore(home, { now: deps.now });
+      for (const key of keys) store.noteDanger(key, { governorToldAt: now().toISOString() });
+    } catch (error) {
+      log(`[paseo-bm] could not note that the governor was told of a danger: ${errorText(error)}`);
+    }
+  };
+
   /** Published keys → their event until the wake that carried them went out, then each Orchestrator's open wakes, oldest first (§G.3). */
   const eventOfKey = new Map<string, BmEvent>();
-  const openWakes = new Map<string, Array<{ events: BmEvent[]; acted: boolean }>>();
+  const openWakes = new Map<string, Array<{ events: BmEvent[]; acted: boolean; offMission: number }>>();
 
   const batch: NoticeBatch = {
     ...EVENTS_BATCH,
+    // §20: each wake opens with the brief of the missions its group concerns, read now.
+    compose: (lines, group) => {
+      const home = homeOf();
+      return eventsMessageOf(lines, home === null ? [] : missionsOfGroup(group).map((missionId) => missionBriefOf(home, missionId)));
+    },
     onSent: (targetId, keys) => {
       const events = keys.flatMap((key) => eventOfKey.get(key) ?? []);
-      openWakes.set(targetId, [...(openWakes.get(targetId) ?? []), { events, acted: false }]);
+      openWakes.set(targetId, [...(openWakes.get(targetId) ?? []), { events, acted: false, offMission: 0 }]);
       for (const key of keys) eventOfKey.delete(key);
       recordWake(targetId, keys, events);
+      noteDangersTold(events);
     },
     onTurnEnded: (targetId, paseo) => {
       const open = openWakes.get(targetId);
       const ended = open?.shift();
       if (open?.length === 0) openWakes.delete(targetId);
-      return endWake(targetId, paseo, ended?.acted);
+      return endWake(targetId, paseo, ended?.acted, ended?.offMission);
     },
   };
 
@@ -772,6 +863,13 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
       const due: typeof fresh = [];
       const hold = new Map<string, BmEvent>();
       for (const entry of fresh) {
+        // §20: a mission Worker's danger waits for its Main until `backupAt`.
+        const backupAt = entry.event.type === "worker.signal" ? Date.parse(entry.event.backupAt ?? "") : Number.NaN;
+        if (!Number.isNaN(backupAt) && at < backupAt) {
+          hold.set(entry.key, entry.event);
+          skipped.push(entry.key);
+          continue;
+        }
         const missions = missionsOfEvent(entry.event);
         if (missions.some((missionId) => !goingFor.has(missionId) && at - (missionWokenAt.get(missionId) ?? Number.NEGATIVE_INFINITY) < MISSION_WAKE_MS)) {
           hold.set(entry.key, entry.event);
@@ -792,7 +890,9 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
           const workspaceId = workspaceOfEvent(event);
           if (workspaceId !== null) workspaceOfKey.set(key, workspaceId);
           eventOfKey.set(key, event);
-          return { key, line: eventLineOf(event), isCurrent: isCurrentOf(event, home) };
+          const item: BatchItem = { key, line: eventLineOf(event), isCurrent: isCurrentOf(event, home), group: wakeGroupOf(event) };
+          if (event.type === "worker.signal" && event.signal === "danger") item.first = true;
+          return item;
         });
         const outcomes = await queue.enqueueBatch(orchestrator.id, batch, items, handle as never);
         const done: PublishResult = { status: "done", published: [], skipped };
@@ -867,7 +967,15 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
     },
     toolCalled(name, input) {
       if (!isWakeAct(name, input)) return;
-      for (const open of openWakes.values()) if (open[0] !== undefined) open[0].acted = true;
+      const home = homeOf();
+      const aimed = actMissionsOf(name, input, (requestId) => (home === null ? null : (requestIndexOf(home, requestId)?.missionId ?? null)));
+      for (const open of openWakes.values()) {
+        const wake = open[0];
+        if (wake === undefined) continue;
+        wake.acted = true;
+        const carried = new Set(wake.events.flatMap(wakeMissionsOf));
+        if (carried.size > 0 && aimed.some((missionId) => !carried.has(missionId))) wake.offMission += 1;
+      }
     },
     wakeEventsOf: (orchestratorId) => openWakes.get(orchestratorId)?.[0]?.events ?? [],
   };

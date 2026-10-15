@@ -114,6 +114,14 @@ function coordinationChangeText(change: CoordinationChange): string {
       return `sets the review budget of a Small request to ${change.value} review calls ${exact}`;
     case "review.mediumBudget":
       return `sets the review budget of a Medium request to ${change.value} review calls ${exact}`;
+    case "main.compact":
+      return `turns a Main's in-place compaction ${change.value ? "on" : "off"} ${exact}`;
+    case "main.contextShare":
+      return `compacts a Main at ${Math.round(change.value * 100)}% of its context window ${exact}`;
+    case "main.contextTokens":
+      return `compacts a Main at ${grouped(change.value)} tokens of context when its window is not known ${exact}`;
+    case "main.hardShare":
+      return `creates a new Main only above ${Math.round(change.value * 100)}% of its window after a compaction ${exact}`;
     case "review.largeBudget":
       return `sets the review budget of a Large request to ${change.value} review calls ${exact}`;
     default:

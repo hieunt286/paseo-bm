@@ -7,7 +7,7 @@
  * | `bm_mission` | reads the caller's mission: charter, plan, contracts, roster (each request's repo, Worker, phase, newest report), its Workers' open questions, the open `m:` cards, the mission level, the newest `MISSION_JOURNAL_SHOWN` journal lines |
  * | `bm_mission_start` | an unassigned Main in the Missions home proposes the mission the owner named (`proposed-mission-starts.ts`); `settleMissionStart` records it at the turn's end only when the turn holds the owner's own message (the decision materialiser), then binds, labels and titles the Main |
  * | `bm_mission_update` | writes the free changes at once (plan, contracts, new criteria, a criterion's status open or met, a repo added at a mission level that delegates `scope-repo`), each with a journal line; everything else opens one `m:` decision whose "apply" option carries the change |
- * | `bm_answer_worker` | answers open `q:` questions of the mission's requests within missions design §8 (`mainAnswerRuleOf`): `by: main`, `via: main`, no grant, handed to `onSettled` (the Worker gets it cited as the Main's); in a `shadow` cell the Main may not decide, records its recommendation as `prediction.main`. Refused for an `ownerOnly` question, one asked over `MAIN_ANSWER_MINUTES` ago, a settled one, an option with a grant or a change, a request of another mission |
+ * | `bm_answer_worker` | answers open `q:` questions of the mission's requests whose decider is the Main (mission runtime design §4.1, `deciderOf`): `by: main`, `via: main`, no grant on the decision (a review grant within the Main's cap is applied to the request), handed to `onSettled` (the Worker gets it cited as the Main's); where the Main only recommends (a `shadow` cell) it records `prediction.main`. Refused for a question someone else decides, a review grant beyond the Main's cap, a settled one, a request of another mission |
  *
  * **The owner's card.** An `m:<missionId>:<n>` decision lives in the
  * mission's own store (`mission-decisions.ts`), asked by `plugin` with the
@@ -27,32 +27,34 @@
  * the input. Text is masked by the stores. Nothing here throws into the
  * endpoint.
  */
+import { deciderOf, grantWithin } from "../shared/authority";
+import { authorityFactsOf } from "./authority-facts";
 import { isAbsolute, resolve } from "node:path";
 import type { ToolCaller } from "./agent-bindings";
 import { createBindingStore } from "./agent-bindings";
-import { mainAnswerRuleOf } from "../shared/autonomy";
-import { MAIN_ANSWER_MINUTES, MISSION_TOOL_FACES, schemaIssues, type ToolFace } from "../shared/bm-tools";
+import { MISSION_TOOL_FACES, schemaIssues, type ToolFace } from "../shared/bm-tools";
 import {
   UNSETTLED_STATUSES,
   answerDecision,
   decisionClassOf,
-  isPreparedChange,
   notOpenRefusalOf,
+  ownerOnlyRefusalText,
   questionDecisionId,
   type Decision,
   type TransitionResult,
 } from "../shared/decisions";
-import { currentPolicy } from "./autonomy-store";
 import { redactText } from "./collector";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { isEmptyMissionChange, missionChangeLinesOf, type MissionChange, type MissionChangeAction } from "../shared/mission-change";
 import { createDecisionStore } from "./decision-store";
 import { decisionSummaryOf, type ServerToolAnswer, type ServerTools } from "./decision-tools";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
-import { createMissionDecisionStore, missionOfDecisionId } from "./mission-decisions";
-import { createMissionRoster, requestIndexOf, runningRequestsOf } from "./mission-roster";
+import { createMissionDecisionStore, isMainQuestion, missionOfDecisionId } from "./mission-decisions";
+import { busyRequestsOf, createMissionRoster, requestIndexOf, stopActiveRequests } from "./mission-roster";
+import { offerMerges, offerTransfer } from "./mission-ownership";
+import { transferRefusalsOf } from "./mission-transfer";
 import { createMissionStore, journalQuietly, type Mission, type MissionContract } from "./mission-store";
-import { isMissionsHome, markMain, missionsHomeIdOf, syncMainTitle } from "./missions-home";
+import { ensureMissionWorkspace, isMissionsHome, markMain, missionsHomeIdOf, syncMainTitle, type MissionsPaseo } from "./missions-home";
 import type { NoticePaseo } from "./notice-queue";
 import { newestReportRecordOf, reportPhaseOf, storeAndDeliver } from "./outbox";
 import { setAgentLabel, type PaseoCliDeps } from "./paseo-cli";
@@ -124,9 +126,9 @@ function idOf(repo: string, listed: readonly ListedWorkspace[] | null): string {
   return entry?.id ?? repo;
 }
 
-/** The ids of the mission's requests whose Worker still runs (`runningRequestsOf`). */
+/** The ids of the mission's requests whose Worker is running a turn (`busyRequestsOf`, mission runtime design §5.4): what a close waits for. */
 const runningIdsOf = async (home: string, paseo: unknown, mission: Mission): Promise<string[]> =>
-  (await runningRequestsOf(home, paseo, mission.missionId)).map((entry) => entry.requestId);
+  (await busyRequestsOf(home, paseo, mission.missionId)).map((entry) => entry.requestId);
 
 // ---------------------------------------------------------------------------
 // Applying changes (pure).
@@ -290,6 +292,8 @@ export interface MissionAnswerDeps {
   cli?: PaseoCliDeps;
   /** The RPC's Paseo handle, for telling the Main; the notice queue's last one when absent. */
   paseo?: unknown;
+  /** Journal only: the Main recorded the answer itself (its own question answered in its chat), so it is not told. */
+  quiet?: boolean;
 }
 
 /**
@@ -304,7 +308,7 @@ export async function tellMain(missionId: string, decisionId: string, text: stri
   try {
     const mainId = createMissionStore(deps.home).get(missionId)?.mainId ?? null;
     const bound = mainId === null ? undefined : createBindingStore(deps.home, { log: deps.log }).list().find((binding) => binding.agentId === mainId);
-    const workspaceId = bound?.workspaceId ?? missionsHomeIdOf(deps.home);
+    const workspaceId = bound?.workspaceId ?? createMissionStore(deps.home).get(missionId)?.workspaceId ?? missionsHomeIdOf(deps.home);
     if (mainId === null || workspaceId === null) return deps.log(`[paseo-bm] the Main of mission ${missionId} could not be told of ${decisionId}: it has no Main or workspace now.`);
     await storeAndDeliver(
       workspaceId,
@@ -314,6 +318,40 @@ export async function tellMain(missionId: string, decisionId: string, text: stri
   } catch (error) {
     deps.log(`[paseo-bm] the Main of mission ${missionId} could not be told of ${decisionId}: ${errorText(error)}`);
   }
+}
+
+/**
+ * The decider is told at once (mission runtime design §4.4, ADR-033 decision
+ * 3): for each question just opened, still open, whose decider is the
+ * request's Main (`deciderOf`) — or that the Main only recommends on — one
+ * message to that Main (`tellMain`, from `plugin`), naming the question, its
+ * class and options and what to do. Questions for code, the Orchestrator or
+ * the owner tell the Main nothing. Never throws: a failure is one log line.
+ */
+export async function tellMainOfQuestions(opened: readonly Decision[], deps: MissionAnswerDeps): Promise<number> {
+  let told = 0;
+  try {
+    const facts = authorityFactsOf(deps.home, deps.log);
+    for (const decision of opened) {
+      if (decision.status !== "open" || !decision.id.startsWith("q:") || decision.requestId === null) continue;
+      const place = requestIndexOf(deps.home, decision.requestId);
+      if (place === null) continue;
+      const decider = deciderOf(decision, facts);
+      if (decider.decider !== "main" && !decider.recommend) continue;
+      const qn = decision.id.slice(decision.id.lastIndexOf(":") + 1);
+      const options = decision.options.map((option) => `${option.key} — ${redactText(option.label).replace(/\s+/g, " ").slice(0, 120)}${option.recommended ? " (recommended)" : ""}`).join("; ");
+      const question = redactText(decision.question.split("\n")[0] ?? "").replace(/\s+/g, " ").slice(0, 300);
+      const what = decider.recommend
+        ? "Recommend an option with bm_answer_worker; the owner decides."
+        : "Answer with bm_answer_worker; the owner sees your answer and may override it.";
+      const text = `${qn} of ${decision.requestId} (${decisionClassOf(decision)}${decision.subject === null ? "" : `, ${decision.subject}`}) is yours ${decider.recommend ? "to recommend on" : "to answer within the mission's delegation"}: ${question}; options ${options}. ${what}`;
+      await tellMain(place.missionId, decision.requestId, text, deps, "plugin");
+      told += 1;
+    }
+  } catch (error) {
+    deps.log(`[paseo-bm] could not tell a Main of its Workers' questions: ${errorText(error)}`);
+  }
+  return told;
 }
 
 /**
@@ -329,6 +367,14 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
   if (missionId === null || answer === null || decision.status !== "answered") return;
   try {
     const store = createMissionStore(deps.home, { now: () => deps.now });
+    // Mission runtime design §4.6: the owner answered the Main's own question.
+    if (isMainQuestion(decision)) {
+      const label = answer.optionKey === null ? null : (decision.options.find((option) => option.key === answer.optionKey)?.label ?? answer.optionKey);
+      const what = label === null ? `in words: ${answer.words ?? ""}` : `${answer.optionKey} — ${label}`;
+      journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `The owner answered the Main's question ${decision.id}: ${what}`.slice(0, 500), ref: decision.id }, deps.log);
+      if (deps.quiet !== true) await tellMain(missionId, decision.id, `The owner answered your question ${decision.id}: ${what}.`, deps);
+      return;
+    }
     const action = answer.by === "owner" ? chosenMissionChange(decision, answer.optionKey) : null;
     if (action === null) {
       const how = answer.optionKey === null ? `answered in words: ${answer.words ?? ""}` : "kept the mission as it is";
@@ -344,6 +390,8 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
       await tellMain(missionId, decision.id, `The owner chose to apply your card ${decision.id}, but it could not be applied: ${result.reasons.join("; ")}.`, deps);
       return;
     }
+    if (action.change.close === true) stopActiveRequests(deps.home, missionId, deps.log);
+    if ((action.change.addRepos ?? []).length > 0) offerMerges(deps.home, missionId, { now: deps.now, log: deps.log });
     const lines = missionChangeLinesOf(action.change).join("; ");
     journalQuietly(store, missionId, { kind: "charter", by: "owner", text: `The owner applied ${decision.id}: ${lines}.`, ref: decision.id }, deps.log);
     await tellMain(missionId, decision.id, `The owner applied your card ${decision.id}: ${lines}.`, deps);
@@ -360,10 +408,10 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
  * log line. Never throws.
  */
 export async function syncMainAfterChange(mission: Mission, change: MissionChange, deps: Pick<MissionAnswerDeps, "log" | "cli">): Promise<void> {
-  if ((change.name === undefined && change.code === undefined) || mission.mainId === null) return;
+  if (change.name === undefined && change.code === undefined) return;
   const titled = await syncMainTitle(mission, deps.cli);
   if (!titled.ok) deps.log(`[paseo-bm] the Main of mission ${mission.code} could not be retitled: ${titled.reason}`);
-  if (change.code !== undefined) {
+  if (change.code !== undefined && mission.mainId !== null) {
     const labelled = await setAgentLabel(mission.mainId, MISSION_CODE_LABEL, mission.code, deps.cli).catch((error: unknown) => ({ ok: false as const, reason: errorText(error) }));
     if (!labelled.ok) deps.log(`[paseo-bm] the Main of mission ${mission.code} could not be relabelled: ${labelled.reason}`);
   }
@@ -378,6 +426,8 @@ export interface SettleDeps {
   log: (message: string) => void;
   now?: () => Date;
   cli?: PaseoCliDeps;
+  /** The hook's Paseo handle: the new mission's own workspace is made with it (ADR-034 decision 4). */
+  paseo?: unknown;
 }
 
 /**
@@ -413,6 +463,10 @@ export async function settleMissionStart(mainId: string, turnStartedAt: string |
     journalQuietly(store, mission.missionId, { kind: "charter", by: "owner", text, ref: mainId }, log);
     const bound = await markMain(mainId, mission, { bindings: createBindingStore(deps.home, { log }), cli: deps.cli, log });
     if (!bound) log(`[paseo-bm] the binding of Main ${mainId} could not record mission ${mission.code}.`);
+    // Mission runtime design §5.2: an older one-repo mission of its repos is offered for merging.
+    offerMerges(deps.home, mission.missionId, { now: deps.now?.() ?? new Date(), log });
+    // ADR-034 decision 4: the mission gets its own workspace now; this Main keeps its conversation in the root until it is replaced.
+    if (deps.paseo !== undefined && deps.paseo !== null) await ensureMissionWorkspace(deps.paseo as MissionsPaseo, mission, { home: deps.home, log, ...(deps.now === undefined ? {} : { now: deps.now }) }).catch((error: unknown) => log(`[paseo-bm] the workspace of mission ${mission.code} could not be made: ${errorText(error)}`));
     return mission.missionId;
   } catch (error) {
     log(`[paseo-bm] recording the mission ${proposal.code} Main ${mainId} proposed failed: ${errorText(error)}`);
@@ -461,6 +515,7 @@ interface UpdateInput {
   repos?: { add?: string[]; remove?: string[] };
   confirmCharter?: boolean;
   close?: boolean;
+  transfer?: { to: string; requestIds: string[]; reason: string };
 }
 
 /** The bound Manager's mission tools (§4), as server-run tools the endpoint composes with its others. Never throws. */
@@ -648,8 +703,17 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       free.versions.push({ id: entry.id, text: entry.text, source: entry.source, ...(entry.title === undefined ? {} : { title: entry.title }), ...repos });
     });
 
+    // Mission runtime design §5.3: a move of requests to another mission is the owner's own card.
+    let target: Mission | null = null;
+    if (input.transfer !== undefined) {
+      const entry = createMissionStore(home).list().find((candidate) => candidate.state === "open" && candidate.code === input.transfer!.to);
+      target = entry === undefined ? null : createMissionStore(home).get(entry.missionId);
+      if (target === null) reasons.push(`input.transfer.to: no open mission has the code ${input.transfer.to} (bm_peers lists them)`);
+      else reasons.push(...transferRefusalsOf(home, { from: mission.missionId, to: target.missionId, requestIds: input.transfer.requestIds }).map((reason) => `input.transfer: ${reason}`));
+    }
+
     if (reasons.length > 0) return fixThese("bm_mission_update", reasons);
-    if (isEmptyFree(free) && isEmptyMissionChange(card)) return refused(`Nothing to change: what you gave is what mission ${mission.code} holds already. ${NOTHING}`);
+    if (isEmptyFree(free) && isEmptyMissionChange(card) && input.transfer === undefined) return refused(`Nothing to change: what you gave is what mission ${mission.code} holds already. ${NOTHING}`);
 
     const at = now().toISOString();
     const store = createMissionStore(home, { now });
@@ -677,17 +741,26 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       decisionId = opened.decision.id;
       journalQuietly(store, mission.missionId, { kind: "decision", by: "main", text: `The Main asked the owner to ${missionChangeLinesOf(card).join("; ")} (${decisionId}).`, ref: decisionId }, log);
     }
+    let transferDecisionId: string | null = null;
+    if (input.transfer !== undefined && target !== null) {
+      const offered = offerTransfer(home, mission, { to: target.missionId, requestIds: input.transfer.requestIds, reason: input.transfer.reason }, { now: now(), log, askedBy: main.agentId });
+      if (!offered.ok) return fixThese("bm_mission_update", offered.reasons.map((reason) => `input.transfer: ${reason}`));
+      transferDecisionId = offered.decisionId;
+    }
     return answered({
       applied,
       decisionId,
-      ...(decisionId === null ? {} : { owner: `The owner applies ${decisionId} or keeps the mission as it is, on its card; bm_mission shows what stands.` }),
+      ...(transferDecisionId === null ? {} : { transferDecisionId }),
+      ...(decisionId === null && transferDecisionId === null
+        ? {}
+        : { owner: `The owner applies ${[decisionId, transferDecisionId].filter((id) => id !== null).join(" and ")} or keeps things as they are, on the cards; bm_mission shows what stands.` }),
     });
   };
 
   /**
    * `bm_answer_worker` (§4, §8): every answer is checked on the decision as
-   * read — open, an option without a grant or change, asked within
-   * `MAIN_ANSWER_MINUTES`, allowed by `mainAnswerRuleOf` — and any refusal
+   * read — open, a known option, the Main named its decider by `deciderOf`
+   * (mission runtime design §4.1), a review grant within the Main's cap — and any refusal
    * writes nothing; then each is written in one transition that checks again.
    * From the reads to the writes nothing awaits.
    */
@@ -703,8 +776,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     const place = requestIndexOf(home, input.requestId);
     if (place === null || place.missionId !== mission.missionId) return refused(`Request ${input.requestId} is not one of mission ${mission.code} (bm_mission lists them). ${NOTHING}`);
     const store = createDecisionStore(home, { log });
-    const level = createMissionAutonomyStore(home);
-    const policy = currentPolicy(home, (why) => log(`[paseo-bm] could not read the autonomy policy for bm_answer_worker: ${why}`));
+    const facts = authorityFactsOf(home, log);
     const at = now();
     const reasonOf = (why: string) => redactText(why, process.env).replace(/\s+/g, " ").trim();
     const ruleOf = (decision: Decision, option: string): { rule: "answer" | "predict" } | { refusal: string } => {
@@ -718,13 +790,21 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       if (notOpen !== null) return { refusal: notOpen };
       const chosen = decision.options.find((entry) => entry.key === option);
       if (chosen === undefined) return { refusal: `${qn} has no option ${option}; its options are ${decision.options.map((entry) => entry.key).join(", ")}` };
-      if (chosen.grant !== undefined || isPreparedChange(chosen.action)) return { refusal: `option ${option} of ${qn} carries a grant or a change: only the owner chooses it` };
-      if (at.getTime() - Date.parse(decision.askedAt) > MAIN_ANSWER_MINUTES * 60_000) {
-        return { refusal: `${qn} was asked more than ${MAIN_ANSWER_MINUTES} minutes ago: it is the owner's now, on its card` };
+      // Mission runtime design §4.1, §4.5: the one resolver names the decider; no time window, review grants within the Main's cap.
+      const decider = deciderOf(decision, facts);
+      if (decider.decider === "main") {
+        if (chosen.grant !== undefined && !grantWithin(chosen.grant, facts.reviewCaps(decision.workspaceId, decision.requestId)?.mainLeft ?? 0)) {
+          return { refusal: `option ${option} of ${qn} grants more review calls than your share leaves: choose another or leave it to the owner` };
+        }
+        return { rule: "answer" };
       }
-      const rule = mainAnswerRuleOf(policy, decision, (name) => level.isDelegated(mission.missionId, name));
-      if ("rule" in rule && rule.rule === "predict" && (decision.prediction?.main ?? null) !== null) return { refusal: `you recommended an option for ${qn} already; the owner decides it` };
-      return rule;
+      if (decider.recommend) {
+        if ((decision.prediction?.main ?? null) !== null) return { refusal: `you recommended an option for ${qn} already; the owner decides it` };
+        return { rule: "predict" };
+      }
+      if (decider.rule === "owner-only") return { refusal: ownerOnlyRefusalText(decision.id) };
+      if (decider.decider === "code") return { refusal: `${qn} is paseo-bm's to decide (${decider.why}): nothing for you to answer` };
+      return { refusal: `${qn} is the owner's (${decider.why}): give your recommendation in your reply to the owner` };
     };
 
     const reasons: string[] = [];

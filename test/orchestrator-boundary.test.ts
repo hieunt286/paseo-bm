@@ -9,6 +9,7 @@ import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { noticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH, ORCHESTRATOR_PROVIDER_ID } from "../plugin/server/orchestrator-agent";
 import { registerOrchestratorRpcs, type OrchestratorRpcDeps } from "../plugin/server/orchestrator-rpc";
+import { createMemoryStore } from "../plugin/server/memory-store";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createOrchestratorTools, type OrchestratorTools } from "../plugin/server/orchestrator-tools";
 import { GIT_READ_ONLY_PREFIX, runGit } from "../plugin/server/repo-tool";
@@ -1419,7 +1420,8 @@ const PATHS: BoundaryPath[] = [
     tool: "bm_note",
     run: async () => {
       expect((await callTool("bm_note", { workspaceId: WORKSPACE_ID, text: "The owner wants dd/mm/yyyy everywhere." })).isError).toBe(false);
-      expect(createOrchestratorStore(home).readNotes(WORKSPACE_ID)).toMatchObject([{ text: "The owner wants dd/mm/yyyy everywhere." }]);
+      // Missions design §20: a project's note is the owner's word in its project memory.
+      expect(createMemoryStore(home).active(WORKSPACE_ID)).toMatchObject([{ kind: "decision", text: "The owner wants dd/mm/yyyy everywhere.", by: { role: "owner" } }]);
       // Missions design §9.1: a note keyed by mission.
       const made = createMissionStore(home, { now: () => NOW }).create({ code: "DATES", name: "Dates", goal: "Fix the date format.", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER });
       if (!made.ok) throw new Error(made.reasons.join("; "));
@@ -1821,13 +1823,15 @@ const PATHS: BoundaryPath[] = [
         turnId: "m-heavy",
         startedAt: at(19),
         endedAt: at(20),
-        usage: claudeUsage(500_000),
+        // Mission runtime design §3.1: a Main's figure is its real context (here 160,000 tokens, no window reported).
+        usage: { ...claudeUsage(500_000), contextUsed: 160_000 },
         runtime: { model: "claude-opus-5", thinkingOptionId: null, modeId: null, provider: "bm-manager" },
       });
       await appendRecord(location(), crossing);
       await codeRunTurn(crossing);
       expect(fake.sends.map((sent) => [sent.id, firstLine(sent.text).split(" ")[0]])).toEqual([[MANAGER, "/compact"]]);
-      expect(createInterventionStore(home).list().map((entry) => [entry.kind, entry.trigger, entry.targetAgentId])).toEqual([["compact", "threshold.crossed", MANAGER]]);
+      // A Main's in-place compaction is maintenance, not a coordination intervention (§3.2).
+      expect(createInterventionStore(home).list()).toEqual([]);
       // Compactable, the Main is not handed over: the mission keeps it.
       expect(createMissionStore(home).get(made.mission.missionId)?.mainId).toBe(MANAGER);
       expect(allCommands()).toEqual([]);

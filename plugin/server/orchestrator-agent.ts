@@ -23,8 +23,9 @@
  *   secret was made has lost its tools (design §5.1). Either way
  *   `open { recreate: true }` creates a new one, and so does every wake-up
  *   (`wakeableOrchestrator`, design §3.3), so the owner never has to. A
- *   wake-up also replaces a current one more than a day old, when it is idle
- *   and the owner has not written to it for 2 hours (design §6B.6). The
+ *   wake-up also replaces a current one more than a day old, or one whose
+ *   wakes touched 4 missions or numbered 10, when it is idle and the owner
+ *   has not written to it for 2 hours (design §6B.6; missions design §20). The
  *   newest labelled agent is the Orchestrator, so the new one takes over and
  *   the old one stays in the user's list.
  *
@@ -46,13 +47,13 @@ import { listAllAgents } from "./agent-role";
 import { aliasBases } from "./alias-bases";
 import { availableProviders } from "./role-choices";
 import { capabilityOf, chooseModeId, featuresFor, modesFor, profileOf, runPostureOf } from "./role-mode";
-import { TRACES_DIR_NAME, ensureDataHome, type DataHomeDeps } from "./data-home";
+import { TRACES_DIR_NAME, ensureDataHome, resolveDataHome, type DataHomeDeps } from "./data-home";
 import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { ORCHESTRATOR_PROMPT_START, briefLineOf } from "./notices";
 import { originOf } from "../shared/message-origin";
 import { ORCHESTRATOR_INSTRUCTIONS } from "./orchestrator-instructions";
 import { INSTRUCTIONS_LABEL, instructionsHashOf } from "./instructions-label";
-import { orchestratorDirOf } from "./orchestrator-store";
+import { createOrchestratorStore, orchestratorDirOf } from "./orchestrator-store";
 import { coded, errorText, requireDataHome } from "./rpc-kit";
 import { ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
@@ -89,14 +90,15 @@ export const ORCHESTRATOR_WORKSPACE = "own" as const;
 /** What the home folder's `README.md` says, so a user who finds it knows what it is. */
 export const ORCHESTRATOR_HOME_README = `# Beads Orchestrator
 
-This folder is the workspace of paseo-bm's Beads Orchestrator: the agent that
-reads the work of every paseo-bm project on this machine and tells their Beads
-Managers what to do. It sends a command itself only where you delegated what
-the command does, in Settings → Autonomy, or right after you tell it to in its
-chat; otherwise it asks you in the Inbox of Beads Manager, with the command
-ready on an option. It
-never asks for a commit, push or deploy, or to touch real data, unless you said
-so, and it asks you on big decisions.
+This folder is the workspace of paseo-bm's Beads Orchestrator: the one agent
+that governs the process of every paseo-bm mission on this machine. Each
+mission has a Main that runs its work; the Orchestrator watches the missions
+against their charters, nudges or re-plans with their Mains, settles which
+mission owns an area, and may stop a Worker on real risk when its Main has
+not. It changes nothing itself and decides no business question. Its
+commands carry no effect — never a commit, push or deploy, real data or cost —
+and no answer of yours grants one; what is yours it asks you in the Inbox of
+Beads Manager.
 
 It holds no project. paseo-bm created it; you may delete it after you archive
 the Beads Orchestrator agent.
@@ -116,7 +118,8 @@ export const ORCHESTRATOR_FIRST_PROMPT_START = ORCHESTRATOR_PROMPT_START;
 export const ORCHESTRATOR_FIRST_PROMPT = [
   briefLineOf("orchestrator", null),
   `${ORCHESTRATOR_FIRST_PROMPT_START}the Inbox of Beads Manager (paseo-bm).`,
-  "Your tools: bm_projects (where the paseo-bm projects stand), bm_missions (the missions you govern: charter, roster, figures and ladder), bm_request (one request), bm_agent_messages (recent messages of a paseo-bm agent), bm_decisions (the owner's decisions and their answers), bm_repo (read-only git in a project's workspace), bm_note (your notes on a mission or a project), bm_findings (a project's measured findings, for advice), bm_why (why a bead, a changed file or a decision exists: the chain behind it), bm_govern (a nudge, re-plan or arbitration to a mission's current Main), bm_arbitrate (settle which of two missions owns an area), bm_create_main (split a mission: on its split level, else the owner's card), bm_ask_owner (put a decision to the owner, with a prepared command to a Main or a change per option), bm_decide (decide a fallback incident, where the owner delegated its class to you), bm_direct_worker (stop a Worker at once, only on an open danger or the governor's stop step; its Main gets a copy) and bm_reply (reply to the owner's question about one of your open decisions, after a BM-ASK; the decision stays open).",
+  "Your tools: bm_projects (where the paseo-bm projects stand), bm_missions (the missions you govern: charter, roster, figures and ladder), bm_request (one request), bm_agent_messages (recent messages of a paseo-bm agent), bm_decisions (the owner's decisions and their answers), bm_repo (read-only git in a project's workspace), bm_note (your notes on a mission; the owner's word about a project goes to its project memory), bm_findings (a project's measured findings, for advice), bm_why (why a bead, a changed file or a decision exists: the chain behind it), bm_govern (a nudge, re-plan or arbitration to a mission's current Main), bm_arbitrate (settle which of two missions owns an area), bm_create_main (split a mission: on its split level, else the owner's card), bm_ask_owner (put a decision to the owner, with a prepared command to a Main or a change per option), bm_decide (decide a fallback incident, where the owner delegated its class to you), bm_direct_worker (stop a Worker at once, only on an open danger or the governor's stop step; its Main gets a copy) and bm_reply (reply to the owner's question about one of your open decisions, after a BM-ASK; the decision stays open).",
+  "Each BM-EVENTS message is one mission's wake and opens with that mission's brief.",
   "Do not look at any project yet. Reply with one short line saying you are ready, then wait for the user.",
 ].join("\n");
 
@@ -139,6 +142,10 @@ export function isOwnerWord(item: unknown): boolean {
 
 /** A current Orchestrator older than this is replaced by a fresh one at a wake-up (design §6B.6) … */
 export const FRESH_ORCHESTRATOR_AFTER_MS = 24 * 3_600_000;
+/** … or whose wakes touched this many missions (missions design §20, ADR-032 decision 3) … */
+export const FRESH_ORCHESTRATOR_AFTER_MISSIONS = 4;
+/** … or that carried this many wakes … */
+export const FRESH_ORCHESTRATOR_AFTER_WAKES = 10;
 /** … when it is idle and the owner has not written in its chat for this long. */
 export const OWNER_QUIET_MS = 2 * 3_600_000;
 /** How far back its chat is read for the owner's newest message: 5 pages of 200 entries. */
@@ -317,20 +324,43 @@ function replacementReasonOf(agent: OrchestratorAgentSnapshot, deps: Orchestrato
 }
 
 /**
- * "is more than a day old" when a current Orchestrator should make way for a
- * fresh one (design §6B.6), else null: created more than 24 hours ago, not
- * running or starting, and the owner's newest message in its chat
- * (`isOwnerWord`) is more than 2 hours old — or there is none. Its chat is read
- * only when the first two hold; an unknown creation time or status, a chat
- * that cannot be read (no entry), or an owner's message without a time keeps
- * it. Its notes survive in the store, and the new one reads them through
- * `bm_projects`.
+ * Why a current Orchestrator's load calls for a fresh one (design §6B.6;
+ * missions design §20, ADR-032 decision 3), from its own wake records: it
+ * touched `FRESH_ORCHESTRATOR_AFTER_MISSIONS` missions, or carried
+ * `FRESH_ORCHESTRATOR_AFTER_WAKES` wakes; else, created more than 24 hours
+ * ago. Null when none holds (wakes that cannot be read count as none).
+ */
+function loadReasonOf(agent: OrchestratorAgentSnapshot, deps: OrchestratorAgentDeps, now: number): string | null {
+  let wakes: ReturnType<ReturnType<typeof createOrchestratorStore>["readWakes"]> = [];
+  try {
+    const home = resolveDataHome(deps).home;
+    if (home !== null) wakes = createOrchestratorStore(home).readWakes().filter((wake) => wake.orchestratorId === agent.id);
+  } catch {
+    wakes = [];
+  }
+  const missions = new Set(wakes.flatMap((wake) => wake.missionIds ?? []));
+  if (missions.size >= FRESH_ORCHESTRATOR_AFTER_MISSIONS) return `has governed ${missions.size} missions`;
+  if (wakes.length >= FRESH_ORCHESTRATOR_AFTER_WAKES) return `has carried ${wakes.length} wakes`;
+  const created = Date.parse(agent.createdAt ?? "");
+  if (!Number.isNaN(created) && now - created > FRESH_ORCHESTRATOR_AFTER_MS) return "is more than a day old";
+  return null;
+}
+
+/**
+ * Why a current Orchestrator should make way for a fresh one (design §6B.6;
+ * missions design §20), else null: its load (`loadReasonOf`: 4 missions, 10
+ * wakes or a day), not running or starting, and the owner's newest message in
+ * its chat (`isOwnerWord`) is more than 2 hours old — or there is none. Its
+ * chat is read only when the first two hold; an unknown status, a chat that
+ * cannot be read (no entry), or an owner's message without a time keeps it.
+ * Its notes survive in the stores, and each wake's brief carries its
+ * mission's (`governor-brief.ts`).
  */
 async function dayOldReasonOf(paseo: OrchestratorAgentPaseo, agent: OrchestratorAgentSnapshot, deps: OrchestratorAgentDeps): Promise<string | null> {
   const now = (deps.now ?? (() => new Date()))().getTime();
-  const created = Date.parse(agent.createdAt ?? "");
-  if (Number.isNaN(created) || now - created <= FRESH_ORCHESTRATOR_AFTER_MS) return null;
   if (typeof agent.status !== "string" || agent.status === "running" || agent.status === "initializing") return null;
+  const reason = loadReasonOf(agent, deps, now);
+  if (reason === null) return null;
   let newestOwner = Number.NEGATIVE_INFINITY;
   const read = await readTimelinePages(paseo as unknown as LiveTimelinePaseo, agent.id, { pages: QUIET_PAGES, limit: QUIET_PAGE_LIMIT }, (entries) => {
     for (const entry of entries) {
@@ -341,7 +371,7 @@ async function dayOldReasonOf(paseo: OrchestratorAgentPaseo, agent: Orchestrator
     }
   });
   if (read === 0 || now - newestOwner <= OWNER_QUIET_MS) return null;
-  return "is more than a day old";
+  return reason;
 }
 
 /** `<data folder>/orchestrator/home`. */
@@ -468,9 +498,9 @@ async function openShared(paseo: OrchestratorAgentPaseo, deps: OrchestratorAgent
  * recreate: true }` creates it, when the newest is outdated or has lost its
  * tools — the owner consented to an Orchestrator when first opening it, and
  * waking one on older instructions or with no tools helps nobody — or when a
- * current one is more than a day old, idle, and the owner has been quiet in
- * its chat for 2 hours (design §6B.6, `dayOldReasonOf`), so its context stays
- * small; null when there is none, since the plugin never creates one the
+ * current one is more than a day old or carried 4 missions or 10 wakes,
+ * idle, and the owner has been quiet in its chat for 2 hours (design §6B.6;
+ * missions design §20; `dayOldReasonOf`), so its context stays small; null when there is none, since the plugin never creates one the
  * owner never opened.
  *
  * The old one is left to the owner: never archived, stopped or messaged
@@ -495,7 +525,7 @@ export async function wakeableOrchestrator(
   try {
     reason = stale ?? (await dayOldReasonOf(paseo, existing, deps));
   } catch (error) {
-    log(`[paseo-bm] could not tell whether the Beads Orchestrator ${existing.id} is a day old: ${errorText(error)}`);
+    log(`[paseo-bm] could not tell whether the Beads Orchestrator ${existing.id} should make way for a fresh one: ${errorText(error)}`);
     reason = null;
   }
   if (reason === null) return existing;

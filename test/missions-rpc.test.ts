@@ -385,6 +385,19 @@ describe("mission.change (§10.4)", () => {
     ]);
   });
 
+  it("closes a mission whose Workers are idle, and its active requests become stopped (mission runtime design §5.4)", async () => {
+    const { fake, web } = await fixture();
+    fake.byId("wkr-1")!.status = "idle";
+    const { summary } = await handleMissionChange({ missionId: web.missionId, close: true }, fake.paseo, deps({ cli: fakeCli().cli }));
+    expect(summary).toMatchObject({ state: "closed" });
+    expect(createMissionRoster(home).list(web.missionId).map((entry) => [entry.requestId, entry.state])).toEqual(
+      expect.arrayContaining([
+        [REQ1, "stopped"],
+        [REQ2, "stopped"],
+      ]),
+    );
+  });
+
   it("closes a mission whose Workers have all finished, without retitling", async () => {
     const { fake, bill } = await fixture();
     const { cli, calls } = fakeCli();
@@ -401,7 +414,8 @@ describe("mission.change (§10.4)", () => {
     ["an empty name", { name: "  " }, "the name is empty"],
     ["a repo Paseo does not list", { addRepos: ["wks-nope"] }, "repo: wks-nope is not a workspace Paseo lists"],
     ["a plugin home", { addRepos: ["wks-own"] }, "repo: wks-own is a paseo-bm home, not a repository"],
-    ["closing while a Worker of the mission runs", { close: true as const }, `a Worker of mission WEB still runs (${REQ1}, ${REQ2})`],
+    // Mission runtime design §5.4: only a Worker running a turn holds the close; REQ2's idle wkr-2 does not.
+    ["closing while a Worker of the mission runs", { close: true as const }, `a Worker of mission WEB still runs (${REQ1})`],
   ])("refuses %s with E_MISSION_INVALID and writes nothing", async (_name, change, reason) => {
     const { fake, web } = await fixture();
     const { cli, calls } = fakeCli();

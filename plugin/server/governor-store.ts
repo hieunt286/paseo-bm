@@ -362,7 +362,7 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
     const outcome: GovernorOutcome = { missionId: mission.missionId, figures, actions: [] };
     const facts: LadderFacts = { now: at, mainTurns: snapshot.mainTurnEnds.length, settings: settings.governor };
 
-    const workspaceId = missionsHomeIdOf(home) ?? mission.legacyWorkspaceId ?? mission.missionId;
+    const workspaceId = mission.workspaceId ?? missionsHomeIdOf(home) ?? mission.legacyWorkspaceId ?? mission.missionId;
     for (const family of GOVERNOR_FAMILIES) {
       const own = familyFiguresOf(figures, family);
       const { state, action } = ladderStepOf(before[family], own, facts);

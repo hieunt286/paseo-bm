@@ -93,12 +93,14 @@
  * (REQ-048b): nothing here reads, stores or prints an unmasked message.
  * Nothing here throws into an agent's turn end: a failure is one log line.
  */
+import { settleOwnerQuestionAnswers } from "./owner-question";
+import { deciderOf } from "../shared/authority";
+import { authorityFactsOf } from "./authority-facts";
 import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { parseAnswers, parseQuestions, type Answer, type Question } from "../shared/bm-questions";
 import { parseReports } from "../shared/bm-report";
 import type { TraceMessage, TraceRecord } from "../shared/contracts";
-import { decideRefusalOf } from "../shared/autonomy";
 import {
   DECISION_ID_PATTERN,
   REVIEW_BUDGET_SUBJECT,
@@ -125,7 +127,6 @@ import {
 import { parseCommandBlock } from "../shared/orchestrator-command";
 import { BR_REOPEN } from "../shared/shell";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
-import { currentPolicy } from "./autonomy-store";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { isPluginNotice } from "./notices";
@@ -135,7 +136,7 @@ import { takeProposedAnswers } from "./proposed-answers";
 import { settleMissionStart } from "./mission-tools";
 import { requestIndexOf } from "./mission-roster";
 import type { PaseoCliDeps } from "./paseo-cli";
-import { applyReviewBudgetGrants, policyGrantCapAt } from "./review-tools";
+import { applyReviewBudgetGrants } from "./review-tools";
 import type { TraceStoreLocation } from "./trace-store";
 import { errorText } from "./rpc-kit";
 
@@ -519,23 +520,22 @@ function freshQuestions(existing: readonly Decision[], requestId: string, questi
 }
 
 /**
- * Design §7.17.8 (a): a `review-budget` question that has just opened, in a
- * project whose cell for its class delegates, answered `by: policy` with its
- * recommended option when that option's grant is within what the policy may
- * still grant the request — its tier's budget less the policy's earlier
- * grants to it, so in all the policy at most doubles the budget
- * (`decideRefusalOf`, `policyGrantCapAt`) — and its grant recorded at once:
- * no card opens. Null when it waits for the owner or the Orchestrator.
+ * Design §7.17.8 (a), mission runtime design §4.1 rule 3, §4.3: a
+ * `review-budget` question that has just opened whose decider is **code**
+ * (`deciderOf`: `cost` delegated by the repo or the request's mission, its
+ * recommended option within the code cap — `untilClean` included, bounded)
+ * is answered `by: policy` with that option, and its grant recorded at once
+ * (`applyReviewBudgetGrants`, which turns a delegated `untilClean` into the
+ * calls left of the cap): no card opens. Null when someone else decides.
  */
 function answerBudgetByPolicy(context: OpenContext, decision: Decision): Decision | null {
   if (decision.subject !== REVIEW_BUDGET_SUBJECT) return null;
   const option = decision.options.find((entry) => entry.recommended);
   if (option === undefined) return null;
   const { home, log, workspaceId } = context;
-  const grantCap = policyGrantCapAt(home, workspaceId, decision.requestId, log);
-  const policy = currentPolicy(home, (why) => log(`[paseo-bm] could not read the autonomy policy; ${decision.id} waits: ${why}`));
-  if (decideRefusalOf(policy, decision, { optionKey: option.key, grantCap }) !== null) return null;
-  const reason = `Answered as it opened by your policy: ${decisionClassOf(decision)} is delegated in this project, and the grant is within what the policy may still grant this request (${grantCap} calls: the tier's budget, less its earlier grants)`;
+  const decider = deciderOf(decision, authorityFactsOf(home, log));
+  if (decider.decider !== "code") return null;
+  const reason = `Answered as it opened by paseo-bm: ${decider.why}`;
   const mutation = context.store.transition(
     decision.id,
     (current) => answerDecision(current, { by: "policy", via: "inbox", optionKey: option.key, class: decisionClassOf(current), reason, at: context.now }),
@@ -765,7 +765,14 @@ async function materialiseManager(context: Context, deps: MaterialiserDeps): Pro
   const proposed = takeProposedAnswers(record.agentId, record.startedAt);
   const owner = record.sent.filter((message) => message.origin === "user");
   // Missions design §4: a Main's bm_mission_start of this turn is recorded on the same rule.
-  await settleMissionStart(record.agentId, record.startedAt, owner.length > 0, { home: context.home, log: context.log, ...(deps.cli === undefined ? {} : { cli: deps.cli }) });
+  await settleMissionStart(record.agentId, record.startedAt, owner.length > 0, {
+    home: context.home,
+    log: context.log,
+    ...(deps.cli === undefined ? {} : { cli: deps.cli }),
+    ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }),
+  });
+  // Mission runtime design §4.6: the owner's answers to the Main's own questions, recorded in this turn, on the same rule.
+  await settleOwnerQuestionAnswers(record.agentId, record.startedAt ?? null, owner.length > 0, { home: context.home, log: context.log });
   if (owner.length === 0) {
     if (proposed.length > 0) {
       context.log(

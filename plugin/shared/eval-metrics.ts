@@ -14,7 +14,8 @@
  * - `eval-metrics/questions.ts` — A-1, A-2, A-5's lower bound over the question keys, the owner's wait and the recommended option's agreement;
  * - `eval-metrics/delegation.ts` — A-4 and A-5 of delegated decisions per class, with the owner's own reversals as A-5's reference;
  * - `eval-metrics/actions.ts` — A-6;
- * - `eval-metrics/orchestrator.ts` — A-7, the Orchestrator's tokens of A-8, A-12;
+ * - `eval-metrics/orchestrator.ts` — A-7, the Orchestrator's tokens of A-8, A-12, A-13;
+ * - `eval-metrics/mains.ts` — A-14, the Mains' turns by what started them;
  * - `eval-metrics/tokens.ts` — A-8 and the context and token figures;
  * - `eval-metrics/requests.ts` — A-11, review lift per tier and workspace (autonomy design §C.4) and the other supplementary figures;
  * - `eval-metrics/suite.ts` — A-3 and A-9, which only the suite knows;
@@ -47,7 +48,8 @@
 import { a6Of } from "./eval-metrics/actions";
 import { admissionEvidenceOf, type AdmissionEvidence } from "./eval-metrics/admission";
 import { delegationOf } from "./eval-metrics/delegation";
-import { a12Of, a7Of, orchestratorTokensOf } from "./eval-metrics/orchestrator";
+import { a14Of } from "./eval-metrics/mains";
+import { a12Of, a13Of, a7Of, orchestratorTokensOf } from "./eval-metrics/orchestrator";
 import { a1Of, a2Of, a5Of, ownerWaitOf, questionOutcomesOf, recommendedAgreementOf } from "./eval-metrics/questions";
 import { a11Of, processOf, reportFormatOf, requestsByDayOf, reviewLiftOf, reviewsOf, roundsBlockedOf, tierMixOf, turnsByRoleOf, turnsEndedOf } from "./eval-metrics/requests";
 import { askedDecisionsOf, conversationOf, deliveriesOf, emptyUnknowns, grantsOf, ownerTextsOf, scopeOf, shellEvidenceOf, storesOf } from "./eval-metrics/scope";
@@ -96,6 +98,7 @@ export {
   type VerificationFigures,
   type WorkerReadingFigures,
 } from "./eval-metrics/admission";
+export { MAIN_TRIGGERS, mainTriggerOf, type MainTrigger } from "./eval-metrics/mains";
 export { answerChoiceOf, freshInputTokensOf, median, normaliseQuestionText, percentile, recordStart, workspaceOfStallKey, type AnswerChoice } from "./eval-metrics/helpers";
 export {
   BRIEF_CHARACTERS,
@@ -124,6 +127,7 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
   const outcomes = questionOutcomesOf(scope, conversation, ownerTexts, decisionsByRequest, unknowns);
   const delegation = delegationOf(scope, stores, unknowns);
   const finished = scope.finishedRequests.length;
+  const a7 = a7Of(input, stores, scope.bounds, unknowns);
 
   return {
     window: { since: input.window.since, until: input.window.until },
@@ -134,11 +138,13 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
     a4: delegation.a4,
     a5: { ...a5Of(outcomes, scope, conversation.answeredAtByRequest, shellByRecord, stores.proposals), ...delegation.a5 },
     a6: a6Of(scope, shellByRecord, ownerTexts, grantsOf(deliveries, stores), input.workspaceDirectories, unknowns, stores),
-    a7: a7Of(input, stores, scope.bounds, unknowns),
+    a7,
     a8: a8Of(scope.finishedRequests, orchestratorTokensOf(stores.wakes, input.wakes !== undefined, scope.bounds, finished), input.suite?.orchestratorCostUsd ?? null),
     a9: a9Of(input.suite),
     a11: a11Of(scope.finishedRequests, outcomes, unknowns),
     a12: a12Of(input.interventions, scope.bounds, unknowns),
+    a13: a13Of(input.dangers, stores.wakes, input.wakes !== undefined, a7.noActionShare, scope.bounds, unknowns),
+    a14: a14Of(scope.scopeRecords, input.missionsWorkspaceIds),
     context: contextOf(scope),
     reviewLift: reviewLiftOf(scope),
     supplementary: {

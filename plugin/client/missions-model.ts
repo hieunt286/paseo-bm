@@ -452,6 +452,70 @@ export interface MissionPageView {
   contracts: Array<{ id: string; title: string; parties: string; version: string }>;
   journal: Array<{ time: string; text: string }>;
   plan: { text: string; meta: string };
+  /** The header's Main card (mission runtime design §7, artboards G and H); null from an older server. */
+  mains: MainHistoryView | null;
+  /** The In flight card (mission runtime design §7); null from an older server. */
+  inFlight: InFlightView | null;
+}
+
+/** One Main of the mission, newest first (artboard G). */
+export interface MainRowView {
+  agentId: string;
+  /** Its id's first 7. */
+  short: string;
+  from: string;
+  /** "now" for the current Main. */
+  until: string;
+  why: string;
+  /** The phone's one word: created, replaced, handoff, fallback, you asked. */
+  shortWhy: string;
+  current: boolean;
+}
+
+export interface MainHistoryView {
+  /** "3 Mains since 2026-10-10 08:12" (wide), "3 Mains" (phone). */
+  count: string;
+  shortCount: string;
+  rows: MainRowView[];
+}
+
+export interface InFlightRequestView {
+  requestId: string;
+  request: string;
+  topic: string;
+  repo: string;
+  worker: string | null;
+  workerId: string | null;
+  state: Badge;
+  /** The phone's words: another request named by its topic. */
+  phoneState: string;
+  lastReport: string;
+  active: boolean;
+}
+
+export interface InFlightQuestionView {
+  id: string;
+  who: Badge;
+  /** "Q1" or the decision id. */
+  label: string;
+  request: string | null;
+  text: string;
+  /** The question alone (the phone's line). */
+  question: string;
+  meta: string;
+  /** The owner's to answer: an "Answer" that opens the Inbox. */
+  yours: boolean;
+}
+
+export interface InFlightView {
+  meta: string;
+  requests: InFlightRequestView[];
+  /** The phone's "+ 1 finished"; null when none. */
+  restLine: string | null;
+  questions: InFlightQuestionView[];
+  /** The Main's open questions to the owner. */
+  asks: Array<{ id: string; text: string; meta: string }>;
+  links: Array<{ id: string; who: string; text: string }>;
 }
 
 /** How many criteria the charter card shows before "+ N more". */
@@ -481,6 +545,112 @@ function workerRowOf(row: MissionRow): WorkerRowView {
     links: row.links.length === 0 ? "—" : row.links.map((link) => `↔ ${link.repo.name} · ${link.messages}`).join(", "),
     active: row.phase === "working" || row.phase === "blocked",
   };
+}
+
+/** Why a Main changed, in words (mission runtime design §7). */
+const MAIN_REASON_WORDS: Readonly<Record<string, string>> = {
+  created: "created with the mission",
+  replaced: "replaced",
+  handoff: "handoff — its context was full; this Main carries on",
+  fallback: "fallback — its provider plan stopped it",
+  owner: "you asked",
+};
+
+const timeOrDate = (at: string, now: Date): string => localTimeText(new Date(at), now) || "—";
+
+/** The header's Main card from `mission.get`'s `mainHistory`, newest first; null with none. */
+export function mainHistoryOf(history: NonNullable<MissionGetOutput["mainHistory"]> | undefined, now: Date): MainHistoryView | null {
+  if (history === undefined || history.length === 0) return null;
+  const rows = [...history]
+    .sort((a, b) => b.from.localeCompare(a.from))
+    .map((entry) => ({
+      agentId: entry.agentId,
+      short: entry.agentId.slice(0, 7),
+      from: timeOrDate(entry.from, now),
+      until: entry.to === null ? "now" : timeOrDate(entry.to, now),
+      why: MAIN_REASON_WORDS[entry.reason] ?? entry.reason,
+      shortWhy: entry.reason === "owner" ? "you asked" : entry.reason,
+      current: entry.to === null,
+    }));
+  const oldest = history.reduce((first, entry) => (entry.from < first ? entry.from : first), history[0]!.from);
+  const count = history.length === 1 ? "1 Main" : `${history.length} Mains`;
+  const first = new Date(oldest);
+  const day = Number.isNaN(first.getTime()) ? "—" : `${first.getFullYear()}-${String(first.getMonth() + 1).padStart(2, "0")}-${String(first.getDate()).padStart(2, "0")}`;
+  return { count: `${count} since ${day} ${clockText(first)}`.trim(), shortCount: count, rows };
+}
+
+type MissionState = NonNullable<MissionGetOutput["inFlight"]>;
+
+const REQUEST_STATE_TONES: Readonly<Record<MissionState["requests"][number]["state"], Tone>> = {
+  working: "info",
+  "waiting-owner": "warning",
+  "waiting-main": "warning",
+  "waiting-other": "plain",
+  finished: "success",
+  stopped: "muted",
+};
+
+const REQUEST_ID_IN_TEXT = /req-\d{8}T\d{6}Z/g;
+
+/** The In flight card from `mission.get`'s `inFlight` (mission runtime design §7, artboards G and H); null from an older server. */
+export function inFlightOf(state: MissionState | undefined, now: Date): InFlightView | null {
+  if (state === undefined) return null;
+  const topicOf = new Map(state.requests.map((request) => [request.requestId, request.topic]));
+  const qnsOf = (requestId: string, decider: "owner" | "main") =>
+    state.questions.filter((question) => question.requestId === requestId && (decider === "owner" ? question.decider === "owner" || question.recommend : question.decider === "main" && !question.recommend)).map((question) => question.qn ?? question.id);
+  const requests = state.requests.map((request): InFlightRequestView => {
+    const waitingOn = request.waitingOn ?? "other work";
+    const words =
+      request.state === "waiting-owner"
+        ? ["waiting for you", ...qnsOf(request.requestId, "owner")].join(" · ")
+        : request.state === "waiting-main"
+          ? ["waiting for the Main", ...qnsOf(request.requestId, "main")].join(" · ")
+          : request.state === "waiting-other"
+            ? `waiting for ${waitingOn.replace(REQUEST_ID_IN_TEXT, (id) => shortRequestOf(id))}`
+            : request.state;
+    const phone = request.state === "waiting-other" ? `waiting for ${waitingOn.replace(REQUEST_ID_IN_TEXT, (id) => topicOf.get(id) ?? shortRequestOf(id))}` : words;
+    return {
+      requestId: request.requestId,
+      request: shortRequestOf(request.requestId),
+      topic: request.topic,
+      repo: request.repo ?? request.workspaceId,
+      worker: request.workerId === null ? null : request.workerId.slice(0, 7),
+      workerId: request.workerId,
+      state: { text: words, tone: REQUEST_STATE_TONES[request.state] },
+      phoneState: phone,
+      lastReport: request.lastReport === null ? "—" : `${request.lastReport.phase} · ${timeOrDate(request.lastReport.at, now)}`,
+      active: request.state !== "finished" && request.state !== "stopped",
+    };
+  });
+  const finished = requests.filter((request) => request.state.text === "finished").length;
+  const stopped = requests.filter((request) => request.state.text === "stopped").length;
+  const rest = [...(finished > 0 ? [`${finished} finished`] : []), ...(stopped > 0 ? [`${stopped} stopped`] : [])];
+  const questions = state.questions.map((question): InFlightQuestionView => {
+    const yours = question.decider === "owner" || question.recommend;
+    const who: Badge = yours
+      ? { text: "you decide", tone: "warning" }
+      : { text: question.decider === "main" ? "the Main decides" : question.decider === "orchestrator" ? "the Orchestrator decides" : "paseo-bm", tone: "muted" };
+    const recommended = question.recommended === null ? [] : [`recommended: ${question.recommended}`];
+    return {
+      id: question.id,
+      who,
+      label: question.qn ?? question.id,
+      request: question.requestId === null ? null : shortRequestOf(question.requestId),
+      text: `${question.class}${question.subject === null ? "" : `, ${question.subject}`} — ${question.question}`,
+      question: question.question,
+      meta: (yours ? recommended : [`asked ${timeOrDate(question.askedAt, now)}`, ...recommended]).join(" · "),
+      yours,
+    };
+  });
+  const asks = state.asks
+    .filter((ask) => ask.byMain !== false)
+    .map((ask) => ({ id: ask.id, text: ask.question, meta: [...(ask.recommended == null ? [] : [`recommended: ${ask.recommended}`]), `m:…:${ask.id.split(":").at(-1) ?? ""}`].join(" · ") }));
+  const links = state.links.map((link) => ({
+    id: link.linkId,
+    who: link.waitingSince === null ? link.state : `waiting ${shortSpan(now.getTime() - (Date.parse(link.waitingSince) || now.getTime()))}`,
+    text: `${link.partner} · ${link.gist}`,
+  }));
+  return { meta: `what the Main knows · read ${clockText(new Date(state.at)) || "—"}`, requests, restLine: rest.length === 0 ? null : `+ ${rest.join(" · ")}`, questions, asks, links };
 }
 
 /** A mission's page from `mission.get`. */
@@ -543,6 +713,8 @@ export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf 
       text: page.plan.text.trim() === "" ? "No plan yet." : page.plan.text,
       meta: page.plan.updatedAt === null ? "not written yet · read-only" : `updated ${localTimeText(new Date(page.plan.updatedAt), now) || "—"} by the Main · read-only`,
     },
+    mains: mainHistoryOf(page.mainHistory, now),
+    inFlight: inFlightOf(page.inFlight, now),
   };
 }
 

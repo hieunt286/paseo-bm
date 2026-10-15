@@ -44,8 +44,9 @@
  *
  * Nothing here throws into the plugin: a failure is one log line.
  */
+import { isMissionMain } from "./main-channel";
 import { join } from "node:path";
-import { compactCrossingOf, compactionOnFor, type CoordinationRole, type CoordinationSettings, type ThresholdCrossing } from "../shared/coordination";
+import { compactCrossingOf, compactionOnFor, mainCompactionOnFor, mainContextCrossingOf, type CoordinationRole, type CoordinationSettings, type ThresholdCrossing } from "../shared/coordination";
 import type { ParsedReport, TraceMessage, TraceRecord } from "../shared/contracts";
 import { BRIEF_CHARACTERS, turnTokensOf } from "../shared/eval-metrics/tokens";
 import { STATE_NOTICE_MARKER } from "../shared/notices";
@@ -70,9 +71,9 @@ import { noticeQueue, type BatchItem, type NoticeBatch, type NoticePaseo, type N
 import { readRecords } from "./trace-store";
 import { reconstructTraces, type ReconstructedTrace } from "./traces";
 import { errorText } from "./rpc-kit";
-import { newestReportRecordOf, reportPhaseOf } from "./outbox";
 import { createMissionStore } from "./mission-store";
-import { createMissionRoster } from "./mission-roster";
+import { missionStateOf } from "./mission-state";
+import { renderMissionState } from "../shared/mission-state";
 
 /**
  * What Claude is told to keep (design §G.5 step 2): the request and the
@@ -121,6 +122,19 @@ export function contextCrossingOf(record: TraceRecord, settings: Pick<Coordinati
   return compactCrossingOf(record.role, { coverage: turn.coverage, tokensRead: turn.tokensRead, contextShare: turn.contextShare }, settings);
 }
 
+/**
+ * Whether a mission's Main's recorded turn crosses its context threshold
+ * (mission runtime design §3.1): its real context against `main.*`, never the
+ * per-turn token sum. Null below, or for a turn holding a compaction (the
+ * next turn is judged). Pure.
+ */
+export function mainCrossingOf(record: TraceRecord, settings: Pick<CoordinationSettings, "main">): ThresholdCrossing | null {
+  if (record.evidence.some((evidence) => evidence.kind === "compaction")) return null;
+  return mainContextCrossingOf(turnTokensOf(record), settings);
+}
+
+export { isMissionMain };
+
 /** A crossing in words, the reason a compaction or a handoff keeps. */
 export function crossingWordsOf(crossing: ThresholdCrossing): string {
   const count = (value: number) => Math.round(value).toLocaleString("en-US");
@@ -131,6 +145,8 @@ export function crossingWordsOf(crossing: ThresholdCrossing): string {
       return `it read ${count(crossing.value)} tokens in one turn (threshold ${count(crossing.threshold)})`;
     case "requestTokens":
       return `its request read ${count(crossing.value)} tokens (threshold ${count(crossing.threshold)})`;
+    case "contextTokens":
+      return `its context reached ${count(crossing.value)} tokens (threshold ${count(crossing.threshold)})`;
   }
 }
 
@@ -248,44 +264,29 @@ function workerBrief(entry: CompactionEntry, trace: ReconstructedTrace | undefin
 }
 
 /**
- * A Main's requests (missions design §3.5, §6): its open mission's active
- * roster requests, newest first, each in its repo with its newest Worker,
- * its newest report's phase and its open decisions. Null for an agent that is
- * no open mission's Main. Never throws: a store that cannot be read is null.
+ * A Main's brief (mission runtime design §2.2, §3.3): the rendering of its
+ * open mission's state — what is in flight, whom it waits on, links, the
+ * owner's recent exchange, the governor, the journal. Null for an agent that
+ * is no open mission's Main. Never throws: a store that cannot be read is null.
  */
-function missionRequestLines(entry: CompactionEntry, home: string, env: NodeJS.ProcessEnv): string[] | null {
+function mainStateLines(entry: CompactionEntry, home: string, env: NodeJS.ProcessEnv): string[] | null {
   try {
     const mission = createMissionStore(home).openByMain(entry.agentId);
     if (mission === null) return null;
-    const decisions = createDecisionStore(home, { log: () => {} });
-    const lines = createMissionRoster(home)
-      .list(mission.missionId)
-      .filter((request) => request.state === "active")
-      .reverse()
-      .slice(0, 5)
-      .map((request) => {
-        const worker = request.workerIds.at(-1) ?? null;
-        const report = worker === null ? null : newestReportRecordOf(home, request.workspaceId, worker);
-        const open = decisions
-          .list({ workspaceId: request.workspaceId, requestId: request.requestId })
-          .filter((decision) => decision.status === "open" || decision.status === "needs-confirmation").length;
-        const asked = request.topic === "" ? "" : `; asked: ${shorten(redactText(request.topic, env), 240)}`;
-        return `- ${request.requestId}: ${(report === null ? null : reportPhaseOf(report.text)) ?? "no report yet"}, in ${request.workspaceId}, Worker ${worker ?? "unknown"}, open decisions ${open}${asked}`;
-      });
-    return [`mission: ${mission.code} ${mission.name}`, ...(lines.length === 0 ? ["requests: none open"] : ["requests (newest first):", ...lines]), "Read the whole mission with bm_mission."];
+    const state = missionStateOf(home, mission.missionId, { env });
+    return state === null ? null : [`role: manager, the Main of mission ${mission.code}`, renderMissionState(state, { maxChars: STATE_BRIEF_MAX_CHARS - 600 })];
   } catch {
     return null;
   }
 }
 
-/** The Manager's brief: its newest requests with where they stand, and the owner's newest words to it; a Main's requests from its mission. */
+/** An unbound Manager's brief: its newest requests with where they stand, and the owner's newest words to it. A Main's is `mainStateLines`. */
 function managerBrief(
   entry: CompactionEntry,
   traces: readonly ReconstructedTrace[],
   decisions: readonly Decision[],
   records: readonly TraceRecord[],
   env: NodeJS.ProcessEnv,
-  mission: string[] | null,
 ): string[] {
   const own = traces
     .filter((trace) => trace.requestId !== null && trace.managerAgentId === entry.agentId)
@@ -306,7 +307,7 @@ function managerBrief(
   };
   return [
     "role: manager",
-    ...(mission ?? (own.length === 0 ? ["requests: none recorded"] : ["requests (newest first):", ...own.map(requestLine)])),
+    ...(own.length === 0 ? ["requests: none recorded"] : ["requests (newest first):", ...own.map(requestLine)]),
     ...(owner.length === 0 ? ["ownerSaid: nothing recorded"] : ["ownerSaid (newest last):", ...owner.map((message) => `- ${message.at}: ${shorten(redactText(message.text, env), 400)}`)]),
   ];
 }
@@ -341,7 +342,7 @@ export function stateBriefOf(entry: CompactionEntry, home: string, env: NodeJS.P
   const body =
     entry.role === "worker"
       ? workerBrief(entry, traces.find((trace) => trace.requestId !== null && trace.requestId === entry.requestId), decisions, env)
-      : managerBrief(entry, traces, decisions, records, env, missionRequestLines(entry, home, env));
+      : (mainStateLines(entry, home, env) ?? managerBrief(entry, traces, decisions, records, env));
   const text = [STATE_NOTICE_MARKER, BRIEF_INTRO, ...body].join("\n");
   return text.length <= STATE_BRIEF_MAX_CHARS ? text : `${text.slice(0, STATE_BRIEF_MAX_CHARS - 2).trimEnd()}\n…`;
 }
@@ -402,6 +403,16 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
     },
   };
 
+  /**
+   * Whether compaction is on for an entry's agent: a mission's Main by
+   * `main.compact` (mission runtime design §3.3), any other agent by
+   * `compact.enabled` and the A-12 guard.
+   */
+  const onFor = (home: string, entry: Pick<CompactionEntry, "agentId" | "role" | "provider">): boolean => {
+    const settings = readCoordinationSettings({ home, log });
+    return entry.role === "manager" && isMissionMain(home, entry.agentId) ? mainCompactionOnFor(settings, entry.provider) : compactionOnFor(settings, entry.provider);
+  };
+
   /** At the idle moment, synchronously: still waiting, compaction still on, and not held past its safe moment. */
   const currentAt =
     (id: string, enqueuedAt: number) =>
@@ -411,7 +422,7 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
       const store = storeOf(home);
       const entry = store.get(id);
       if (entry === null || entry.state !== "waiting") return false;
-      if (!compactionOnFor(readCoordinationSettings({ home, log }), entry.provider)) {
+      if (!onFor(home, entry)) {
         store.update(id, (current) => endedEntry(current, "off", now().toISOString()));
         return false;
       }
@@ -447,6 +458,21 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
   function start(home: string, store: CompactionStore, record: TraceRecord): CompactionEntry | null {
     const settings = readCoordinationSettings({ home, log });
     const provider = turnProviderOf(record);
+    // Mission runtime design §3.3: a Main is compacted in place by its real context, without a cap and outside the A-12 guard.
+    if (record.role === "manager" && isMissionMain(home, record.agentId)) {
+      if (!mainCompactionOnFor(settings, provider)) return null;
+      const crossing = mainCrossingOf(record, settings);
+      if (crossing === null) return null;
+      return store.add({
+        workspaceId: record.workspaceId,
+        requestId: null,
+        agentId: record.agentId,
+        role: "manager",
+        provider: provider as CompactionEntry["provider"],
+        interventionId: null,
+        reason: shorten(crossingWordsOf(crossing), MAX_COMPACTION_REASON_CHARS),
+      });
+    }
     if (!compactionOnFor(settings, provider)) return null;
     const crossing = contextCrossingOf(record, settings);
     if (crossing === null || sentCompactionsOf(store.list(), record.agentId) >= settings.compact.maxPerAgent) return null;
@@ -485,7 +511,7 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
           if (compactedAt !== null) await sendBrief(home, entry, compactedAt, paseo);
           return;
         }
-        if (!compactionOnFor(readCoordinationSettings({ home, log }), entry.provider)) {
+        if (!onFor(home, entry)) {
           store.update(entry.id, (current) => endedEntry(current, "off", now().toISOString()));
           return;
         }

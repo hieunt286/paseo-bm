@@ -18,9 +18,12 @@ import {
   isWakeAct,
   missionReviewEventsOf,
   missionSignalEventsOf,
+  actMissionsOf,
   missionsOfEvent,
+  missionsOfGroup,
   outsideCharterOf,
   reviewMarksOf,
+  wakeGroupOf,
   wakesGovernor,
   type BmEvent,
   type EventBus,
@@ -120,6 +123,12 @@ const LOCAL_OPTIONS: Decision["options"] = [
 const question = (n: number, over: Partial<Decision> = {}) =>
   makeDecision({ id: `q:${REQUEST}:Q${n}`, workspaceId: WS, requestId: REQUEST, options: LOCAL_OPTIONS, ...over });
 const wakes = () => createOrchestratorStore(home, { now: () => clock }).readWakes();
+/** A BM-EVENTS message's event lines: after its mission briefs (missions design §20), else after its two header lines. */
+const eventLinesOf = (text: string): string[] => {
+  const lines = text.split("\n");
+  const at = lines.indexOf("## Events");
+  return at < 0 ? lines.slice(2) : lines.slice(at + 1);
+};
 
 /** A danger signal of Worker `n` of a project, its alert raised: it wakes the Orchestrator (missions design §9.7). */
 function danger(n: number, workspaceId = WS): WorkerSignalEvent & { alertKey: string } {
@@ -183,7 +192,7 @@ describe("events: types, keys, lines (design §A.8)", () => {
     expect(message.split("\n")[0]).toBe(EVENTS_NOTICE_MARKER);
     expect(message.split("\n")).toHaveLength(4);
     expect(message).toContain("2 events");
-    expect(EVENTS_BATCH.compose(["- x"])).toContain("1 event,");
+    expect(EVENTS_BATCH.compose(["- x"], "")).toContain("1 event,");
     // A plugin notice: never the owner's words, nor the owner's approval.
     expect(isPluginNotice(message)).toBe(true);
     expect(noticeMarkerOf(message)).toBe("BM-EVENTS");
@@ -241,7 +250,7 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     expect(await events.publish([first], fake.paseo)).toEqual({ status: "done", published: [eventKeyOf(first)], skipped: [] });
     await orchestratorIdle(fake);
     expect(fake.sends).toHaveLength(1);
-    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([expect.stringMatching(/^- worker\.signal danger — project wks_1, Worker agent-worker-1,/)]);
+    expect(eventLinesOf(fake.sends[0]!.text)).toEqual([expect.stringMatching(/^- worker\.signal danger — project wks_1, Worker agent-worker-1,/)]);
     // Out of the scope: nothing, and no Orchestrator is looked for.
     expect(await events.publish([danger(2, OTHER_WS)], fake.paseo)).toMatchObject({ status: "none", published: [] });
     // Its alert cleared before the Orchestrator is idle: dropped.
@@ -271,7 +280,7 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     expect(missionsOfEvent(signal!)).toEqual([MISSION]);
     expect(await events.governed([outcome], fake.paseo)).toEqual({ status: "done", published: [`mission.signal:${MISSION}:stuck@${clock.toISOString()}`], skipped: [] });
     expect(fake.sends).toHaveLength(1);
-    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([
+    expect(eventLinesOf(fake.sends[0]!.text)).toEqual([
       `- mission.signal stuck — mission ${MISSION}, step 3: the Main was nudged and these still hold after the window: stalled 1 (threshold ≥ 1; ${REQUEST}). Read the mission with bm_missions and send its Main bm_govern with step "replan"; on real risk, ask the owner with bm_ask_owner or stop a Worker with bm_direct_worker.`,
     ]);
 
@@ -312,7 +321,7 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
       published: [`mission.review:${MISSION}:finished-10:10`, `mission.review:${MISSION}:budget-50:requestsBudget`],
       skipped: [],
     });
-    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([
+    expect(eventLinesOf(fake.sends[0]!.text)).toEqual([
       `- mission.review finished-10 — mission ${MISSION}, 10 requests finished. Read it with bm_missions against its charter; act with bm_govern or bm_ask_owner where it drifted, else keep a note with bm_note.`,
       `- mission.review budget-50 — mission ${MISSION}, requestsBudget at 50 %. Read it with bm_missions against its charter; act with bm_govern or bm_ask_owner where it drifted, else keep a note with bm_note.`,
     ]);
@@ -343,7 +352,7 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     expect(await pass()).toMatchObject({ status: "none" });
     clock = new Date(clock.getTime() + 60_000);
     expect(await pass()).toEqual({ status: "done", published: [`mission.scope:${MISSION}:${OTHER_WS}:${REQUEST}`], skipped: [] });
-    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([
+    expect(eventLinesOf(fake.sends[0]!.text)).toEqual([
       `- mission.scope — mission ${MISSION}, project ${OTHER_WS} is outside its charter (request ${REQUEST}); its Main may not add the repo and has not asked the owner. Read the mission with bm_missions; tell its Main with bm_govern, or ask the owner with bm_ask_owner.`,
     ]);
     await orchestratorIdle(fake);
@@ -373,7 +382,7 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     const fake = daemon();
     const events = bus();
     expect((await events.publish([conflict("src/pay/")], fake.paseo)).published).toHaveLength(1);
-    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([
+    expect(eventLinesOf(fake.sends[0]!.text)).toEqual([
       `- mission.conflict — missions ${OTHER_MISSION} and ${MISSION}, project ${WS}, area src/pay/: both wrote src/pay/card.ts in the last 7 days. Read both with bm_missions and give the area one owner with bm_arbitrate.`,
     ]);
     await orchestratorIdle(fake);
@@ -394,7 +403,7 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     const events = bus();
     const start = clock.getTime();
     const minute = (m: number) => (clock = new Date(start + m * 60_000));
-    const lines = (n: number) => fake.sends[n]!.text.split("\n").slice(2).map((line) => line.split(" — ")[0]);
+    const lines = (n: number) => eventLinesOf(fake.sends[n]!.text).map((line) => line.split(" — ")[0]);
 
     // Two families of one mission at once: one wake.
     const both: GovernorOutcome = { ...replanDue(), actions: [...replanDue().actions, { family: "drift", action: "replan-due", commandId: null, reason: null }] };
@@ -456,7 +465,7 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     failing = 1;
     expect(await events.governed([], fake.paseo)).toMatchObject({ status: "failed", published: [] });
     expect(await events.governed([], fake.paseo)).toMatchObject({ status: "done", published: [driftKey] });
-    expect(fake.sends.map((send) => send.text.split("\n").slice(2).map((line) => line.split(" — ")[0]))).toEqual([["- mission.signal stuck"], ["- mission.signal drift"]]);
+    expect(fake.sends.map((send) => eventLinesOf(send.text).map((line) => line.split(" — ")[0]))).toEqual([["- mission.signal stuck"], ["- mission.signal drift"]]);
     await orchestratorIdle(fake);
 
     // A danger signal the queue dropped is not remembered: raised again, it goes.
@@ -566,23 +575,34 @@ describe("the delegation to the Orchestrator (design §B.5, §B.9; bead t9lm.11)
 });
 
 describe("each wake recorded for A-7 (evaluation design §4) and M-26 (missions design §9.7)", () => {
-  it("a delivered BM-EVENTS message is one wake: the Orchestrator, the time, its projects, events and their types, no text", async () => {
+  it("a delivered BM-EVENTS message is one wake of one group (missions design §20): the Orchestrator, the time, its projects, missions, events and their types, no text", async () => {
     inScope();
     inScope(OTHER_WS);
     openMission();
     const fake = daemon();
     fake.byId(ORCHESTRATOR)!.status = "running";
     const events = bus();
-    await events.publish([danger(1), danger(2, OTHER_WS), ...missionSignalEventsOf(replanDue(), clock)], fake.paseo);
+    const signals = missionSignalEventsOf(replanDue(), clock);
+    await events.publish([...signals, danger(1), danger(2, OTHER_WS)], fake.paseo);
     // Queued, not yet sent: no wake.
     expect(wakes()).toEqual([]);
     clock = new Date(clock.getTime() + 60_000);
     await orchestratorIdle(fake);
+    // The danger groups go first, each project its own wake; the mission's wake follows, one turn apart.
     expect(fake.sends).toHaveLength(1);
-    expect(wakes()).toEqual([
-      { orchestratorId: ORCHESTRATOR, at: clock.toISOString(), endedAt: null, workspaceIds: [WS, OTHER_WS].sort(), events: 3, eventTypes: ["mission.signal", "worker.signal"] },
-    ]);
-    expect(events.wakeEventsOf(ORCHESTRATOR).map((event) => event.type)).toEqual(["worker.signal", "worker.signal", "mission.signal"]);
+    expect(wakes()).toEqual([{ orchestratorId: ORCHESTRATOR, at: clock.toISOString(), endedAt: null, workspaceIds: [WS], events: 1, eventTypes: ["worker.signal"] }]);
+    expect(events.wakeEventsOf(ORCHESTRATOR).map((event) => event.type)).toEqual(["worker.signal"]);
+    await orchestratorIdle(fake);
+    expect(fake.sends).toHaveLength(2);
+    expect(wakes()[1]).toMatchObject({ workspaceIds: [OTHER_WS], events: 1, eventTypes: ["worker.signal"] });
+    await orchestratorIdle(fake);
+    expect(fake.sends).toHaveLength(3);
+    expect(wakes()[2]).toMatchObject({ workspaceIds: [], events: signals.length, eventTypes: ["mission.signal"], missionIds: [MISSION] });
+    expect(wakes()[2]).not.toHaveProperty("text");
+    // The mission's wake opens with its brief, read when it was sent.
+    expect(fake.sends[2]!.text).toContain(`## The mission now`);
+    expect(fake.sends[2]!.text).toContain(`(${MISSION}), open`);
+    expect(fake.sends[0]!.text).not.toContain(`## The mission now`);
   });
 
   it("a batch whose every event settled is no wake", async () => {
@@ -664,6 +684,7 @@ describe("each wake recorded for A-7 (evaluation design §4) and M-26 (missions 
         eventTypes: ["worker.signal"],
         usage: { inputTokens: 9, cachedInputTokens: 41_200, outputTokens: 350 },
         acted: false,
+        offMission: 0,
       },
     ]);
     // The owner talking to it later: no open wake, nothing read or written.
@@ -802,7 +823,7 @@ describe("mission.split: a Main's split suggestion wakes the governor (missions 
     const events = bus();
     const first = suggest("REF");
     expect(await events.publish([first], fake.paseo)).toEqual({ status: "done", published: [`mission.split:${MISSION}:REF`], skipped: [] });
-    expect(fake.sends[0]!.text.split("\n").slice(2)).toEqual([eventLineOf(first)]);
+    expect(eventLinesOf(fake.sends[0]!.text)).toEqual([eventLineOf(first)]);
     await orchestratorIdle(fake);
 
     // Past the mission's window, the Orchestrator busy: a mission that took the code settles it.
@@ -835,6 +856,95 @@ describe("mission.split: a Main's split suggestion wakes the governor (missions 
     clock = new Date(start + 15 * 60_000);
     expect(await events.governed([], fake.paseo)).toMatchObject({ status: "done", published: [`mission.split:${MISSION}:CARD`] });
     expect(fake.sends).toHaveLength(2);
-    expect(fake.sends[1]!.text.split("\n").slice(2).map((line) => line.split(" — ")[0])).toEqual(["- mission.split"]);
+    expect(eventLinesOf(fake.sends[1]!.text).map((line) => line.split(" — ")[0])).toEqual(["- mission.split"]);
+  });
+});
+
+describe("a mission per wake, danger to the Main first (missions design §20, ADR-032)", () => {
+  /** A mission Worker's danger: its Main told, so the governor hears at `backupAt` (3 minutes after the alert). */
+  const missionDanger = (n: number, backupAt: string | null = new Date(clock.getTime() + 3 * 60_000).toISOString()) => ({ ...danger(n), missionId: MISSION, backupAt });
+
+  it("groups by mission, a conflict's two missions together, a Worker of no mission by its project", () => {
+    const signal = missionSignalEventsOf(replanDue(), clock)[0]!;
+    expect(wakeGroupOf(signal)).toBe(`mission:${MISSION}`);
+    expect(wakeGroupOf({ type: "mission.conflict", missions: [OTHER_MISSION, MISSION, MISSION], workspaceId: WS, area: "src", evidence: "x" })).toBe(`missions:${MISSION}+${OTHER_MISSION}`);
+    expect(wakeGroupOf(danger(1))).toBe(`project:${WS}`);
+    expect(wakeGroupOf(missionDanger(2))).toBe(`mission:${MISSION}`);
+    expect(missionsOfGroup(`missions:${MISSION}+${OTHER_MISSION}`)).toEqual([MISSION, OTHER_MISSION]);
+    expect(missionsOfGroup(`project:${WS}`)).toEqual([]);
+  });
+
+  it("a mission Worker's danger reaches the governor at any repo level, only from backupAt, with its mission's brief", async () => {
+    openMission();
+    const fake = daemon();
+    const events = bus();
+    const signal = missionDanger(1);
+    createOrchestratorStore(home, { now: () => clock }).openDanger({ alertKey: signal.alertKey, workspaceId: WS, workerId: signal.workerId, requestId: REQUEST, missionId: MISSION, raisedAt: signal.since, mainId: "main-1" });
+    // No project of the policy's scope, yet in the events' scope: a mission's Worker.
+    expect(isInEventScope(signal, new Set())).toBe(true);
+    expect(isInEventScope({ ...signal, missionId: null }, new Set())).toBe(false);
+
+    expect(await events.publish([signal], fake.paseo)).toMatchObject({ status: "none", published: [], skipped: [eventKeyOf(signal)] });
+    expect(fake.sends).toEqual([]);
+    clock = new Date(clock.getTime() + 3 * 60_000);
+    expect(await events.governed([], fake.paseo)).toMatchObject({ status: "done", published: [eventKeyOf(signal)] });
+    expect(fake.sends).toHaveLength(1);
+    expect(fake.sends[0]!.text).toContain(`Mission PAY — PAY (${MISSION}), open; Main main-1.`);
+    expect(eventLinesOf(fake.sends[0]!.text)).toEqual([expect.stringMatching(/^- worker\.signal danger — project wks_1, Worker agent-worker-1,/)]);
+    expect(createOrchestratorStore(home).readDangers()[0]).toMatchObject({ governorToldAt: clock.toISOString(), endedAt: null });
+    expect(wakes()[0]).toMatchObject({ missionIds: [MISSION], eventTypes: ["worker.signal"] });
+  });
+
+  it("the backup is dropped when the Main stopped the Worker first (its alert cleared); with no Main told it goes at once", async () => {
+    openMission();
+    const fake = daemon();
+    const events = bus();
+    const stopped = missionDanger(1);
+    await events.publish([stopped], fake.paseo);
+    alerts().clear(stopped.alertKey);
+    clock = new Date(clock.getTime() + 3 * 60_000);
+    await events.governed([], fake.paseo);
+    expect(fake.sends).toEqual([]);
+
+    const noMain = missionDanger(2, null);
+    expect(await events.publish([noMain], fake.paseo)).toMatchObject({ status: "done", published: [eventKeyOf(noMain)] });
+    expect(fake.sends).toHaveLength(1);
+  });
+
+  it("two missions' events pending at one idle moment go as two wakes, each with its own brief", async () => {
+    openMission();
+    openMission(OTHER_MISSION, [OTHER_WS], "BIL");
+    const fake = daemon();
+    fake.byId(ORCHESTRATOR)!.status = "running";
+    const events = bus();
+    await events.governed([replanDue(), replanDue(OTHER_MISSION)], fake.paseo);
+    await orchestratorIdle(fake);
+    await orchestratorIdle(fake);
+    expect(fake.sends).toHaveLength(2);
+    const briefs = fake.sends.map((send) => send.text.split("\n").find((line) => line.startsWith("Mission "))?.split(" State read")[0]);
+    expect(briefs).toEqual([`Mission PAY — PAY (${MISSION}), open; Main main-1.`, `Mission BIL — BIL (${OTHER_MISSION}), open; Main main-1.`]);
+    expect(fake.sends[0]!.text).not.toContain(OTHER_MISSION);
+    expect(wakes().map((wake) => wake.missionIds)).toEqual([[MISSION], [OTHER_MISSION]]);
+  });
+
+  it("counts the acts of a wake aimed at a mission it did not carry (M-28)", async () => {
+    openMission();
+    openMission(OTHER_MISSION, [OTHER_WS], "BIL");
+    const fake = daemon();
+    const events = bus();
+    const call = vi.fn<(name: string, input: unknown) => Promise<{ ok: boolean; text: string }>>(async () => ({ ok: true, text: "" }));
+    const tools = actsNoted({ faces: [], call }, events);
+    await events.governed([replanDue()], fake.paseo);
+    await tools.call("bm_govern", { missionId: MISSION, step: "replan" });
+    await tools.call("bm_govern", { missionId: OTHER_MISSION, step: "nudge" });
+    await tools.call("bm_note", { workspaceId: WS, text: "x" });
+    await orchestratorIdle(fake);
+    expect(wakes()[0]).toMatchObject({ acted: true, offMission: 1 });
+
+    expect(actMissionsOf("bm_arbitrate", { missions: [MISSION, OTHER_MISSION] }, () => null)).toEqual([MISSION, OTHER_MISSION]);
+    expect(actMissionsOf("bm_create_main", { fromMissionId: MISSION }, () => null)).toEqual([MISSION]);
+    expect(actMissionsOf("bm_direct_worker", { requestId: REQUEST }, (requestId) => (requestId === REQUEST ? OTHER_MISSION : null))).toEqual([OTHER_MISSION]);
+    expect(actMissionsOf("bm_direct_worker", {}, () => MISSION)).toEqual([]);
+    expect(actMissionsOf("bm_note", { workspaceId: WS }, () => null)).toEqual([]);
   });
 });

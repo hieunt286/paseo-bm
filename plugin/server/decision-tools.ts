@@ -72,6 +72,11 @@ function actionLineOf(action: PreparedAction | undefined): string | null {
       return `the plugin splits mission ${action.missionId}: ${missionSplitLinesOf(action.split).join("; ")}, only when the owner chooses it`;
     case "arbitration":
       return `the plugin sets the goal of mission ${action.missionId} as arbitration ${action.arbitrationId} leaves it, only when the owner chooses it`;
+    case "mission-merge":
+      // Mission runtime design §5.2: the plugin moves the legacy mission's requests and closes it on the owner's tap only.
+      return `the plugin merges mission ${action.from} into mission ${action.missionId}, only when the owner chooses it`;
+    case "mission-transfer":
+      return `the plugin moves the requests ${action.requestIds.join(", ")} from mission ${action.missionId} to mission ${action.to}, only when the owner chooses it`;
     default:
       // Autonomy design §G.4: a change of the owner's settings, applied only on the owner's own answer.
       return `${action.kind}: the plugin ${preparedChangeTextOf(action)}, only when the owner chooses it`;

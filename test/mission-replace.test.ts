@@ -15,7 +15,6 @@ import { createOutbox, storeAndDeliver } from "../plugin/server/outbox";
 import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { proposeAnswers, proposedAnswersOf } from "../plugin/server/proposed-answers";
 import { createRequestRegistry } from "../plugin/server/request-registry";
-import { managerIdNotice } from "../plugin/server/settings-notices";
 import { answerDecision, type Decision } from "../plugin/shared/decisions";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
 import { makeDecision } from "./helpers/decisions";
@@ -153,12 +152,9 @@ describe("the replacement drill (§3.4, §12)", () => {
     ]);
     // 2. The open requests.
     expect([registry.get(REPO, R1)?.managerId, registry.get(REPO, R2)?.managerId]).toEqual([NEW, NEW]);
-    // 3. The bound Worker's binding, and the notice to both Workers.
+    // 3. The bound Worker's binding; no Worker is told (mission runtime design §3.4).
     expect(bindings.bindingOfAgent("w-bound")?.parentId).toBe(NEW);
-    expect(fake.sends.filter((send) => send.id.startsWith("w-"))).toEqual([
-      { id: "w-bound", text: managerIdNotice(NEW) },
-      { id: "w-unbound", text: managerIdNotice(NEW) },
-    ]);
+    expect(fake.sends.filter((send) => send.id.startsWith("w-"))).toEqual([]);
     // 4. and 5. The parent labels, and the old Main marked (never archived).
     expect(labels).toEqual([
       ["w-bound", "paseo.parent-agent-id", NEW],
@@ -173,7 +169,8 @@ describe("the replacement drill (§3.4, §12)", () => {
     expect(queue.pending(OLD)).toEqual([]);
     // The new Main was idle: it got the queued notice at once; the report waits for its next idle moment.
     expect(fake.sends.filter((send) => send.id === NEW).map((send) => send.text)).toEqual(["BM-SETTINGS a notice for the Main"]);
-    expect(queue.pending(NEW).map((entry) => entry.kind)).toEqual([`report:${pending.record.id}`]);
+    // On the new Main's channel (mission runtime design §6.2).
+    expect(queue.pending(NEW).map((entry) => entry.kind)).toEqual([`BM-UPDATES:report:${pending.record.id}`]);
     expect(createOutbox(home).list(REPO)[0]).toMatchObject({ to: NEW, state: "pending" });
     fake.byId(NEW)!.status = "idle";
     await queue.turnEnded({ agent: { id: NEW } }, fake.paseo);
@@ -189,7 +186,7 @@ describe("the replacement drill (§3.4, §12)", () => {
     // The prepared command the owner chooses now goes to the new Main.
     fake.byId(NEW)!.status = "running";
     await createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW, queue, log })([answeredCommand()], { paseo: fake.paseo });
-    expect(queue.pending(NEW).map((entry) => entry.kind)).toContain("command:o:drill-1");
+    expect(queue.pending(NEW).map((entry) => entry.kind)).toContain("BM-UPDATES:command:o:drill-1");
     expect(queue.pending(OLD)).toEqual([]);
     expect(createOutbox(home).list(REPO).filter((record) => record.state === "dropped")).toEqual([]);
   });
@@ -221,7 +218,7 @@ describe("the replacement drill (§3.4, §12)", () => {
     expect(bindings.bindingOfAgent("w-bound")?.parentId).toBe("new-1");
     expect(createOutbox(home).list(REPO)[0]).toMatchObject({ to: "new-1", state: "delivered" });
     expect(fake.sends.filter((send) => send.id === "new-1").map((send) => send.text.split("\n")[0])).toEqual([`BM-DELIVERY report ${held.record.id}`]);
-    expect(fake.sends.find((send) => send.id === "w-bound")?.text).toBe(managerIdNotice("new-1"));
+    expect(fake.sends.find((send) => send.id === "w-bound")).toBeUndefined();
     expect(calls).toContainEqual(["agent", "update", "w-bound", "--label", "paseo.parent-agent-id=new-1", "--json"]);
     // The archived Main is not marked: it is not live.
     expect(calls.some((args) => args[2] === OLD)).toBe(false);

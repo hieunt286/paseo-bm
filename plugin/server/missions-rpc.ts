@@ -60,8 +60,11 @@ import { createPrecedentStore } from "./precedent-store";
 import { PRECEDENT_SCOPE_ALL } from "../shared/precedents";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionDecisionStore } from "./mission-decisions";
-import { createMissionRoster, type RosterEntry } from "./mission-roster";
+import { createMissionRoster, stopActiveRequests, type RosterEntry } from "./mission-roster";
+import { offerMerges } from "./mission-ownership";
 import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { missionStateOf } from "./mission-state";
+import type { MissionState } from "../shared/mission-state";
 import { applyMissionChange, missionChangeRefusalsOf, syncMainAfterChange, tellMain } from "./mission-tools";
 import { missionInvalid } from "./missions-home";
 import { workspaceLabelOf } from "./orchestrator-state";
@@ -360,8 +363,21 @@ export async function handleMissionGet(input: { missionId: string }, paseo: unkn
         .reverse()
         .map((line) => ({ at: line.at, kind: line.kind, by: line.by, text: line.text })),
       plan: { text: mission.plan.text, updatedAt: mission.plan.updatedAt },
+      // Mission runtime design §7: the page's In flight and Main history read the one mission state.
+      ...inFlightOf(home, mission.missionId),
+      mainHistory: mission.mainHistory.map((entry) => ({ agentId: entry.agentId, from: entry.from, to: entry.to, reason: entry.reason })),
     };
   });
+}
+
+/** `mission.get`'s `inFlight`: the mission state, when it can be read. Never throws. */
+function inFlightOf(home: string, missionId: string): { inFlight?: MissionState } {
+  try {
+    const state = missionStateOf(home, missionId);
+    return state === null ? {} : { inFlight: state };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -401,6 +417,8 @@ export async function handleMissionChange(input: MissionChangeInput, paseo: unkn
   const at = now.toISOString();
   const result = coded("E_MISSION_WRITE_FAILED", "write the mission", () => store.update(mission.missionId, (current) => applyMissionChange(current, change, at)));
   if (!result.ok) throw missionInvalid(result.reasons);
+  if (change.close === true) stopActiveRequests(home, mission.missionId, log);
+  if ((change.addRepos ?? []).length > 0) offerMerges(home, mission.missionId, { now, log });
   const lines = missionChangeLinesOf(change).join("; ");
   journalQuietly(store, mission.missionId, { kind: "charter", by: "owner", text: `The owner changed the mission from the Missions screen: ${lines}.` }, log);
   await tellMain(mission.missionId, mission.missionId, `The owner changed your mission from the Missions screen: ${lines}.`, {

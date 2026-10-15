@@ -98,7 +98,8 @@
 import { join } from "node:path";
 import { parseReports } from "../shared/bm-report";
 import type { ParsedReport, TraceRecord } from "../shared/contracts";
-import { compactionOnFor, handoffCrossingOf, type ThresholdCrossing } from "../shared/coordination";
+import { handoffCrossingOf, mainCompactionOnFor, mainContextHardOf, type CoordinationSettings, type ThresholdCrossing } from "../shared/coordination";
+import { turnTokensOf } from "../shared/eval-metrics/tokens";
 import { HANDOFF_BRIEF_MARKER, holdsHandoffBrief, requestFinishedOf, requestTokensReadOf } from "../shared/handoff";
 import {
   COORDINATION_HANDOFF_AUTHORITY,
@@ -109,13 +110,13 @@ import {
 } from "../shared/orchestrator-command";
 import { andChainOf, brActions, shellSucceeded } from "../shared/shell";
 import { shorten } from "../shared/text";
-import { timeOrNull } from "../shared/time";
+import { timeOrNull, timeOrZero } from "../shared/time";
 import { createBindingStore, creationMayExist, liveBindingOf, type AgentBinder } from "./agent-bindings";
 import { listAllAgents, parentOf, roleOfProvider } from "./agent-role";
 import { redactText, sliceLastTurn } from "./collector";
 import { COMMAND_LIMIT_MESSAGE, HANDOFF_OFF_MESSAGE, commandRefusalOf, loopGuardFull, sendCommand } from "./command-send";
-import { contextCrossingOf, crossingWordsOf, turnProviderOf } from "./compaction";
-import { createCompactionStore, pendingCompactionOf, sentCompactionsOf } from "./compaction-store";
+import { crossingWordsOf, mainCrossingOf, turnProviderOf } from "./compaction";
+import { createCompactionStore, type CompactionEntry } from "./compaction-store";
 import { createPluginWorker, workerProfileOf, workerTitleOf, type WorkerCreationPaseo } from "./create-worker";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
@@ -602,8 +603,37 @@ export function handoffInfoCommandOf(entry: Pick<HandoffEntry, "id" | "requestId
  * The line a Main's successor gets after its brief (missions design §9.5):
  * whom it takes the mission over from, and why.
  */
-export function mainHandoffLineOf(oldMainId: string, crossing: ThresholdCrossing): string {
-  return `You take this mission over from Main ${oldMainId}: ${crossingWordsOf(crossing)}, so paseo-bm handed the mission over to you in a fresh context. Its chat keeps the earlier conversation; start from the mission's records above.`;
+export function mainHandoffLineOf(oldMainId: string, crossing: ThresholdCrossing | string): string {
+  const why = typeof crossing === "string" ? crossing : crossingWordsOf(crossing);
+  return `You take this mission over from Main ${oldMainId}: ${why}, so paseo-bm handed the mission over to you in a fresh context. Its chat keeps the earlier conversation; start from the mission state above. In your first reply tell the owner in one line that you took over and what is in flight, from that state.`;
+}
+
+/**
+ * Why a mission's Main must be handed over now (mission runtime design §3.5),
+ * else null — only when in-place compaction cannot keep it:
+ * 1. its provider does not compact (or `main.compact` is off) and its turn
+ *    crosses its context threshold;
+ * 2. its two newest compactions ended `no-compaction`;
+ * 3. the first turn after its newest completed compaction still reaches the
+ *    hard figure.
+ * A pending compaction always waits. `afterCompaction` is that newest
+ * completed compaction, when this turn is the first after it. Pure.
+ */
+export function mainHandoffReasonOf(
+  record: TraceRecord,
+  settings: Pick<CoordinationSettings, "main">,
+  compactions: readonly CompactionEntry[],
+  afterCompaction: CompactionEntry | null,
+): ThresholdCrossing | string | null {
+  const own = compactions.filter((entry) => entry.agentId === record.agentId).sort((a, b) => timeOrZero(a.requestedAt) - timeOrZero(b.requestedAt));
+  if (own.some((entry) => entry.state === "waiting" || entry.state === "compacting")) return null;
+  if (!mainCompactionOnFor(settings, turnProviderOf(record))) return mainCrossingOf(record, settings);
+  const [before, last] = own.slice(-2);
+  if (before !== undefined && last !== undefined && before.ending === "no-compaction" && last.ending === "no-compaction") return "two compactions in a row did not compact its context";
+  if (afterCompaction !== null && !record.evidence.some((evidence) => evidence.kind === "compaction") && mainContextHardOf(turnTokensOf(record), settings)) {
+    return "its context stayed above the hard figure right after a compaction";
+  }
+  return null;
 }
 
 /** The ending of a handoff whose command the send's checks refused. */
@@ -1011,6 +1041,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
 
   /** Mains this run began to hand over: each once. */
   const mainsHandedOver = new Set<string>();
+  /** Completed compactions whose first turn after was judged (§3.5 case 3). */
+  const checkedAfter = new Set<string>();
 
   /**
    * A Main's turn crossing its context threshold once it can no longer be
@@ -1021,15 +1053,20 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
   async function handOverMainOf(home: string, record: TraceRecord, paseo: unknown): Promise<void> {
     if (mainsHandedOver.has(record.agentId)) return;
     const settings = readCoordinationSettings({ home, log });
-    const crossing = settings.handoff.enabled ? contextCrossingOf(record, settings) : null;
-    if (crossing === null) return;
+    if (!settings.handoff.enabled) return;
     const missions = createMissionStore(home);
     const listed = missions.openByMain(record.agentId);
     const mission = listed === null ? null : missions.get(listed.missionId);
     if (mission === null) return;
     const compactions = createCompactionStore(home, { now }).list();
-    if (pendingCompactionOf(compactions, record.agentId, now()) !== null) return;
-    if (compactionOnFor(settings, turnProviderOf(record)) && sentCompactionsOf(compactions, record.agentId) < settings.compact.maxPerAgent) return;
+    // The newest completed compaction of this Main, when this is the first recorded turn after it (§3.5 case 3).
+    const done = compactions
+      .filter((entry) => entry.agentId === record.agentId && entry.state === "done" && entry.briefAt !== null)
+      .sort((a, b) => timeOrZero(b.briefAt) - timeOrZero(a.briefAt))[0];
+    const first = done !== undefined && !checkedAfter.has(done.id) && timeOrZero(record.startedAt ?? record.at) >= timeOrZero(done.briefAt);
+    if (first) checkedAfter.add(done.id);
+    const crossing = mainHandoffReasonOf(record, settings, compactions, first ? done : null);
+    if (crossing === null) return;
     mainsHandedOver.add(record.agentId);
     try {
       const successor = await handOverMain(mission, paseo as MissionsPaseo, mainHandoffLineOf(record.agentId, crossing), {
@@ -1041,7 +1078,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         ...(deps.readMainInstructions === undefined ? {} : { readInstructions: deps.readMainInstructions }),
         ...(typeof (queue as Partial<NoticeQueue>).retarget === "function" ? { queue: queue as NoticeQueue } : {}),
       });
-      log(`[paseo-bm] Main ${record.agentId} of mission ${mission.code} was handed over to ${successor}: ${crossingWordsOf(crossing)}.`);
+      log(`[paseo-bm] Main ${record.agentId} of mission ${mission.code} was handed over to ${successor}: ${typeof crossing === "string" ? crossing : crossingWordsOf(crossing)}.`);
     } catch (error) {
       log(`[paseo-bm] Main ${record.agentId} of mission ${mission.code} could not be handed over: ${errorText(error)}`);
     }

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { REDACTED } from "../plugin/server/collector";
 import { createOrchestratorTools, type OrchestratorToolsDeps } from "../plugin/server/orchestrator-tools";
-import { AGENT_MESSAGE_MAX_CHARS, PROJECTS_BOUNDED_NOTE, REQUEST_BOUNDED_NOTE, agentMessagesBoundedNote } from "../plugin/server/orchestrator-read-tools";
+import { AGENT_MESSAGE_MAX_CHARS, ORCHESTRATOR_MEMORY_SOURCE, PROJECTS_BOUNDED_NOTE, REQUEST_BOUNDED_NOTE, agentMessagesBoundedNote } from "../plugin/server/orchestrator-read-tools";
+import { createMemoryStore } from "../plugin/server/memory-store";
 import {
   DIRECT_REFUSED_MESSAGE,
   GOVERNOR_STOP_STEP,
@@ -492,7 +493,8 @@ describe("bounded reads by default (autonomy design §A.9)", () => {
     deps.redactEnv = { PASEO_PASSWORD: SECRET };
     const { paseo, sends } = daemonWith(fixture.agents.map((facts) => snapshotOf(facts)));
     const tools = toolsWith(paseo);
-    await tools.call("bm_note", { workspaceId: WORKSPACE_ID, text: "The owner wants PDF only." });
+    // An older build's project note: still read and counted (missions design §20).
+    createOrchestratorStore(home, { now: () => NOW }).appendNote(WORKSPACE_ID, "The owner wants PDF only.");
     const asked = await tools.call("bm_ask_owner", {
       workspaceId: WORKSPACE_ID,
       requestId: fixture.requestId,
@@ -1664,7 +1666,7 @@ describe("bm_direct_worker (design §6B.4, ADR-016; missions design §9.1): only
 });
 
 describe("bm_note and the notes bm_projects returns (design §6B.4, §6B.6)", () => {
-  it("keeps notes per project, 20 at most, replace empties first, and bm_projects hands them out redacted", async () => {
+  it("a project's note goes to its project memory as the owner's word, masked; replace supersedes the newest such entry (missions design §20)", async () => {
     await store(smallWithBead().records);
     const { paseo, sends } = daemonWith(smallWithBead().agents.map((facts) => snapshotOf(facts)));
     deps.redactEnv = { PASEO_PASSWORD: SECRET };
@@ -1672,16 +1674,32 @@ describe("bm_note and the notes bm_projects returns (design §6B.4, §6B.6)", ()
 
     const first = await tools.call("bm_note", { workspaceId: WORKSPACE_ID, text: `The owner wants PDF only; token ${SECRET} is not ours.` });
     expect(first.ok).toBe(true);
-    expect(first.text.split("\n")[0]).toMatch(/^Noted\./);
-    for (let index = 0; index < 21; index += 1) await tools.call("bm_note", { workspaceId: WORKSPACE_ID, text: `Note ${index}` });
-    expect(createOrchestratorStore(home).readNotes(WORKSPACE_ID)).toHaveLength(20);
-    expect(createOrchestratorStore(home).readNotes(WORKSPACE_ID)[0]!.text).toBe("Note 1");
+    expect(first.text.split("\n")[0]).toBe("Noted in the project memory: its Mains and Workers carry it in their briefs.");
+    await tools.call("bm_note", { workspaceId: WORKSPACE_ID, text: "Invoices stay in euros." });
+    const memory = createMemoryStore(home);
+    expect(memory.active(WORKSPACE_ID).map((entry) => [entry.kind, entry.text, entry.source, entry.by])).toEqual([
+      ["decision", `The owner wants PDF only; token ${REDACTED} is not ours.`, `${ORCHESTRATOR_MEMORY_SOURCE}, ${NOW.toISOString().slice(0, 10)}`, { role: "owner", agentId: null, missionId: null }],
+      ["decision", "Invoices stay in euros.", `${ORCHESTRATOR_MEMORY_SOURCE}, ${NOW.toISOString().slice(0, 10)}`, { role: "owner", agentId: null, missionId: null }],
+    ]);
 
-    await tools.call("bm_note", { workspaceId: WORKSPACE_ID, text: `Keep dates dd/mm/yyyy; ${SECRET}.`, replace: true });
-    const projects = jsonOf(await tools.call("bm_projects", { detail: "full" })) as { projects: Array<{ workspaceId: string; notes: Array<{ at: string; text: string }> }> };
+    const second = memory.active(WORKSPACE_ID)[1]!.id;
+    const replaced = await tools.call("bm_note", { workspaceId: WORKSPACE_ID, text: `Keep dates dd/mm/yyyy; ${SECRET}.`, replace: true });
+    expect(jsonOf(replaced)).toMatchObject({ supersedes: second });
+    expect(memory.active(WORKSPACE_ID).map((entry) => entry.text)).toEqual([`The owner wants PDF only; token ${REDACTED} is not ours.`, `Keep dates dd/mm/yyyy; ${REDACTED}.`]);
+    // The Orchestrator's own project notes are no longer written.
+    expect(createOrchestratorStore(home).readNotes(WORKSPACE_ID)).toEqual([]);
+    expect(JSON.stringify(memory.list(WORKSPACE_ID))).not.toContain(SECRET);
+    expect(sends).toEqual([]);
+  });
+
+  it("older project notes stay readable through bm_projects, redacted", async () => {
+    await store(smallWithBead().records);
+    const { paseo } = daemonWith(smallWithBead().agents.map((facts) => snapshotOf(facts)));
+    deps.redactEnv = { PASEO_PASSWORD: SECRET };
+    createOrchestratorStore(home, { now: () => NOW }).appendNote(WORKSPACE_ID, `Keep dates dd/mm/yyyy; ${SECRET}.`);
+    const projects = jsonOf(await toolsWith(paseo).call("bm_projects", { detail: "full" })) as { projects: Array<{ workspaceId: string; notes: Array<{ at: string; text: string }> }> };
     expect(projects.projects[0]!.notes).toEqual([{ at: NOW.toISOString(), text: `Keep dates dd/mm/yyyy; ${REDACTED}.` }]);
     expect(JSON.stringify(projects)).not.toContain(SECRET);
-    expect(sends).toEqual([]);
   });
 
   it("refuses an unknown project, an empty or long note, and writes nothing", async () => {

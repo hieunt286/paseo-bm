@@ -9,9 +9,9 @@ import { rolePaseoToolsPolicy } from "../plugin/server/setup-roles";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { createMissionStore } from "../plugin/server/mission-store";
-import { managerEnsureRpc, missionsCreateRpc } from "../plugin/shared/contracts";
+import { managerEnsureRpc } from "../plugin/shared/contracts";
 import { createSlot } from "../plugin/client/slot";
-import { launcherNotices, sectionRequests } from "../plugin/client/surface-view";
+import { newMissionRequests, sectionRequests } from "../plugin/client/surface-view";
 import {
   LAUNCHER_ICON,
   LAUNCHER_SURFACE_ID,
@@ -274,15 +274,16 @@ describe("client entry registrations", () => {
     );
   });
 
-  it("New mission creates an unassigned Main through missions.create and says where it is on the surface (missions design §3.3)", async () => {
+  it("New mission opens the Missions section's New mission form, creating nothing (ADR-034 decision 4)", async () => {
     const fake = fakeClient();
     clientContribute(fake.client);
-    const rpc = vi.fn(async () => ({ missionId: null, agentId: "main-1", created: true }));
+    const rpc = vi.fn();
     const openSurface = vi.fn();
     await fake.commandItems.find((item) => item.id === "new-beads-mission")!.onSelect({ context: "global", rpc, openSurface });
-    expect(rpc).toHaveBeenCalledWith(missionsCreateRpc, {});
+    expect(rpc).not.toHaveBeenCalled();
     expect(openSurface).toHaveBeenCalledWith(LAUNCHER_SURFACE_ID);
-    expect(launcherNotices.take()).toMatch(/^Started a new mission's Main in the Missions home workspace\./);
+    expect(sectionRequests.take()).toBe("missions");
+    expect(newMissionRequests.take()).toBe(true);
   });
 
   it("uses Paseo's custom footer item when available and keeps the legacy item as fallback", () => {

@@ -79,6 +79,7 @@ import { roleOfProvider } from "./agent-role";
 import { isPluginHome } from "./plugin-homes";
 import { WORKER_PASS_MS, clearWorkerTurnSignals, runWorkerPass, workerPassResult, type PermissionFirstSeen, type WorkerPassResult } from "./worker-watch";
 import { errorText } from "./rpc-kit";
+import type { ChannelQueue } from "./main-channel";
 import { timeOrZero } from "../shared/time";
 
 /** How often a pass runs (design §6). */
@@ -193,6 +194,8 @@ export interface StallWatcherDeps extends DataHomeDeps {
   /** Secrets to mask in an alert's detail; the process's own by default. */
   redactEnv?: NodeJS.ProcessEnv;
   log?: (message: string) => void;
+  /** How the Worker pass tells a Main of its Worker's danger (`BM-SIGNAL`, missions design §20); the shared notice queue by default. */
+  signalQueue?: ChannelQueue;
   /**
    * Whether the Orchestrator has lost its tools (design §5.1), for the bus
    * this watcher makes when none is given.
@@ -479,7 +482,7 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     const home = homeOf();
     if (home === null) return [];
     try {
-      return clearWorkerTurnSignals(home, agent.id, { now });
+      return clearWorkerTurnSignals(home, agent.id, { now, log });
     } catch (error) {
       log(`[paseo-bm] the Worker watch could not clear the alerts of ${agent.id}: ${errorText(error)}`);
       return [];

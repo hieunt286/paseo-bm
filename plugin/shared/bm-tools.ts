@@ -1069,7 +1069,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_note",
     role: "orchestrator",
     description:
-      "Keep a short note about a project, or a mission, for later: what the owner decided, what to watch. Give workspaceId or missionId, not both. The 20 newest are kept per project or mission, and bm_projects (bm_missions for a mission) returns them, also to a new Orchestrator. replace: true clears those notes first. Sends nothing.",
+      "Keep a short note for later: what the owner decided, preferred or asked to stand. Give workspaceId or missionId, not both. A mission's note is yours: the 20 newest are kept, and bm_missions and each wake's brief return them, also to a new Orchestrator; replace: true clears that mission's notes first. A project's note is the owner's word about that repo: it goes to the repo's project memory, which its Mains and Workers carry in their briefs; replace: true supersedes your newest such entry there. Sends nothing.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1078,7 +1078,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
         workspaceId: WORKSPACE_ID,
         missionId: MISSION_ID,
         text: { type: "string", minLength: 1, maxLength: MAX_NOTE_CHARS, description: `The note, at most ${MAX_NOTE_CHARS} characters.` },
-        replace: { type: "boolean", description: "true empties the project's (or the mission's) notes before adding this one." },
+        replace: { type: "boolean", description: "A mission: true empties its notes before adding this one. A project: true supersedes your newest entry in its memory." },
       },
     },
   },
@@ -1614,8 +1614,6 @@ const MISSION_REPO: JsonSchema = { type: "string", minLength: 1, maxLength: MISS
 const MISSION_REPOS: JsonSchema = { type: "array", minItems: 1, maxItems: MISSION_TOOL_LIMITS.repos, items: MISSION_REPO };
 const BUDGET_VALUE: JsonSchema = { type: "integer", minimum: 0 };
 
-/** How long after a Worker's question its Main may still answer it (missions design §8 rule 2); then it is the owner's. */
-export const MAIN_ANSWER_MINUTES = 10;
 
 /** `bm_mission`, `bm_mission_start`, `bm_mission_update` and `bm_answer_worker`: a bound Manager lists them; only a Main can use them. */
 export const MISSION_TOOL_FACES: readonly ToolFace[] = [
@@ -1645,7 +1643,7 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
   {
     name: "bm_mission_update",
     role: "manager",
-    description: `Change your mission. Written at once: plan (the whole text), contracts (add one, or a new version of one by id), a new done criterion, a criterion's status open or met (met with its evidence), and adding a repo when the mission level delegates scope-repo. Everything else — name, code, goal, nonGoals, budget, confirmCharter, close, removing a repo, rewording or dropping a criterion, adding a repo otherwise — opens one owner card (m:) with "apply" and "keep as is", which paseo-bm applies when the owner taps apply. Returns JSON { applied, decisionId }. ${DELIVERED}`,
+    description: `Change your mission. Written at once: plan (the whole text), contracts (add one, or a new version of one by id), a new done criterion, a criterion's status open or met (met with its evidence), and adding a repo when the mission level delegates scope-repo. Everything else — name, code, goal, nonGoals, budget, confirmCharter, close, removing a repo, rewording or dropping a criterion, adding a repo otherwise — opens one owner card (m:) with "apply" and "keep as is", which paseo-bm applies when the owner taps apply. transfer opens its own card to move requests to another mission (bm_ask_mission only asks; it moves nothing). Returns JSON { applied, decisionId, transferDecisionId? }. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1707,14 +1705,25 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
           properties: { add: MISSION_REPOS, remove: MISSION_REPOS },
         },
         confirmCharter: { type: "boolean", description: "True: ask the owner to confirm the charter as it stands." },
-        close: { type: "boolean", description: "True: ask the owner to close the mission (refused while a Worker of it runs)." },
+        close: { type: "boolean", description: "True: ask the owner to close the mission (refused while a Worker of it runs a turn)." },
+        transfer: {
+          type: "object",
+          additionalProperties: false,
+          required: ["to", "requestIds", "reason"],
+          description: "Ask the owner to move requests of your mission, with their Workers, to another open mission: its own owner card (m:).",
+          properties: {
+            to: { type: "string", pattern: "^[A-Z][A-Z0-9]{1,7}$", description: "The code of the open mission that takes them." },
+            requestIds: { type: "array", minItems: 1, maxItems: 50, items: REQUEST_ID },
+            reason: { type: "string", minLength: 1, maxLength: 500, description: "Why, in one sentence the owner reads." },
+          },
+        },
       },
     },
   },
   {
     name: "bm_answer_worker",
     role: "manager",
-    description: `Answer your Workers' open questions (Qn) yourself, as the mission's Main, where paseo-bm lets you: a class the repo delegates, or one your mission level delegates (answer-technical: scope, preference, reversible-technical; answer-effects: the rest). In a shadow cell you may not decide, your choice is recorded as your recommendation and the owner decides. paseo-bm delivers your answer to the Worker as yours, never the owner's, and it grants nothing: an effect it allows still passes the repo's action boundary. Refused for an ownerOnly question, a question asked more than ${MAIN_ANSWER_MINUTES} minutes ago (it is the owner's then), a settled one, an option with a grant or a change, or a request outside your mission. Returns JSON [{ qn, decisionId, state }]. ${DELIVERED}`,
+    description: `Answer your Workers' open questions (Qn) yourself, as the mission's Main, where paseo-bm names you the decider: a class the repo delegates, or one your mission level delegates (answer-technical: scope, preference, reversible-technical; answer-effects: the rest), review grants within your share included; paseo-bm tells you when one opens. In a shadow cell you may not decide, your choice is recorded as your recommendation and the owner decides. paseo-bm delivers your answer to the Worker as yours, never the owner's, and it grants nothing: an effect it allows still passes the repo's action boundary. Refused for a question paseo-bm names someone else to decide (an ownerOnly fact, a class nobody delegated, a review budget paseo-bm decides itself), a review grant beyond your share, a settled one, or a request outside your mission; the owner may answer any question first. Returns JSON [{ qn, decisionId, state }]. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1740,6 +1749,43 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
     },
   },
 ];
+
+/**
+ * `bm_owner_question` (mission runtime design §4.6, ADR-033 decision 3), run
+ * by `server/owner-question.ts`: the Main asks the owner with a stored
+ * decision (an `m:` question in the Inbox), or records the owner's answer to
+ * one typed in its chat.
+ */
+export const OWNER_QUESTION_FACE: ToolFace = {
+  name: "bm_owner_question",
+  role: "manager",
+  description: `Ask the owner what is theirs to decide as a stored decision they answer in the Inbox or here: one question per call, two to five options you can carry out, exactly one recommended, its class (and ownerOnly for a fact only the owner knows: a login, an id, a personal choice). Never ask the owner only in your reply: your reply names the question in one line. When the owner answers one of your questions here in words, record it in the same turn with answered (its m: id) and the option they chose or their words; it is settled at the end of the turn only when the owner typed in it. paseo-bm tells you the owner's answer given on the card. Returns JSON { decisionId } or { proposed }. ${DELIVERED}`,
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      question: { type: "string", minLength: 1, maxLength: MAX_DECISION_TEXT_CHARS, description: "To ask: the question, in the owner's language." },
+      options: {
+        type: "array",
+        minItems: 2,
+        maxItems: 5,
+        description: "To ask: the options, exactly one recommended.",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["label"],
+          properties: { label: { type: "string", minLength: 1, maxLength: 200 }, recommended: { type: "boolean" } },
+        },
+      },
+      class: { type: "string", enum: [...DECISION_CLASSES], description: "To ask: the question's class." },
+      subject: { type: "string", minLength: 1, maxLength: 60, description: "To ask: a short subject, kebab-case." },
+      ownerOnly: { type: "boolean", description: "To ask: true for a fact only the owner knows." },
+      answered: { type: "string", pattern: "^m:mis-[0-9a-f]{10}:[1-9][0-9]{0,5}$", description: "To record the owner's answer typed here: the m: id of your question." },
+      option: { type: "string", minLength: 1, maxLength: 20, description: "With answered: the option key the owner chose (a, b, …)." },
+      words: { type: "string", minLength: 1, maxLength: 2_000, description: "With answered: the owner's answer in their words, when it is no option." },
+    },
+  },
+};
 
 /**
  * `bm_split_mission` (missions design §9.6), run by `server/mission-split.ts`:
@@ -1924,6 +1970,7 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
   ...peerFaces("worker"),
   ...MISSION_TOOL_FACES,
   MISSION_SPLIT_FACE,
+  OWNER_QUESTION_FACE,
   ...MEMORY_TOOL_FACES,
   ...MISSION_LINK_FACES,
 ];

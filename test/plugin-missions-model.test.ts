@@ -616,3 +616,109 @@ describe("the hook-free pieces of the Missions screen (renderTree)", () => {
     expect(onMemory).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("the mission page's Main card and In flight card (mission runtime design §7; mockup mission-runtime.html, artboards G and H)", () => {
+  const R = (n: number) => `req-20261010T0${n}0000Z`;
+  const STATE: NonNullable<MissionGetOutput["inFlight"]> = {
+    at: at(10, 14),
+    mission: { missionId: "mis-0000000001", code: "AIX", name: "AI Assistant ↔ xOne", state: "open", goal: "g", charterConfirmed: true, repos: [], mainId: "c41e2a0aa", mainHistory: [] },
+    criteria: { met: 4, total: 9, open: [] },
+    requests: [
+      { requestId: R(1), workspaceId: "ws-ui", repo: "xspace-ai-assistant", topic: "G14 platform screens", workerId: "0545c7a11", state: "working", lastReport: { phase: "implementing", at: at(10, 5), line: "" }, followUpAt: null, waitingOn: null },
+      { requestId: R(2), workspaceId: "ws-be", repo: "ai-assistant", topic: "Backend catalogue API", workerId: "733918b22", state: "waiting-owner", lastReport: { phase: "blocked", at: at(9, 58), line: "" }, followUpAt: null, waitingOn: null },
+      { requestId: R(3), workspaceId: "ws-ui", repo: "xspace-ai-assistant", topic: "Open the MR", workerId: "9c01d7e33", state: "waiting-main", lastReport: { phase: "blocked", at: at(10, 9), line: "" }, followUpAt: null, waitingOn: null },
+      { requestId: R(4), workspaceId: "ws-be", repo: "ai-assistant", topic: "Env template", workerId: "1a77f3044", state: "waiting-other", lastReport: { phase: "blocked", at: at(10, 1), line: "" }, followUpAt: null, waitingOn: R(1) },
+      { requestId: R(5), workspaceId: "ws-ui", repo: "xspace-ai-assistant", topic: "13 English keys", workerId: "0989dc455", state: "finished", lastReport: { phase: "finished", at: at(9, 40), line: "" }, followUpAt: null, waitingOn: null },
+    ],
+    questions: [
+      { id: `q:${R(2)}:Q1`, requestId: R(2), qn: "Q1", class: "scope", subject: null, decider: "owner", recommend: false, askedAt: at(9, 58), question: "Which tool list does the assistant use?", recommended: "a — Backend catalogue" },
+      { id: `q:${R(3)}:Q2`, requestId: R(3), qn: "Q2", class: "release", subject: null, decider: "main", recommend: false, askedAt: at(10, 9), question: "Squash the commits before the MR?", recommended: "a — Squash" },
+    ],
+    asks: [
+      { id: "m:mis-0000000001:3", askedAt: at(10, 10), question: "Commit .env.serve.local?", options: ["Commit", "Leave it untracked"], recommended: "b — Leave it untracked", byMain: true },
+      { id: "m:mis-0000000001:4", askedAt: at(10, 11), question: "Merge mission AIAS (ai-assistant) into AIX", options: ["Merge it", "Keep as is"], recommended: "a — Merge it", byMain: false },
+    ],
+    links: [{ linkId: "link-1", route: "mission", kind: "worker", direction: "out", partner: "0545c7a ↔ 733918b", state: "waiting", waitingSince: at(9, 31), gist: "the catalogue endpoint's shape" }],
+    owner: [],
+    governor: [],
+    journal: [],
+    unknown: [],
+  };
+  const HISTORY = [
+    { agentId: "2b8d0e4aa", from: at(8, 12), to: at(9, 12), reason: "created" },
+    { agentId: "7f3a9b1aa", from: at(9, 12), to: at(10, 2), reason: "replaced" },
+    { agentId: "c41e2a0aa", from: at(10, 2), to: null, reason: "handoff" },
+  ];
+  const RUNTIME: MissionGetOutput = { ...PAGE, inFlight: STATE, mainHistory: HISTORY };
+  const later = new Date(2026, 9, 10, 9, 45);
+  const view = missionPageOf(RUNTIME, new Date(2026, 9, 10, 10, 15));
+
+  it("reads the Mains newest first, with when and why each changed; an older server shows neither card", () => {
+    expect(view.mains).toEqual({
+      count: "3 Mains since 2026-10-10 08:12",
+      shortCount: "3 Mains",
+      rows: [
+        { agentId: "c41e2a0aa", short: "c41e2a0", from: "10:02", until: "now", why: "handoff — its context was full; this Main carries on", shortWhy: "handoff", current: true },
+        { agentId: "7f3a9b1aa", short: "7f3a9b1", from: "09:12", until: "10:02", why: "replaced", shortWhy: "replaced", current: false },
+        { agentId: "2b8d0e4aa", short: "2b8d0e4", from: "08:12", until: "09:12", why: "created with the mission", shortWhy: "created", current: false },
+      ],
+    });
+    expect(missionPageOf(PAGE, later)).toMatchObject({ mains: null, inFlight: null });
+  });
+
+  it("reads each request's state and whom it waits on, the open questions by who decides, the Main's own asks and the live links", () => {
+    const flight = view.inFlight!;
+    expect(flight.meta).toBe("what the Main knows · read 10:14");
+    expect(flight.requests.map((request) => [request.request, request.state.text, request.state.tone, request.lastReport])).toEqual([
+      ["req-…010000Z", "working", "info", "implementing · 10:05"],
+      ["req-…020000Z", "waiting for you · Q1", "warning", "blocked · 09:58"],
+      ["req-…030000Z", "waiting for the Main · Q2", "warning", "blocked · 10:09"],
+      ["req-…040000Z", "waiting for req-…010000Z", "plain", "blocked · 10:01"],
+      ["req-…050000Z", "finished", "success", "finished · 09:40"],
+    ]);
+    expect(flight.requests[3]!.phoneState).toBe("waiting for G14 platform screens");
+    expect(flight.restLine).toBe("+ 1 finished");
+    expect(flight.questions.map((question) => [question.who.text, question.label, question.text, question.meta, question.yours])).toEqual([
+      ["you decide", "Q1", "scope — Which tool list does the assistant use?", "recommended: a — Backend catalogue", true],
+      ["the Main decides", "Q2", "release — Squash the commits before the MR?", "asked 10:09 · recommended: a — Squash", false],
+    ]);
+    // paseo-bm's own cards (a merge) are not the Main's asks.
+    expect(flight.asks).toEqual([{ id: "m:mis-0000000001:3", text: "Commit .env.serve.local?", meta: "recommended: b — Leave it untracked · m:…:3" }]);
+    expect(flight.links).toEqual([{ id: "link-1", who: "waiting 44 min", text: "0545c7a ↔ 733918b · the catalogue endpoint's shape" }]);
+  });
+
+  const actions = () => ({ back: vi.fn(), openMain: vi.fn(), ui: vi.fn(), saveRename: vi.fn(), close: vi.fn(), addRepo: vi.fn(), level: vi.fn(), confirmLevel: vi.fn(), memory: vi.fn(), openAgent: vi.fn(), openInbox: vi.fn() });
+  const body = (compact: boolean, on = actions()) => renderTree(MissionPageBody({ page: view, ui: PAGE_UI_IDLE, addable: [], compact, on, styles, theme }));
+
+  it("draws artboard G: the Main card under the title, In flight between the Workers and the contracts", () => {
+    const on = actions();
+    const nodes = body(false, on);
+    const shown = texts(nodes);
+    for (const text of [
+      "Main", "3 Mains since", "Why it changed", "c41e2a0", "idle", "now", "handoff — its context was full; this Main carries on", "7f3a9b1", "replaced",
+      "A previous Main is kept, never archived; its chat is read-only for mission work — its tools that write are refused.",
+      "In flight", "what the Main knows · read 10:14", "Request · topic", "State", "Last report", "G14 platform screens", "waiting for you · Q1", "waiting for req-…010000Z", "implementing · 10:05",
+      "Questions", "you decide", "the Main decides", "The Main asked you", "open", "Commit .env.serve.local?", "Links", "waiting 44 min", "0545c7a ↔ 733918b · the catalogue endpoint's shape",
+    ]) {
+      expect(shown.some((entry) => entry.includes(text)), text).toBe(true);
+    }
+    // Order: title, Main, stats, …, Workers, In flight, Contracts.
+    const order = ["Open Main", "Why it changed", "Done criteria", "Workers by repository", "In flight", "Contracts between repositories"].map((text) => shown.findIndex((entry) => entry === text));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    pressByLabel(nodes, "Open the previous Main 7f3a9b1");
+    expect(on.openAgent).toHaveBeenCalledWith("7f3a9b1aa");
+    pressByLabel(nodes, "Answer Q1 in the Inbox");
+    pressByLabel(nodes, "Answer m:mis-0000000001:3 in the Inbox");
+    expect(on.openInbox).toHaveBeenCalledTimes(2);
+    expect(pressables(nodes).some((node) => node.props["accessibilityLabel"] === "Answer Q2 in the Inbox")).toBe(false);
+  });
+
+  it("draws artboard H: the Main's lines and In flight's lines on a phone", () => {
+    const shown = texts(body(true));
+    for (const text of ["Main", "3 Mains", "c41e2a0 · since 10:02 · handoff", "7f3a9b1 · 09:12–10:02 · replaced", "+ 1 earlier", "In flight", "G14 platform screens", "waiting for G14 platform screens", "+ 1 finished", "You decide:", "The Main asked you:", "1 link waiting 44 min"]) {
+      expect(shown.some((entry) => entry.includes(text)), text).toBe(true);
+    }
+    const order = ["Open Main", "Main", "Done", "In flight", "Charter"].map((text) => shown.findIndex((entry) => entry === text));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+});

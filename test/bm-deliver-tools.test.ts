@@ -135,7 +135,7 @@ describe("the bound lists (design §16.6)", () => {
   it("a bound Worker, Reviewer and Manager list their delivering tools; unbound agents keep today's lists", () => {
     expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
     expect(toolFacesFor("reviewer", true).map((face) => face.name)).toEqual(["bm_review"]);
-    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(toolFacesFor("worker").map((face) => face.name)).toEqual(["bm_report", "bm_reply"]);
     expect(toolFacesFor("reviewer").map((face) => face.name)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).toEqual(["bm_answers", "bm_decisions"]);
@@ -151,7 +151,7 @@ describe("the bound lists (design §16.6)", () => {
     const tools = (role: "worker" | "reviewer" | "manager") => withAgentTools(empty, role, "http://127.0.0.1:1/mcp/x", true)?.toolPolicy?.preapproved?.map((grant) => grant.tool);
     expect(tools("worker")).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
     expect(tools("reviewer")).toEqual(["bm_review"]);
-    expect(tools("manager")).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(tools("manager")).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(answer("reviewer", { jsonrpc: "2.0", id: 1, method: "tools/list" }, true)).toMatchObject({ result: { tools: [{ name: "bm_review" }] } });
   });
 });

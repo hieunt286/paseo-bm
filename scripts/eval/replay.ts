@@ -55,6 +55,7 @@ import { fileURLToPath } from "node:url";
 import type { TraceRecord } from "../../plugin/shared/contracts.js";
 import {
   EVAL_ROLES,
+  MAIN_TRIGGERS,
   REVIEW_TIERS,
   computeAdmissionEvidence,
   computeEvalMetrics,
@@ -652,6 +653,17 @@ export function renderMarkdown(report: ReplayReport): string {
   const checked = Object.entries(metrics.a12.byKind).filter(([, counts]) => counts.met + counts.missed > 0);
   lines.push(
     `| A-12 interventions met / checked, by kind | ${checked.length === 0 ? "none checked" : checked.map(([kind, counts]) => `${kind} ${counts.met} / ${counts.met + counts.missed}`).join(" · ")} |`,
+  );
+  // Missions design §20, ADR-032 decision 6: the governor's scale and the figures that would reopen a per-mission governor.
+  const scale = metrics.a13;
+  const reopened = Object.entries(scale.reopen).filter(([, crossed]) => crossed === true).map(([figure]) => figure);
+  lines.push(
+    `| A-13 governor: wakes / missions · off-mission acts · median tokens read per wake · dangers ended / raised, median to end (ms) · reopen | ${scale.wakes} / ${scale.missions} · ${scale.offMissionActs} · ${formatValue(scale.tokensReadPerWake.median)} · ${scale.dangers.ended} / ${scale.dangers.raised}, ${formatValue(scale.dangers.toEndMs.median)} · ${reopened.length === 0 ? "none" : reopened.join(", ")} |`,
+  );
+  // Mission runtime design §10, M-33: the Mains' turns by what started them.
+  const mains = metrics.a14;
+  lines.push(
+    `| A-14 Main turns: owner share · by trigger · batched | ${mains.homeKnown ? `${formatValue(mains.ownerShare)} · ${MAIN_TRIGGERS.map((trigger) => `${trigger} ${mains.byTrigger[trigger]}`).join(" / ")} · ${mains.batched}` : "Missions home unknown"} |`,
     "",
   );
 

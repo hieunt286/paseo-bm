@@ -32,9 +32,8 @@ import { setAgentLabel, setAgentMode, type PaseoCliDeps } from "./paseo-cli";
 import { PARENT_AGENT_LABEL, listAllAgents, roleOfAgent } from "./agent-role";
 import { providerId } from "./provider-id";
 import { MISSION_CODE_LABEL, MISSION_ID_LABEL, UNASSIGNED_MAIN_TITLE, mainTitleOf, withRoleMarker, withoutRoleMarker } from "./role-title";
-import { createMissionStore, journalQuietly, type Mission, type MissionResult } from "./mission-store";
+import type { Mission } from "./mission-store";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
-import { errorText } from "./rpc-kit";
 import { AUTO_APPROVE_FEATURE, capabilityOf, featuresFor, managerModeFor, modesFor, runPostureOf } from "./role-mode";
 import { workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { readIncidents } from "./fallback-state";
@@ -733,8 +732,8 @@ export async function createManager(
 
 /** What `createMain` creates. */
 export interface MainSpec {
-  /** The Missions home's workspace (`ensureMissionsHome`). */
-  homeWorkspaceId: string;
+  /** Where it is created: its mission's own workspace (`ensureMissionWorkspace`, ADR-034), the Mission-List root for an unassigned Main. */
+  workspaceId: string;
   /** The Main's mission; null for an unassigned Main (§3.3). */
   mission: Pick<Mission, "missionId" | "code" | "name"> | null;
   /** Its first prompt: the brief of §3.5 (`mainBriefOf`). */
@@ -746,7 +745,7 @@ export interface MainSpec {
 }
 
 /**
- * Creates a Main in the Missions home (missions design §3.3) through
+ * Creates a Main in its mission's workspace (missions design §3.3, ADR-034) through
  * `createFromProfile` — never `ensureRolesFor`, so a tool may call it: the
  * labels of §3.2 (`bm.missionId`, `bm.missionCode` beside `bm.role` and
  * `bm.version`; none for an unassigned Main), the title `mainTitleOf`
@@ -762,28 +761,13 @@ export async function createMain(spec: MainSpec, deps: EnsureManagerDeps, ensure
     ...(mission === null ? {} : { [MISSION_ID_LABEL]: mission.missionId, [MISSION_CODE_LABEL]: mission.code }),
     ...(spec.replaces ? { [REPLACES_LABEL]: spec.replaces } : {}),
   };
-  const created = await createFromProfile(deps, spec.homeWorkspaceId, ensured, {
+  const created = await createFromProfile(deps, spec.workspaceId, ensured, {
     title: mission === null ? withRoleMarker("manager", UNASSIGNED_MAIN_TITLE) : mainTitleOf(mission.code, mission.name),
     labels,
     missionId: mission?.missionId ?? null,
     prompt: spec.prompt,
   });
-  const home = deps.home !== undefined ? deps.home : dataHomeOf();
-  if (mission !== null && home !== null) {
-    const log = deps.log ?? ((message: string) => console.warn(message));
-    const store = createMissionStore(home);
-    let set: MissionResult;
-    try {
-      set = store.setMain(mission.missionId, created.agentId, spec.reason ?? "created");
-    } catch (error) {
-      set = { ok: false, reasons: [errorText(error)] };
-    }
-    if (!set.ok) log(`[paseo-bm] Main ${created.agentId} of mission ${mission.missionId} was created, but the mission could not record it: ${set.reasons.join("; ")}`);
-    else {
-      const text = spec.replaces ? `Main ${created.agentId} replaces ${spec.replaces} (${spec.reason ?? "replaced"}).` : `Main ${created.agentId} created.`;
-      journalQuietly(store, mission.missionId, { kind: "main", by: "plugin", text, ref: created.agentId }, log);
-    }
-  }
+  // Mission runtime design §3.4: creating a Main records nothing; its caller makes it the mission's with `replaceMain`.
   return created;
 }
 

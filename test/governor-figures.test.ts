@@ -14,6 +14,7 @@ import {
 } from "../plugin/server/governor-figures";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { createMissionRoster } from "../plugin/server/mission-roster";
+import { createOutbox } from "../plugin/server/outbox";
 import { createMissionStore, type Mission } from "../plugin/server/mission-store";
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { appendRecord } from "../plugin/server/trace-store";
@@ -282,6 +283,24 @@ describe("stuck", () => {
     expect(figureOf(figures, "unansweredLinks")).toMatchObject({ value: 1, crossed: true });
     expect(figureOf(figures, "oldCards")).toMatchObject({ value: 1, crossed: true, detail: `q:${R}:1` });
   });
+
+  it("leaves out of stalled a request waiting on active work of the mission, and a stopped one (mission runtime design §6.3)", () => {
+    const [A, B, C, D, E] = ["req-20261009T100000Z", "req-20261009T110000Z", "req-20261009T120000Z", "req-20261009T130000Z", "req-20261009T140000Z"];
+    const stalled = [A, B, C, D, E].map((subject) => ({ kind: "request-stalled" as const, subject }));
+    const requests = [
+      // Waits on B's Worker, which still works: waiting, not stalled.
+      request(A, { lastPhase: "blocked", waitingOn: "Main's signal that w-b finished G14", workerIds: ["w-a"] }),
+      request(B, { lastPhase: "implementing", workerIds: ["w-b"] }),
+      // Waits on D, which is finished: stalled.
+      request(C, { lastPhase: "blocked", waitingOn: `the Worker of ${D}`, workerIds: ["w-c"] }),
+      request(D, { rosterState: "finished", lastPhase: "finished", workerIds: ["w-d"] }),
+      // Stopped by its report while the roster still says active: not stalled.
+      request(E, { lastPhase: "stopped", workerIds: ["w-e"] }),
+    ];
+    expect(figureOf(figuresOf({ requests, alerts: stalled }), "stalled")).toMatchObject({ value: 3, detail: [B, C, D].join(", ") });
+    // A wait on the owner names nothing: still stalled.
+    expect(figureOf(figuresOf({ requests: [request(A, { lastPhase: "blocked", waitingOn: null })], alerts: [stalled[0]!] }), "stalled").value).toBe(1);
+  });
 });
 
 describe("budget", () => {
@@ -328,6 +347,8 @@ describe("readGovernorSnapshot: what the stores of a data folder give", () => {
     const location = { tracesDir: join(home, "traces") };
     await appendRecord(location, wrote("w1", ["src/pay.ts"], 1));
     await appendRecord(location, wrote("w-other", ["src/pay.ts"], 1));
+    // Its newest report, read for the stalled exclusions (mission runtime design §6.3).
+    createOutbox(home).add("repo-a", { kind: "report", requestId: R, from: "w1", to: "main-1", text: `BM-REPORT\nrequestId: ${R}\nphase: blocked\nblockers: waiting for: req-20261009T110000Z to finish` });
     const alerts = createAlertStore(home);
     alerts.raise({ workspaceId: "repo-a", kind: "request-stalled", subject: R, detail: "idle-unfinished" });
     alerts.raise({ workspaceId: "repo-a", kind: "request-stalled", subject: "req-20261009T110000Z", detail: "idle-unfinished" });
@@ -337,7 +358,7 @@ describe("readGovernorSnapshot: what the stores of a data folder give", () => {
       agents: [{ workspaceId: "repo-a", facts: { id: "w1", status: "running", archived: false } }],
       settings: DEFAULT_COORDINATION_SETTINGS,
     });
-    expect(read.requests).toEqual([request(R, { workerIds: ["w1"] })]);
+    expect(read.requests).toEqual([request(R, { workerIds: ["w1"], lastPhase: "blocked", waitingOn: "req-20261009T110000Z to finish" })]);
     expect(read.liveWorkers).toEqual([{ agentId: "w1", workspaceId: "repo-a" }]);
     expect(read.records.map((record) => record.agentId)).toEqual(["w1"]);
     expect(read.alerts.map((alert) => alert.subject)).toEqual([R]);

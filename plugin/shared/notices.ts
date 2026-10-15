@@ -200,6 +200,63 @@ export const INTERRUPTED_NOTICE_MARKER = "BM-INTERRUPTED";
 export const ASK_NOTICE_MARKER = "BM-ASK";
 
 /**
+ * First line of the plugin's word to a Main when one of its Workers raised a
+ * `danger` signal (missions design §20, ADR-032 decision 4): the Worker, its
+ * request and repo, the redacted command, and that the Main may stop it with
+ * `cancel_agent` unless the owner asked for it; the governor is its backup.
+ * Listed so it is never the owner's words. Matched as a whole word.
+ */
+export const SIGNAL_NOTICE_MARKER = "BM-SIGNAL";
+
+/** Minutes after a `danger` alert the governor is told, when the Main was (ADR-032 decision 4). */
+export const DANGER_BACKUP_MINUTES = 3;
+
+/** The `BM-SIGNAL` notice to a Main (missions design §20). Pure. */
+export function dangerSignalNoticeOf(input: { workerId: string; requestId: string | null; workspaceId: string; since: string; evidence: string }): string {
+  return [
+    `${SIGNAL_NOTICE_MARKER} danger`,
+    `From the paseo-bm plugin, not the owner: your Worker ${input.workerId} (request ${input.requestId ?? "not known"}, repo ${input.workspaceId}) ran, at ${input.since}, a command no answer of the owner covered:`,
+    input.evidence,
+    `If the owner did not ask for it, stop that Worker now with cancel_agent and tell the owner why in one line; if they did, do nothing. The governor is told in ${DANGER_BACKUP_MINUTES} minutes if the Worker still runs.`,
+  ].join("\n");
+}
+
+/**
+ * First word of the Main's channel (mission runtime design §6.2, ADR-033
+ * decision 5): what is pending for a mission's Main at its idle moment goes as
+ * one message, `BM-UPDATES <n>`, a line saying it is the plugin's, then each
+ * item's own block (`BM-DELIVERY …`, `BM-COMMAND …`, `BM-SIGNAL …`) after a
+ * line `BM-ITEM <i>`. One item alone goes as its block. Matched as a whole word.
+ */
+export const UPDATES_NOTICE_MARKER = "BM-UPDATES";
+
+/** The line before each item of a `BM-UPDATES` message: `BM-ITEM <i>`, from 1. */
+export const UPDATES_ITEM_MARKER = "BM-ITEM";
+
+const UPDATES_ITEM_LINE = new RegExp(`^${UPDATES_ITEM_MARKER} \\d+$`);
+
+/** The one message of a Main's pending items, oldest first (§6.2); one item alone is its block. Pure. */
+export function updatesNoticeOf(blocks: readonly string[]): string {
+  if (blocks.length === 1) return blocks[0]!;
+  return [
+    `${UPDATES_NOTICE_MARKER} ${blocks.length}`,
+    `From the paseo-bm plugin, not the owner: ${blocks.length} items, oldest first. Act on each as its block says.`,
+    ...blocks.flatMap((block, index) => [`${UPDATES_ITEM_MARKER} ${index + 1}`, block]),
+  ].join("\n");
+}
+
+/** The items of a `BM-UPDATES` message, in order, or null for any other text. Pure. */
+export function updatesItemsOf(text: unknown): string[] | null {
+  if (typeof text !== "string" || !startsWithMarker(text, UPDATES_NOTICE_MARKER)) return null;
+  const items: string[][] = [];
+  for (const line of text.split("\n").slice(1)) {
+    if (UPDATES_ITEM_LINE.test(line.trimEnd())) items.push([]);
+    else items.at(-1)?.push(line);
+  }
+  return items.map((lines) => lines.join("\n")).filter((item) => item.trim() !== "");
+}
+
+/**
  * First words of notices older builds sent and no build sends any more
  * (autonomy design §A.14). Stored history still holds them, so they are
  * recognised — and so ignored — like every notice: the notice that told a
@@ -227,10 +284,12 @@ const PREFIXES: readonly string[] = [
   REPLACED_NOTICE_MARKER,
   INTERRUPTED_NOTICE_MARKER,
   ASK_NOTICE_MARKER,
+  SIGNAL_NOTICE_MARKER,
+  UPDATES_NOTICE_MARKER,
 ];
 
 /** Markers that count only as a whole word: followed by whitespace or nothing. */
-const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER, ASK_NOTICE_MARKER]);
+const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER, ASK_NOTICE_MARKER, SIGNAL_NOTICE_MARKER, UPDATES_NOTICE_MARKER]);
 
 function startsWithMarker(text: string, prefix: string): boolean {
   if (!text.startsWith(prefix)) return false;

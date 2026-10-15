@@ -73,6 +73,8 @@
  *
  * Nothing here throws into the plugin: a failure is one log line and no tools.
  */
+import { createOwnerQuestionTools } from "./owner-question";
+import { replacedMainRefusalOf } from "./mission-replace";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { lstatSync, readFileSync } from "node:fs";
@@ -256,6 +258,9 @@ async function serve(
   // A builder's name (bm_report, bm_review, bm_answers) delivers only for a bound caller (design §16.6);
   // every other caller gets the builder, as before.
   if (!bound && role !== "orchestrator" && toolNamed(call.name)?.role === role) return built();
+  // Mission runtime design §3.6: a replaced Main writes and sends nothing; it names the current Main.
+  const replaced = role === "manager" && home !== null ? replacedMainRefusalOf(home, caller, call.name) : null;
+  if (replaced !== null) return { reply: reply(id, { content: [{ type: "text", text: replaced }], isError: true }), served: true };
   const result = await tools.call(call.name, call.arguments ?? {}, caller);
   const content = [{ type: "text", text: result.text }];
   return { reply: reply(id, result.ok ? { content } : { content, isError: true }), served: true };
@@ -741,8 +746,12 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
           })),
       // Missions design §9.6: the Main's bm_split_mission, published to the governor as mission.split.
       joinServerTools(
-        memory.manager,
-        createMissionSplitTools({ paseo: () => paseoHandle, home: () => home, log, ...(options.onMissionSplit === undefined ? {} : { publish: options.onMissionSplit }) }),
+        joinServerTools(
+          memory.manager,
+          createMissionSplitTools({ paseo: () => paseoHandle, home: () => home, log, ...(options.onMissionSplit === undefined ? {} : { publish: options.onMissionSplit }) }),
+        ),
+        // Mission runtime design §4.6: the Main asks the owner with a stored decision.
+        createOwnerQuestionTools({ home: () => home, log, turnStartOf: currentTurnStartOf }),
       ),
     ),
   );

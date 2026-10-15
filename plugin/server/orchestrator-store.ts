@@ -62,11 +62,13 @@ import type { DashboardErrorCode } from "../shared/contracts";
 import {
   DANGER_ALLOWANCE_MS,
   MAX_NOTES,
+  MAX_WAKE_MISSIONS,
   MAX_WAKE_WORKSPACES,
   isSentCommand,
   orchestratorNoteSchema,
   proposalSchema,
   stallEntrySchema,
+  dangerEntrySchema,
   wakeEntrySchema,
   wakeUsageSchema,
   type CommandTarget,
@@ -74,6 +76,7 @@ import {
   type Proposal,
   type ProposalOutcome,
   type StallEntry,
+  type DangerEntry,
   type WakeEntry,
   type WakeUsage,
 } from "../shared/orchestrator";
@@ -94,6 +97,10 @@ export const ORCHESTRATOR_DIR_NAME = "orchestrator";
 export const PROPOSALS_FILE = "proposals.json";
 export const STALLS_FILE = "stalls.json";
 export const WAKES_FILE = "wakes.json";
+/** The danger log (missions design §20, A-13). */
+export const DANGERS_FILE = "dangers.json";
+/** At most this many danger entries; the ones raised longest ago go first. */
+export const DANGER_LOG_LIMIT = 500;
 /** Where an earlier build kept the workflow assessments; retired (autonomy design §B.9), never read or written. */
 export const RETIRED_ASSESSMENTS_DIR_NAME = "assessments";
 export const NOTES_DIR_NAME = "notes";
@@ -197,18 +204,32 @@ export interface OrchestratorStore {
    * (missions design §9.7) to this Orchestrator, now. Returns the entry
    * stored; throws when it does not validate or cannot be written.
    */
-  appendWake(input: { orchestratorId: string; workspaceIds: readonly string[]; events: number; eventTypes?: readonly string[] }): WakeEntry;
+  appendWake(input: { orchestratorId: string; workspaceIds: readonly string[]; events: number; eventTypes?: readonly string[]; missionIds?: readonly string[] }): WakeEntry;
   /**
    * The Orchestrator's turn ended: its **oldest** wake still without an end,
    * started no later than now, ends now. Oldest, because the turn end that
    * closes one wake may already have delivered the next. `usage` is the
    * tokens of that closing turn (change-007 C6), null when unknown; `acted`,
-   * whether that turn called an act tool (M-26), when known. Returns the
+   * whether that turn called an act tool (M-26), when known; `offMission`,
+   * how many of its acts aimed at a mission the wake did not carry (M-28,
+   * missions design §20), when known. Returns the
    * wake it ended, or null — writing nothing — when none was open.
    */
-  endWake(orchestratorId: string, usage?: WakeUsage | null, acted?: boolean): WakeEntry | null;
+  endWake(orchestratorId: string, usage?: WakeUsage | null, acted?: boolean, offMission?: number): WakeEntry | null;
   /** The recorded wakes in file order (oldest first). */
   readWakes(): WakeEntry[];
+
+  /**
+   * The danger log (missions design §20, A-13). `openDanger` records a newly
+   * raised `danger` alert (one entry per alert key; a second call keeps the
+   * first); `noteDanger` sets the times of the entry of `alertKey` that are
+   * still null (`mainToldAt`, `governorToldAt`, `endedAt`) and returns
+   * whether it found one; `readDangers` gives the entries in file order.
+   * Writers throw when the file cannot be written.
+   */
+  openDanger(entry: Omit<DangerEntry, "mainToldAt" | "governorToldAt" | "endedAt">): DangerEntry;
+  noteDanger(alertKey: string, times: Partial<Pick<DangerEntry, "mainToldAt" | "governorToldAt" | "endedAt">>): boolean;
+  readDangers(): DangerEntry[];
 
   /**
    * Deletes the workspace's `assessments/<workspaceId>.jsonl` an earlier build
@@ -339,6 +360,15 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
   // The wakes in file order; the `WAKE_LOG_LIMIT` newest are kept.
   const wakes = entriesFile(ORCHESTRATOR_DIR_NAME, WAKES_FILE, (raw) => entriesOf(wakeEntrySchema, raw), () => [], (entries) => capBy(entries, WAKE_LOG_LIMIT));
 
+  // The danger log in file order; the ones raised longest ago go first past the limit.
+  const dangers = entriesFile(
+    ORCHESTRATOR_DIR_NAME,
+    DANGERS_FILE,
+    (raw) => entriesOf(dangerEntrySchema, raw),
+    () => [],
+    (entries) => capBy(entries, DANGER_LOG_LIMIT, (entry) => timeOrZero(entry.raisedAt)),
+  );
+
   const allowanceOf = (key: string, entry: StallEntry, at: number): DangerAllowanceView | null => {
     const parts = parseDangerOpenKey(key);
     if (parts === null) return null;
@@ -449,12 +479,13 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
         workspaceIds: [...new Set(input.workspaceIds)].sort().slice(0, MAX_WAKE_WORKSPACES),
         events: input.events,
         ...(input.eventTypes === undefined ? {} : { eventTypes: [...new Set(input.eventTypes)].sort() }),
+        ...(input.missionIds === undefined || input.missionIds.length === 0 ? {} : { missionIds: [...new Set(input.missionIds)].sort().slice(0, MAX_WAKE_MISSIONS) }),
       });
       wakes.update(({ entries }) => ({ entries: [...entries, entry] }));
       return entry;
     },
 
-    endWake(orchestratorId, usage = null, acted) {
+    endWake(orchestratorId, usage = null, acted, offMission) {
       const end = now();
       const entries = readWakes();
       const index = entries.findIndex(
@@ -463,13 +494,52 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
       if (index < 0) return null;
       // Usage that does not validate is unknown, and never costs the wake its end.
       const known = wakeUsageSchema.safeParse(usage);
-      const ended: WakeEntry = { ...entries[index]!, endedAt: end.toISOString(), usage: known.success ? known.data : null, ...(acted === undefined ? {} : { acted }) };
+      const ended: WakeEntry = {
+        ...entries[index]!,
+        endedAt: end.toISOString(),
+        usage: known.success ? known.data : null,
+        ...(acted === undefined ? {} : { acted }),
+        ...(offMission === undefined ? {} : { offMission }),
+      };
       entries[index] = ended;
       wakes.write({ entries });
       return ended;
     },
 
     readWakes,
+
+    openDanger(input) {
+      const entry = dangerEntrySchema.parse({ ...input, mainToldAt: null, governorToldAt: null, endedAt: null });
+      let kept = entry;
+      dangers.update(({ entries }) => {
+        const found = entries.find((other) => other.alertKey === entry.alertKey);
+        if (found !== undefined) {
+          kept = found;
+          return { entries };
+        }
+        return { entries: [...entries, entry] };
+      });
+      return kept;
+    },
+
+    noteDanger(alertKey, times) {
+      let found = false;
+      dangers.update(({ entries }) => ({
+        entries: entries.map((entry) => {
+          if (entry.alertKey !== alertKey) return entry;
+          found = true;
+          return {
+            ...entry,
+            mainToldAt: entry.mainToldAt ?? times.mainToldAt ?? null,
+            governorToldAt: entry.governorToldAt ?? times.governorToldAt ?? null,
+            endedAt: entry.endedAt ?? times.endedAt ?? null,
+          };
+        }),
+      }));
+      return found;
+    },
+
+    readDangers: () => dangers.read().entries,
 
     deleteRetiredAssessments(workspaceId) {
       assertWorkspaceId(workspaceId);

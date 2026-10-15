@@ -14,7 +14,9 @@
  * 1. the record is written `pending` first;
  * 2. it goes to the notice queue as `enqueue(to, "<kind>:<id>", text)` — a
  *    kind of its own, so "the newest of a kind replaces the older" never
- *    applies — with `BM-DELIVERY <kind> <recordId>` as its first line;
+ *    applies — with `BM-DELIVERY <kind> <recordId>` as its first line; to a
+ *    mission's Main, as an item of its channel (`main-channel.ts`, mission
+ *    runtime design §6.2), the same kind its key;
  * 3. the queue's callbacks record the outcome: `onSent` → `delivered` (at
  *    once, or at the target's idle moment), `onDropped` → `dropped` with its
  *    reason, one log line and the `delivery-dropped` Inbox alert naming the
@@ -79,7 +81,8 @@ import { redactText } from "./collector";
 import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
 import { requestIndexOf } from "./mission-roster";
 import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
-import { noticeQueue, type NoticeOutcome, type NoticePaseo, type NoticeQueue } from "./notice-queue";
+import { enqueueNotice, type ChannelQueue } from "./main-channel";
+import { noticeQueue, type NoticeCallbacks, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { createRequestRegistry } from "./request-registry";
 import { errorText } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN } from "./trace-store";
@@ -347,7 +350,7 @@ export interface OutboxDeliveryDeps extends OutboxDeps {
   /** The data folder. */
   home: string;
   /** The notice queue; the plugin's shared one by default. */
-  queue?: Pick<NoticeQueue, "enqueue">;
+  queue?: ChannelQueue;
   /** The caller's Paseo handle; the queue's last one when absent. */
   paseo?: NoticePaseo;
   log?: (message: string) => void;
@@ -461,7 +464,8 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
   const attempt = async (retargets: number): Promise<NoticeOutcome> => {
     const told = { any: false, again: null as Promise<NoticeOutcome> | null };
     try {
-      const outcome = await queue.enqueue(record.to, deliveryKindOf(record), deliveryTextOf(record), deps.paseo, {
+      // A mission's Main gets it on its channel (mission runtime design §6.2), with what else is pending for it.
+      const callbacks: NoticeCallbacks = {
         onSent: () => {
           told.any = true;
           settle("delivered");
@@ -470,7 +474,8 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
           told.any = true;
           told.again = dropped(reason, retargets);
         },
-      });
+      };
+      const outcome = await enqueueNotice({ home: deps.home, queue, targetId: record.to, kind: deliveryKindOf(record), text: deliveryTextOf(record), ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }), callbacks });
       // A drop during this call that sent the record on: its outcome is this delivery's.
       if (told.again !== null) return await told.again;
       // An input the queue refuses outright calls no callback; `queued` and `replaced` settle later.

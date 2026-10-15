@@ -192,10 +192,8 @@ describe("switch (Manager)", () => {
     expect(setLabels).toHaveBeenCalledWith(OLD, { "bm.replacedBy": NEW });
     expect(setTitle).toHaveBeenCalledWith(OLD, "🟣 M · WEB Website · replaced");
     expect(setLabels).toHaveBeenCalledWith("wrk-idle", { "paseo.parent-agent-id": NEW });
-    expect(enqueue.mock.calls.map((call) => [call[0], call[1]])).toEqual([
-      ["wrk-idle", "BM-SETTINGS"],
-      ["wrk-busy", "BM-SETTINGS"],
-    ]);
+    // Mission runtime design §3.4: no Worker is told its Main changed.
+    expect(enqueue.mock.calls.filter((call) => call[1] === "BM-SETTINGS")).toEqual([]);
   });
 
   it("tells every live, non-replaced Worker of the workspace the new Manager's id (queued for a running one)", async () => {

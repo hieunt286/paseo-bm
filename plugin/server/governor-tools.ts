@@ -17,11 +17,11 @@
  *   source mission whose "apply" option carries the `mission-split` prepared
  *   change, and the plugin runs the split on the owner's tap. A split writes
  *   the new mission (`createdBy: orchestrator`, `parentMissionId`,
- *   `splitReason`), moves the named requests' roster entries, creates its Main
- *   in the Missions home (`handleMissionEnsure`), then reassigns those
- *   requests and their Workers to it (`reassignRequests`, §3.4 steps 2–4 for
- *   them only) and tells the source mission's Main; the new Main reads it in
- *   its brief's journal.
+ *   `splitReason`), moves the named requests to it (`transferRequests`,
+ *   mission runtime design §5.1: roster, registry mission, bindings), creates
+ *   its Main in the Missions home (`handleMissionEnsure`, whose `replaceMain`
+ *   points those requests and their Workers at it) and tells the source
+ *   mission's Main; the new Main reads it in its brief's journal.
  * - **Refused** (`splitRefusalsOf`, checked by the tool and again on the
  *   owner's tap): the source mission unknown or closed, a code an open mission
  *   holds, a repo Paseo does not list, a request not on the source's roster,
@@ -58,7 +58,7 @@ import {
 } from "./governor-conflicts";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionDecisionStore, missionOfDecisionId } from "./mission-decisions";
-import { reassignRequests } from "./mission-replace";
+import { transferRequests, type TransferDeps } from "./mission-transfer";
 import { createMissionRoster } from "./mission-roster";
 import { MISSION_CODE_PATTERN, createMissionStore, type Mission } from "./mission-store";
 import { resolveRepos, tellMain, type MissionAnswerDeps } from "./mission-tools";
@@ -222,21 +222,35 @@ export type SplitResult = { ok: true; mission: Mission; mainId: string; moved: s
 export async function executeSplit(source: Mission, split: MissionSplit, by: "owner" | "orchestrator", ref: string, deps: SplitDeps): Promise<SplitResult> {
   const { home, log } = deps;
   const store = createMissionStore(home, { now: () => deps.now });
-  const roster = createMissionRoster(home, { now: () => deps.now });
+  const bindings = deps.missions?.bindings?.() ?? undefined;
+  const transferDeps: TransferDeps = {
+    home,
+    now: deps.now,
+    paseo: deps.paseo,
+    log,
+    ...(bindings ? { bindings } : {}),
+    ...(deps.queue === undefined ? {} : { queue: deps.queue }),
+    ...(deps.missions?.cli === undefined ? {} : { cli: deps.missions.cli }),
+  };
   /** The new mission and the requests moved to it, until its Main exists; then null: the split stands. */
   let undoable: { mission: Mission; movedIds: string[] } | null = null;
-  const undo = (why: string): void => {
+  const undo = async (why: string): Promise<void> => {
     if (undoable === null) return;
     const { mission, movedIds } = undoable;
     undoable = null;
+    const back = async (): Promise<void> => {
+      if (movedIds.length === 0) return;
+      const returned = await transferRequests({ from: mission.missionId, to: source.missionId, requestIds: movedIds, reason: why, by: "plugin", ref: mission.missionId, journal: false, tell: false }, transferDeps);
+      if (!returned.ok) throw new Error(returned.reasons.join("; "));
+    };
     const steps: Array<[string, () => unknown]> = [
-      ["put the moved requests back", () => roster.move(mission.missionId, source.missionId, movedIds)],
+      ["put the moved requests back", back],
       ["close the new mission", () => store.update(mission.missionId, (current) => ({ ...current, state: "closed", closedAt: deps.now.toISOString() }))],
       ["journal it", () => store.appendJournal(source.missionId, { kind: "charter", by: "plugin", text: `Split into ${split.code} undone: ${why}`, ref: mission.missionId })],
     ];
     for (const [what, step] of steps) {
       try {
-        step();
+        await step();
       } catch (error) {
         log(`[paseo-bm] undoing the split into ${split.code} could not ${what}: ${errorText(error)}`);
       }
@@ -249,8 +263,10 @@ export async function executeSplit(source: Mission, split: MissionSplit, by: "ow
     if (!created.ok) return { ok: false, reasons: created.reasons };
     const mission = created.mission;
     undoable = { mission, movedIds: [] };
-    const moved = roster.move(source.missionId, mission.missionId, split.requestIds);
-    const movedIds = moved.map((entry) => entry.requestId);
+    // Mission runtime design §5.1: the one transfer; the new mission has no Main yet, so its creation points the requests at it.
+    const transferred = await transferRequests({ from: source.missionId, to: mission.missionId, requestIds: split.requestIds, reason: split.reason, by, ref, journal: false, tell: false }, transferDeps);
+    if (!transferred.ok) throw new Error(transferred.reasons.join("; "));
+    const movedIds = transferred.moved;
     undoable = { mission, movedIds };
     const listedIds = movedIds.length === 0 ? "no request" : `requests ${movedIds.join(", ")}`;
     store.appendJournal(mission.missionId, { kind: "charter", by, text: `Split from mission ${source.code} with ${listedIds}: ${split.reason}`, ref: source.missionId });
@@ -270,20 +286,11 @@ export async function executeSplit(source: Mission, split: MissionSplit, by: "ow
         })
       ).agentId;
     } catch (error) {
-      undo(`its Main could not be created (${errorText(error)})`);
+      await undo(`its Main could not be created (${errorText(error)})`);
       return { ok: false, reasons: [`the new mission's Main could not be created: ${errorText(error)}`] };
     }
     undoable = null;
-    const bindings = deps.missions?.bindings?.() ?? undefined;
-    const workers = await reassignRequests(mission.missionId, moved, mainId, {
-      home,
-      paseo: deps.paseo,
-      log,
-      now: () => deps.now,
-      ...(bindings ? { bindings } : {}),
-      ...(deps.queue === undefined ? {} : { queue: deps.queue }),
-      ...(deps.missions?.cli === undefined ? {} : { cli: deps.missions.cli }),
-    });
+    const workers = transferred.workers;
     const told: MissionAnswerDeps = { home, now: deps.now, log, paseo: deps.paseo, ...(deps.missions?.cli === undefined ? {} : { cli: deps.missions.cli }) };
     await tellMain(
       source.missionId,
@@ -294,7 +301,7 @@ export async function executeSplit(source: Mission, split: MissionSplit, by: "ow
     );
     return { ok: true, mission: store.get(mission.missionId) ?? mission, mainId, moved: movedIds, workers };
   } catch (error) {
-    undo(`it failed before its Main was created (${errorText(error)})`);
+    await undo(`it failed before its Main was created (${errorText(error)})`);
     return { ok: false, reasons: [errorText(error)] };
   }
 }

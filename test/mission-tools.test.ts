@@ -292,8 +292,31 @@ describe("bm_mission_update (§4, §4.1)", () => {
     expect(logs.filter((line) => line.includes(`the journal of mission ${mission.missionId} could not record`))).toHaveLength(3);
   });
 
-  it("refuses close while a Worker of the mission runs, at the call and at the owner's tap", async () => {
-    const worker: FakeAgent = { id: "wkr-1", provider: "bm-worker", workspaceId: "wks-a", labels: { "bm.role": "worker" } };
+  it("transfer opens its own owner card to move requests to another open mission; an unknown code or a request off the roster is refused (mission runtime design §5.3)", async () => {
+    const { call, json } = await setup();
+    const { mission, who } = missionOf();
+    const other = createMissionStore(home, { now: () => NOW }).create({ code: "BILL", name: "Billing", goal: "Invoices", repos: ["wks-a"], createdBy: "owner", mainId: "main-bill" });
+    if (!other.ok) throw new Error(other.reasons.join("; "));
+    createMissionRoster(home).add(mission.missionId, { requestId: "req-20261009T100000Z", workspaceId: "wks-a", topic: "invoice API", workerId: "wkr-1" });
+    const unknown = await call("bm_mission_update", { transfer: { to: "NOPE", requestIds: ["req-20261009T100000Z"], reason: "r" } }, who);
+    expect(unknown.text).toContain("input.transfer.to: no open mission has the code NOPE");
+    const off = await call("bm_mission_update", { transfer: { to: "BILL", requestIds: ["req-20261009T110000Z"], reason: "r" } }, who);
+    expect(off.text).toContain("input.transfer: not on mission WEB's roster: req-20261009T110000Z");
+    const asked = await json("bm_mission_update", { transfer: { to: "BILL", requestIds: ["req-20261009T100000Z"], reason: "Billing owns invoices" } }, who);
+    expect(asked).toMatchObject({ applied: [], decisionId: null, transferDecisionId: `m:${mission.missionId}:1` });
+    expect(createMissionDecisionStore(home).get(`m:${mission.missionId}:1`)!.options[0]!.action).toEqual({
+      kind: "mission-transfer",
+      missionId: mission.missionId,
+      to: other.mission.missionId,
+      requestIds: ["req-20261009T100000Z"],
+      reason: "Billing owns invoices",
+    });
+    // Nothing moved until the owner taps it.
+    expect(createMissionRoster(home).list(mission.missionId).map((entry) => entry.requestId)).toEqual(["req-20261009T100000Z"]);
+  });
+
+  it("refuses close while a Worker of the mission runs a turn, at the call and at the owner's tap; an idle one does not hold it (mission runtime design §5.4)", async () => {
+    const worker: FakeAgent = { id: "wkr-1", provider: "bm-worker", workspaceId: "wks-a", status: "running", labels: { "bm.role": "worker" } };
     const { call, json, fake } = await setup([worker]);
     const { mission, who } = missionOf();
     // No Worker runs yet: the card opens.
@@ -304,9 +327,10 @@ describe("bm_mission_update (§4, §4.1)", () => {
     await expect(handleDecisionsAnswer({ id, optionKey: "apply" }, fake.paseo, { home, now: () => NOW, cli: fakeCli().cli })).rejects.toMatchObject({ code: "E_MISSION_INVALID" });
     expect(createMissionDecisionStore(home).get(id)!.status).toBe("open");
     expect(createMissionStore(home).get(mission.missionId)!.state).toBe("open");
-    // Its request finished: the tap closes the mission.
-    createMissionRoster(home).setState(mission.missionId, "req-20261009T100000Z", "finished");
+    // Its Worker ended its turn, the request still active: the tap closes the mission, and the request is stopped.
+    fake.byId("wkr-1")!.status = "idle";
     await handleDecisionsAnswer({ id, optionKey: "apply" }, fake.paseo, { home, now: () => NOW, cli: fakeCli().cli });
     expect(createMissionStore(home).get(mission.missionId)).toMatchObject({ state: "closed", closedAt: NOW.toISOString() });
+    expect(createMissionRoster(home).get(mission.missionId, "req-20261009T100000Z")?.state).toBe("stopped");
   });
 });

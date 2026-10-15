@@ -11,6 +11,9 @@ import { createBindingStore } from "../plugin/server/agent-bindings";
 import { checkOffToolReviewer } from "../plugin/server/off-tool-reviewer";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createEventBus } from "../plugin/server/event-bus";
+import { createMissionStore } from "../plugin/server/mission-store";
+import { clearRequestIndexCache, createMissionRoster } from "../plugin/server/mission-roster";
+import { SIGNAL_NOTICE_MARKER } from "../plugin/shared/notices";
 import { STALL_PASS_MS, createStallWatcher, type StallWatcher, type StallWatcherDeps } from "../plugin/server/stall-watcher";
 import { appendRecord, clearTraceStoreCache, writeWorkspaceMeta } from "../plugin/server/trace-store";
 import {
@@ -714,6 +717,63 @@ describe("danger opens the interrupt allowance for 10 minutes (design §6B.3)", 
     expect(store().isDangerOpen(WORKSPACE_ID, WORKER)).toBe(true);
     clock = new Date(when(26).getTime() + DANGER_ALLOWANCE_MS);
     expect(store().isDangerOpen(WORKSPACE_ID, WORKER)).toBe(false);
+  });
+});
+
+describe("danger goes to the Main first (missions design §20, ADR-032 decision 4)", () => {
+  const MISSION = "mis-0123456789";
+  /** The request of the seeded trace on an open mission's roster, its Main the Manager. */
+  function onMission(): void {
+    const made = createMissionStore(home, { newId: () => MISSION, env: {} }).create({ code: "INV", name: "Invoices", goal: "Fix dates", repos: [WORKSPACE_ID], createdBy: "owner", mainId: MANAGER });
+    if (!made.ok) throw new Error(made.reasons.join("; "));
+    createMissionRoster(home).add(MISSION, { requestId: REQUEST_ID, workspaceId: WORKSPACE_ID, topic: "dates", workerId: WORKER });
+    clearRequestIndexCache();
+  }
+
+  it("a mission's Worker at an all-owner repo: its Main gets BM-SIGNAL at once, the allowance opens, and the governor's event waits for backupAt", async () => {
+    await seed();
+    onMission();
+    // No class above owner: the repo is outside the policy's scope.
+    const worker = workerAgent({ timeline: [...healthyTurn(), shellCall("git push origin main", at(24, 30))] });
+    const fake = daemonWith([managerAgent(), worker, orchestratorAgent()]);
+    const watch = watcher({ signalQueue: queue });
+    watch.usePaseo(fake.paseo);
+
+    const pass = await watch.workerPass();
+    expect(pass).toMatchObject({ raised: [alertOf("danger")], allowances: [WORKER], mainsTold: [MANAGER] });
+    const toMain = fake.sends.filter((sent) => sent.id === MANAGER);
+    expect(toMain).toHaveLength(1);
+    expect(toMain[0]!.text.split("\n")[0]).toBe(`${SIGNAL_NOTICE_MARKER} danger`);
+    expect(toMain[0]!.text).toContain(`your Worker ${WORKER} (request ${REQUEST_ID}, repo ${WORKSPACE_ID})`);
+    expect(toMain[0]!.text).toContain("git push: git push origin main");
+    expect(toMain[0]!.text).toContain("stop that Worker now with cancel_agent");
+    expect(isPluginNotice(toMain[0]!.text)).toBe(true);
+    const backupAt = new Date(when(25).getTime() + 3 * 60_000).toISOString();
+    expect(pass.events).toEqual([expect.objectContaining({ signal: "danger", missionId: MISSION, backupAt })]);
+    // Held for the Main: nothing reaches the Orchestrator yet.
+    expect(fake.sends.filter((sent) => sent.id === ORCHESTRATOR)).toEqual([]);
+    expect(store().readDangers()).toEqual([
+      { alertKey: alertOf("danger"), workspaceId: WORKSPACE_ID, workerId: WORKER, requestId: REQUEST_ID, missionId: MISSION, raisedAt: when(25).toISOString(), mainId: MANAGER, mainToldAt: when(25).toISOString(), governorToldAt: null, endedAt: null },
+    ]);
+
+    // The Main stopped it: the Worker no longer runs, the alert clears and the danger ends.
+    fake.byId(WORKER)!.status = "idle";
+    clock = when(26);
+    expect(await watch.workerPass()).toMatchObject({ cleared: [alertOf("danger")] });
+    expect(store().readDangers()[0]).toMatchObject({ endedAt: when(26).toISOString(), governorToldAt: null });
+  });
+
+  it("a Worker of no mission: no BM-SIGNAL, its danger logged without a Main", async () => {
+    await seed();
+    inScope();
+    const fake = daemonWith([managerAgent(), workerAgent({ timeline: [...healthyTurn(), shellCall("git push", at(24, 30))] }), orchestratorAgent()]);
+    const watch = watcher({ signalQueue: queue });
+    watch.usePaseo(fake.paseo);
+    expect(await watch.workerPass()).toMatchObject({ raised: [alertOf("danger")], mainsTold: [] });
+    expect(fake.sends.filter((sent) => sent.id === MANAGER)).toEqual([]);
+    expect(store().readDangers()).toEqual([expect.objectContaining({ missionId: null, mainId: null, mainToldAt: null })]);
+    // In the policy's scope, it reaches the governor at once.
+    expect(store().readDangers()[0]!.governorToldAt).toBe(when(25).toISOString());
   });
 });
 

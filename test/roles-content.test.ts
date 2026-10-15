@@ -267,7 +267,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
 
   it("checks plan and result against the owner's goals and raises a misalignment as a question (REQ-117 d)", () => {
     keys(M, "at received, beads-done and finished", "At `received`, `beads-done`", "`finished`", "owner's goals");
-    keys(M, "raised in its reply, with options and a recommendation", "raise it in your reply", "one question", "options", "your recommendation");
+    // Mission runtime design §4.6 (REQ-205): a misalignment is a stored question, never only prose in the reply.
+    keys(M, "asked as a stored question, with options and a recommendation", "ask it with `bm_owner_question`", "options", "your recommendation", "name it in one line");
     keys(M, "the owner's answer goes through bm_tell_worker", "Their answer goes to the Worker with `bm_tell_worker`");
     keys(M, "technical choices are not alignment questions", "How the Worker builds is never this question");
   });
@@ -917,7 +918,9 @@ describe("missions — the Main's file and the Worker's side (missions design §
 
   it("answers Workers' questions only within the mission level, never an ownerOnly one", () => {
     keys(MR, "never answers in the owner's place beyond the mission level", "never answer a Worker's question in the owner's", "beyond your mission level");
-    keys(M, "within the level through bm_answer_worker, never an ownerOnly question", "mission level delegates", "`bm_answer_worker`", "never an `ownerOnly`", "owner's card or words");
+    // Mission runtime design §4.4, §4.5: the plugin names the questions that are the Main's; no time window.
+    keys(M, "answers the questions the plugin names as its own through bm_answer_worker, never an ownerOnly question", "The plugin tells you each question that is", "`bm_answer_worker`", "never an `ownerOnly`", "owner's card or words");
+    keys(M, "what else the owner decides goes to bm_owner_question, never only into the reply", "`bm_owner_question`, never only into your reply");
   });
 
   it("takes a BM-COMMAND on how the mission runs as process feedback", () => {

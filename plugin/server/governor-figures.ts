@@ -34,7 +34,7 @@
  * | drift | `mainTurnsSinceCriterion`: the Mains' turns since a done criterion last changed state (else since the charter was confirmed, else since the mission began); none while every done criterion is met or dropped and no request is open | > `mainTurnsSinceCriterion` |
  * | | `finishedSinceCriterion`: requests finished since then | > `finishedSinceCriterion` |
  * | | `outsideCharter`: requests and live links in repos outside `charter.repos` (none while it is empty) | ≥ `outsideCharter` |
- * | stuck | `stalled`, `unansweredLinks`: open alerts of the mission's requests; `oldCards`: open cards older than `cardAgeHours` | ≥ 1 each |
+ * | stuck | `stalled`, `unansweredLinks`: open alerts of the mission's requests — `stalled` leaves out a stopped request and one waiting on active work of the mission (`waitingOrStoppedOf`, mission runtime design §6.3); `oldCards`: open cards older than `cardAgeHours` | ≥ 1 each |
  * | budget | `requestsBudget`, `workersBudget`, `reviewCallsBudget`, `daysBudget`: percent of each `charter.budget` field above 0 | ≥ `budgetPercent` |
  *
  * Documents in Review or Draft are not counted among the open approvals: no
@@ -49,14 +49,15 @@ import { isProcessDocumentPath, overReviewCeiling, reviewCeilingOf } from "../sh
 import { timeOrZero } from "../shared/time";
 import { GOVERNOR_FIGURES, MAX_FIGURE_DETAIL, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
 import { writtenFilesOf } from "../shared/writers-observed";
+import { waitingOnOf } from "../shared/mission-state";
 import { createAlertStore } from "./alert-store";
 import { TRACES_DIR_NAME } from "./data-home";
 import { createDecisionStore } from "./decision-store";
 import { createMissionDecisionStore, missionOfDecisionId } from "./mission-decisions";
 import { createMissionRoster, type RosterState } from "./mission-roster";
 import type { Mission } from "./mission-store";
-import { missionsHomeIdOf } from "./missions-home";
-import { createOutbox } from "./outbox";
+import { mainPlacesOf } from "./missions-home";
+import { createOutbox, newestReportRecordOf, reportPhaseOf } from "./outbox";
 import { createPeerLinkStore, isLiveLink } from "./peer-links";
 import { createRequestRegistry } from "./request-registry";
 import { exemptCallsOf, grantedCallsOf } from "./review-tools";
@@ -92,6 +93,9 @@ export interface GovernorRequestFacts {
   reviewCalls: number;
   reviewGranted: number;
   reviewExempt: number;
+  /** Its newest report's phase, and what a `blocked` one waits on besides the owner (`waitingOnOf`); absent when unknown. */
+  lastPhase?: string | null;
+  waitingOn?: string | null;
 }
 
 /** A read of everything one mission's figures need. Built by `readGovernorSnapshot`; fixtures in tests. */
@@ -274,12 +278,39 @@ function driftFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): G
   ];
 }
 
+const isDone = (request: GovernorRequestFacts): boolean =>
+  request.rosterState === "finished" || request.rosterState === "stopped" || request.lastPhase === "finished" || request.lastPhase === "stopped";
+
+/**
+ * The requests the `stalled` figure leaves out (mission runtime design §6.3):
+ * a stopped one, and one whose newest report is `blocked` waiting on a request
+ * or Worker of the same mission that is not finished or stopped. Pure.
+ */
+export function waitingOrStoppedOf(requests: readonly GovernorRequestFacts[]): Set<string> {
+  const active = requests.filter((request) => !isDone(request));
+  const out = new Set<string>();
+  for (const request of requests) {
+    if (request.rosterState === "stopped" || request.lastPhase === "stopped") out.add(request.requestId);
+    else if (request.lastPhase === "blocked" && request.waitingOn != null) {
+      const on = request.waitingOn;
+      const named = active.some((other) => other.requestId !== request.requestId && (on.includes(other.requestId) || other.workerIds.some((workerId) => on.includes(workerId))));
+      if (named) out.add(request.requestId);
+    }
+  }
+  return out;
+}
+
 function stuckFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): GovernorFigure[] {
   const now = timeOrZero(snapshot.now);
   const old = snapshot.decisions.filter((decision) => isAnswerable(decision) && now - timeOrZero(decision.askedAt) > settings.cardAgeHours * 3_600_000);
   const count = (id: GovernorFigureId, subjects: readonly string[]) => figure(id, subjects.length, 1, ">=", subjects.length === 0 ? null : subjects.join(", "));
   const of = (kind: Alert["kind"]) => snapshot.alerts.filter((alert) => alert.kind === kind).map((alert) => alert.subject);
-  return [count("stalled", of("request-stalled")), count("unansweredLinks", of("peer-unanswered")), count("oldCards", old.map((decision) => decision.id))];
+  const notStalled = waitingOrStoppedOf(snapshot.requests);
+  return [
+    count("stalled", of("request-stalled").filter((requestId) => !notStalled.has(requestId))),
+    count("unansweredLinks", of("peer-unanswered")),
+    count("oldCards", old.map((decision) => decision.id)),
+  ];
 }
 
 function budgetFigures(snapshot: GovernorSnapshot, settings: GovernorSettings): GovernorFigure[] {
@@ -328,6 +359,15 @@ export function liveWorkersOf(agents: readonly ListedAgent[], requests: Readonly
     .map(({ facts }) => ({ agentId: facts.id, workspaceId: repoOf.get(facts.id)! }));
 }
 
+/** The newest report record of a request's Workers, newest Worker first. */
+function newestReportOf(home: string, workspaceId: string, workerIds: readonly string[]): { text: string } | null {
+  for (const workerId of [...workerIds].reverse()) {
+    const record = newestReportRecordOf(home, workspaceId, workerId);
+    if (record !== null) return record;
+  }
+  return null;
+}
+
 export interface GovernorSnapshotDeps {
   now: Date;
   /** The live agents (a Paseo list); the mission's live Workers are taken from it. */
@@ -356,6 +396,7 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
   const registry = createRequestRegistry(home, { log });
   const requests: GovernorRequestFacts[] = roster.map((entry) => {
     const registered = registry.get(entry.workspaceId, entry.requestId);
+    const report = quietly(`the reports of ${entry.requestId}`, () => newestReportOf(home, entry.workspaceId, entry.workerIds), null);
     return {
       requestId: entry.requestId,
       workspaceId: entry.workspaceId,
@@ -366,6 +407,8 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
       reviewCalls: registered === null ? 0 : registered.reviews.batches.reduce((sum, batch) => sum + batch.calls.length, 0),
       reviewGranted: registered === null ? 0 : grantedCallsOf(registered),
       reviewExempt: registered === null ? 0 : exemptCallsOf(registered),
+      lastPhase: report === null ? null : (reportPhaseOf(report.text) ?? null),
+      waitingOn: report === null ? null : waitingOnOf(report.text),
     };
   });
   const requestIds = new Set(requests.map((request) => request.requestId));
@@ -381,7 +424,7 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
 
   // The Mains' turns are traced under their home; a legacy mission's Main in its repo (§3.6).
   const mainIds = new Set([...mission.mainHistory.map((entry) => entry.agentId), ...(mission.mainId === null ? [] : [mission.mainId])]);
-  const mainPlaces = [...new Set([missionsHomeIdOf(home), mission.legacyWorkspaceId].filter((id): id is string => id !== null))];
+  const mainPlaces = mainPlacesOf(home, mission);
   const mainTurns = new Map<string, string>();
   for (const workspaceId of mainPlaces) {
     for (const record of quietly("the Mains' traces", () => readRecords(location, workspaceId).records, [])) {

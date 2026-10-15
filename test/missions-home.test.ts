@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,8 +20,14 @@ import {
   isMissionsHome,
   mainBriefOf,
   mainFactsOf,
+  ensureMissionWorkspace,
+  legacyMissionsHomeDirOf,
+  mainPlacesOf,
+  missionWorkspaceDirOf,
   missionsHomeDirOf,
   missionsHomeIdOf,
+  missionsPlaceOf,
+  missionsWorkspaceIdsOf,
   syncMainTitle,
   type MissionsPaseo,
 } from "../plugin/server/missions-home";
@@ -80,12 +86,13 @@ function recordingBinder() {
 const readInstructions = async (_paseo: unknown, workspaceId: string, missionId: string | null) => `instructions ${workspaceId} ${missionId ?? "none"}`;
 
 describe("the Missions home (§3.1)", () => {
-  it("creates <data>/missions/home with its README (0700), opens it as a workspace and caches its id", async () => {
+  it("creates <data>/missions/Mission-List with its README (0700), opens it as a workspace and caches its id (ADR-034)", async () => {
     const fake = daemon();
     expect(missionsHomeIdOf(home)).toBeNull();
     const opened = await ensureMissionsHome(fake.paseo, { home });
     const directory = missionsHomeDirOf(home);
-    expect(opened).toEqual({ workspaceId: "wks-own", directory });
+    expect(directory.endsWith("/missions/Mission-List")).toBe(true);
+    expect(opened).toEqual({ workspaceId: "wks-own", directory, projectId: null });
     expect(fake.api.workspaces.open).toHaveBeenCalledWith({ cwd: directory });
     expect(readFileSync(join(directory, "README.md"), "utf8")).toBe(MISSIONS_HOME_README);
     expect(statSync(directory).mode & 0o777).toBe(0o700);
@@ -440,7 +447,7 @@ describe("a Main's brief and Runtime facts (§3.5)", () => {
     expect(text).toContain("\n## Runtime facts\n\nMission: none yet");
   });
 
-  it("the brief lists the open requests, the open done criteria and the newest journal lines", async () => {
+  it("the brief renders the mission state: what is in flight, the open done criteria and the newest journal lines (mission runtime design §2.2)", async () => {
     const store = createMissionStore(home, { newId: () => MISSION });
     store.create({ code: "WEB", name: "Website", goal: "", repos: ["wks-a"], createdBy: "owner" });
     store.update(MISSION, (mission) => ({
@@ -452,10 +459,10 @@ describe("a Main's brief and Runtime facts (§3.5)", () => {
     createMissionRoster(home).add(MISSION, { requestId: "req-20261009T100000Z", workspaceId: "wks-a", topic: "Login page", workerId: "w-1" });
     const brief = await mainBriefOf(daemon().paseo, home, store.get(MISSION));
     expect(brief).toContain("Goal: not set yet — ask the owner when you need it");
-    expect(brief).toContain("- req-20261009T100000Z in api: Login page; Worker w-1; newest report: none");
-    expect(brief).toContain("- D1: The site is live");
+    expect(brief).toContain("In flight:\n- req-20261009T100000Z in api: working; Worker w-1; no report yet; asked: Login page");
+    expect(brief).toContain("Done criteria: 1 of 2 met; open: D1 The site is live");
     expect(brief).not.toContain("D2");
-    expect(brief).toMatch(/Journal \(newest last\):\n- \S+ note owner: Started/);
+    expect(brief).toMatch(/Recently:\n- \S+ note owner: Started/);
   });
 
   it("the brief's newest report: two in one second read as the further phase, whatever the outbox file's order (acceptance 2026-10-09)", async () => {
@@ -469,7 +476,7 @@ describe("a Main's brief and Runtime facts (§3.5)", () => {
       outbox.add("wks-a", { kind: "report", requestId: "req-20261009T100000Z", from: "w-1", to: "main-1", text: ["BM-REPORT", "requestId: req-20261009T100000Z", `phase: ${phase}`].join("\n") });
     }
     const brief = await mainBriefOf(daemon().paseo, home, store.get(MISSION));
-    expect(brief).toContain("- req-20261009T100000Z in api: Login page; Worker w-1; newest report: blocked");
+    expect(brief).toMatch(/- req-20261009T100000Z in api: working; Worker w-1; blocked \d+ h ago; asked: Login page/);
   });
 });
 
@@ -532,5 +539,102 @@ describe("binding missionId (§3.3)", () => {
     // A Manager's binding without a mission says nothing of one.
     const other = bindings.issue({ role: "manager", workspaceId: "wks-a" });
     expect(bindings.callerOf(other.token, "manager")).not.toHaveProperty("missionId");
+  });
+});
+
+describe("one workspace per mission in the Mission-List project (ADR-034)", () => {
+  const project = () =>
+    fakePaseo<MissionsPaseo>({
+      agents: [],
+      workspaces: [{ id: "wks-a", directory: "/repo/api" }],
+      workspaceProject: "prj-missions",
+      config: { providers: roleAliases(), agentProfiles: roleProfiles() },
+      omit: ["providers"],
+    });
+
+  it("a named mission's Main starts in the mission's own workspace, a directory workspace of the root's project titled <CODE> · <name>", async () => {
+    const fake = project();
+    const result = await handleMissionsCreate({ name: "Website relaunch", code: "WEB", repos: ["wks-a"] }, fake.paseo, { home, readInstructions });
+    const mission = createMissionStore(home).get(result.missionId!)!;
+    const folder = missionWorkspaceDirOf(home, mission.missionId);
+    expect(fake.api.workspaces.create).toHaveBeenCalledWith({ source: { kind: "directory", path: folder, projectId: "prj-missions" }, title: "WEB · Website relaunch" });
+    expect(readFileSync(join(folder, "README.md"), "utf8")).toContain("# WEB · Website relaunch");
+    expect(mission.workspaceId).toBe("wks-new-1");
+    expect(fake.creates[0]!.workspaceId).toBe("wks-new-1");
+    expect(missionsPlaceOf("wks-new-1", home)).toEqual({ kind: "mission", missionId: mission.missionId });
+    expect(missionsPlaceOf(folder, home)).toEqual({ kind: "mission", missionId: mission.missionId });
+    expect(missionsPlaceOf("wks-own", home)).toEqual({ kind: "root" });
+    expect(isMissionsHome("wks-new-1", home)).toBe(true);
+    expect(isMissionsHome("wks-a", home)).toBe(false);
+    // An unassigned Main still starts in the root.
+    await handleMissionsCreate({}, fake.paseo, { home, readInstructions });
+    expect(fake.creates[1]!.workspaceId).toBe("wks-own");
+  });
+
+  it("a successor starts in the same workspace, found again by its folder; the workspace is made once", async () => {
+    const fake = project();
+    const result = await handleMissionsCreate({ name: "Website", code: "WEB", repos: [] }, fake.paseo, { home, readInstructions });
+    const id = result.missionId!;
+    // The cached id goes stale; the folder finds the workspace again.
+    createMissionStore(home).update(id, (mission) => ({ ...mission, workspaceId: null }));
+    const replaced = await handleMissionEnsure({ missionId: id, replace: "owner" }, fake.paseo, { home, readInstructions });
+    expect(replaced.created).toBe(true);
+    expect(fake.api.workspaces.create).toHaveBeenCalledTimes(1);
+    expect(fake.creates.map((created) => created.workspaceId)).toEqual(["wks-new-1", "wks-new-1"]);
+    expect(createMissionStore(home).get(id)?.workspaceId).toBe("wks-new-1");
+    expect(await ensureMissionWorkspace(fake.paseo, createMissionStore(home).get(id)!, { home })).toBe("wks-new-1");
+  });
+
+  it("a host that cannot add a workspace to a project keeps the Main in the root, with one log line", async () => {
+    const fake = daemon();
+    const logs: string[] = [];
+    const result = await handleMissionsCreate({ name: "Website", code: "WEB", repos: [] }, fake.paseo, { home, readInstructions, log: (line) => logs.push(line) });
+    expect(fake.creates[0]!.workspaceId).toBe("wks-own");
+    expect(createMissionStore(home).get(result.missionId!)?.workspaceId ?? null).toBeNull();
+    expect(logs.filter((line) => line.includes("Mission-List"))).toEqual([expect.stringContaining("cannot add a workspace to the Mission-List project")]);
+  });
+
+  it("the shared home of earlier builds stays a Missions place, and a mission's Mains are read in every place they worked", async () => {
+    mkdirSync(join(home, "ui"), { recursive: true });
+    writeFileSync(join(home, "ui", "missions-home.json"), JSON.stringify({ schemaVersion: 1, workspaceId: "wks-old-home", directory: legacyMissionsHomeDirOf(home) }));
+    const fake = project();
+    await ensureMissionsHome(fake.paseo, { home });
+    expect(missionsHomeIdOf(home)).toBe("wks-own");
+    expect(missionsPlaceOf("wks-old-home", home)).toEqual({ kind: "legacy" });
+    expect(missionsPlaceOf(legacyMissionsHomeDirOf(home), home)).toEqual({ kind: "legacy" });
+    const result = await handleMissionsCreate({ name: "Website", code: "WEB", repos: [] }, fake.paseo, { home, readInstructions });
+    const mission = createMissionStore(home).get(result.missionId!)!;
+    expect(missionsWorkspaceIdsOf(home)).toEqual(["wks-own", "wks-old-home", "wks-new-1"]);
+    expect(mainPlacesOf(home, mission)).toEqual(["wks-new-1", "wks-own", "wks-old-home"]);
+    expect(mainPlacesOf(home, { ...mission, legacyWorkspaceId: "wks-a" })).toEqual(["wks-new-1", "wks-own", "wks-old-home", "wks-a"]);
+  });
+
+  it("a bm-manager the owner opens in a mission's workspace is its Main when it has none live; else an extra chat, left alone", async () => {
+    const fake = project();
+    const result = await handleMissionsCreate({ name: "Website", code: "WEB", repos: [] }, fake.paseo, { home, readInstructions });
+    const id = result.missionId!;
+    const { cli } = fakeCli();
+    const succession = createMainSuccession({ home, cli, bindings: () => createBindingStore(home), log: () => {} });
+    const owned = (live: string[]) => ({
+      agents: {
+        ref: () => ({ refresh: async () => ({ agent: { labels: {} } }) }),
+        list: async () => ({ entries: live.map((agentId) => ({ id: agentId, provider: "bm-manager", status: "idle", labels: { "bm.role": "manager", "bm.missionId": id } })), pageInfo: { nextCursor: null, hasMore: false } }),
+      },
+    });
+    // The Main created-1 is live: the owner's extra tab stays an ordinary chat.
+    expect(await succession.agentCreated({ id: "tab-1", provider: "bm-manager", workspaceId: "wks-new-1" }, owned(["created-1"]))).toBeNull();
+    expect(createMissionStore(home).get(id)?.mainId).toBe("created-1");
+    // With no live Main, the agent opened in the mission's workspace becomes its Main.
+    expect(await succession.agentCreated({ id: "tab-2", provider: "bm-manager", workspaceId: "wks-new-1" }, owned([]))).toBe(id);
+    expect(createMissionStore(home).get(id)?.mainId).toBe("tab-2");
+  });
+
+  it("a rename retitles the mission's workspace with its Main", async () => {
+    const { cli, calls } = fakeCli();
+    expect(await syncMainTitle({ mainId: "main-1", code: "WEBX", name: "Website v2", workspaceId: "wks-new-1" }, cli)).toEqual({ ok: true });
+    expect(calls).toEqual([
+      ["workspace", "rename", "wks-new-1", "WEBX · Website v2", "--json"],
+      ["agent", "update", "main-1", "--name", "🟣 M · WEBX Website v2", "--json"],
+    ]);
   });
 });

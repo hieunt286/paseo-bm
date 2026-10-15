@@ -43,7 +43,8 @@ import { randomUUID } from "node:crypto";
 import { redactText } from "./collector";
 import type { BmEvent } from "./event-bus";
 import { interventionOfCommand, recordIntervention } from "./intervention-store";
-import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
+import { enqueueNotice, type ChannelQueue } from "./main-channel";
+import { noticeQueue, type NoticePaseo } from "./notice-queue";
 import { commandKindOf } from "./orchestrator-state";
 import { createOrchestratorStore, type OrchestratorStoreDeps } from "./orchestrator-store";
 import { missionOfRequest } from "./orchestrator-tool-context";
@@ -184,8 +185,8 @@ export interface CommandSend {
    * events of the wake whose turn sent it. Null: never logged.
    */
   intervention: { requestId: string | null; ownerAsked: boolean; wakeEvents: () => Promise<readonly BmEvent[]> } | null;
-  /** The queue it goes through; the plugin's shared one by default. */
-  queue?: Pick<NoticeQueue, "enqueue">;
+  /** The queue it goes through; the plugin's shared one by default. A mission's Main gets it on its channel (mission runtime design §6.2). */
+  queue?: ChannelQueue;
   /** The commands store's own deps (fixed ids and time in tests); its `newId` names the command. */
   store?: OrchestratorStoreDeps;
   /** The environment whose secrets are masked in the stored copy; the plugin's own by default. */
@@ -296,7 +297,7 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
     }
     outcome = "sent";
   } else {
-    const queued = await queue.enqueue(spec.targetId, kind, text, spec.paseo);
+    const queued = await enqueueNotice({ home, queue, targetId: spec.targetId, kind, text, paseo: spec.paseo });
     if (!delivered(queued)) return { ok: false, stage: "delivery", reason: `${role} ${spec.targetId} could not be reached` };
     outcome = queued;
   }
@@ -345,7 +346,7 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
   if (spec.copyTo !== null) {
     // The copy keeps one line of command the Manager can see (ADR-016 decision 2).
     try {
-      const copied = await queue.enqueue(spec.copyTo, kind, commandBlockOf({ ...command, copy: true }), spec.paseo);
+      const copied = await enqueueNotice({ home, queue, targetId: spec.copyTo, kind, text: commandBlockOf({ ...command, copy: true }), paseo: spec.paseo });
       copy = delivered(copied) ? copied : "failed";
     } catch {
       copy = "failed";

@@ -1,8 +1,9 @@
 /**
  * The Missions section (missions design §10; the approved mockup
  * `docs/design/mockups/missions-screen.html`, artboards A–F): one screen,
- * four views — the list (A, C), a mission's page (B, D), New mission (E) and
- * a project's memory (F). What each shows is `missions-model.ts`; this file
+ * four views — the list (A, C), a mission's page (B, D; its Main card and
+ * In flight card from `docs/design/mockups/mission-runtime.html`, artboards
+ * G and H), New mission (E) and a project's memory (F). What each shows is `missions-model.ts`; this file
  * reads `missions.list`, `mission.get` and `memory.list` every
  * `WORK_POLL_MS` while the view shows, and sends the owner's changes:
  * `mission.change` (Rename, Close mission, "+ Add"), `autonomy.set-mission-level`
@@ -19,7 +20,7 @@
  */
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, TextInput, View, type TextStyle, type ViewStyle } from "react-native";
 import {
   autonomySetMissionLevelRpc,
@@ -62,6 +63,7 @@ import { MONO } from "./text-tabs";
 import { toneColor, type Badge, type Tone } from "./tone";
 import { Button, ConfirmBlock, KindBar, RoleMark, ToneText, type Styles, type Theme } from "./ui";
 import { WORK_POLL_MS } from "./work-model";
+import { newMissionRequests } from "./surface-view";
 
 /** A listed project, by its own name (plugin homes left out by the launcher). */
 export interface MissionProject {
@@ -412,6 +414,8 @@ export interface MissionPageActions {
   confirmLevel: () => void;
   memory: (workspaceId: string) => void;
   openAgent?: (agentId: string) => void;
+  /** Opens the Inbox, where an open question's card is answered (mission runtime design §7). */
+  openInbox?: () => void;
 }
 
 export interface MissionPageBodyProps {
@@ -699,6 +703,216 @@ function WorkersCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyP
   );
 }
 
+const MAIN_COLUMNS = [1.6, 0.7, 0.7, 2.6, 0.6] as const;
+
+function MainMark({ short, theme, muted = false }: { short: string; theme: Theme; muted?: boolean }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+      <RoleMark kind="request" theme={theme} size={16} />
+      <Text style={{ fontSize: 12, fontFamily: MONO, color: muted ? theme.colors.foregroundMuted : theme.colors.foreground }}>{short}</Text>
+    </View>
+  );
+}
+
+/** The header's Main card (mission runtime design §7, artboards G and H): each Main, when and why it changed; "Open" on a previous one. */
+function MainsCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "on" | "styles" | "theme">) {
+  const mains = page.mains;
+  if (mains === null) return null;
+  const open = (agentId: string, short: string) =>
+    on.openAgent === undefined ? null : (
+      <Button label="Open" kind="secondary" accessibilityLabel={`Open the previous Main ${short}`} onPress={() => on.openAgent!(agentId)} styles={styles} style={{ paddingVertical: 3, paddingHorizontal: 8 }} textStyle={BUTTON_TEXT} />
+    );
+  if (compact) {
+    const [current, previous, ...earlier] = mains.rows;
+    return (
+      <Card styles={styles} theme={theme}>
+        <View style={SPREAD_ROW}>
+          <Text style={styles.sectionLabel}>Main</Text>
+          <Small tone="muted" theme={theme}>{mains.shortCount}</Small>
+        </View>
+        {current === undefined ? null : <Small theme={theme}>{`${current.short} · ${current.current ? `since ${current.from}` : `${current.from}–${current.until}`} · ${current.shortWhy}`}</Small>}
+        {previous === undefined ? null : (
+          <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>
+            {`${previous.short} · ${previous.from}–${previous.until} · ${previous.shortWhy}`}
+            {on.openAgent === undefined ? null : (
+              <Text accessibilityRole="button" accessibilityLabel={`Open the previous Main ${previous.short}`} onPress={() => on.openAgent!(previous.agentId)} style={{ color: toneColor(theme, "info") }}>
+                {" · Open"}
+              </Text>
+            )}
+          </Text>
+        )}
+        {earlier.length === 0 ? null : <Small tone="muted" theme={theme}>{`+ ${earlier.length} earlier`}</Small>}
+      </Card>
+    );
+  }
+  return (
+    <Card styles={styles} theme={theme}>
+      <View style={SPREAD_ROW}>
+        <Text style={styles.sectionLabel}>Main</Text>
+        <Small tone="muted" theme={theme}>{mains.count}</Small>
+      </View>
+      <View>
+        <TableRow header cells={["Main", "From", "Until", "Why it changed", ""]} flex={MAIN_COLUMNS} theme={theme} />
+        {mains.rows.map((row) => (
+          <TableRow
+            key={`${row.agentId}-${row.from}`}
+            flex={MAIN_COLUMNS}
+            theme={theme}
+            cells={[
+              <View key="main" style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <MainMark short={row.short} muted={!row.current} theme={theme} />
+                {row.current ? <MissionChip text={page.main.text.replace(/^Main /, "")} mark={page.main.tone} theme={theme} /> : null}
+              </View>,
+              <Small key="from" tone={row.current ? "plain" : "muted"} theme={theme} style={{ fontSize: 13 }}>{row.from}</Small>,
+              <Small key="until" tone="muted" theme={theme} style={{ fontSize: 13 }}>{row.until}</Small>,
+              <Small key="why" tone={row.current ? "plain" : "muted"} theme={theme} style={{ fontSize: 13 }}>{row.why}</Small>,
+              row.current ? "" : (open(row.agentId, row.short) ?? ""),
+            ]}
+          />
+        ))}
+      </View>
+      <Small tone="muted" theme={theme}>A previous Main is kept, never archived; its chat is read-only for mission work — its tools that write are refused.</Small>
+    </Card>
+  );
+}
+
+const FLIGHT_COLUMNS = [2.2, 1.4, 1, 1.6, 1.2] as const;
+
+/** One line of the In flight card's lists: who at the left, the text, an "Answer" at the right when it is the owner's. */
+function FlightLine({ who, children, answer, on, styles, theme }: { who: { text: string; tone: Tone }; children: ReactNode; answer: string | null; on: MissionPageActions; styles: Styles; theme: Theme }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: theme.colors.border, borderStyle: "dashed" }}>
+      <Text style={{ fontSize: 11, color: toneColor(theme, who.tone), minWidth: 84 }}>{who.text}</Text>
+      <View style={{ flex: 1, minWidth: 0 }}>{children}</View>
+      {answer === null || on.openInbox === undefined ? null : (
+        <Button label="Answer" kind="secondary" accessibilityLabel={`Answer ${answer} in the Inbox`} onPress={on.openInbox} styles={styles} style={{ paddingVertical: 3, paddingHorizontal: 8 }} textStyle={BUTTON_TEXT} />
+      )}
+    </View>
+  );
+}
+
+/** The In flight card (mission runtime design §7, artboards G and H): what the Main knows — requests and whom they wait on, open questions, the Main's asks, live links. */
+function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "on" | "styles" | "theme">) {
+  const flight = page.inFlight;
+  if (flight === null) return null;
+  const { colors } = theme;
+  const text = (value: string, muted = false) => <Text style={{ fontSize: 13, color: muted ? colors.foregroundMuted : colors.foreground }}>{value}</Text>;
+  if (compact) {
+    const active = flight.requests.filter((request) => request.active);
+    const yours = flight.questions.filter((question) => question.yours);
+    const answer = (what: string) =>
+      on.openInbox === undefined ? null : (
+        <Text accessibilityRole="button" accessibilityLabel={`Answer ${what} in the Inbox`} onPress={on.openInbox} style={{ color: toneColor(theme, "info") }}>
+          {" Answer"}
+        </Text>
+      );
+    const firstLink = flight.links[0];
+    return (
+      <Card styles={styles} theme={theme}>
+        <Text style={styles.sectionLabel}>In flight</Text>
+        {flight.requests.length === 0 ? <Small tone="muted" theme={theme}>Nothing in flight.</Small> : null}
+        {active.map((request) => (
+          <Text key={request.requestId} style={{ fontSize: 12, color: colors.foreground }}>
+            <Text style={{ fontWeight: "700" }}>{request.topic}</Text>
+            {" · "}
+            <Text style={{ color: toneColor(theme, request.state.tone) }}>{request.phoneState}</Text>
+          </Text>
+        ))}
+        {flight.restLine === null ? null : <Small tone="muted" theme={theme}>{flight.restLine}</Small>}
+        {yours.map((question) => (
+          <Text key={question.id} style={{ fontSize: 12, color: colors.foreground, marginTop: 4 }}>
+            <Text style={{ color: toneColor(theme, "warning") }}>You decide:</Text>
+            {` ${question.label} · ${question.question}`}
+            {answer(question.label)}
+          </Text>
+        ))}
+        {flight.asks.map((ask) => (
+          <Text key={ask.id} style={{ fontSize: 12, color: colors.foreground }}>
+            <Text style={{ color: toneColor(theme, "warning") }}>The Main asked you:</Text>
+            {` ${ask.text}`}
+            {answer(ask.id)}
+          </Text>
+        ))}
+        {firstLink === undefined ? null : <Small tone="muted" theme={theme}>{flight.links.length === 1 ? `1 link ${firstLink.who}` : `${flight.links.length} links`}</Small>}
+      </Card>
+    );
+  }
+  return (
+    <Card styles={styles} theme={theme}>
+      <View style={SPREAD_ROW}>
+        <Text style={styles.sectionLabel}>In flight</Text>
+        <Small tone="muted" theme={theme}>{flight.meta}</Small>
+      </View>
+      {flight.requests.length === 0 ? (
+        <Small tone="muted" theme={theme}>Nothing in flight.</Small>
+      ) : (
+        <View>
+          <TableRow header cells={["Request · topic", "Repository", "Worker", "State", "Last report"]} flex={FLIGHT_COLUMNS} theme={theme} />
+          {flight.requests.map((request) => (
+            <TableRow
+              key={request.requestId}
+              flex={FLIGHT_COLUMNS}
+              theme={theme}
+              cells={[
+                <Text key="request" style={{ fontSize: 13, color: request.active ? colors.foreground : colors.foregroundMuted }}>
+                  <Text style={{ fontFamily: MONO, fontSize: 12 }}>{request.request}</Text>
+                  {` ${request.topic}`}
+                </Text>,
+                text(request.repo, !request.active),
+                <WorkerCell key="worker" worker={request.worker} workerId={request.workerId} openAgent={on.openAgent} theme={theme} />,
+                <Text key="state" style={{ fontSize: 13, color: toneColor(theme, request.state.tone) }}>{request.state.text}</Text>,
+                <Small key="report" tone="muted" theme={theme}>{request.lastReport}</Small>,
+              ]}
+            />
+          ))}
+        </View>
+      )}
+      <Grid gap={12}>
+        {[
+          <View key="questions">
+            <Small tone="muted" theme={theme}>Questions</Small>
+            {flight.questions.length === 0 ? <Small tone="muted" theme={theme}>No open question.</Small> : null}
+            {flight.questions.map((question) => (
+              <FlightLine key={question.id} who={question.who} answer={question.yours ? question.label : null} on={on} styles={styles} theme={theme}>
+                <Text style={{ fontSize: 13, color: colors.foreground }}>
+                  <Text style={{ fontWeight: "700" }}>{question.label}</Text>
+                  {question.request === null ? null : (
+                    <>
+                      {" of "}
+                      <Text style={{ fontFamily: MONO, fontSize: 12 }}>{question.request}</Text>
+                    </>
+                  )}
+                  {` · ${question.text}`}
+                  {question.meta === "" ? null : <Text style={{ color: colors.foregroundMuted }}>{` · ${question.meta}`}</Text>}
+                </Text>
+              </FlightLine>
+            ))}
+          </View>,
+          <View key="asks">
+            <Small tone="muted" theme={theme}>The Main asked you</Small>
+            {flight.asks.length === 0 ? <Small tone="muted" theme={theme}>Nothing open.</Small> : null}
+            {flight.asks.map((ask) => (
+              <FlightLine key={ask.id} who={{ text: "open", tone: "warning" }} answer={ask.id} on={on} styles={styles} theme={theme}>
+                <Text style={{ fontSize: 13, color: colors.foreground }}>
+                  {ask.text}
+                  <Text style={{ color: colors.foregroundMuted }}>{` · ${ask.meta}`}</Text>
+                </Text>
+              </FlightLine>
+            ))}
+            <Small tone="muted" theme={theme} style={{ marginTop: 8 }}>Links</Small>
+            {flight.links.length === 0 ? <Small tone="muted" theme={theme}>No live link.</Small> : null}
+            {flight.links.map((link) => (
+              <FlightLine key={link.id} who={{ text: link.who, tone: "muted" }} answer={null} on={on} styles={styles} theme={theme}>
+                {text(link.text)}
+              </FlightLine>
+            ))}
+          </View>,
+        ]}
+      </Grid>
+    </Card>
+  );
+}
+
 const CONTRACT_COLUMNS = [1.7, 1.7, 1] as const;
 
 function ContractsCard({ page, compact, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "styles" | "theme">) {
@@ -779,7 +993,9 @@ export function MissionPageBody(props: MissionPageBodyProps) {
         <PageHeader {...props} />
         {status}
         <PageForms {...props} />
+        <MainsCard {...props} />
         <Grid gap={10}>{stats}</Grid>
+        <InFlightCard {...props} />
         <CharterCard {...props} />
         <Card styles={styles} theme={theme}>
           <Text style={styles.sectionLabel}>Governor</Text>
@@ -803,11 +1019,13 @@ export function MissionPageBody(props: MissionPageBodyProps) {
       <PageHeader {...props} />
       {status}
       <PageForms {...props} />
+      <MainsCard {...props} />
       <Grid gap={10}>{stats}</Grid>
       <Grid gap={12}>
         {[<CharterCard key="charter" {...props} />, <LevelCard key="level" {...props} />]}
       </Grid>
       <WorkersCard {...props} />
+      <InFlightCard {...props} />
       <Grid gap={12}>
         {[<ContractsCard key="contracts" {...props} />, <JournalCard key="journal" {...props} />]}
       </Grid>
@@ -981,10 +1199,12 @@ export interface MissionsScreenProps extends PluginSurfaceProps {
   projects: readonly MissionProject[];
   /** The surface's status strip. */
   status?: ReactNode;
+  /** Opens the Inbox, where the In flight card's "Answer" leads (mission runtime design §7). */
+  onOpenInbox?: () => void;
 }
 
 /** The Missions section: the list, a mission's page, New mission, a project's memory. */
-export function MissionsScreen({ theme, layout, navigation, projects, status }: MissionsScreenProps) {
+export function MissionsScreen({ theme, layout, navigation, projects, status, onOpenInbox }: MissionsScreenProps) {
   const compact = layout.compact;
   const styles = useMemo(() => dashboardStyles(theme, compact), [theme, compact]);
   const queryClient = useQueryClient();
@@ -1000,6 +1220,16 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
   const [closedShown, setClosedShown] = useState(false);
   const [ui, setUi] = useState<PageUi>(PAGE_UI_IDLE);
   const [form, setForm] = useState<NewForm>(NEW_FORM_IDLE);
+  // ADR-034 decision 4: the Command Center's "New mission" opens the form, so the mission is named before its Main exists.
+  useEffect(() => {
+    const run = () => {
+      if (newMissionRequests.take() === null) return;
+      setForm(NEW_FORM_IDLE);
+      setPlace({ view: "new" });
+    };
+    run();
+    return newMissionRequests.subscribe(run);
+  }, []);
 
   const list = useQuery({ queryKey: MISSIONS_QUERY_KEYS.list, queryFn: () => listMissions({}), ...pollWhile(place.view === "list") });
   const missionId = place.view === "page" ? place.missionId : "";
@@ -1149,6 +1379,7 @@ export function MissionsScreen({ theme, layout, navigation, projects, status }: 
             },
             memory: (workspaceId) => setPlace({ view: "memory", workspaceId, repos: view.charter.repos, back: { view: "page", missionId: view.missionId, code: view.code } }),
             ...(openAgent === undefined ? {} : { openAgent: (agentId: string) => openAgent({ agentId }) }),
+            ...(onOpenInbox === undefined ? {} : { openInbox: onOpenInbox }),
           }}
         />
       );

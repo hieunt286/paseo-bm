@@ -1,12 +1,15 @@
 /**
  * The Missions home and its Mains (missions design §3.1–§3.3, §3.5; ADR-029).
  *
- * - **The home** (`ensureMissionsHome`, §3.1): `<data folder>/missions/home`
- *   (`0700`, a `README.md` saying what it is), opened as a workspace with
- *   `paseo.workspaces.open({ cwd })` as the Orchestrator's home is. Its
- *   workspace id is cached in `ui/missions-home.json`, which the creation
- *   hook reads (`missionsHomeIdOf`, `isMissionsHome`): a `bm-manager` the
- *   owner opens there is an unassigned Main.
+ * - **The home** (`ensureMissionsHome`, §3.1, ADR-034): the Mission-List
+ *   project, `<data folder>/missions/Mission-List` (`0700`, a `README.md`),
+ *   opened as a workspace with `paseo.workspaces.open({ cwd })`; its id is
+ *   cached in `ui/missions-home.json` (with the earlier shared home's as
+ *   `legacyWorkspaceId`). Each mission has its own workspace there
+ *   (`ensureMissionWorkspace`), where its Mains are created. The creation
+ *   hook reads the places (`missionsPlaceOf`, `isMissionsHome`): a
+ *   `bm-manager` the owner opens in the root is an unassigned Main; one in a
+ *   mission's workspace is that mission's.
  * - **Creating** (§3.3): `missions.create { name?, code?, repos?, goal? }`
  *   writes the mission and creates its Main (`createMain`) — or, without a
  *   name and a code (the Command Center's "New mission"), an unassigned Main.
@@ -48,21 +51,23 @@ import { hasOutdatedInstructions } from "./instructions-label";
 import { REPLACES_LABEL, VERSION_LABEL, createMain, ensureRolesFor, findMain, setupNoticeFor, type ManagerPaseo } from "./manager";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { replaceMain, type ReplaceMainDeps } from "./mission-replace";
-import { createMissionRoster } from "./mission-roster";
-import { MISSIONS_DIR_NAME, createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { offerMerges } from "./mission-ownership";
+import { MISSIONS_DIR_NAME, MISSION_ID_PATTERN, createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { missionStateOf } from "./mission-state";
+import { renderMissionState } from "../shared/mission-state";
 import { briefLineOf } from "./notices";
 import { orchestratorHomeOf } from "./orchestrator-agent";
-import { newestReportRecordOf, reportPhaseOf } from "./outbox";
-import { setAgentLabels, setAgentTitle, type PaseoCliDeps } from "./paseo-cli";
+import { setAgentLabels, setAgentTitle, setWorkspaceTitle, type PaseoCliDeps } from "./paseo-cli";
 import { directoryIn, listedWorkspaces, titleIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
-import { createRequestRegistry } from "./request-registry";
 import { asRecord, nonEmpty } from "./role-choices";
 import { currentInstructions, type MainFacts } from "./role-instructions";
 import { MISSION_CODE_LABEL, MISSION_ID_LABEL, mainTitleOf } from "./role-title";
 import { coded, dataHome, errorText, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
 
-/** The home's folder, under `<data folder>/missions/`. */
-export const MISSIONS_HOME_DIR_NAME = "home";
+/** The home's folder, under `<data folder>/missions/`: Paseo names the project after it (ADR-034). */
+export const MISSIONS_HOME_DIR_NAME = "Mission-List";
+/** The home's folder before ADR-034: its workspace and Mains are still recognised as a Missions place. */
+export const LEGACY_MISSIONS_HOME_DIR_NAME = "home";
 /** Where the home's workspace id is cached, in the data folder's `ui/`. */
 export const MISSIONS_HOME_FILE = "missions-home.json";
 export const MISSIONS_HOME_VERSION = 1;
@@ -72,30 +77,55 @@ export const SUCCESSOR_WINDOW_MS = 60_000;
 export const BRIEF_JOURNAL_LINES = 20;
 
 /** What the home folder's `README.md` says, so a user who finds it knows what it is. */
-export const MISSIONS_HOME_README = `# Beads Missions
+export const MISSIONS_HOME_README = `# Mission-List
 
-This folder is the workspace of paseo-bm's Mains: one Beads Manager per
-mission, each working across the repositories of its mission. It holds no
-project; the work happens in the repositories.
+paseo-bm's missions: one folder, and one Paseo workspace, per mission, where
+its Main (one Beads Manager per mission) works across the mission's
+repositories. This root workspace holds a Main you open here by hand before
+its mission has a name. No project lives here; the work happens in the
+repositories.
 
 paseo-bm created it; the missions themselves are kept beside it, in this
 folder's parent.
 `;
 
-/** `<data folder>/missions/home`. */
+/** `<data folder>/missions/Mission-List` (ADR-034). */
 export function missionsHomeDirOf(home: string): string {
   return join(home, MISSIONS_DIR_NAME, MISSIONS_HOME_DIR_NAME);
 }
 
+/** `<data folder>/missions/home`, the shared home before ADR-034. */
+export function legacyMissionsHomeDirOf(home: string): string {
+  return join(home, MISSIONS_DIR_NAME, LEGACY_MISSIONS_HOME_DIR_NAME);
+}
+
+/** A mission's own folder, `<Mission-List>/<missionId>` (ADR-034 decision 2). */
+export function missionWorkspaceDirOf(home: string, missionId: string): string {
+  return join(missionsHomeDirOf(home), missionId);
+}
+
+/** A mission's workspace title: `<CODE> · <name>`, at most 80 characters. Pure. */
+export function missionWorkspaceTitleOf(code: string, name: string): string {
+  const title = `${code} · ${name.replace(/\s+/g, " ").trim()}`.trim();
+  return title.length <= 80 ? title : `${title.slice(0, 79)}…`;
+}
+
+interface HomeRecord {
+  workspaceId: string | null;
+  directory: string | null;
+  /** The shared home's workspace before ADR-034, still recognised; null when there was none. */
+  legacyWorkspaceId: string | null;
+}
+
 const homeFile = (home: string) =>
-  createJsonFileStore<{ workspaceId: string | null; directory: string | null }>({
+  createJsonFileStore<HomeRecord>({
     home,
     dir: UI_DIR_NAME,
     file: MISSIONS_HOME_FILE,
     version: MISSIONS_HOME_VERSION,
     versionKey: "schemaVersion",
-    parse: (body) => ({ workspaceId: nonEmpty(body["workspaceId"]), directory: nonEmpty(body["directory"]) }),
-    empty: () => ({ workspaceId: null, directory: null }),
+    parse: (body) => ({ workspaceId: nonEmpty(body["workspaceId"]), directory: nonEmpty(body["directory"]), legacyWorkspaceId: nonEmpty(body["legacyWorkspaceId"]) }),
+    empty: () => ({ workspaceId: null, directory: null, legacyWorkspaceId: null }),
     codes: { unwritable: "E_MISSION_WRITE_FAILED" },
     cached: true,
   });
@@ -110,22 +140,72 @@ export function missionsHomeIdOf(home: string | null = dataHome()): string | nul
   }
 }
 
-/** True when `workspaceIdOrDirectory` is the Missions home: its cached id, or its folder. Never throws. */
-export function isMissionsHome(workspaceIdOrDirectory: string | null | undefined, home: string | null = dataHome()): boolean {
-  if (home === null || typeof workspaceIdOrDirectory !== "string" || workspaceIdOrDirectory === "") return false;
-  if (workspaceIdOrDirectory === missionsHomeIdOf(home)) return true;
+/**
+ * Which Missions place `workspaceIdOrDirectory` is (ADR-034): the root (the
+ * lobby), the shared home of earlier builds (`legacy`), or a mission's own
+ * workspace (its id or folder); null for anything else. Never throws.
+ */
+export function missionsPlaceOf(workspaceIdOrDirectory: string | null | undefined, home: string | null = dataHome()): { kind: "root" | "legacy" } | { kind: "mission"; missionId: string } | null {
+  if (home === null || typeof workspaceIdOrDirectory !== "string" || workspaceIdOrDirectory === "") return null;
   try {
-    return resolve(workspaceIdOrDirectory) === resolve(missionsHomeDirOf(home));
+    const record = homeFile(home).read();
+    if (workspaceIdOrDirectory === record.workspaceId) return { kind: "root" };
+    if (workspaceIdOrDirectory === record.legacyWorkspaceId) return { kind: "legacy" };
+    const byId = createMissionStore(home).list().find((entry) => entry.workspaceId === workspaceIdOrDirectory);
+    if (byId !== undefined) return { kind: "mission", missionId: byId.missionId };
+    if (!workspaceIdOrDirectory.startsWith("/")) return null;
+    const directory = resolve(workspaceIdOrDirectory);
+    const root = resolve(missionsHomeDirOf(home));
+    if (directory === root) return { kind: "root" };
+    if (directory === resolve(legacyMissionsHomeDirOf(home))) return { kind: "legacy" };
+    const named = directory.startsWith(`${root}/`) ? directory.slice(root.length + 1) : null;
+    return named !== null && MISSION_ID_PATTERN.test(named) ? { kind: "mission", missionId: named } : null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+/** True when `workspaceIdOrDirectory` is a Missions place (`missionsPlaceOf`): a paseo-bm home, never a repo. Never throws. */
+export function isMissionsHome(workspaceIdOrDirectory: string | null | undefined, home: string | null = dataHome()): boolean {
+  return missionsPlaceOf(workspaceIdOrDirectory, home) !== null;
+}
+
+/**
+ * Where a mission's Mains have worked, so where their turns are traced
+ * (ADR-034 decision 7): its own workspace, the root, the earlier shared home,
+ * and a legacy mission's repo. Never throws.
+ */
+export function mainPlacesOf(home: string, mission: Pick<Mission, "legacyWorkspaceId"> & { workspaceId?: string | null }): string[] {
+  let record: HomeRecord = { workspaceId: null, directory: null, legacyWorkspaceId: null };
+  try {
+    record = homeFile(home).read();
+  } catch {
+    // An unreadable home record leaves the mission's own places.
+  }
+  return [...new Set([mission.workspaceId ?? null, record.workspaceId, record.legacyWorkspaceId, mission.legacyWorkspaceId].filter((id): id is string => id !== null))];
+}
+
+/** Every Missions place's workspace id: the root, the earlier shared home, each mission's workspace (ADR-034 decision 7). Never throws. */
+export function missionsWorkspaceIdsOf(home: string | null = dataHome()): string[] {
+  if (home === null) return [];
+  try {
+    const record = homeFile(home).read();
+    const missions = createMissionStore(home)
+      .list()
+      .flatMap((entry) => (entry.workspaceId == null ? [] : [entry.workspaceId]));
+    return [...new Set([record.workspaceId, record.legacyWorkspaceId, ...missions].filter((id): id is string => id !== null))];
+  } catch {
+    return [];
   }
 }
 
 /** The SDK slice the home and its Mains use; `PaseoApi` is structurally assignable. */
 export type MissionsPaseo = ManagerPaseo & {
   workspaces: ManagerPaseo["workspaces"] & {
-    open(input: { cwd: string }): Promise<{ readonly id: string }>;
+    open(input: { cwd: string }): Promise<{ readonly id: string; readonly projectId?: string | null }>;
     list(options?: unknown): Promise<{ entries: Array<Record<string, unknown>> }>;
+    /** A directory workspace in an existing project (ADR-034); absent from an older host. */
+    create?(options: { source: { kind: "directory"; path: string; projectId?: string }; title?: string }): Promise<{ readonly id: string }>;
   };
 };
 
@@ -144,24 +224,67 @@ export interface MissionsHomeDeps extends RpcHomeDeps {
 const logOf = (deps: MissionsHomeDeps) => deps.log ?? ((message: string) => console.warn(message));
 
 /**
- * Creates `<data folder>/missions/home` (`0700`, its `README.md`), opens it
- * as a workspace and caches its id (§3.1). No data folder →
+ * Creates `<data folder>/missions/Mission-List` (`0700`, its `README.md`),
+ * opens it as a workspace — the root of the Mission-List project — and caches
+ * its id (§3.1, ADR-034). A cached home in another folder (the shared `home`
+ * of earlier builds) is kept as `legacyWorkspaceId`. No data folder →
  * `E_DATA_HOME_UNAVAILABLE`; a failed write → `E_MISSION_WRITE_FAILED`.
  */
-export async function ensureMissionsHome(paseo: Pick<MissionsPaseo, "workspaces">, deps: MissionsHomeDeps = {}): Promise<{ workspaceId: string; directory: string }> {
+export async function ensureMissionsHome(paseo: Pick<MissionsPaseo, "workspaces">, deps: MissionsHomeDeps = {}): Promise<{ workspaceId: string; directory: string; projectId: string | null }> {
   const home = requireDataHome(deps, "open the Missions home");
   const directory = missionsHomeDirOf(home);
   coded("E_MISSION_WRITE_FAILED", `prepare the Missions home ${directory}`, () => {
     ensureDataDir(home, directory, "E_MISSION_WRITE_FAILED");
     writeFileAtomically(home, join(directory, "README.md"), MISSIONS_HOME_README, "E_MISSION_WRITE_FAILED");
   });
-  const { id } = await paseo.workspaces.open({ cwd: directory });
+  const opened = await paseo.workspaces.open({ cwd: directory });
   const file = homeFile(home);
   const cached = file.read();
-  if (cached.workspaceId !== id || cached.directory !== directory) {
-    coded("E_MISSION_WRITE_FAILED", "remember the Missions home", () => file.write({ workspaceId: id, directory }));
+  const legacyWorkspaceId = cached.legacyWorkspaceId ?? (cached.workspaceId !== null && cached.workspaceId !== opened.id ? cached.workspaceId : null);
+  if (cached.workspaceId !== opened.id || cached.directory !== directory || cached.legacyWorkspaceId !== legacyWorkspaceId) {
+    coded("E_MISSION_WRITE_FAILED", "remember the Missions home", () => file.write({ workspaceId: opened.id, directory, legacyWorkspaceId }));
   }
-  return { workspaceId: id, directory };
+  return { workspaceId: opened.id, directory, projectId: opened.projectId ?? null };
+}
+
+/**
+ * A mission's own workspace (ADR-034 decision 2): its folder
+ * `<Mission-List>/<missionId>` (with a `README.md`), the workspace Paseo
+ * lists for that folder, else a new directory workspace in the root's
+ * project titled `missionWorkspaceTitleOf`; its id cached on the mission.
+ * A host without `workspaces.create`, or a creation Paseo refuses, gives the
+ * root (one log line). Throws as `ensureMissionsHome` does.
+ */
+export async function ensureMissionWorkspace(paseo: Pick<MissionsPaseo, "workspaces">, mission: Pick<Mission, "missionId" | "code" | "name">, deps: MissionsHomeDeps = {}): Promise<string> {
+  const home = requireDataHome(deps, "open a mission's workspace");
+  const root = await ensureMissionsHome(paseo, deps);
+  const directory = missionWorkspaceDirOf(home, mission.missionId);
+  const title = missionWorkspaceTitleOf(mission.code, mission.name);
+  const log = logOf(deps);
+  try {
+    coded("E_MISSION_WRITE_FAILED", `prepare the workspace of mission ${mission.code}`, () => {
+      ensureDataDir(home, directory, "E_MISSION_WRITE_FAILED");
+      writeFileAtomically(home, join(directory, "README.md"), `# ${title}\n\nThe workspace of mission ${mission.code}'s Main (paseo-bm). The work happens in the mission's repositories.\n`, "E_MISSION_WRITE_FAILED");
+    });
+    const listed = await listedWorkspaces(paseo as unknown as DashboardPaseo);
+    let workspaceId = listed?.find((entry) => !entry.archived && entry.directory !== null && resolve(entry.directory) === resolve(directory))?.id ?? null;
+    if (workspaceId === null) {
+      if (typeof paseo.workspaces.create !== "function" || root.projectId === null) {
+        log(`[paseo-bm] this Paseo cannot add a workspace to the Mission-List project; mission ${mission.code}'s Main works in the root.`);
+        return root.workspaceId;
+      }
+      workspaceId = (await paseo.workspaces.create({ source: { kind: "directory", path: directory, projectId: root.projectId }, title })).id;
+    }
+    const store = createMissionStore(home, deps.now === undefined ? {} : { now: deps.now });
+    if (store.get(mission.missionId)?.workspaceId !== workspaceId) {
+      const saved = store.update(mission.missionId, (current) => ({ ...current, workspaceId }));
+      if (!saved.ok) log(`[paseo-bm] the workspace of mission ${mission.code} could not be recorded: ${saved.reasons.join("; ")}`);
+    }
+    return workspaceId;
+  } catch (error) {
+    log(`[paseo-bm] the workspace of mission ${mission.code} could not be opened (${errorText(error)}); its Main works in the root.`);
+    return root.workspaceId;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,11 +320,11 @@ export const UNASSIGNED_MAIN_BRIEF = [
 ].join("\n");
 
 /**
- * A Main's first prompt (§3.5): the `BM-BRIEF manager requestId: none
- * mission: <code>` line, the mission's name, goal and charter state, its repos
- * with their folders, its open requests (repo, newest Worker, newest report's
- * phase), its open done criteria, the newest 20 journal lines, and where the
- * rest is. `UNASSIGNED_MAIN_BRIEF` for none. Never throws: a store that
+ * A Main's first prompt (§3.5; mission runtime design §2.2): the
+ * `BM-BRIEF manager requestId: none mission: <code>` line, the mission's name,
+ * goal and charter state, its repos with their folders, then the mission
+ * state's rendering (`renderMissionState`): what is in flight, what waits on
+ * whom, links, the owner's recent exchange, the governor, the journal. `UNASSIGNED_MAIN_BRIEF` for none. Never throws: a store that
  * cannot be read is left out.
  */
 export async function mainBriefOf(paseo: unknown, home: string | null, mission: Mission | null): Promise<string> {
@@ -217,27 +340,13 @@ export async function mainBriefOf(paseo: unknown, home: string | null, mission: 
     "Repos:",
     ...(charter.repos.length === 0 ? ["- none yet"] : charter.repos.map((workspaceId) => `- ${repoName(workspaceId)} (${workspaceId}): ${folderOf(workspaceId) ?? "folder unknown"}`)),
   ];
-  try {
-    const registry = createRequestRegistry(home);
-    const open = createMissionRoster(home).list(mission.missionId).filter((entry) => entry.state === "active");
-    lines.push("Open requests:");
-    if (open.length === 0) lines.push("- none");
-    for (const entry of open) {
-      const workerId = entry.workerIds.at(-1) ?? registry.get(entry.workspaceId, entry.requestId)?.workerIds.at(-1) ?? null;
-      const report = workerId === null ? null : newestReportRecordOf(home, entry.workspaceId, workerId);
-      const phase = report === null ? null : reportPhaseOf(report.text);
-      lines.push(
-        `- ${entry.requestId} in ${repoName(entry.workspaceId)}: ${oneLine(entry.topic, 120) || "no topic"}; Worker ${workerId ?? "none"}; newest report: ${phase ?? "none"}`,
-      );
-    }
-  } catch {
-    // The roster cannot be read: bm_mission reads it again.
+  // Mission runtime design §2.2: what is in flight comes from the one mission state, never from the roster alone.
+  const state = missionStateOf(home, mission.missionId, { repoName: (workspaceId) => (listed === null ? null : repoName(workspaceId)) });
+  if (state === null) {
+    lines.push("Read the whole mission with bm_mission.");
+    return lines.join("\n");
   }
-  const criteria = charter.doneCriteria.filter((criterion) => criterion.status === "open");
-  lines.push("Open done criteria:", ...(criteria.length === 0 ? ["- none"] : criteria.map((criterion) => `- ${criterion.id}: ${oneLine(criterion.text, 500)}`)));
-  const journal = createMissionStore(home).journal(mission.missionId, BRIEF_JOURNAL_LINES);
-  if (journal.length > 0) lines.push("Journal (newest last):", ...journal.map((line) => `- ${line.at} ${line.kind} ${line.by}: ${oneLine(line.text)}`));
-  lines.push("Read the whole mission with bm_mission.");
+  lines.push(renderMissionState(state));
   return lines.join("\n");
 }
 
@@ -245,9 +354,14 @@ export async function mainBriefOf(paseo: unknown, home: string | null, mission: 
  * After a rename (§3.2): the mission's Main gets the title `mainTitleOf`
  * through the Paseo CLI. Ok when there is no Main to title. Never throws.
  */
-export async function syncMainTitle(mission: Pick<Mission, "mainId" | "code" | "name">, cli?: PaseoCliDeps): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (mission.mainId === null) return { ok: true };
+export async function syncMainTitle(mission: Pick<Mission, "mainId" | "code" | "name"> & { workspaceId?: string | null }, cli?: PaseoCliDeps): Promise<{ ok: true } | { ok: false; reason: string }> {
   try {
+    // ADR-034: the mission's own workspace carries its code and name too.
+    if (mission.workspaceId != null) {
+      const renamed = await setWorkspaceTitle(mission.workspaceId, missionWorkspaceTitleOf(mission.code, mission.name), cli);
+      if (!renamed.ok) return renamed;
+    }
+    if (mission.mainId === null) return { ok: true };
     return await setAgentTitle(mission.mainId, mainTitleOf(mission.code, mission.name), cli);
   } catch (error) {
     return { ok: false, reason: errorText(error) };
@@ -335,21 +449,62 @@ export async function handleMissionsCreate(input: MissionsCreateInput, paseo: Mi
     if (refused.length > 0) throw missionInvalid(refused);
   }
   const ensured = await ensureRolesFor(paseo, deps.log);
-  const { workspaceId: homeWorkspaceId } = await ensureMissionsHome(paseo, deps);
+  const root = await ensureMissionsHome(paseo, deps);
   let mission: Mission | null = null;
   if (named) {
     const created = coded("E_MISSION_WRITE_FAILED", "write the mission", () => store.create({ code, name, goal: input.goal ?? "", repos, createdBy: "owner" }));
     if (!created.ok) throw missionInvalid(created.reasons);
     mission = created.mission;
   }
+  // ADR-034: a named mission's Main starts in its own workspace; an unassigned one in the root.
+  const workspaceId = mission === null ? root.workspaceId : await ensureMissionWorkspace(paseo, mission, deps);
   const prompt = await mainBriefOf(paseo, home, mission);
-  const main = await createMain({ homeWorkspaceId, mission, prompt }, managerDeps(paseo, home, mission?.missionId ?? null, deps), ensured);
+  const main = await createMain({ workspaceId, mission, prompt }, managerDeps(paseo, home, mission?.missionId ?? null, deps), ensured);
+  if (mission !== null) {
+    // Mission runtime design §3.4: the one path names the mission's Main.
+    const bindings = deps.bindings?.() ?? undefined;
+    const named = await replaceMain(mission.missionId, main.agentId, "created", {
+      home,
+      paseo,
+      expectedOld: null,
+      ...(bindings ? { bindings } : {}),
+      ...(deps.cli !== undefined ? { cli: deps.cli } : {}),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
+    });
+    if (!named.ok) logOf(deps)(`[paseo-bm] Main ${main.agentId} of mission ${mission.code} was created, but the mission could not record it: ${named.reasons.join("; ")}`);
+    // Mission runtime design §5.2: an older one-repo mission of its repos is offered for merging.
+    offerMerges(home, mission.missionId, { now: deps.now?.() ?? new Date(), log: logOf(deps) });
+  }
   return { missionId: mission?.missionId ?? null, agentId: main.agentId, created: true, toolsNotice: main.toolsNotice, setupNotice: await setupNoticeFor(paseo, ensured) };
+}
+
+/**
+ * Each mission's Main being created right now (mission runtime design §3.4):
+ * a `mission.ensure` during it joins it instead of adopting the half-made
+ * agent, so one replacement runs.
+ */
+const creatingMain = new Map<string, Promise<string>>();
+
+/** Runs `create` as the mission's one creation in flight; another call meanwhile gets the same agent id. */
+async function oneMainCreation(missionId: string, create: () => Promise<string>): Promise<{ agentId: string; joined: boolean }> {
+  const running = creatingMain.get(missionId);
+  if (running !== undefined) return { agentId: await running, joined: true };
+  const started = create();
+  creatingMain.set(missionId, started);
+  try {
+    return { agentId: await started, joined: false };
+  } finally {
+    if (creatingMain.get(missionId) === started) creatingMain.delete(missionId);
+  }
 }
 
 /** `mission.ensure` (§3.4). See the contract. */
 export async function handleMissionEnsure(input: MissionEnsureInput, paseo: MissionsPaseo, deps: MissionsHomeDeps = {}): Promise<MissionEnsureOutput> {
   const home = requireDataHome(deps, "open a mission");
+  // Mission runtime design §3.4: a Main being created for this mission is the one to open.
+  const inFlight = creatingMain.get(input.missionId);
+  if (inFlight !== undefined) return { agentId: await inFlight, created: false, replacedMainId: null };
   const store = createMissionStore(home, deps.now === undefined ? {} : { now: deps.now });
   const mission = store.get(input.missionId);
   if (mission === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
@@ -374,24 +529,28 @@ export async function handleMissionEnsure(input: MissionEnsureInput, paseo: Miss
     return { agentId: chosen.id, created: false, replacedMainId: null };
   }
   const ensured = await ensureRolesFor(paseo, deps.log);
-  const { workspaceId: homeWorkspaceId } = await ensureMissionsHome(paseo, deps);
+  const workspaceId = await ensureMissionWorkspace(paseo, mission, deps);
   const live = chosen?.id ?? null;
   // An archived Main the mission still names is replaced too: what waits for it goes to the successor.
   const old = live ?? mission.mainId;
   const reason = input.replace === "owner" && live !== null ? "owner" : mission.mainId === null ? "created" : "replaced";
-  const prompt = await mainBriefOf(paseo, home, mission);
-  const main = await createMain({ homeWorkspaceId, mission, prompt, reason, replaces: old }, managerDeps(paseo, home, mission.missionId, deps), ensured);
-  if (old !== null) {
-    // §3.4 steps 2–5; `createMain` named the successor (step 1).
-    const replaced = await replaceMain(mission.missionId, main.agentId, reason, { ...replaceDeps, replaced: old });
-    if (!replaced.ok) logOf(deps)(`[paseo-bm] Main ${main.agentId} replaces ${old}, but the replacement could not complete: ${replaced.reasons.join("; ")}`);
-  }
-  return { agentId: main.agentId, created: true, replacedMainId: live, toolsNotice: main.toolsNotice };
+  let toolsNotice: string | null = null;
+  const made = await oneMainCreation(mission.missionId, async () => {
+    const prompt = await mainBriefOf(paseo, home, mission);
+    const main = await createMain({ workspaceId, mission, prompt, reason, replaces: old }, managerDeps(paseo, home, mission.missionId, deps), ensured);
+    toolsNotice = main.toolsNotice;
+    // Mission runtime design §3.4: the one path names the successor, compare-and-set on the Main this call read.
+    const replaced = await replaceMain(mission.missionId, main.agentId, reason, { ...replaceDeps, replaced: old, expectedOld: mission.mainId });
+    if (!replaced.ok) logOf(deps)(`[paseo-bm] Main ${main.agentId} replaces ${old ?? "none"}, but the replacement could not complete: ${replaced.reasons.join("; ")}`);
+    return main.agentId;
+  });
+  if (made.joined) return { agentId: made.agentId, created: false, replacedMainId: null };
+  return { agentId: made.agentId, created: true, replacedMainId: live, toolsNotice };
 }
 
 /**
  * A code handoff of a Main (missions design §9.5): its successor, created as
- * `mission.ensure`'s replacement is — in the home, from the brief of §3.5
+ * `mission.ensure`'s replacement is — in the mission's workspace, from the brief of §3.5
  * with `notice` after it, `bm.replaces` = the old Main — then §3.4 steps 2–5
  * (`replaceMain`, reason `handoff`). Returns the successor's id. Throws as
  * `createMain` does; a replacement that cannot complete is one log line.
@@ -404,22 +563,27 @@ export async function handOverMain(
 ): Promise<string> {
   const home = requireDataHome(deps, "hand a Main over");
   const old = mission.mainId;
-  const { workspaceId: homeWorkspaceId } = await ensureMissionsHome(paseo, deps);
-  const prompt = `${await mainBriefOf(paseo, home, mission)}\n${notice}`;
-  const main = await createMain({ homeWorkspaceId, mission, prompt, reason: "handoff", replaces: old }, managerDeps(paseo, home, mission.missionId, deps));
-  const bindings = deps.bindings?.() ?? undefined;
-  const replaced = await replaceMain(mission.missionId, main.agentId, "handoff", {
-    home,
-    paseo,
-    replaced: old,
-    ...(bindings ? { bindings } : {}),
-    ...(deps.queue !== undefined ? { queue: deps.queue } : {}),
-    ...(deps.cli !== undefined ? { cli: deps.cli } : {}),
-    ...(deps.now !== undefined ? { now: deps.now } : {}),
-    ...(deps.log !== undefined ? { log: deps.log } : {}),
+  const workspaceId = await ensureMissionWorkspace(paseo, mission, deps);
+  const made = await oneMainCreation(mission.missionId, async () => {
+    const prompt = `${await mainBriefOf(paseo, home, mission)}\n${notice}`;
+    const main = await createMain({ workspaceId, mission, prompt, reason: "handoff", replaces: old }, managerDeps(paseo, home, mission.missionId, deps));
+    const bindings = deps.bindings?.() ?? undefined;
+    // Mission runtime design §3.4: inside the one creation, so a mission.ensure meanwhile joins it.
+    const replaced = await replaceMain(mission.missionId, main.agentId, "handoff", {
+      home,
+      paseo,
+      replaced: old,
+      expectedOld: old,
+      ...(bindings ? { bindings } : {}),
+      ...(deps.queue !== undefined ? { queue: deps.queue } : {}),
+      ...(deps.cli !== undefined ? { cli: deps.cli } : {}),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
+    });
+    if (!replaced.ok) logOf(deps)(`[paseo-bm] Main ${main.agentId} replaces ${old ?? "none"}, but the replacement could not complete: ${replaced.reasons.join("; ")}`);
+    return main.agentId;
   });
-  if (!replaced.ok) logOf(deps)(`[paseo-bm] Main ${main.agentId} replaces ${old ?? "none"}, but the replacement could not complete: ${replaced.reasons.join("; ")}`);
-  return main.agentId;
+  return made.agentId;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +658,31 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
     return true;
   }
 
+  /** ADR-034 decision 5: a `bm-manager` the owner opened in the workspace of a mission with no live Main becomes its Main. */
+  async function adopt(missionId: string, agentId: string, labelled: boolean, paseo?: unknown): Promise<boolean> {
+    const home = dataHome(deps);
+    if (home === null) return false;
+    const store = createMissionStore(home, deps.now === undefined ? {} : { now: deps.now });
+    const mission = store.get(missionId);
+    if (mission === null || mission.state !== "open") return false;
+    const bindings = deps.bindings?.() ?? undefined;
+    await markMain(agentId, mission, { bindings, cli: deps.cli, log }, labelled ? null : mission.mainId === null ? {} : { [REPLACES_LABEL]: mission.mainId });
+    const replaced = await replaceMain(missionId, agentId, mission.mainId === null ? "created" : "replaced", {
+      home,
+      ...(paseo !== undefined ? { paseo } : {}),
+      ...(bindings ? { bindings } : {}),
+      ...(deps.cli !== undefined ? { cli: deps.cli } : {}),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+      log,
+    });
+    if (!replaced.ok) {
+      log(`[paseo-bm] could not make ${agentId} the Main of mission ${mission.code}: ${replaced.reasons.join("; ")}`);
+      return false;
+    }
+    log(`[paseo-bm] ${agentId}, opened in the workspace of mission ${mission.code}, is its Main now.`);
+    return true;
+  }
+
   return {
     /** `agent.archived`: an open mission whose Main this was awaits a successor. Returns the claimed mission, if any. */
     async mainArchived(agentId: string): Promise<string | null> {
@@ -531,9 +720,19 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
         // The Main of another open mission succeeds no one.
         const holds = createMissionStore(home).openByMain(agent.id);
         if (holds !== null && holds.missionId !== own) return null;
-        // The mission its labels name, else the one whose Main was archived last.
-        const missionId = own ?? [...awaiting.entries()].sort((a, b) => b[1].at - a[1].at)[0]?.[0];
+        // ADR-034 decision 5: in a mission's own workspace, the agent is that mission's.
+        const place = missionsPlaceOf(agent.workspaceId, home);
+        const placed = place?.kind === "mission" ? place.missionId : null;
+        if (placed !== null && own !== null && own !== placed) return null;
+        // The mission its labels name, else its workspace's, else the one whose Main was archived last.
+        const missionId = own ?? placed ?? [...awaiting.entries()].sort((a, b) => b[1].at - a[1].at)[0]?.[0];
         const entry = missionId === undefined ? undefined : awaiting.get(missionId);
+        if (placed !== null && entry === undefined && nonEmpty(labels[VERSION_LABEL]) === null) {
+          // The owner opened it in the mission's workspace: its Main when the mission has none live; else an extra chat, left alone.
+          const live = (await findMain(paseo as MissionsPaseo, placed)).filter((candidate) => candidate.id !== agent.id);
+          if (live.length > 0) return null;
+          return (await adopt(placed, agent.id, own !== null, paseo)) ? placed : null;
+        }
         if (missionId === undefined || entry === undefined) {
           unclaimed.set(agent.id, { at: now().getTime(), missionId: own });
           return null;

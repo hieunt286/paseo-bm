@@ -4,7 +4,7 @@
 |---|---|
 | Status | Accepted (2026-10-09) — the owner's decisions of the discussion of 2026-10-09; `prd-ready` by Claude under the owner's delegation |
 | Owner | hieu.nt10 (GitHub: hieunt286) |
-| Routing decision | [ADR-029 § Routing Decision](../adr/ADR-029-missions-mains-and-a-process-governor.md#routing-decision) |
+| Routing decision | [ADR-029 § Routing Decision](../adr/ADR-029-missions-mains-and-a-process-governor.md#routing-decision); for REQ-197 → REQ-201, [ADR-032 § Routing Decision](../adr/ADR-032-one-governor-a-mission-per-wake.md#routing-decision); for REQ-202 → REQ-208, [ADR-033 § Routing Decision](../adr/ADR-033-the-mission-is-the-system-of-record.md#routing-decision) |
 | Amends | [Base PRD](./paseo-bm-prd.md) REQ-020 (one Manager per workspace) and REQ-021 (a Worker in the open workspace); REQ-176 → REQ-178 (asks go to the asker's own Main); [autonomy PRD](./paseo-bm-autonomy-prd.md) §5 (the Orchestrator's role) and the per-project levels (now the repo level) |
 | Design | [Missions design](../design/paseo-bm-missions.md) |
 
@@ -29,6 +29,14 @@ An owner works toward goals, not repositories. A goal such as "the AI Assistant 
 | M-25 | Owner messages that only tell the Main to take the next planned step | 0 on the acceptance scenario at a mission level that delegates `proceed` (field: "bắt đầu làm tài liệu design và adr") | The Main's timeline |
 | M-26 | Orchestrator wakes that end with no action | ≤ 20% of wakes (field: 11 of 18 `request.finished` wakes) | `orchestrator/wakes.json` with the intervention log |
 | M-27 | Work lost when a Main is replaced (commands, decisions or deliveries that fail because their Main changed) | 0 | Outbox and command records of a replacement drill in acceptance |
+| M-28 | Governor acts aimed at a mission the wake did not carry | 0 (more than 1 in a field period reopens ADR-032 decision 1) | `orchestrator/wakes.json` `offMission` (A-13) |
+| M-29 | Time from a `danger` alert to the Worker no longer running | median ≤ 5 minutes on the acceptance drill, with the Main told within the first minute | `orchestrator/dangers.json` (A-13) |
+| M-30 | Input tokens read per governor wake (input + cached, closing turn) | median ≤ 350,000, twice the 2026-10-09 acceptance's 175,000 | `orchestrator/wakes.json` `usage` (A-8, A-13) |
+| M-31 | Work lost when a Main is replaced: requests, follow-ups, questions, the Main's asks or links missing from the successor's brief | 0 (XAI 2026-10-10: a handed-over request and its follow-up missing) | A property test replacing the Main after every event of a scripted mission; the isolated-daemon drill |
+| M-32 | Main replacements for context while its real context is below the hard figure | 0 (XAI: replaced at 110,000 tokens of context) | The journal's `main` lines with the traces' `contextUsed` |
+| M-33 | Share of a Main's turns started by the owner | ≥ 50 % on the acceptance scenario (XAI: 5 of 20) | A-14 over the Missions home's trace records |
+| M-34 | Questions reaching the owner at Full auto other than `ownerOnly` and those beyond the delegated caps | 0 (XAI: review budgets, every time) | The decision store |
+| M-35 | Open legacy missions overlapping an owner's mission after its merge card was applied | 0 (XAI: AIAS and XSPA beside XAI) | The mission index |
 
 ## 3. Out of scope
 
@@ -44,7 +52,7 @@ An owner works toward goals, not repositories. A goal such as "the AI Assistant 
 - **Main** — a Beads Manager carrying one mission; faces the owner; plans; creates, wakes, links and stops its Workers; decides within the mission level; changes nothing itself.
 - **Worker** — does the work in one repository for one Main; decides within the repo level; talks to its sibling Workers on links its Main opened.
 - **Reviewer** — unchanged.
-- **Orchestrator** — governs the process across missions; arbitrates between missions; may create a Main to split one; may stop a Worker on real risk.
+- **Orchestrator** — one for the machine; governs the process across missions, one mission per wake; arbitrates between missions; may create a Main to split one; may stop a Worker on real risk, as the backup of its Main.
 
 ## 5. Journeys
 
@@ -74,11 +82,23 @@ An owner works toward goals, not repositories. A goal such as "the AI Assistant 
 | REQ-194 | The governor arbitrates between missions | P2 | (a) Detects two missions on one area (charters, writers, links). (b) Records who owns the area, tells both Mains, asks the owner when a goal changes. (c) Proposes splitting a mission and, on the owner's answer or the mission's `split` level, creates a Main for the new mission. |
 | REQ-195 | Routine runs in code | P2 | (a) Compaction and handoff of Workers and Mains run in code within the Coordination settings and inform the Main. (b) The Orchestrator is woken only on a signal step that needs judgement, a conflict, or a periodic mission review. |
 | REQ-196 | The Missions screen | P3 | (a) Lists missions with name, code, Main, repositories, state, done criteria progress, Workers, open questions and governor signals. (b) Creates, renames and closes a mission; sets its level. (c) Matches an approved mockup. |
+| REQ-197 | One governor, a mission per wake | P4 | (a) One Orchestrator governs every mission; none is created per mission. (b) Each wake carries the events of one mission, or of the two missions of a conflict, and opens with that mission's brief read at delivery: goal, open done criteria, repos, Main, ladder families above step 0 with their figures, open cards, notes, newest governor journal lines and arbitrations. (c) A wake carrying a `danger` signal goes before the others. |
+| REQ-198 | The governor's conversation is disposable | P4 | (a) An idle Orchestrator the owner has not written to for 2 hours is replaced after 24 hours, after its wakes touched 4 missions, or after 10 wakes. (b) The owner's conversation with it is never cut while they wrote in the last 2 hours. (c) Nothing the governor needs is lost: it lives in the stores and the brief. |
+| REQ-199 | `danger` follows the chain of command | P4 | (a) When a Worker of a mission's request raises `danger`, its Main is told at once, with the evidence and that it may stop the Worker. (b) The governor is woken as the backup 3 minutes later if the danger still holds, or at once when no Main could be told. (c) For a mission's Worker neither depends on the repo level. (d) The owner's Inbox alert is unchanged, and the plugin itself stops nobody. (e) The governor's stop keeps its authority: a delegated class, the owner's word, or an answered decision; else it asks the owner. |
+| REQ-200 | No project-era residue in the governor | P4 | (a) A note the Orchestrator keeps about a repo goes to that repo's project memory as the owner's word, so Mains and Workers carry it. (b) The governor's own notes are per mission; older project notes stay readable. (c) Its first prompt and home README describe the governor of missions. |
+| REQ-201 | The governor's scale is measured | P4 | (a) Wake records name their missions and count off-mission acts. (b) A danger log records when each danger was raised, its Main and the governor told, and when it ended. (c) The replay reports A-13 (wakes per mission, off-mission acts, danger-to-end time, Main told within a minute, tokens per wake). (d) ADR-032 decision 6 names the figures that reopen a per-mission governor. |
+| REQ-202 | The mission is the system of record | P5 | (a) Every event that changes what is in flight — a follow-up, a report's phase, a question and its answer, the Main's question to the owner, a link asked, taken, answered or closed, a transfer, a Main replaced — is written by the plugin where it happens. (b) One mission state ("in flight, waiting on whom") is the only source of the Main's brief, its state after compaction, the governor's brief and the Missions screen. |
+| REQ-203 | The Main is long-lived | P5 | (a) A Main's context is maintained in place by compaction at the owner's threshold on its real context; its chat with the owner stays. (b) A new Main is created only when compaction is impossible, failed twice, or left the context above the hard figure, and loses nothing (M-31). (c) One function replaces a Main; opening the Main during a replacement joins it. (d) Workers are not told when their Main changes; a replaced Main's tools refuse and name the current Main. |
+| REQ-204 | One authority names who decides | P5 | (a) When a decision opens, one rule set names its decider: code, the Main, the Orchestrator or the owner. (b) Review budgets within the code cap at a level delegating `cost` are not questions; the Main decides within its cap; beyond it, the owner. (c) The owner may answer any open decision. (d) The decider is told at once. |
+| REQ-205 | The Main asks the owner with stored decisions | P5 | (a) What the owner must decide is a decision in the Inbox, opened by the Main, answered on the card or in the Main's chat. (b) The answer reaches the Main and the journal. |
+| REQ-206 | One owner per thing | P5 | (a) Requests move between missions only through one transfer, on the owner's card (splits included). (b) A legacy one-repo mission on a repo of the owner's mission is offered for merging, on a card. (c) A mission closes while its Workers sit idle. (d) Entry points open the Main of the request's mission; by workspace, the owner's mission before a legacy one. |
+| REQ-207 | A signal budget | P5 | (a) A notice is sent only when its recipient has something to do. (b) Everything for a Main pending at its idle moment arrives as one message, each item its own card. (c) No notice for a Main replacement or a review budget. (d) The governor treats a request waiting on another request of its mission, or stopped, as waiting. |
+| REQ-208 | The Missions screen shows what is in flight and the Main's history | P5 | (a) A mission page lists requests by state, questions by who decides, the Main's asks and live links. (b) It lists the mission's Mains with when and why each changed and opens a previous one. (c) Matches an approved mockup. |
 
 ## 7. Non-functional requirements
 
 - **Safety:** a Worker still works only in its repository, under its repo level and action boundary; a Main changes nothing; the governor may only stop. No agent answers an `ownerOnly` question.
-- **Cost:** the governor's wakes are signal-driven (M-26); Mains compact and hand off in code.
+- **Cost:** the governor's wakes are signal-driven (M-26), one mission each, with a bounded brief (M-30); Mains compact in place (M-32) and the plugin wakes an agent only when it has something to do (M-33).
 - **Durability:** missions survive a plugin reload and a Main replacement; every store follows `data-files.ts`.
 - **Bundle:** the published entries stay under paseo.cafe's 2,000,000-byte scan limit.
 
@@ -95,6 +115,8 @@ An owner works toward goals, not repositories. A goal such as "the AI Assistant 
 | Phase 1 MVP — Missions | REQ-184 → REQ-192 | A two-repository mission on an isolated daemon meets M-22, M-23, M-24, M-25, M-27 |
 | Phase 2 MVP — The governor | REQ-193 → REQ-195 | The governor's scenario (sprawl, drift, a two-mission conflict, a split) meets M-26 and resolves each case without the owner relaying |
 | Phase 3 MVP — The Missions screen | REQ-196 | The screen matches the approved mockup at phone and desktop widths |
+| Phase 4 — One governor at mission scale (ADR-032) | REQ-197 → REQ-201 | The automated checks pass; an acceptance drill on an isolated daemon (two missions signalling together, a danger at a Hands-on repo) meets M-28 and M-29 — the drill is the owner's step after install |
+| Phase 5 — The mission runtime (ADR-033) | REQ-202 → REQ-208 | The automated checks pass, including the M-31 property test and the M-32, M-34, M-35 scripts; the mission page matches an approved mockup; the isolated-daemon drill (a forced Main replacement mid-work, a review budget at Full auto, a legacy merge) is the owner's step after install |
 
 ## 10. Open questions
 
@@ -109,3 +131,6 @@ An owner works toward goals, not repositories. A goal such as "the AI Assistant 
 |---|---|---|
 | 2026-10-09 | hieu.nt10 (owner decisions; written by Claude) | Created from the discussion of 2026-10-09. `prd-ready`: PASS (Claude under the owner's delegation) |
 | 2026-10-09 | Claude (owner's delegation) | After the design review: REQ-189 states who decides a Worker's question at each layer; Q-200 at level 2; Phase 0 (ADR-030) |
+| 2026-10-10 | hieu.nt10 (owner request; written by Claude) | REQ-197 → REQ-201, M-28 → M-30, Phase 4 and the Orchestrator's actor line: one governor, a mission per wake, a disposable conversation, `danger` to the Main first, notes into project memory, the governor's scale measured ([ADR-032](../adr/ADR-032-one-governor-a-mission-per-wake.md)). `prd-ready`: PASS (Claude under the owner's delegation) |
+| 2026-10-10 | hieu.nt10 (owner approval of the five changes; written by Claude) | REQ-202 → REQ-208, M-31 → M-35, Phase 5: the mission runtime — state of record, a long-lived Main, one authority, the Main's asks as decisions, one owner, a signal budget, the mission page's in-flight part ([ADR-033](../adr/ADR-033-the-mission-is-the-system-of-record.md)); REQ-199 (a)'s `BM-SIGNAL` now arrives through the Main's channel (REQ-207). `prd-ready`: PASS (Claude under the owner's delegation) |
+| 2026-10-10 | Claude (as built) | Phase 5 built: the automated checks pass (the M-31 property test, the M-32, M-34 and M-35 unit tests, A-14 in the replay); the mission page matches the approved mockup ([mission-runtime.html](../design/mockups/mission-runtime.html)). REQ-206 (d): no client entry point opens a Manager for one request yet; `manager.ensure` takes `requestId`, and by workspace the owner's mission comes first. What remains is the owner's isolated-daemon drill |

@@ -19,12 +19,14 @@
  *   synchronous).
  * - **Every other live Manager** of that workspace is flagged by the
  *   outdated-agents pass (`extraManagersOf`, `EXTRA_MANAGER_DETAIL`).
- * - **`manager.ensure { workspaceId }`** (`handleManagerEnsure`), behind the
- *   sidebar's "Beads Manager", the Command Center's "Open Beads Manager",
- *   Work's "Open Manager", a bead action and the Inbox's replace action: the
- *   migration, then the Main of the newest open mission whose scope holds the
- *   workspace (`mission.ensure`, `replace: "outdated"` for `replaceOutdated`),
- *   else a new one-repo mission and its Main in the home. A plugin home, or
+ * - **`manager.ensure { workspaceId, requestId? }`** (`handleManagerEnsure`),
+ *   behind the sidebar's "Beads Manager", the Command Center's "Open Beads
+ *   Manager", Work's "Open Manager", a bead action and the Inbox's replace
+ *   action: the Main of the open mission whose roster holds `requestId`, when
+ *   given; else the migration, then the Main of the open mission whose scope
+ *   holds the workspace (`missionOfWorkspace`: an owner's before a legacy one,
+ *   mission runtime design §5.5; `mission.ensure`, `replace: "outdated"` for
+ *   `replaceOutdated`), else a new one-repo mission and its Main in the home. A plugin home, or
  *   no data folder, keeps the per-workspace `ensureManager`.
  * - **A `bm-manager` the owner opens from the composer in a repo workspace**
  *   (`adoptComposerManager`, at its `agent.created`): an extra agent when the
@@ -38,13 +40,14 @@ import type { EnsureRolesResult } from "./setup-roles";
 import { createBindingStore, type BindingStore } from "./agent-bindings";
 import { listAllAgents, roleOfAgent, roleOfProvider } from "./agent-role";
 import { VERSION_LABEL, ensureManager, ensureRolesFor, findLiveManagers, findMain, setupNoticeFor, type EnsureManagerResult, type ManagerAgentSnapshot } from "./manager";
-import { createMissionRoster } from "./mission-roster";
+import { createMissionRoster, requestIndexOf } from "./mission-roster";
 import { replaceMain } from "./mission-replace";
+import { offerMerges } from "./mission-ownership";
 import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission } from "./mission-store";
-import { handleMissionEnsure, labelsOf, markMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
+import { ensureMissionWorkspace, ensureMissionsHome, handleMissionEnsure, labelsOf, markMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
 import { hasOutdatedInstructions } from "./instructions-label";
-import { workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
-import { isPluginHome } from "./plugin-homes";
+import { listedWorkspaces, workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
+import { isPluginHome, isPluginHomeIn } from "./plugin-homes";
 import { createRequestRegistry } from "./request-registry";
 import { nonEmpty } from "./role-choices";
 import { currentInstructions } from "./role-instructions";
@@ -76,17 +79,23 @@ export function legacyCodeOf(name: string, taken: (code: string) => boolean): st
   return base;
 }
 
-/** The newest open mission whose scope holds the workspace, or null. Never throws. */
+/**
+ * The open mission whose scope holds the workspace, or null (mission runtime
+ * design §5.5): one the owner or the orchestrator created before a legacy
+ * one, then the one with the newest journal line, then the newest. Never throws.
+ */
 export function missionOfWorkspace(home: string, workspaceId: string): Mission | null {
   try {
     const store = createMissionStore(home);
+    const lastActivity = (mission: Mission): string => store.journal(mission.missionId, 1).at(-1)?.at ?? "";
     return (
       store
         .list()
         .filter((entry) => entry.state === "open" && entry.repos.includes(workspaceId))
         .map((entry) => store.get(entry.missionId))
         .filter((mission): mission is Mission => mission !== null && mission.state === "open")
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null
+        .map((mission) => ({ mission, legacy: mission.createdBy === "legacy" ? 1 : 0, active: lastActivity(mission) }))
+        .sort((a, b) => a.legacy - b.legacy || b.active.localeCompare(a.active) || b.mission.createdAt.localeCompare(a.mission.createdAt))[0]?.mission ?? null
     );
   } catch {
     return null;
@@ -139,7 +148,7 @@ export async function migrateWorkspace(
   options: { managers?: readonly ManagerAgentSnapshot[]; prefer?: string } = {},
 ): Promise<Mission | null> {
   const home = dataHome(deps);
-  if (home === null || isPluginHome(workspaceId, home) || missionOfWorkspace(home, workspaceId) !== null) return null;
+  if (home === null || (await isPluginHomeNow(paseo, workspaceId, home)) || missionOfWorkspace(home, workspaceId) !== null) return null;
   const log = logOf(deps);
   try {
     let chosen = options.prefer ?? null;
@@ -181,6 +190,18 @@ export function createLegacyMigration(deps: MissionsHomeDeps = {}) {
         const agents = await listAllAgents((options) => handle.agents.list(options), { includeArchived: false });
         const workspaces = new Set(agents.filter((agent) => roleOfAgent(agent)?.role === "manager").map((agent) => agent.workspaceId));
         for (const workspaceId of workspaces) if (typeof workspaceId === "string" && workspaceId !== "") await migrateWorkspace(handle, workspaceId, deps);
+        // Mission runtime design §5.2: every open mission is offered the merge of an older one-repo mission of its repos, once per pair.
+        const home = dataHome(deps);
+        if (home !== null) for (const entry of createMissionStore(home).list()) if (entry.state === "open") offerMerges(home, entry.missionId, { now: deps.now?.() ?? new Date(), log: logOf(deps) });
+        // ADR-034 decision 6: the Mission-List project, and a workspace for every open mission of the owner or the orchestrator.
+        if (home !== null && typeof handle.workspaces?.open === "function") {
+          await ensureMissionsHome(handle, deps);
+          const store = createMissionStore(home);
+          for (const entry of store.list()) {
+            const mission = entry.state === "open" ? store.get(entry.missionId) : null;
+            if (mission !== null && mission.createdBy !== "legacy") await ensureMissionWorkspace(handle, mission, deps);
+          }
+        }
       } catch (error) {
         logOf(deps)(`[paseo-bm] the start-up migration of the Beads Managers failed: ${errorText(error)}`);
       }
@@ -188,15 +209,38 @@ export function createLegacyMigration(deps: MissionsHomeDeps = {}) {
   };
 }
 
+/**
+ * Whether a workspace is a plugin home, by its id or, when the id is cached
+ * nowhere yet, by the folder Paseo lists for it: a second workspace Paseo
+ * opened for a home folder, before its first trace, once became a one-repo
+ * mission "HOME" (2026-10-12). Never throws.
+ */
+async function isPluginHomeNow(paseo: unknown, workspaceId: string, home: string): Promise<boolean> {
+  if (isPluginHome(workspaceId, home)) return true;
+  const listed = await listedWorkspaces(paseo as DashboardPaseo).catch(() => null);
+  return isPluginHomeIn(workspaceId, listed, home);
+}
+
+/** The open mission whose roster holds `requestId`, or null. Never throws. */
+function openMissionOfRequest(home: string, requestId: string): Mission | null {
+  try {
+    const place = requestIndexOf(home, requestId);
+    const mission = place === null ? null : createMissionStore(home).get(place.missionId);
+    return mission !== null && mission.state === "open" ? mission : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `manager.ensure` (§3.6): see the module comment. Throws as `mission.ensure` and `ensureManager` do. */
 export async function handleManagerEnsure(
-  input: { workspaceId: string; replaceOutdated?: boolean },
+  input: { workspaceId: string; replaceOutdated?: boolean; requestId?: string },
   paseo: MissionsPaseo,
   deps: MissionsHomeDeps = {},
 ): Promise<EnsureManagerResult> {
   const home = dataHome(deps);
   const { workspaceId } = input;
-  if (home === null || isPluginHome(workspaceId, home)) {
+  if (home === null || (await isPluginHomeNow(paseo, workspaceId, home))) {
     return ensureManager(input, {
       paseo,
       home,
@@ -208,9 +252,11 @@ export async function handleManagerEnsure(
   }
   const ensured: EnsureRolesResult = await ensureRolesFor(paseo, deps.log);
   const managers = await findLiveManagers(paseo, workspaceId, { home, log: deps.log });
-  await migrateWorkspace(paseo, workspaceId, deps, { managers });
-  const folder = missionOfWorkspace(home, workspaceId) === null ? await workspaceDirectory(paseo as unknown as DashboardPaseo, workspaceId).catch(() => null) : null;
-  const { mission } = writeLegacyMission(home, workspaceId, folder, null, deps);
+  // Mission runtime design §5.5: a request of an open mission opens that mission's Main.
+  const ofRequest = input.requestId === undefined ? null : openMissionOfRequest(home, input.requestId);
+  if (ofRequest === null) await migrateWorkspace(paseo, workspaceId, deps, { managers });
+  const folder = ofRequest === null && missionOfWorkspace(home, workspaceId) === null ? await workspaceDirectory(paseo as unknown as DashboardPaseo, workspaceId).catch(() => null) : null;
+  const { mission } = ofRequest !== null ? { mission: ofRequest } : writeLegacyMission(home, workspaceId, folder, null, deps);
   // A Main its label never reached (the CLI refused it) is still the mission's: opened unless it is replaced.
   const unlabelled = managers.find((agent) => agent.id === mission.mainId);
   const opened =
@@ -241,7 +287,7 @@ export async function adoptComposerManager(
 ): Promise<"main" | "extra" | "mission" | null> {
   const home = dataHome(deps);
   const workspaceId = agent.workspaceId;
-  if (roleOfProvider(agent.provider) !== "manager" || home === null || workspaceId === null || isPluginHome(workspaceId, home)) return null;
+  if (roleOfProvider(agent.provider) !== "manager" || home === null || workspaceId === null || (await isPluginHomeNow(paseo, workspaceId, home))) return null;
   const log = logOf(deps);
   try {
     const labels = await labelsOf(paseo, agent.id);

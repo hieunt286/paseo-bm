@@ -183,8 +183,8 @@ describe("the index (§2.1)", () => {
     const index = JSON.parse(readFileSync(join(home, MISSIONS_DIR_NAME, "index.json"), "utf8")) as { schemaVersion: number; missions: unknown[] };
     expect(index.schemaVersion).toBe(1);
     expect(index.missions).toEqual([
-      { missionId: a.missionId, code: "PAY", name: "Payments", state: "open", mainId: "main-1", repos: ["wks_a", "wks_b"] },
-      { missionId: b.missionId, code: "OPS", name: "Ops", state: "open", mainId: null, repos: ["wks_c"] },
+      { missionId: a.missionId, code: "PAY", name: "Payments", state: "open", mainId: "main-1", repos: ["wks_a", "wks_b"], workspaceId: null },
+      { missionId: b.missionId, code: "OPS", name: "Ops", state: "open", mainId: null, repos: ["wks_c"], workspaceId: null },
     ]);
     expect(missions.byCode("OPS")?.missionId).toBe(b.missionId);
     expect(missions.byCode("NONE")).toBeNull();

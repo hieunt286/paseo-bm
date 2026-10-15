@@ -119,8 +119,31 @@ export const arbitrationActionSchema = z.object({
 });
 export type ArbitrationAction = z.infer<typeof arbitrationActionSchema>;
 
+/**
+ * A legacy one-repo mission merged into the mission that holds its repo
+ * (mission runtime design §5.2): `missionId` is the holding mission, `from`
+ * the legacy one. The plugin moves its requests, closes it and marks its Main
+ * on the owner's tap (`server/mission-ownership.ts`).
+ */
+export const missionMergeActionSchema = z.object({ kind: z.literal("mission-merge"), missionId: missionIdSchema, from: missionIdSchema });
+export type MissionMergeAction = z.infer<typeof missionMergeActionSchema>;
+
+/**
+ * Requests moved to another mission (mission runtime design §5.3): `missionId`
+ * is the source mission, whose Main asked it with `bm_mission_update`'s
+ * `transfer`; the plugin runs the transfer on the owner's tap.
+ */
+export const missionTransferActionSchema = z.object({
+  kind: z.literal("mission-transfer"),
+  missionId: missionIdSchema,
+  to: missionIdSchema,
+  requestIds: z.array(z.string().regex(/^req-\d{8}T\d{6}Z$/)).min(1).max(50),
+  reason: z.string().min(1).max(500),
+});
+export type MissionTransferAction = z.infer<typeof missionTransferActionSchema>;
+
 /** The prepared actions of `m:` cards: applied by the plugin on the owner's tap only, kept out of `PREPARED_CHANGE_KINDS` so `bm_ask_owner` cannot offer one. */
-export const MISSION_ACTION_KINDS = ["mission-change", "mission-split", "arbitration"] as const;
+export const MISSION_ACTION_KINDS = ["mission-change", "mission-split", "arbitration", "mission-merge", "mission-transfer"] as const;
 
 /** True for the kind of an `m:` card's prepared action. Pure. */
 export function isMissionActionKind(kind: string | undefined): boolean {

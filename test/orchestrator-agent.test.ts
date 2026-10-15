@@ -18,6 +18,7 @@ import {
   type OrchestratorAgentPaseo,
 } from "../plugin/server/orchestrator-agent";
 import { toolsStaleSince } from "../plugin/server/agent-tools";
+import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { DASHBOARD_ERROR_CODES, DashboardError, orchestratorOpenPreviewRpc, orchestratorOpenRpc } from "../plugin/shared/contracts";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { ORCHESTRATOR_INSTRUCTIONS } from "../plugin/server/orchestrator-instructions";
@@ -207,8 +208,9 @@ describe("orchestrator.open", () => {
     expect(folder).toBe(join(home, "orchestrator", "home"));
     expect(statSync(folder).mode & 0o777).toBe(0o700);
     expect(readFileSync(join(folder, "README.md"), "utf8")).toBe(ORCHESTRATOR_HOME_README);
-    // It says when a command goes out without a click — where the owner delegated it (autonomy design §B.9) — and the limits.
-    expect(ORCHESTRATOR_HOME_README).toMatch(/only where you delegated what\s+the command does, in Settings → Autonomy/);
+    // It says what the governor is (missions design §20, ADR-032) and its limits: commands with no effect (ADR-031).
+    expect(ORCHESTRATOR_HOME_README).toMatch(/governs the process of every paseo-bm\s+mission/);
+    expect(ORCHESTRATOR_HOME_README).toMatch(/commands\s+carry no effect/);
     expect(ORCHESTRATOR_HOME_README).toMatch(/commit, push or deploy/);
     expect(ORCHESTRATOR_HOME_README).not.toMatch(/unless you approve it/);
   });
@@ -513,6 +515,47 @@ describe("wakeableOrchestrator: the Orchestrator a plugin notice wakes (design �
       const busy = withChat(orchestratorAgent("busy", { createdAt: hoursAgo(30), status: "running" }), []);
       await wakeableOrchestrator(busy.paseo, dayDeps());
       expect([...young.refetches, ...busy.refetches]).toEqual([]);
+    });
+
+    describe("by its load (missions design §20, ADR-032 decision 3)", () => {
+      /** Wakes of `agentId` in the data folder's wake log, each naming one mission. */
+      const wakesOf = (agentId: string, missions: readonly string[]) => {
+        const store = createOrchestratorStore(home, { now: () => NOW });
+        for (const missionId of missions) store.appendWake({ orchestratorId: agentId, workspaceIds: [], events: 1, eventTypes: ["mission.signal"], missionIds: [missionId] });
+      };
+      const quiet = [owner("Hi.", hoursAgo(5))];
+
+      it("replaces a young one whose wakes touched 4 missions, idle, whose owner has been quiet for 2 hours", async () => {
+        const fake = withChat(orchestratorAgent("busy", { createdAt: hoursAgo(3) }), quiet);
+        wakesOf("busy", ["mis-0000000001", "mis-0000000002", "mis-0000000003", "mis-0000000004"]);
+        const log = vi.fn();
+        await expect(wakeableOrchestrator(fake.paseo, dayDeps(log))).resolves.toMatchObject({ id: "agent-1" });
+        expect(log.mock.calls.map(([line]) => line)).toEqual([
+          "[paseo-bm] the Beads Orchestrator busy has governed 4 missions; created agent-1 to take over (the old one stays in your agent list)",
+        ]);
+      });
+
+      it("replaces a young one that carried 10 wakes of fewer missions", async () => {
+        const fake = withChat(orchestratorAgent("busy", { createdAt: hoursAgo(3) }), quiet);
+        wakesOf("busy", Array.from({ length: 10 }, (_, index) => `mis-000000000${index % 3}`));
+        const log = vi.fn();
+        await expect(wakeableOrchestrator(fake.paseo, dayDeps(log))).resolves.toMatchObject({ id: "agent-1" });
+        expect(log.mock.calls[0]![0]).toContain("has carried 10 wakes");
+      });
+
+      it("keeps one with 3 missions and 9 wakes, one another Orchestrator's wakes would cross, and one the owner wrote to within 2 hours", async () => {
+        const light = withChat(orchestratorAgent("light", { createdAt: hoursAgo(3) }), quiet);
+        wakesOf("light", ["mis-0000000001", "mis-0000000002", "mis-0000000003", "mis-0000000001", "mis-0000000002", "mis-0000000003", "mis-0000000001", "mis-0000000002", "mis-0000000003"]);
+        wakesOf("someone-else", ["mis-0000000004", "mis-0000000005", "mis-0000000006", "mis-0000000007"]);
+        await expect(wakeableOrchestrator(light.paseo, dayDeps())).resolves.toMatchObject({ id: "light" });
+        expect(light.creates).toEqual([]);
+
+        rmSync(home, { recursive: true, force: true });
+        const talking = withChat(orchestratorAgent("talking", { createdAt: hoursAgo(3) }), [owner("How is AIX?", hoursAgo(1))]);
+        wakesOf("talking", ["mis-0000000001", "mis-0000000002", "mis-0000000003", "mis-0000000004"]);
+        await expect(wakeableOrchestrator(talking.paseo, dayDeps())).resolves.toMatchObject({ id: "talking" });
+        expect(talking.creates).toEqual([]);
+      });
     });
 
     it("a chat with only plugin notices and prompts counts as the owner's silence", async () => {

@@ -16,7 +16,7 @@
  */
 import { z } from "zod";
 import { coordinationChangeSchema, type ReviewBudget } from "./coordination";
-import { arbitrationActionSchema, isMissionActionKind, missionChangeActionSchema, missionSplitActionSchema } from "./mission-change";
+import { arbitrationActionSchema, isMissionActionKind, missionChangeActionSchema, missionMergeActionSchema, missionSplitActionSchema, missionTransferActionSchema } from "./mission-change";
 import type { Tier } from "./contracts";
 
 // ---------------------------------------------------------------------------
@@ -284,6 +284,9 @@ export const preparedActionSchema = z.discriminatedUnion("kind", [
   /** A split and an arbitration's goal change on an `m:` card (missions design §9.6), the same way. */
   missionSplitActionSchema,
   arbitrationActionSchema,
+  /** A legacy mission's merge and a transfer of requests on an `m:` card (mission runtime design §5.2, §5.3), the same way. */
+  missionMergeActionSchema,
+  missionTransferActionSchema,
 ]);
 export type PreparedAction = z.infer<typeof preparedActionSchema>;
 

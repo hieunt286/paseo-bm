@@ -555,10 +555,10 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
     const call = (input: Record<string, unknown>, as: ToolCaller = caller) => tools.call("bm_create_worker", { request: "Do it.", context: [], ...input }, as);
     expect(await call({})).toEqual({
       ok: false,
-      text: "input.project: mission SHOP works in 5 repos — wks_1 (invoice-app), wks_back (back), wks_old (old), wks_home (home), wks_orch (home); name the one the Worker works in\nNothing was created.",
+      text: "input.project: mission SHOP works in 5 repos — wks_1 (invoice-app), wks_back (back), wks_old (old), wks_home (Mission-List), wks_orch (home); name the one the Worker works in\nNothing was created.",
     });
     expect((await call({ project: "wks_front" })).text).toBe(
-      "project wks_front is outside mission SHOP's scope (wks_1 (invoice-app), wks_back (back), wks_old (old), wks_home (home), wks_orch (home)); add it with bm_mission_update repos first\nNothing was created.",
+      "project wks_front is outside mission SHOP's scope (wks_1 (invoice-app), wks_back (back), wks_old (old), wks_home (Mission-List), wks_orch (home)); add it with bm_mission_update repos first\nNothing was created.",
     );
     expect((await call({ project: "wks_old" })).text).toBe("project wks_old is archived or no longer listed in Paseo\nNothing was created.");
     expect((await call({ project: "wks_home" })).text).toBe("project wks_home is a paseo-bm home, not a repo\nNothing was created.");

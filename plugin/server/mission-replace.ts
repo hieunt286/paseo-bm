@@ -1,30 +1,30 @@
 /**
  * Replacing a Main without losing work (missions design §3.4, REQ-188, M-27).
  *
- * `replaceMain(missionId, newMainId, reason, deps)` is the one path every
- * replacement takes once its successor exists: `mission.ensure` with
- * `replace` (`missions-home.ts`), a cleared conversation's successor
- * (`createMainSuccession`) and the fallback switch of a Main
- * (`fallback-manager.ts`). The callers create the successor (step 1's first
- * half, `bm.replaces` on it); here, in the design's order:
+ * `replaceMain(missionId, newMainId, reason, deps)` is the one function that
+ * changes a mission's Main (mission runtime design §3.4): a new mission's
+ * first Main, `mission.ensure`, a code handoff (`handOverMain`), a cleared
+ * conversation's successor (`createMainSuccession`), the composer adoption
+ * and the fallback switch of a Main (`fallback-manager.ts`). `createMain`
+ * only creates the agent. Single flight per mission; idempotent (a mission
+ * naming the successor already writes nothing); compare-and-set on
+ * `expectedOld`. In the design's order:
  *
- * 1. the mission's `mainId` becomes the successor (`setMain`, unless the
- *    caller's `createMain` wrote it already) — from here every record, handoff
- *    and link addressed to "the Main" resolves to it at delivery;
+ * 1. the mission's `mainId` becomes the successor (`setMain`) and the journal
+ *    gets exactly one `main` line — from here every record, handoff and link
+ *    addressed to "the Main" resolves to it at delivery;
  * 2. every active request of the roster: registry `managerId` = new
  *    (`reassignManager`);
  * 3. every Worker of the mission — the roster's and the registry's, a bound
  *    Worker whose binding names an earlier Main, a live Worker labelled with
- *    one — gets its binding re-pointed (`reparent`) and, when live, the
- *    `BM-SETTINGS` "The Beads Manager you report to was replaced" notice;
+ *    one — gets its binding re-pointed (`reparent`); no Worker is told;
  * 4. a live Worker's `paseo.parent-agent-id` label is set to the successor
  *    through the Paseo CLI (a refusal costs one log line: readers go to the
  *    registry's `managerId` first);
  * 5. the old Main is marked `bm.replacedBy` (when it is not known to be
  *    archived) and, once marked, retitled `replacedMainTitleOf` through the
  *    Paseo CLI (`setAgentTitle`, as `syncMainTitle` titles a Main), so its
- *    tab no longer reads as the mission's Main; the journal records the
- *    replacement.
+ *    tab no longer reads as the mission's Main.
  *
  * Then, the replacement complete: the old Main's proposed answers and proposed
  * mission start are dropped (one log line), the notice queue moves what it
@@ -42,7 +42,6 @@ import { createMissionRoster } from "./mission-roster";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
-import { SETTINGS_NOTICE_MARKER } from "./notices";
 import { createOutbox, deliverRecord, isOpenRecord } from "./outbox";
 import { setAgentLabel, setAgentTitle, type CliResult, type PaseoCliDeps } from "./paseo-cli";
 import { dropProposedAnswersOf } from "./proposed-answers";
@@ -50,7 +49,6 @@ import { dropProposedMissionStartOf } from "./proposed-mission-starts";
 import { createRequestRegistry, type RequestRegistry } from "./request-registry";
 import { replacedMainTitleOf } from "./role-title";
 import { errorText } from "./rpc-kit";
-import { managerIdNotice } from "./settings-notices";
 
 export interface ReplaceMainDeps {
   home: string;
@@ -58,6 +56,12 @@ export interface ReplaceMainDeps {
   paseo?: unknown;
   /** The Main replaced, when the mission names the successor already (`createMain` wrote it); the mission's `mainId` otherwise. */
   replaced?: string | null;
+  /**
+   * Compare-and-set (mission runtime design §3.4): the Main the caller read;
+   * when the mission names another by now, nothing is written or sent. Null for
+   * a mission with no Main yet; undefined skips the check.
+   */
+  expectedOld?: string | null;
   bindings?: BindingStore;
   queue?: Pick<NoticeQueue, "enqueue" | "retarget">;
   /** Sets one label through the Paseo CLI; `setAgentLabel` with `cli` by default. */
@@ -115,8 +119,9 @@ function reassignEntries(
 
 /**
  * §3.4 steps 3 and 4 for `workers`: each binding re-pointed to `newMainId`
- * (and given `missionId`, when given); each live one told its new Main
- * (`BM-SETTINGS`) and given the parent label. Each failure is one log line.
+ * (and given `missionId`, when given); each live one given the parent label.
+ * No Worker is told (mission runtime design §3.4): every delivery resolves to
+ * the current Main when it is sent. Each failure is one log line.
  */
 async function repointWorkers(
   workers: Iterable<string>,
@@ -133,21 +138,42 @@ async function repointWorkers(
     deps.bindings?.reparent(workerId, newMainId);
     if (deps.missionId !== undefined) deps.bindings?.assignMission(workerId, deps.missionId);
     if (live !== null && !live.has(workerId)) continue;
-    const outcome = await deps.queue.enqueue(workerId, SETTINGS_NOTICE_MARKER, managerIdNotice(newMainId), deps.paseo as NoticePaseo | undefined);
-    if (outcome === "dropped") deps.log(`[paseo-bm] Worker ${workerId} could not be told its new Main ${newMainId}.`);
     if (parentOf(live?.get(workerId)) === newMainId) continue;
     const labelled = await deps.setLabel(workerId, PARENT_AGENT_LABEL, newMainId).catch((error: unknown) => ({ ok: false as const, reason: errorText(error) }));
     if (!labelled.ok) deps.log(`[paseo-bm] Worker ${workerId} keeps its parent label (its Main is ${newMainId} now): ${labelled.reason}`);
   }
 }
 
-/** See the module comment. */
+/** Each mission's replacement in flight: a second call waits for the first (mission runtime design §3.4). */
+const replacing = new Map<string, Promise<unknown>>();
+
+/**
+ * The one function that changes a mission's Main (mission runtime design
+ * §3.4): single flight per mission, idempotent (the mission naming
+ * `newMainId` already writes nothing), compare-and-set on `expectedOld`; see
+ * the module comment for its steps.
+ */
 export async function replaceMain(missionId: string, newMainId: string, reason: Mission["mainHistory"][number]["reason"], deps: ReplaceMainDeps): Promise<ReplaceMainResult> {
+  const before = replacing.get(missionId) ?? Promise.resolve();
+  const run = before.catch(() => undefined).then(() => replaceMainNow(missionId, newMainId, reason, deps));
+  replacing.set(missionId, run);
+  try {
+    return await run;
+  } finally {
+    if (replacing.get(missionId) === run) replacing.delete(missionId);
+  }
+}
+
+async function replaceMainNow(missionId: string, newMainId: string, reason: Mission["mainHistory"][number]["reason"], deps: ReplaceMainDeps): Promise<ReplaceMainResult> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const { home } = deps;
   const store = createMissionStore(home, deps.now === undefined ? {} : { now: deps.now });
   const mission = store.get(missionId);
   if (mission === null) return { ok: false, reasons: [`unknown mission ${missionId}`] };
+  if (mission.mainId === newMainId) return { ok: true, replaced: null, requests: 0, workers: [], moved: 0, redelivered: 0 };
+  if (deps.expectedOld !== undefined && mission.mainId !== deps.expectedOld) {
+    return { ok: false, reasons: [`the mission's Main changed meanwhile (it is ${mission.mainId ?? "none"}, not ${deps.expectedOld ?? "none"})`] };
+  }
   // A Main never replaces itself: a caller naming the successor as the one replaced (or a mission already
   // naming it) has no earlier Main to mark.
   const named = deps.replaced !== undefined ? deps.replaced : mission.mainId;
@@ -161,7 +187,7 @@ export async function replaceMain(missionId: string, newMainId: string, reason: 
     } catch (error) {
       return { ok: false, reasons: [errorText(error)] };
     }
-    journalQuietly(store, missionId, { kind: "main", by: "plugin", text: `Main ${newMainId} replaces ${old ?? "none"} (${reason}).`, ref: newMainId }, log);
+    journalQuietly(store, missionId, { kind: "main", by: "plugin", text: old === null ? `Main ${newMainId} created.` : `Main ${newMainId} replaces ${old} (${reason}).`, ref: newMainId }, log);
   }
   const earlier = new Set([...mission.mainHistory.map((entry) => entry.agentId), ...(mission.mainId === null ? [] : [mission.mainId]), ...(old === null ? [] : [old])]);
   earlier.delete(newMainId);
@@ -247,4 +273,39 @@ export async function reassignRequests(
     missionId,
   });
   return [...workers];
+}
+
+/**
+ * The tools a replaced Main may no longer call (mission runtime design §3.6):
+ * every bound Manager tool that writes or sends. Reads (`bm_mission`,
+ * `bm_decisions`, `bm_repo`, `bm_peers`, `bm_memory`) still answer.
+ */
+export const MAIN_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  "bm_create_worker",
+  "bm_tell_worker",
+  "bm_answers",
+  "bm_answer_worker",
+  "bm_mission_update",
+  "bm_split_mission",
+  "bm_link_workers",
+  "bm_ask_mission",
+  "bm_peer_reply",
+  "bm_owner_question",
+]);
+
+/**
+ * Why a Manager's tool call is refused because another Main holds its mission
+ * (mission runtime design §3.6), or null: the caller's binding names an open
+ * mission whose `mainId` is another agent, and the tool writes or sends.
+ * Never throws: a mission that cannot be read refuses nothing.
+ */
+export function replacedMainRefusalOf(home: string, caller: { agentId: string | null; missionId?: string | null } | null, tool: string): string | null {
+  if (caller === null || caller.agentId === null || (caller.missionId ?? null) === null || !MAIN_WRITE_TOOLS.has(tool)) return null;
+  try {
+    const mission = createMissionStore(home).get(caller.missionId!);
+    if (mission === null || mission.state !== "open" || mission.mainId === null || mission.mainId === caller.agentId) return null;
+    return `You were replaced by Main ${mission.mainId} of mission ${mission.code}; tell the owner to continue in that Main's chat (the Missions screen opens it). Nothing was done.`;
+  } catch {
+    return null;
+  }
 }

@@ -4,8 +4,8 @@
 |---|---|
 | Status | Active — the contract the beads build to; edited in place as built |
 | Owner | hieu.nt10 |
-| Requirements | [Missions PRD](../product/paseo-bm-missions-prd.md) REQ-184 → REQ-196, M-22 → M-27 |
-| Decision | [ADR-029](../adr/ADR-029-missions-mains-and-a-process-governor.md) |
+| Requirements | [Missions PRD](../product/paseo-bm-missions-prd.md) REQ-184 → REQ-201, M-22 → M-30 |
+| Decision | [ADR-029](../adr/ADR-029-missions-mains-and-a-process-governor.md); §20: [ADR-032](../adr/ADR-032-one-governor-a-mission-per-wake.md) |
 | Builds on | [base design](./paseo-bm.md) §7.3 (Manager), §7.4 (bindings), §7.14–§7.17 (registry, tools, outbox, peer links); [Orchestrator design](./paseo-bm-orchestrator.md); [autonomy design](./paseo-bm-autonomy.md) Parts A, B, G |
 
 Section numbers are cited by code; they are never renumbered.
@@ -118,9 +118,13 @@ The "a project cannot ask itself" rule applies to `project` and `ask-main` only.
 
 ## 3. The home and the Main
 
-### 3.1 The home
+### 3.1 The home: the Mission-List project, a workspace per mission ([ADR-034](../adr/ADR-034-each-mission-has-its-own-workspace.md))
 
-`ensureMissionsHome` creates `<data>/missions/home` (`0700`, a `README.md` saying what it is) and opens it with `paseo.workspaces.open({ cwd })`, as `orchestrator-agent.ts` does for the Orchestrator. Its workspace id is cached in `ui/missions-home.json`.
+- **The root.** `ensureMissionsHome` creates `<data>/missions/Mission-List` (`0700`, a `README.md` saying what it is) and opens it with `paseo.workspaces.open({ cwd })`; Paseo names the project after the folder. Its workspace id is cached in `ui/missions-home.json`. The root workspace is the lobby: an unassigned Main the owner opens there by hand lives there.
+- **A workspace per mission.** `ensureMissionWorkspace` makes `<Mission-List>/<missionId>` (a `README.md` naming the mission) and finds the workspace Paseo lists for that folder, else creates one with `workspaces.create({ source: { kind: "directory", path, projectId: <root's project> }, title: "<CODE> · <name>" })`. Its id is cached on the mission (`workspaceId`, also in the index). A rename retitles it (`paseo workspace rename`) with the Main. A host without `workspaces.create`, or a root without a project id, keeps the Main in the root (one log line).
+- **Where Mains are created.** Every Main the plugin creates for a mission — the first, a successor of a handoff, a replace or a fallback, an `Open Main` that finds none — is created in its mission's workspace; a replaced Main stays where it was, as a tab. At start, every open mission of the owner or the orchestrator gets its workspace; a legacy one-repo mission gets one when the plugin first creates a Main for it.
+- **The earlier shared home.** A cached home in another folder (`<data>/missions/home`, before ADR-034) is kept as `legacyWorkspaceId` in `ui/missions-home.json`: its workspace and Mains stay a Missions place until the owner archives it; nothing is moved or archived.
+- **Missions places** (`missionsPlaceOf`): the root, the earlier home, a mission's workspace (by id or folder). `isMissionsHome` is true for any of them — a paseo-bm home, never a repo. A Main's turns are read in every place it worked (`mainPlacesOf`: its mission's workspace, the root, the earlier home, a legacy mission's repo); A-14 counts the `manager` records of every Missions place.
 
 **Plugin homes are not projects.** `listedWorkspaces` stays raw (the creation hook's `workspaceOfFolder` needs the home to bind a Main created there). `isPluginHome(workspaceIdOrDirectory)` (the Missions home and the Orchestrator home) is applied **in each project-view caller**: `bm_projects` and the stored-workspace list it reads (`orchestrator-tool-context.ts`), `bm_peers`, project resolution of links, the Work, Inbox and Insights project lists, the overview counts and the event scope. A Main's own turns are traced under the home; those records are read by mission, never as a project.
 
@@ -135,12 +139,13 @@ The "a project cannot ask itself" rule applies to `project` and `ask-main` only.
 
 ### 3.3 Creating a mission and its Main
 
-**From the Command Center** — "New mission" (Phase 1), and from the Missions screen (Phase 3). `missions.create { name?, code?, repos?, goal? }` behaves as follows:
-- With a name and a code, it writes the mission (state `open`, `createdBy: owner`) and creates its Main.
-- Without them (the Command Center path), it creates an **unassigned Main**: a Main in the home with no `bm.missionId`. Its brief asks the owner the name, code, goal and repositories, and records them with `bm_mission_start`.
+**From the Command Center or the Missions screen.** The Command Center's "New mission" opens the Missions screen's New mission form (ADR-034 decision 4). `missions.create { name?, code?, repos?, goal? }` behaves as follows:
+- With a name and a code, it writes the mission (state `open`, `createdBy: owner`) and creates its Main in the mission's own workspace.
+- Without them, it creates an **unassigned Main** in the root: a Main with no `bm.missionId`. Its brief asks the owner the name, code, goal and repositories, and records them with `bm_mission_start`; the mission's workspace is made then, and the Main keeps its conversation in the root until it is replaced (its successor starts in the mission's workspace).
 
 **From Paseo's composer** — a `bm-manager` created by the owner:
-- **In the home:** the hook binding (base design §7.17.7) binds it, and it is an unassigned Main as above.
+- **In the root (or the earlier home):** the hook binding (base design §7.17.7) binds it, and it is an unassigned Main as above.
+- **In a mission's workspace:** it is that mission's — the successor of a cleared conversation (the claim window), or its Main when the mission has no live Main; when a live Main exists, it is an extra chat the owner opened on purpose, left alone.
 - **In a repo workspace:** it becomes a one-repo mission (§3.6).
 
 A charter repo must be a listed, unarchived repo workspace (not a plugin home).
@@ -290,7 +295,7 @@ Requests without a mission keep today's rule (the Orchestrator under the repo po
 | `bm_send_command` | **Replaced** by `bm_govern` to a Main (§9.4) |
 | `bm_ask_owner` | Kept; prepared commands go to a Main only |
 | `bm_compact`, `bm_handoff` | **Retired** from the model; code runs them (§9.5) |
-| `bm_projects`, `bm_request`, `bm_agent_messages`, `bm_repo`, `bm_why`, `bm_decisions`, `bm_note`, `bm_reply` | Kept; `bm_note` keyed by mission |
+| `bm_projects`, `bm_request`, `bm_agent_messages`, `bm_repo`, `bm_why`, `bm_decisions`, `bm_note`, `bm_reply` | Kept; `bm_note` keyed by mission; a project's note goes to its project memory (§20) |
 | † `bm_missions` | Reads missions with charter, roster, figures and ladder state (§9.2, §9.3) |
 | † `bm_govern`, `bm_arbitrate`, `bm_create_main` | §9.4, §9.6 |
 | Wakes `decision.opened`, `request.finished`, `advice.due`, `threshold.crossed`, `request.stalled`, `writers.observed`, `worker.signal` other than `danger` | **Retired as wakes**; they feed the figures |
@@ -362,9 +367,9 @@ The safe-point runners of `compaction.ts` and `handoff.ts` run by themselves whe
 | `mission.conflict` | always |
 | `mission.scope` | a request or link targets a repo outside the charter and the Main cannot add it (`scope-repo` not delegated), and the Main has not asked the owner within the window |
 | `mission.review` | every 10 finished requests of a mission, or at 50% and 100% of a budget |
-| `worker.signal danger` | always |
+| `worker.signal danger` | a mission's Worker: as its Main's backup, from `backupAt` (§20); another Worker: in the policy's scope |
 
-Events are batched in `BM-EVENTS`, at most one wake per mission per 15 minutes except `danger`. A wake that ends with no action is recorded per event type (M-26).
+Events are batched in `BM-EVENTS`, one mission per message with its brief (§20), at most one wake per mission per 15 minutes except `danger`. A wake that ends with no action is recorded per event type (M-26).
 
 ## 10. The Missions screen (Phase 3)
 
@@ -473,6 +478,7 @@ The owner approved the mockup on 2026-10-10 ([`mockups/missions-screen.html`](mo
 | Phase 1 MVP | §2–§8 and §11's Main and Worker files; the §6 rows, including the Orchestrator's targeting so it keeps working; a live check of placement, clear-conversation labels and a Main's reads; acceptance of §12 |
 | Phase 2 MVP | §9 and §11's governor file; retiring the Orchestrator's question decisions for every request |
 | Phase 3 MVP | §10 after the mockup is approved |
+| Phase 4 | §20 (ADR-032): a mission per wake, a disposable governor conversation, `danger` to the Main first, notes into project memory, A-13 |
 
 ## 16. As built — Phase 1 (2026-10-09)
 
@@ -647,6 +653,69 @@ Four read-only reviews of Phases 1–3, then fixes and simplifications (beads `b
   - **The dead advice setting removed** (found while checking Settings): `advice.due` has not woken anyone since ADR-029, so the "Orchestrator advice" card, the event bus's counting and `advice-store.ts` are gone; `advice.everyFinished` is kept as a stored no-op. The Coordination copy says paseo-bm compacts and hands over, and names the Main.
   - **The Main's answers in the owner's view** (so the words above hold): `isDecidedForOwner` counts `by: main`, so a Main's answer is in "Decided for you" and the owner overrides it like a policy answer (the corrected answer reaches the Worker through `override:<id>`); every view names it "the Main", never "you" or "your policy"; `prediction.main` is hidden below Co-pilot as the Orchestrator's was. Settings → Autonomy and the decision card say "Main" where a Worker's question is decided or proposed ("Main suggests"; an older "Orchestrator suggests" still shows).
 
+## 20. One governor, a mission per wake (ADR-032, 2026-10-10)
+
+REQ-197 → REQ-201. Where this section and §9 or §17 differ, this one describes the code.
+
+### 20.1 A mission per wake (REQ-197)
+
+- **Groups.** The notice queue's batch items carry a `group` and may be `first` (`notice-queue.ts`). Items of one batch name and one group still pending at the target's idle moment go as one message, `compose(lines, group)`. Another group waits for the turn end that message starts. The oldest item of a `first` group goes before every other notice of the target.
+- **The event bus's groups** (`wakeGroupOf`, `event-bus.ts`): `mission:<id>` for a mission's events and for a `danger` of a mission's Worker; `missions:<id>+<id>` for a conflict; `project:<workspaceId>` for a Worker of no mission. A `danger` item is `first`.
+- **The brief** (`governor-brief.ts` `missionBriefOf`). Each message of a mission group opens with `## The mission now (read when this was sent; bm_missions has the rest)`, one brief per mission of the group, then `## Events` and the event lines. It is read from the stores at the idle moment, synchronously:
+  - its code, name, id, state and Main;
+  - the goal, repos, non-goals and budget;
+  - the done criteria met and up to 5 open ones;
+  - each ladder family above step 0 with its step, since when and its crossed figures;
+  - the open `m:` cards, the governor's 3 newest notes on the mission, and the 4 newest `governor` journal lines (nudges, re-plans, arbitrations).
+
+  Each text is cut at 300 characters (notes and journal lines at 200), the whole brief at 3,000. Text is masked with `redactText`. A mission it cannot find is one line saying so.
+- **The 15-minute window** of §9.7 is unchanged and still counts per mission. A `danger` is not held by it.
+
+### 20.2 A disposable conversation (REQ-198)
+
+`wakeableOrchestrator` replaces a current, idle Orchestrator whose owner has not written in its chat for 2 hours when its load calls for it (`loadReasonOf`, `orchestrator-agent.ts`). The reasons are checked in this order:
+1. its wakes in `wakes.json` name 4 distinct missions (`FRESH_ORCHESTRATOR_AFTER_MISSIONS`): "has governed N missions";
+2. it carried 10 wakes (`FRESH_ORCHESTRATOR_AFTER_WAKES`): "has carried N wakes";
+3. it was created more than 24 hours ago: "is more than a day old".
+
+The chat is read only when a reason holds, and the 2-hour owner-silence rule holds for every reason. The old agent is left in the owner's list (ADR-005). The first prompt tells a new Orchestrator that each `BM-EVENTS` message is one mission's wake and opens with that mission's brief.
+
+### 20.3 `danger` to the Main first (REQ-199)
+
+For each newly raised `danger` alert, the Worker pass (`worker-watch.ts`) does the following:
+- **Logs the danger.** It records an entry in the danger log (`openDanger`, §20.5).
+- **Finds the Worker's mission.** It resolves the mission and Main of the Worker's request (`missionPlaceOf`): the rosters' request index, then the registry's `managerId`, else the mission's `mainId`.
+- **Tells the Main.** For a mission's Worker it sends the Main `BM-SIGNAL` through the notice queue at once, kind `BM-SIGNAL:<workerId>`, at any repo level (`dangerSignalNoticeOf`, `shared/notices.ts`). The notice names the Worker, its request and repo, when it ran, and the redacted evidence. It tells the Main to stop that Worker now with `cancel_agent` and tell the owner why, unless the owner asked for it, and says the governor is told in 3 minutes if the Worker still runs. `BM-SIGNAL` is a plugin notice, matched as a whole word. When it goes out, the danger log gets `mainToldAt`.
+- **Opens the allowance.** A mission's Worker is in the events' scope whatever the policy: the 10-minute interrupt allowance opens, and the `worker.signal` event carries `missionId` and, when the Main was told (`sent` or `queued`), `backupAt` = the alert's time + 3 minutes (`DANGER_BACKUP_MINUTES`).
+- **Holds the governor's event.** The event bus holds such an event until `backupAt`; the governor's pass publishes held events each minute. It is dropped at delivery when its alert cleared first, because the Main stopped the Worker or its turn ended. When it goes out, the danger log gets `governorToldAt`.
+
+A Worker of no mission keeps the old rule: events and the allowance only in the policy's scope, with no `BM-SIGNAL`. The owner's Inbox alert is unchanged everywhere. The Main's rule 4 names a `BM-SIGNAL` among the runs it cancels. The plugin itself stops nobody.
+
+The governor's backup stop keeps `bm_direct_worker`'s authority (`stopAuthorityOf`): the project's default class delegated, the owner's own latest word in its chat, or an answered decision. At a repo where none holds, the refusal sends it to `bm_ask_owner`, and it stops with that `decisionId` once the owner answers. Who hears of a danger widens; who may stop a Worker does not.
+
+### 20.4 No project-era residue (REQ-200)
+
+- **`bm_note { workspaceId }`** writes that repo's project memory, not an Orchestrator note: a `decision` entry by `owner` (agent and mission null) with source `The owner, in the Orchestrator's chat, <date>` (`ORCHESTRATOR_MEMORY_SOURCE`). It is masked with the tool context's secrets. `replace: true` supersedes the newest active entry of that source. The memory's 300-entry bound refuses it like any owner entry. The memory format is unchanged.
+- **Older project notes** (`orchestrator/notes/<workspaceId>.json`) stay readable through `bm_projects` and `orchestrator.state`, and are no longer written. Mission notes are unchanged.
+- **The Orchestrator's home README** describes the governor of missions and its commands without effect (ADR-031). **The first prompt** names `bm_note`'s two targets and the wake shape.
+
+### 20.5 Measured before splitting (REQ-201, A-13)
+
+- **Wake records** (`wakes.json`) gain `missionIds`, sorted, at most 20, absent when the wake carried no mission. At the wake's end they gain `offMission`: how many successful acts of its turn aimed at a mission the wake did not carry (`actMissionsOf`). An act aims at its `missionId`, `fromMissionId` or `missions`, and `bm_direct_worker` at the mission of its `requestId`. An act that names no mission is never off-mission.
+- **The danger log** `orchestrator/dangers.json` = `{ version: 1, entries }`, at most 500, the oldest raised dropped first. Each entry is `{ alertKey, workspaceId, workerId, requestId, missionId, raisedAt, mainId, mainToldAt, governorToldAt, endedAt }` (`dangerEntrySchema`): ids and times only, one entry per alert, and each time is set once. `endedAt` is set when the alert clears: the Worker stopped running, or its turn was recorded.
+- **A-13** (evaluation design §4) reads both. It reports:
+  - wakes per mission;
+  - off-mission acts (M-28);
+  - input + cached tokens per wake (M-30);
+  - dangers raised and ended, the Main told within a minute, those that needed the backup, and the time to end (M-29);
+  - `reopen`, which of ADR-032 decision 6's figures crossed.
+
+  The replay prints it as a headline row.
+
+### 20.6 Compatibility
+
+Every stored change is additive. An older build ignores the wake fields and `dangers.json`; `cleanup` deletes the latter with `orchestrator/`. The role files change (`orchestrator.md`, `manager.md`), so running Orchestrators and Mains are outdated and replaced as for every role-file change.
+
 ## 14. Revision History
 
 | Date | Author | Change |
@@ -658,3 +727,5 @@ Four read-only reviews of Phases 1–3, then fixes and simplifications (beads `b
 | 2026-10-10 | Claude (owner's delegation) | The owner approved the Missions screen mockup: §10 written in detail (placement, element sources, words, RPCs `missions.list`, `mission.get`, `mission.change`, `memory.list`, tests and the visual check); the phone keeps Tools as a fifth tab |
 | 2026-10-10 | Claude (owner's delegation) | Phase 3 built (beads bm-missions-9qc3.26.1–.26.4) and checked against the artboards in the preview harness: §18 as built; `memory.list` shows the owner's precedents; the Inbox names mission cards by their mission and their Main |
 | 2026-10-10 | Claude (owner's request to review and simplify) | §19: four reviews of Phases 1–3; 13 defects fixed (mission core 6, governor 3, client 1, docs 2, the replaced Main's Worker creation among them); retired-wake builders and the grant machinery removed; lookups and helpers shared; §16–§18 claims corrected |
+| 2026-10-10 | Claude (owner's request: every recommendation of the assessment) | §20: one governor, a mission per wake with its brief, a disposable conversation (4 missions, 10 wakes or a day), `danger` to the Main first (`BM-SIGNAL`, governor backup at 3 minutes, no repo-level gate for a mission's Worker), project notes into project memory, A-13 with the danger log ([ADR-032](../adr/ADR-032-one-governor-a-mission-per-wake.md)); §9.1, §9.7 and §15 rows updated. `design-ready`: PASS (Claude under the owner's delegation) |
+| 2026-10-12 | Claude (owner request; ADR-034) | §3.1: the home is the Mission-List project, one workspace per mission, Mains created there, the earlier shared home kept as a Missions place. §3.3: "New mission" opens the New mission form; an unassigned Main lives in the root; a `bm-manager` opened in a mission's workspace is that mission's |

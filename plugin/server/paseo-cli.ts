@@ -123,6 +123,18 @@ export function setAgentTitle(agentId: string, title: string, deps: PaseoCliDeps
 }
 
 /**
+ * `paseo workspace rename <id> <title> --json` (ADR-034: a mission's
+ * workspace keeps its `<CODE> · <name>` title). An id or a title that could
+ * be read as a flag, a blank or multi-line title, or one over 200 characters
+ * is refused.
+ */
+export function setWorkspaceTitle(workspaceId: string, title: string, deps: PaseoCliDeps = {}): Promise<CliResult> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId) || workspaceId.startsWith("-")) return Promise.resolve({ ok: false, reason: `refusing an unexpected workspace id "${workspaceId}"` });
+  if (title.trim() === "" || title.startsWith("-") || /[\r\n]/.test(title) || title.length > 200) return Promise.resolve({ ok: false, reason: "refusing an unexpected title" });
+  return runPaseo(["workspace", "rename", workspaceId, title, "--json"], deps);
+}
+
+/**
  * `paseo agent update <id> --label <k>=<v> [--label <k>=<v> …] --json`: one
  * command for several labels. Paseo adds or sets each label and removes none
  * (`paseo agent update --help`, 0.8.0). Every key and value is checked first.

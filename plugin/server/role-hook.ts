@@ -39,7 +39,7 @@ import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { rememberCreatedBoundary } from "./created-boundary";
 import { applyRoleTitle } from "./role-title";
 import { suppressCodexNativeDelegation } from "./provider-native-delegation";
-import { isMissionsHome, mainFactsOf } from "./missions-home";
+import { mainFactsOf, missionsPlaceOf } from "./missions-home";
 import { dataHome } from "./rpc-kit";
 
 /**
@@ -522,9 +522,10 @@ async function prepare(
         });
   const base = id === null ? null : ((await aliasBases(paseo))[id] ?? null);
   const boundary = boundaryPostureOf({ role, base, project: project.boundary, modes, profileModeId });
-  // Missions design §3.5: a Manager created in the Missions home is a Main.
+  // Missions design §3.5: a Manager created in a Missions place is a Main; in a mission's own workspace (ADR-034), that mission's.
   const home = role === "manager" ? dataHome() : null;
-  const main = home !== null && (isMissionsHome(project.workspaceId, home) || isMissionsHome(cwd, home)) ? mainFactsOf(home, missionId) : null;
+  const place = home === null ? null : (missionsPlaceOf(project.workspaceId, home) ?? missionsPlaceOf(cwd, home));
+  const main = home !== null && place !== null ? mainFactsOf(home, missionId ?? (place.kind === "mission" ? place.missionId : null)) : null;
   const withMain = main === null ? facts : { ...facts, main };
   return {
     modes,

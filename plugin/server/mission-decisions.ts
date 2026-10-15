@@ -35,6 +35,11 @@ export function isMissionDecisionId(id: string): boolean {
   return MISSION_DECISION_ID_PATTERN.test(id);
 }
 
+/** True for the Main's question (`bm_owner_question`, mission runtime design §4.6): an `m:` decision whose options carry no action, keyed `a`, `b`, …. Pure. */
+export function isMainQuestion(decision: Pick<Decision, "id" | "options">): boolean {
+  return isMissionDecisionId(decision.id) && decision.options.length > 0 && decision.options.every((option) => option.action === undefined) && decision.options[0]!.key === "a";
+}
+
 /** The mission an `m:` id names, or null. */
 export function missionOfDecisionId(id: string): string | null {
   return MISSION_DECISION_ID_PATTERN.exec(id)?.[1] ?? null;

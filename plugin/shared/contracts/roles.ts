@@ -39,6 +39,8 @@ export const managerEnsureRpc = defineRpc({
   input: z.object({
     workspaceId: workspaceIdSchema,
     replaceOutdated: z.boolean().optional(),
+    /** Mission runtime design §5.5: a request of an open mission opens that mission's Main. */
+    requestId: z.string().regex(/^req-\d{8}T\d{6}Z$/).optional(),
   }),
   output: z.object({
     agentId: agentIdSchema,

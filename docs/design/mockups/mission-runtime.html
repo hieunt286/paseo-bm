@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paseo-bm — mission page: In flight and Main history (draft for approval)</title>
+<style>
+  /* Colours stand for the theme tokens the plugin uses (no literal colours in code):
+     surface0, surface1, border, foreground, foregroundMuted, accent, accentForeground,
+     statusWarning, statusDanger, statusSuccess. Radius 2. */
+  :root { --s0:#0f1115; --s1:#161a20; --s2:#1c2129; --b:#2a303a; --fg:#e6e8eb; --mu:#8b93a1;
+          --ac:#7c93ff; --acf:#0b0d12; --wa:#e3a33b; --da:#e5534b; --ok:#3fb27f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#07080a; color:var(--fg); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  h1.page { font-size:15px; color:var(--mu); font-weight:500; margin:24px 32px 8px; }
+  .note { margin:0 32px 24px; color:var(--mu); font-size:12px; max-width:1100px; }
+  .boards { display:flex; flex-wrap:wrap; gap:32px; padding:0 32px 48px; align-items:flex-start; }
+  .board { background:var(--s0); border:1px solid var(--b); border-radius:6px; overflow:hidden; }
+  .board > .cap { font-size:11px; color:var(--mu); padding:6px 10px; border-bottom:1px solid var(--b); background:#0b0d11; }
+  .desk { width:1040px; } .phone { width:390px; }
+  .tabs { display:flex; gap:18px; padding:12px 24px 0; border-bottom:1px solid var(--b); }
+  .phone .tabs { padding:10px 12px 0; gap:12px; overflow:hidden; }
+  .tab { padding:0 0 10px; color:var(--mu); font-size:13px; }
+  .tab.on { color:var(--fg); border-bottom:2px solid var(--ac); }
+  .content { padding:24px; display:flex; flex-direction:column; gap:12px; }
+  .phone .content { padding:12px; gap:8px; }
+  .title { font-size:24px; font-weight:600; } .phone .title { font-size:18px; }
+  .row { display:flex; align-items:center; gap:10px; } .between { justify-content:space-between; }
+  .wrap { flex-wrap:wrap; }
+  .label { color:var(--mu); font-size:12px; font-weight:500; text-transform:uppercase; letter-spacing:.6px; }
+  .muted { color:var(--mu); } .small { font-size:12px; } .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  .card { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:14px; display:flex; flex-direction:column; gap:8px; position:relative; }
+  .phone .card { padding:10px; gap:6px; }
+  .bar { position:absolute; left:0; top:0; bottom:0; width:3px; }
+  .btn { padding:9px 14px; border-radius:2px; font-size:13px; border:1px solid var(--b); background:transparent; color:var(--fg); }
+  .btn.pri { background:var(--ac); color:var(--acf); border-color:var(--ac); }
+  .btn.dan { border-color:var(--da); color:var(--da); }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--fg); padding:2px 8px; border:1px solid var(--b); border-radius:2px; background:var(--s2); }
+  .sq { width:7px; height:7px; display:inline-block; }
+  .code { font-weight:700; letter-spacing:.5px; }
+  .prog { height:4px; background:var(--s2); border-radius:2px; overflow:hidden; } .prog > i { display:block; height:100%; background:var(--ac); }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .grid3 { display:grid; grid-template-columns: repeat(3,1fr); gap:10px; }
+  .stat { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:12px; }
+  .stat b { font-size:20px; display:block; } .phone .stat b { font-size:16px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:7px 8px; border-bottom:1px solid var(--b); vertical-align:top; }
+  th { color:var(--mu); font-weight:500; font-size:12px; }
+  .ok{color:var(--ok)} .wa{color:var(--wa)} .da{color:var(--da)} .ac{color:var(--ac)}
+  .crit { display:flex; gap:8px; align-items:flex-start; font-size:13px; } .box { width:14px; height:14px; border:1px solid var(--b); border-radius:2px; flex:none; margin-top:2px; }
+  .box.met { background:var(--ok); border-color:var(--ok); } .box.drop { background:var(--s2); }
+  .seg { display:flex; border:1px solid var(--b); border-radius:2px; overflow:hidden; } .seg span { padding:6px 10px; font-size:12px; color:var(--mu); border-right:1px solid var(--b); } .seg span:last-child{border-right:none} .seg span.on { background:var(--ac); color:var(--acf); }
+  .journal div { font-size:12px; color:var(--mu); padding:3px 0; border-bottom:1px dashed var(--b); } .journal b { color:var(--fg); font-weight:500; }
+  .input { border:1px solid var(--b); background:var(--s0); border-radius:2px; padding:8px 10px; color:var(--mu); font-size:13px; }
+  .new { outline:1px dashed var(--ac); outline-offset:3px; }
+  .tag { font-size:10px; color:var(--ac); border:1px solid var(--ac); border-radius:2px; padding:0 4px; margin-left:6px; text-transform:none; letter-spacing:0; }
+  .dim { opacity:.45; }
+  .q { display:flex; gap:8px; align-items:flex-start; font-size:13px; padding:6px 0; border-bottom:1px dashed var(--b); }
+  .q:last-child { border-bottom:none; }
+  .who { font-size:11px; color:var(--mu); min-width:84px; }
+</style>
+</head>
+<body>
+<h1 class="page">paseo-bm · mission page — In flight and Main history — mockup for the owner's approval (2026-10-10, draft 1)</h1>
+<p class="note">Design: docs/design/paseo-bm-mission-runtime.md §7 (ADR-033). Two additions to the approved mission page (missions-screen.html, artboards B and D); everything else on the page is unchanged and shown dimmed. New parts have a dashed outline. <b>In flight</b> comes from <span class="mono">mission.get</span>'s <span class="mono">inFlight</span> — the same mission state the Main, its successor and the governor read — so the page shows what the Main knows. <b>Main</b> in the header comes from <span class="mono">mainHistory</span>. Nothing here is built until you approve it — comment on what to add, remove, rename or move.</p>
+
+<div class="boards">
+
+<!-- ============ G. Desktop · mission page with In flight and Main history ============ -->
+<div class="board desk">
+  <div class="cap">G · Desktop — a mission's page: Main history in the header, In flight under the Workers</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span><span class="tab">Tools &amp; skills</span></div>
+  <div class="content">
+    <div class="row between">
+      <div class="row"><span class="muted">Missions ›</span><span class="code" style="font-size:20px">XAI</span><span class="title" style="font-size:20px">XSpace AI Assistant</span></div>
+      <div class="row"><span class="btn pri">Open Main</span><span class="btn">Rename</span><span class="btn dan">Close mission</span></div>
+    </div>
+
+    <div class="card new"><div class="row between"><span class="label">Main<span class="tag">new</span></span><span class="small muted">3 Mains since 2026-10-10 08:12</span></div>
+      <table>
+        <tr><th>Main</th><th>From</th><th>Until</th><th>Why it changed</th><th></th></tr>
+        <tr><td>🟣 c41e2a0 <span class="chip" style="margin-left:6px"><span class="sq" style="background:var(--ok)"></span>idle</span></td><td>10:02</td><td class="muted">now</td><td>handoff — its context was full; this Main carries on</td><td></td></tr>
+        <tr><td class="muted">🟣 7f3a9b1</td><td class="muted">09:12</td><td class="muted">10:02</td><td class="muted">replaced</td><td><span class="btn" style="padding:3px 8px">Open</span></td></tr>
+        <tr><td class="muted">🟣 2b8d0e4</td><td class="muted">08:12</td><td class="muted">09:12</td><td class="muted">created with the mission</td><td><span class="btn" style="padding:3px 8px">Open</span></td></tr>
+      </table>
+      <span class="small muted">A previous Main is kept, never archived; its chat is read-only for mission work — its tools that write are refused.</span>
+    </div>
+
+    <div class="dim">
+      <div class="grid3">
+        <div class="stat"><span class="small muted">Done criteria</span><b>4 / 9</b></div>
+        <div class="stat"><span class="small muted">Live Workers</span><b>3</b><span class="small muted">budget 4</span></div>
+        <div class="stat"><span class="small muted">Questions for you</span><b class="wa">1</b></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="grid2">
+        <div class="card"><span class="label">Charter · confirmed 2026-10-10</span><div class="small">Goal, repositories, not in this mission, done criteria — as approved (artboard B)</div></div>
+        <div class="card"><span class="label">Mission level · Governor</span><div class="small">As approved (artboard B)</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="card"><span class="label">Workers by repository</span><div class="small">As approved (artboard B)</div></div>
+    </div>
+
+    <div class="card new"><div class="row between"><span class="label">In flight<span class="tag">new</span></span><span class="small muted">what the Main knows · read 10:14</span></div>
+      <table>
+        <tr><th>Request · topic</th><th>Repository</th><th>Worker</th><th>State</th><th>Last report</th></tr>
+        <tr><td><span class="mono">req-…042844Z</span> G14 platform screens</td><td>xspace-ai-assistant</td><td>🔵 0545c7a</td><td><span class="ac">working</span></td><td class="small muted">implementing · 10:05</td></tr>
+        <tr><td><span class="mono">req-…064157Z</span> Backend catalogue API</td><td>ai-assistant</td><td>🔵 733918b</td><td><span class="wa">waiting for you · Q1</span></td><td class="small muted">blocked · 09:58</td></tr>
+        <tr><td><span class="mono">req-…071502Z</span> Open the MR</td><td>xspace-ai-assistant</td><td>🔵 9c01d7e</td><td><span class="wa">waiting for the Main · Q2</span></td><td class="small muted">blocked · 10:09</td></tr>
+        <tr><td><span class="mono">req-…080310Z</span> Env template</td><td>ai-assistant</td><td>🔵 1a77f30</td><td>waiting for <span class="mono">req-…042844Z</span></td><td class="small muted">blocked · 10:01</td></tr>
+        <tr><td class="muted"><span class="mono">req-…061148Z</span> 13 English keys</td><td class="muted">xspace-ai-assistant</td><td class="muted">🔵 0989dc4</td><td><span class="ok">finished</span></td><td class="small muted">finished · 09:40</td></tr>
+      </table>
+
+      <div class="grid2" style="margin-top:4px">
+        <div>
+          <span class="small muted">Questions</span>
+          <div class="q"><span class="who wa">you decide</span><span style="flex:1"><b>Q1</b> of <span class="mono">req-…064157Z</span> · scope — Which tool list does the assistant use? <span class="muted">· recommended: a — Backend catalogue</span></span><span class="btn" style="padding:3px 8px">Answer</span></div>
+          <div class="q"><span class="who">the Main decides</span><span style="flex:1"><b>Q2</b> of <span class="mono">req-…071502Z</span> · release — Squash the commits before the MR? <span class="muted">· asked 10:09 · recommended: a — Squash</span></span></div>
+        </div>
+        <div>
+          <span class="small muted">The Main asked you</span>
+          <div class="q"><span class="who wa">open</span><span style="flex:1">Commit <span class="mono">.env.serve.local</span>? <span class="muted">· recommended: leave it untracked · m:…:3</span></span><span class="btn" style="padding:3px 8px">Answer</span></div>
+          <span class="small muted" style="display:block;margin-top:8px">Links</span>
+          <div class="q"><span class="who">waiting 14 min</span><span style="flex:1">0545c7a ↔ 733918b · the catalogue endpoint's shape</span></div>
+          <div class="q"><span class="who">waiting 3 min</span><span style="flex:1">asked mission WEB · who owns the shared .env template</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dim"><div class="grid2">
+      <div class="card"><span class="label">Contracts between repositories</span><div class="small">As approved (artboard B)</div></div>
+      <div class="card"><span class="label">Journal</span><div class="small">As approved (artboard B); it now also shows links opened, answered and closed, and reports blocked, finished and stopped</div></div>
+    </div></div>
+  </div>
+</div>
+
+<!-- ============ H. Phone · mission page ============ -->
+<div class="board phone">
+  <div class="cap">H · Phone — a mission's page</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span></div>
+  <div class="content">
+    <div class="small muted">Missions ›</div>
+    <div class="row"><span class="code" style="font-size:18px">XAI</span><span class="title">XSpace AI Assistant</span></div>
+    <div class="row"><span class="btn pri" style="flex:1;text-align:center">Open Main</span><span class="btn">⋯</span></div>
+    <div class="card new"><div class="row between"><span class="label">Main<span class="tag">new</span></span><span class="small muted">3 Mains</span></div>
+      <div class="small">🟣 c41e2a0 · since 10:02 · handoff</div>
+      <div class="small muted">🟣 7f3a9b1 · 09:12–10:02 · replaced · <span class="ac">Open</span></div>
+      <div class="small muted">+ 1 earlier</div>
+    </div>
+    <div class="dim"><div class="grid3"><div class="stat"><span class="small muted">Done</span><b>4/9</b></div><div class="stat"><span class="small muted">Workers</span><b>3</b></div><div class="stat"><span class="small muted">For you</span><b class="wa">1</b></div></div></div>
+    <div class="card new"><span class="label">In flight<span class="tag">new</span></span>
+      <div class="small"><b>G14 platform screens</b> · <span class="ac">working</span></div>
+      <div class="small"><b>Backend catalogue API</b> · <span class="wa">waiting for you · Q1</span></div>
+      <div class="small"><b>Open the MR</b> · <span class="wa">waiting for the Main · Q2</span></div>
+      <div class="small"><b>Env template</b> · waiting for G14 platform screens</div>
+      <div class="small muted">+ 1 finished</div>
+      <div class="small" style="margin-top:4px"><span class="wa">You decide:</span> Q1 · Which tool list? <span class="ac">Answer</span></div>
+      <div class="small"><span class="wa">The Main asked you:</span> Commit .env.serve.local? <span class="ac">Answer</span></div>
+      <div class="small muted">1 link waiting 14 min</div>
+    </div>
+    <div class="dim"><div class="card"><span class="label">Charter · Governor · Workers · Mission level</span><div class="small muted">As approved (artboard D)</div></div></div>
+  </div>
+</div>
+
+</div>
+<p class="note">Not on this page: the merge and transfer cards (mission runtime design §5.2, §5.3) are decision cards in the Inbox, drawn as every other decision card; "Answer" here opens that card. States read: working · waiting for you · waiting for the Main · waiting for &lt;other work&gt; · finished · stopped. Why a Main changed reads: created with the mission · replaced · handoff · fallback (its provider plan stopped it) · you asked. Questions list the open ones only, for you or for the Main; ones paseo-bm settles by your policy never wait. Finished and stopped requests stay listed for a day, then only in the journal.</p>
+</body>
+</html>

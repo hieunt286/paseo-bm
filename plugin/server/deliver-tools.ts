@@ -42,7 +42,7 @@ import { PENDING_TTL_MS, createBindingStore, liveBindingOf, type ToolCaller } fr
 import { openLinkOf, unboundPeerReason } from "./create-worker";
 import { CUT_NOTE_LINE, followsPaseoCut } from "./interruption-watch";
 import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
-import { noteRosterReport, requestIndexOf } from "./mission-roster";
+import { noteFollowUp, noteRosterReport, requestIndexOf } from "./mission-roster";
 import { createMissionStore } from "./mission-store";
 import { createPeerLinkStore, type PeerLink } from "./peer-links";
 import { peerBriefOf, peerReplyText, titleIn } from "./peer-tools";
@@ -333,7 +333,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
           log(`[paseo-bm] could not note the report of request ${requestId} in the registry: ${reasonOf(error)}`);
         }
         // Missions design §2.3: a mission request's roster state follows its reports.
-        noteRosterReport(home, requestId, phase, log);
+        noteRosterReport(home, requestId, phase, log, text);
         if (phase === "finished" || phase === "stopped") {
           try {
             clearDroppedAlert(home, worker.workspaceId, requestId, null, { now });
@@ -593,6 +593,8 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     };
     const stored = await storeThenDeliver(home, workspaceId, { kind: "message", requestId, from: manager.agentId, to: workerId, text: message }, paseo, peerLink === undefined ? undefined : take);
     if ("ok" in stored) return stored;
+    // Mission runtime design §2.3: a follow-up reopens the request in its mission, and is its history.
+    noteFollowUp(home, requestId, text, now().toISOString(), log);
     return answered({ workerId, delivery: stored.delivery });
   };
 

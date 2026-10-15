@@ -66,6 +66,15 @@ export const COMPACT_MAX_PER_AGENT: CoordinationBounds = { min: 1, max: 5, defau
 export const HANDOFF_REQUEST_TOKENS: CoordinationBounds = { min: 10_000_000, max: 1_000_000_000, default: 150_000_000, whole: true };
 /** `handoff.maxPerRequest`: handoffs of one request, at most. */
 export const HANDOFF_MAX_PER_REQUEST: CoordinationBounds = { min: 1, max: 5, default: 2, whole: true };
+/**
+ * A Main's context (mission runtime design §3.2): compacted in place when its
+ * real context — the turn's `contextUsed` — fills `main.contextShare` of its
+ * window, or, with no window reported, reaches `main.contextTokens`; a new Main
+ * only when it stays at `main.hardShare` after a compaction (§3.5).
+ */
+export const MAIN_CONTEXT_SHARE: CoordinationBounds = { min: 0.3, max: 0.9, default: 0.6, whole: false };
+export const MAIN_CONTEXT_TOKENS: CoordinationBounds = { min: 50_000, max: 2_000_000, default: 150_000, whole: true };
+export const MAIN_HARD_SHARE: CoordinationBounds = { min: 0.35, max: 0.95, default: 0.85, whole: false };
 
 // ── Phase 3: the review budget per tier (§C.4, §G.7; change-008 C6) ────────
 // The review calls one request may make before the Worker asks the owner for
@@ -169,6 +178,13 @@ const handoffSchema = z.object({
   maxPerRequest: boundedSchema(HANDOFF_MAX_PER_REQUEST),
 });
 
+const mainSchema = z.object({
+  compact: z.boolean(),
+  contextShare: boundedSchema(MAIN_CONTEXT_SHARE),
+  contextTokens: boundedSchema(MAIN_CONTEXT_TOKENS),
+  hardShare: boundedSchema(MAIN_HARD_SHARE),
+});
+
 const reviewSchema = z.object({
   smallBudget: boundedSchema(REVIEW_SMALL_BUDGET),
   mediumBudget: boundedSchema(REVIEW_MEDIUM_BUDGET),
@@ -200,6 +216,7 @@ export const coordinationSettingsSchema = z.object({
   advice: z.object({ everyFinished: adviceEveryFinishedSchema }),
   compact: compactSchema,
   handoff: handoffSchema,
+  main: mainSchema,
   review: reviewSchema,
   governor: governorSchema,
   guard: z.object({ compact: switchGuardSchema, handoff: switchGuardSchema }),
@@ -223,6 +240,7 @@ export const DEFAULT_COORDINATION_SETTINGS: CoordinationSettings = {
     requestTokens: HANDOFF_REQUEST_TOKENS.default,
     maxPerRequest: HANDOFF_MAX_PER_REQUEST.default,
   },
+  main: { compact: true, contextShare: MAIN_CONTEXT_SHARE.default, contextTokens: MAIN_CONTEXT_TOKENS.default, hardShare: MAIN_HARD_SHARE.default },
   review: {
     smallBudget: REVIEW_SMALL_BUDGET.default,
     mediumBudget: REVIEW_MEDIUM_BUDGET.default,
@@ -246,6 +264,10 @@ export const coordinationChangeSchema = z.discriminatedUnion("key", [
   z.object({ key: z.literal("handoff.enabled"), value: z.boolean() }),
   z.object({ key: z.literal("handoff.requestTokens"), value: handoffSchema.shape.requestTokens }),
   z.object({ key: z.literal("handoff.maxPerRequest"), value: handoffSchema.shape.maxPerRequest }),
+  z.object({ key: z.literal("main.compact"), value: z.boolean() }),
+  z.object({ key: z.literal("main.contextShare"), value: mainSchema.shape.contextShare }),
+  z.object({ key: z.literal("main.contextTokens"), value: mainSchema.shape.contextTokens }),
+  z.object({ key: z.literal("main.hardShare"), value: mainSchema.shape.hardShare }),
   z.object({ key: z.literal("review.smallBudget"), value: reviewSchema.shape.smallBudget }),
   z.object({ key: z.literal("review.mediumBudget"), value: reviewSchema.shape.mediumBudget }),
   z.object({ key: z.literal("review.largeBudget"), value: reviewSchema.shape.largeBudget }),
@@ -265,6 +287,10 @@ export const COORDINATION_KEYS: readonly CoordinationKey[] = [
   "handoff.enabled",
   "handoff.requestTokens",
   "handoff.maxPerRequest",
+  "main.compact",
+  "main.contextShare",
+  "main.contextTokens",
+  "main.hardShare",
   "review.smallBudget",
   "review.mediumBudget",
   "review.largeBudget",
@@ -278,7 +304,7 @@ export function governorSettingOf(key: GovernorKey): GovernorSetting {
 }
 
 /** The keys whose value is a number, with their bounds. */
-export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, "compact.enabled" | "handoff.enabled">, CoordinationBounds>> = {
+export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, "compact.enabled" | "handoff.enabled" | "main.compact">, CoordinationBounds>> = {
   "advice.everyFinished": { ...ADVICE_EVERY_FINISHED, whole: true },
   "compact.managerTokensPerTurn": COMPACT_MANAGER_TOKENS_PER_TURN,
   "compact.workerTokensPerTurn": COMPACT_WORKER_TOKENS_PER_TURN,
@@ -286,6 +312,9 @@ export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, "comp
   "compact.maxPerAgent": COMPACT_MAX_PER_AGENT,
   "handoff.requestTokens": HANDOFF_REQUEST_TOKENS,
   "handoff.maxPerRequest": HANDOFF_MAX_PER_REQUEST,
+  "main.contextShare": MAIN_CONTEXT_SHARE,
+  "main.contextTokens": MAIN_CONTEXT_TOKENS,
+  "main.hardShare": MAIN_HARD_SHARE,
   "review.smallBudget": REVIEW_SMALL_BUDGET,
   "review.mediumBudget": REVIEW_MEDIUM_BUDGET,
   "review.largeBudget": REVIEW_LARGE_BUDGET,
@@ -304,7 +333,7 @@ function isCoordinationKey(key: unknown): key is CoordinationKey {
  */
 export function coordinationRuleOf(key: unknown): string | null {
   if (!isCoordinationKey(key)) return null;
-  if (key === "compact.enabled" || key === "handoff.enabled") return `${key} must be true (on) or false (off)`;
+  if (key === "compact.enabled" || key === "handoff.enabled" || key === "main.compact") return `${key} must be true (on) or false (off)`;
   const bounds = COORDINATION_BOUNDS[key];
   const kind = bounds.whole ? "a whole number" : "a number";
   return `${key} must be ${kind} from ${bounds.min}${key === "advice.everyFinished" ? " (off)" : ""} to ${bounds.max}`;
@@ -347,6 +376,7 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
   const advice = objectOf(root?.["advice"]);
   const compact = objectOf(root?.["compact"]);
   const handoff = objectOf(root?.["handoff"]);
+  const main = objectOf(root?.["main"]);
   const review = objectOf(root?.["review"]);
   const governor = objectOf(root?.["governor"]);
   const guard = objectOf(root?.["guard"]);
@@ -366,6 +396,12 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
       enabled: handoffEnabled,
       requestTokens: valueOr(shape.handoff.requestTokens, handoff?.["requestTokens"], defaults.handoff.requestTokens),
       maxPerRequest: valueOr(shape.handoff.maxPerRequest, handoff?.["maxPerRequest"], defaults.handoff.maxPerRequest),
+    },
+    main: {
+      compact: valueOr(mainSchema.shape.compact, main?.["compact"], defaults.main.compact),
+      contextShare: valueOr(mainSchema.shape.contextShare, main?.["contextShare"], defaults.main.contextShare),
+      contextTokens: valueOr(mainSchema.shape.contextTokens, main?.["contextTokens"], defaults.main.contextTokens),
+      hardShare: valueOr(mainSchema.shape.hardShare, main?.["hardShare"], defaults.main.hardShare),
     },
     review: {
       smallBudget: valueOr(shape.review.smallBudget, review?.["smallBudget"], defaults.review.smallBudget),
@@ -420,6 +456,14 @@ export function applyCoordinationChange(settings: CoordinationSettings, change: 
       return { ...settings, review: { ...settings.review, mediumBudget: change.value } };
     case "review.largeBudget":
       return { ...settings, review: { ...settings.review, largeBudget: change.value } };
+    case "main.compact":
+      return { ...settings, main: { ...settings.main, compact: change.value } };
+    case "main.contextShare":
+      return { ...settings, main: { ...settings.main, contextShare: change.value } };
+    case "main.contextTokens":
+      return { ...settings, main: { ...settings.main, contextTokens: change.value } };
+    case "main.hardShare":
+      return { ...settings, main: { ...settings.main, hardShare: change.value } };
     default:
       return { ...settings, governor: { ...settings.governor, [governorSettingOf(change.key)]: change.value } };
   }
@@ -470,7 +514,7 @@ export function compactionOnFor(settings: Pick<CoordinationSettings, "compact">,
 export type CoordinationRole = "manager" | "worker";
 
 /** Which figure crossed (the `figure` of a `threshold.crossed` event). */
-export const THRESHOLD_FIGURES = ["tokensPerTurn", "contextShare", "requestTokens"] as const;
+export const THRESHOLD_FIGURES = ["tokensPerTurn", "contextShare", "requestTokens", "contextTokens"] as const;
 export type ThresholdFigure = (typeof THRESHOLD_FIGURES)[number];
 
 export interface ThresholdCrossing {
@@ -510,6 +554,44 @@ export function compactCrossingOf(role: CoordinationRole, turn: TurnFigures, set
     return { figure: "contextShare", value: turn.contextShare, threshold: share };
   }
   return null;
+}
+
+/** A turn's context, as `turnTokensOf` reads it (mission runtime design §3.1): the tokens of its context and their share of the window. */
+export interface MainTurnContext {
+  context: { tokens: number } | null;
+  contextShare: number | null;
+}
+
+/**
+ * Whether a Main's turn crosses its context threshold (mission runtime design
+ * §3.1, §3.2): its real context's share of the window at `main.contextShare`,
+ * or, with no window reported, its context tokens at `main.contextTokens`.
+ * The per-turn token sum is never a Main's figure. Pure.
+ */
+export function mainContextCrossingOf(turn: MainTurnContext, settings: Pick<CoordinationSettings, "main">): ThresholdCrossing | null {
+  const { contextShare, contextTokens } = settings.main;
+  if (turn.contextShare !== null && Number.isFinite(turn.contextShare)) {
+    return turn.contextShare >= contextShare ? { figure: "contextShare", value: turn.contextShare, threshold: contextShare } : null;
+  }
+  if (turn.context !== null && turn.context.tokens >= contextTokens) return { figure: "contextTokens", value: turn.context.tokens, threshold: contextTokens };
+  return null;
+}
+
+/**
+ * Whether a Main's turn reaches the hard figure (mission runtime design §3.5):
+ * `main.hardShare` of its window (never below `main.contextShare` + 0.05), or,
+ * with no window, the context tokens `contextTokens / contextShare × hardShare`.
+ * Pure.
+ */
+export function mainContextHardOf(turn: MainTurnContext, settings: Pick<CoordinationSettings, "main">): boolean {
+  const hard = Math.max(settings.main.hardShare, settings.main.contextShare + 0.05);
+  if (turn.contextShare !== null && Number.isFinite(turn.contextShare)) return turn.contextShare >= hard;
+  return turn.context !== null && turn.context.tokens >= (settings.main.contextTokens / settings.main.contextShare) * hard;
+}
+
+/** Whether a Main on this provider is compacted in place (mission runtime design §3.3): `main.compact` and a provider that compacts. Pure. */
+export function mainCompactionOnFor(settings: Pick<CoordinationSettings, "main">, provider: string | null): boolean {
+  return settings.main.compact && provider !== null && (COMPACTION_PROVIDERS as readonly string[]).includes(provider);
 }
 
 /**
