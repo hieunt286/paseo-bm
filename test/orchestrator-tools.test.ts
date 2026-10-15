@@ -1722,8 +1722,9 @@ describe("bm_repo (design §6B.4): read-only git inside the project's folder", (
     }
   })();
   let repo: string;
+  // No background maintenance: a commit's detached `git maintenance --auto` writes `.git/objects/maintenance.lock` while the test reads the folder (macOS runner, 2026-10-15).
   const gitIn = (...args: string[]) =>
-    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args], {
+    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args], {
       cwd: repo,
       env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
       stdio: "pipe",
