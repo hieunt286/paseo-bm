@@ -6,6 +6,24 @@ export interface ReleaseNote { version: string; summary: string; sections: reado
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    "version": "0.5.6",
+    "summary": "Work by mission instead of by repository. A mission is one goal you name — \"Ship card payments\" — with its own Main: a Beads Manager that works across every repository the goal needs, creates and links the Workers in each, keeps what is in flight, and asks you only what is yours to decide. Missions live in a Mission-List project in Paseo, one workspace per mission, and a new Missions screen shows each one. The Orchestrator becomes the governor of the missions' process. Projects can also ask each other through the plugin.",
+    "sections": [
+      "What changed",
+      "Missions and their Mains",
+      "The Missions screen",
+      "The Orchestrator as governor",
+      "Projects ask each other",
+      "Agent roles",
+      "What to know when upgrading",
+      "Rollback",
+      "Evidence",
+      "Sources"
+    ],
+    "prereleases": [],
+    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.5.6/docs/releases/paseo-bm-release-notes-0.5.6.md"
+  },
+  {
     "version": "0.5.5",
     "summary": "Update paseo-bm from Settings, browse release notes from the same source used on GitHub, and navigate busy project screens with less scrolling. This release includes the update visibility introduced in 0.5.4 and adds a confirmed in-product update action, a unified changelog view, a compact Autonomy project picker, and mobile Bead details beside the selected task.",
     "sections": [

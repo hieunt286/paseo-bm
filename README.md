@@ -1,6 +1,6 @@
 # paseo-bm — Beads Management for Paseo
 
-paseo-bm adds a focused agent team and project dashboard to [Paseo](https://paseo.sh). Describe a change to the Beads Manager; a Worker implements and proves it, a Reviewer checks larger work, and the optional Orchestrator helps coordinate projects at the autonomy level you choose.
+paseo-bm adds a focused agent team and a dashboard to [Paseo](https://paseo.sh), organised by **mission**: one goal you name, across every repository it needs. Each mission has a **Main** — a Beads Manager that briefs Workers in each repository, links them when they must agree, keeps what is in flight and asks you only what is yours to decide. A Worker implements and proves each change, a Reviewer checks larger work, and the optional Orchestrator governs the missions' process at the autonomy level you choose.
 
 Visit the [paseo-bm website](https://paseo-bm.erai.pro/) for a guided overview of the plugin.
 
@@ -8,13 +8,15 @@ Visit the [paseo-bm website](https://paseo-bm.erai.pro/) for a guided overview o
 
 ## What you get
 
-- **Inbox** — decisions and alerts that need you, grouped by project.
-- **Projects** — request timelines, Beads, metrics and running agents.
-- **Settings** — autonomy, coordination, roles, update status and release notes.
+- **Missions** — every mission with its Main, level, repositories, Workers, done criteria and governor signals; a mission's page shows what is in flight and whom it waits on, the Main's history, contracts, journal, plan and each repository's memory.
+- **A Mission-List project in Paseo** — one workspace per mission, where its Main works; tabs appear there only when you open one or the plugin opens a successor for that mission.
+- **Inbox** — decisions and alerts that need you, grouped by project: Workers' questions, the Main's own questions, merges and transfers between missions.
+- **Projects** — request timelines, Beads, metrics and running agents per repository.
+- **Settings** — repository and mission autonomy, coordination, roles, update status and release notes.
 - **Tools & skills** — the skills and command-line tools the team uses.
-- **Four roles** — Manager, Worker, Reviewer and an optional machine-wide Orchestrator.
+- **Four roles** — the Main (Beads Manager), Worker, Reviewer and an optional machine-wide Orchestrator that governs the missions.
 
-Small changes stay lightweight; work that changes contracts, data or safety boundaries gets documentation, Beads and independent review.
+Small changes stay lightweight; work that changes contracts, data or safety boundaries gets documentation, Beads and independent review. Every question has one decider — paseo-bm, the Main, the Orchestrator or you — named when it opens, within the levels you set.
 
 ## Install and start
 
@@ -29,9 +31,10 @@ Then:
 1. Open **Beads Manager** in Paseo.
 2. In **Settings → More → Agents**, choose **Allow agent tools**.
 3. In **Tools & skills**, install the workflow skills and `br` / `bv` if they are missing.
-4. Open a project, choose **Chat ▸**, and describe the outcome you want.
+4. In **Missions**, choose **New mission** (or **New mission** in the Command Center): give it a name, a short code, a goal, its repositories and a mission level. Its Main opens in the mission's own workspace.
+5. Tell the Main the outcome you want. It answers what reading the code answers, and gives every change to a Worker in the right repository.
 
-The first open creates the four `bm-*` role profiles with an available provider/model. You can change them in Settings.
+The first open creates the four `bm-*` role profiles with an available provider/model. You can change them in Settings. Repositories you already used with an earlier version keep their Manager as a one-repository mission; the Inbox offers to merge it into a mission of yours that covers the same repository.
 
 ## Updates and release notes
 

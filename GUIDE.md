@@ -7,6 +7,7 @@ The complete reference for `paseo-bm`. For a short overview and the quick start,
 - [Before you install: read these warnings](#before-you-install-read-these-warnings)
 - [Requirements](#requirements)
 - [Install](#install)
+- [Missions: one Main per goal](#missions-one-main-per-goal)
 - [Working with the agents](#working-with-the-agents)
 - [The Beads Manager screen](#the-beads-manager-screen)
 - [Inbox: what needs you](#inbox-what-needs-you)
@@ -114,17 +115,31 @@ time, so paseo-bm does its setup lazily, the first time you open **Beads Manager
    in. paseo-bm never runs a login command and never sees a credential: it shows the command that
    provider's own tool documents, and you run it.
 
+## Missions: one Main per goal
+
+A **mission** is one goal you name — "Ship card payments", "Upgrade the AI assistant" — with the repositories it needs. Each mission has a **Main**: a Beads Manager labelled with the mission, which works across all of those repositories. Many missions run at once, one per goal.
+
+- **Creating one.** In **Missions**, choose **New mission** (the Command Center's **New mission** opens the same form): a name, a short code of 2 to 8 capitals or digits (`XAI`), a goal, the repositories and a **mission level**. paseo-bm writes the mission and starts its Main. The Main drafts the rest of the charter with you — non-goals, done criteria, a rough budget — and you confirm it on a card.
+- **Where it lives.** Paseo's sidebar shows one project, **Mission-List** (the folder `~/.paseo-bm/missions/Mission-List`), with one workspace per mission titled `<CODE> · <name>`. The mission's Main works in that workspace; another tab appears there only when you open one yourself or paseo-bm opens a successor for that mission. A Beads Manager you open yourself in a mission's workspace becomes its Main when the mission has none running; otherwise it is an extra chat paseo-bm leaves alone. The root workspace, **Mission-List**, holds a Main you open there before its mission has a name: it asks you the name, code, goal and repositories and records them.
+- **Work in each repository.** A request lives in the repository of its Worker: the Worker's folder, request id, decisions, autonomy level and action boundary are that repository's. The Main creates Workers in any repository of its mission, several when the work splits; links two Workers that must agree so they talk directly; and records what they settle as a contract between repositories. A Worker that needs another repository asks its own Main, which links it to the Worker on that work or creates one. Mains of two missions talk on a link of their own.
+- **Two autonomy layers.** A repository's level (Settings → Autonomy) governs the work inside it. The **mission level**, 0 to 4, governs what the Main does on its own: going on to the next step (level 1), creating Workers (2), deciding Workers' technical questions (3), and adding repositories, deciding questions with effects and letting the governor split the mission (4). Above its level the Main asks you; a change of goal, name, budget or repositories is a card paseo-bm applies when you choose it.
+- **One decider per question.** When a question opens, paseo-bm names who decides it — paseo-bm itself (a review budget within its cap), the Main (within the mission's delegation), the Orchestrator, or you — and tells that decider at once. A fact only you know (a login, an id, a port) is always yours. The Main asks you its own questions as cards too, answered on the card or in its chat.
+- **The mission is the record.** Every event that changes what is in flight — a follow-up, a report, a question and its answer, a link, a transfer, a Main replaced — is written to the mission: its roster, journal and decisions. A Main's context is compacted in place when it fills (60 % of its window by default) and it carries on from the mission's state; a new Main is created only when compaction cannot help, and its first reply says it took over and what is in flight. Nothing the mission holds is lost.
+- **Project memory.** Each repository keeps a memory — your decisions and precedents, conventions and facts Workers settled, each with its source. The Main reads it into every Worker's brief and curates it; Missions shows it per repository.
+- **Moving work between missions.** A request moves only on your card: a split, a merge of a one-repository mission into yours, or a Main asking to hand requests to another mission. Closing a mission waits only for a Worker running a turn; its open requests then read `stopped`. Only you close a mission.
+- **Repositories from earlier versions.** A repository's existing Manager becomes the Main of a one-repository mission named after the repository, and keeps running where it is. When one of your own missions covers that repository, the Inbox offers to merge it. **Open Beads Manager** in a repository opens the Main of the mission that holds it — yours before a one-repository one.
+
 ## Working with the agents
 
-### 1. Ask the Manager
+### 1. Ask the Main
 
-Open the Manager with **Chat ▸** on a project's page in [Projects](#projects-what-each-project-and-request-is-doing), or with **Open Beads Manager** in a workspace's Command Center. Each workspace reuses one Manager.
+Open a mission's Main with **Open Main** on its page in **Missions**, from its workspace in the Mission-List project, or with **Open Beads Manager** in a repository's Command Center (the Main of the mission that holds that repository).
 
-Describe the change in normal chat. The Manager:
+Describe the change in normal chat. The Main:
 
 - restates the request in one sentence (the Worker decides its size);
 - **answers a question itself when it can read the answer** — where a request or a Worker stands, what the beads say, what a file or function does, what git shows — naming what it read and starting no Worker. It changes nothing itself: no file, bead, build or test;
-- for a change, **immediately creates one Beads Worker** in the same workspace. A follow-up to a request already in progress goes to that request's Worker instead;
+- for a change, **immediately creates one Beads Worker** in the repository the change belongs to. A follow-up to a request already in progress goes to that request's Worker instead;
 - passes your request on **verbatim** and adds no requirements of its own;
 - **coordinates the Workers for you.** When a Worker is waiting — on your own "wait until X" answer, on another Worker's work, on a commit — the Manager wakes it itself as soon as it can *see* that the thing happened: another Worker's report, an agent's status, `git`, `br`. When two Workers would write the same files, beads or history, it lets one run and tells the other — as it creates it, never by holding the request back — that it waits, then wakes it when the way is clear. It tells you beforehand that it will do this and on what, and afterwards what it saw and what it sent, so you can overturn it;
 - **answers a Worker's question itself when the answer is only a fact** it can read — has that Worker committed, is that bead closed — sending the fact with its source. Anything about scope, approach, a trade-off, or anything only you can do still comes to you;
@@ -270,13 +285,14 @@ under a new number and the old card says **Superseded**.
 ## The Beads Manager screen
 
 Open **Beads Manager** in Paseo's sidebar. It opens on the **Inbox**, and a row of tabs switches
-**Inbox · Projects · Settings · Tools & skills**. The Inbox tab carries the number of things that need you
+**Inbox · Missions · Projects · Settings · Tools & skills**. **Missions** lists every mission — its Main's state, level, repositories, live Workers, done criteria, questions for you and governor signals — and a mission's page shows its charter, level, governor, Workers by repository, **In flight** (each request's state and whom it waits on, the open questions by who decides, the Main's own questions to you, live links), the **Main** history (each Main, when and why it changed, and Open on a previous one), contracts, journal, plan and each repository's memory. The Inbox tab carries the number of things that need you
 (as a count beside its name); there is no badge on the sidebar item. A slash command's notice and the state of the
 last Manager launch show under the tabs, wherever you are.
 
-Three Command Center items open it for you: **Open Beads Manager** (in a workspace: that workspace's
-Manager chat, created the first time), **Open Beads project** (in a workspace: that workspace's page
-in Projects, on its Overview) and **Open Beads Inbox** (anywhere).
+Four Command Center items open it for you: **Open Beads Manager** (in a repository: the Main of the
+mission that holds it, a one-repository mission created the first time), **Open Beads project** (in a
+workspace: that workspace's page in Projects, on its Overview), **Open Beads Inbox** (anywhere) and
+**New mission** (anywhere: the Missions screen's New mission form).
 
 **The Beads tab.** Every workspace can also show its own page in a tab: open the **+** menu of the
 workspace's tab bar (on a phone, the Beads button on the workspace header) and choose **Beads**. It is
@@ -530,6 +546,8 @@ What your agents can use, on one screen:
 
 ## The Orchestrator: one coordinator for every project
 
+**With missions, the Orchestrator is their governor.** It checks each mission's process against its charter through figures paseo-bm computes from the stores — **mess** (several Workers on one area, two writers on a file, repeated questions, dropped deliveries), **overengineering** (documents and beads growing past the charter's need, tier inflation, exhausted review budgets), **drift** (Main turns or finished requests that move no done criterion, work outside the charter), **stuck** work (stalls, unanswered links, old cards; a request waiting on another request of its mission is waiting, not stuck) and **budget** — and acts on a ladder: record, nudge the Main with the numbers, ask the Main to re-plan, then you. It wakes for one mission at a time, with that mission's brief, arbitrates between missions and may split a mission on your card or the mission's level. It speaks to Mains, not around them: it no longer briefs or answers Workers, and an answer it gives grants no effect. A Worker's **danger** signal goes to that Worker's Main first; the governor is the backup a few minutes later. The rest of this section describes how you talk to it and what it reads.
+
 The **Beads Orchestrator** is one agent for the whole machine that you chat with. It reads the work of every paseo-bm project — where each request stands, the Workers' reports, the decisions waiting on you — and tells each project's Manager (and, where you allow it, its Worker) what to do next. How far it goes is up to you, per project:
 
 - **At Hands-on** (every kind of decision yours, as a new install leaves it): before it sends anything, it asks you. Its question is a decision in the [Inbox](#inbox-what-needs-you), each option saying what it would allow, and often with the command ready on it: picking that option sends the command once, on your answer. You can also answer in its chat, or tell it there to send ("send it", "go ahead and send").
@@ -683,6 +701,9 @@ Data** shows the folder it is using and how it was found.
 | `~/.paseo-bm/autonomy/policy.json` | Your autonomy levels from Settings → Autonomy, kept as who decides each kind of decision per project and when you set it, whether the Orchestrator proposes answers there, and whether risky actions are held. No file means Hands-on everywhere. Your data. |
 | `~/.paseo-bm/autonomy/precedents.json` | Your precedents, saved from a decision card or in Settings → More → Precedents: for each, the subject, the project (or all), your answer, the decision it came from, when it was saved, until when it holds and what replaced it. Every active one is kept, and the 500 newest ended, expired or replaced ones. Your data. |
 | `~/.paseo-bm/coordination/settings.json` | Your choices in Settings → Coordination: the advice cadence, compaction, handoff and the review budget, and which of compaction or handoff switched itself off. A missing file reads as the defaults. |
+| `~/.paseo-bm/missions/` | The missions: `index.json`, and per mission `<id>.json` (charter, plan, contracts, its Mains and its workspace), `<id>.roster.json` (its requests and their Workers), `<id>.journal.jsonl` (what happened), `<id>.decisions.json` (its cards: the Main's questions, mission changes, merges, transfers); `autonomy.json` (each mission's level); `Mission-List/` (the Mission-List project: a `README.md` and one folder per mission, the workspaces of the Mains; an earlier `home/` is kept). Your data. |
+| `~/.paseo-bm/memory/` | Each repository's project memory, one file per workspace: decisions, precedents, conventions and facts with their source. Your data. |
+| `~/.paseo-bm/requests/`, `outbox/`, `peers/` | The request registry per repository (request ids, their Main and mission, review calls), the deliveries between agents stored before they are sent (`outbox/`, so a reload loses none), and the links between Workers and between missions (`peers/links.json`). |
 | `~/.paseo-bm/handoffs/` | One file per handoff the Orchestrator asked for: the request, the outgoing Worker and its Manager, the reason, the outgoing Worker's note and the brief (secrets masked), and how far it got. |
 | `~/.paseo-bm/role-extras.json` | Additional role instructions saved with an earlier version. Never read now; deleted with the data by **Remove paseo-bm's settings…**. Your data. |
 | `~/.paseo-bm/role-fallback.json` | Your fallback chains from Roles & models: each role's policy and fallback entries (provider, model, thinking, mode), plus optional detection `patterns` you edit by hand. Your data. |

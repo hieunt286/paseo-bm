@@ -1,6 +1,6 @@
 # paseo-bm-plugin — Beads Management for Paseo
 
-paseo-bm is a small agent team and project dashboard for [Paseo](https://paseo.sh). Tell the Beads Manager what outcome you want; a Worker implements and proves it, a Reviewer checks larger work, and the optional Orchestrator helps coordinate projects at the autonomy level you choose.
+paseo-bm is a small agent team and dashboard for [Paseo](https://paseo.sh), organised by **mission**: one goal you name, across every repository it needs. Each mission's **Main** (a Beads Manager) gives each change to a Worker in the right repository, links Workers that must agree, keeps what is in flight and asks you only what is yours to decide; a Reviewer checks larger work, and the optional Orchestrator governs the missions' process at the autonomy level you choose.
 
 Visit the [paseo-bm website](https://paseo-bm.erai.pro/) for a guided overview of the plugin.
 
@@ -8,11 +8,13 @@ Visit the [paseo-bm website](https://paseo-bm.erai.pro/) for a guided overview o
 
 ## What is included
 
+- **Missions** with each mission's Main, level, repositories, Workers, done criteria, what is in flight and the Main's history.
+- A **Mission-List** project in Paseo with one workspace per mission.
 - **Inbox** for decisions and alerts that need you.
-- **Projects** with request timelines, Beads, metrics and agents.
-- **Settings** for autonomy, coordination, roles, updates and release notes.
+- **Projects** with request timelines, Beads, metrics and agents per repository.
+- **Settings** for repository and mission autonomy, coordination, roles, updates and release notes.
 - **Tools & skills** for workflow skills, agent tools, `br` and `bv`.
-- Manager, Worker, Reviewer and optional machine-wide Orchestrator roles.
+- Main (Beads Manager), Worker, Reviewer and optional machine-wide Orchestrator roles.
 
 ## Install and start
 
@@ -26,7 +28,8 @@ Open **Beads Manager**. The first open creates the four `bm-*` role profiles wit
 
 1. Choose **Allow agent tools** in **Settings → More → Agents**.
 2. Choose **Install skills** and install `br` / `bv` in **Tools & skills** when shown.
-3. Open a project, choose **Chat ▸**, and describe the change.
+3. In **Missions**, choose **New mission**: a name, a short code, a goal, its repositories and a level. Its Main opens in the mission's own workspace.
+4. Tell the Main the outcome you want; it gives each change to a Worker in the right repository.
 
 ## Update and see what changed
 
