@@ -6,21 +6,23 @@
  *
  * **`mission.conflict { missions, workspaceId, area, evidence }`** comes from:
  *
- * - **charters** (`charterConflictsOf`, the 60-second pass): two open
- *   missions whose charters hold one repo and whose requests wrote files of
- *   one area there in the last `CONFLICT_WINDOW_MS` (trace `file` evidence).
- *   An area is a file's folder (`areaOfFile`; a file at the repo's root is its
- *   own area); at most `MAX_AREAS_PER_PAIR` areas per pair and repo, the most
- *   written first;
- * - **writers** (`writerConflictsOf`, each recorded turn): a
- *   `writers.observed` collision (`writers-watch.ts`) whose two writers
- *   belong to two open missions (their requests in the request index, else
- *   the mission whose Main wrote); the area is the file;
+ * - **overlaps** (`overlapConflictsOf`, the 60-second pass; delivery line
+ *   design §4.7): two open missions whose ready placements of one repo (by
+ *   repo key) change one file against their integration branch — `git diff
+ *   --name-only origin/<target>...<branch>`, read by `line-watch.ts` at most
+ *   once a minute, only for a repo two open placements share — "expect a
+ *   merge conflict". An area is a file's folder (`areaOfFile`; a file at the
+ *   repo's root is its own area); at most `MAX_AREAS_PER_PAIR` areas per pair
+ *   and repo, the most files first;
  * - **links** (`linkConflictsOf`, the 60-second pass): a live `project` link
  *   of a mission's request into a repo of another open mission's charter that
  *   is not in its own, and a live `mission` link of kind `work` from one
  *   mission's Main to another's, once per repo both charters hold; the area
  *   is the whole repo (`.`).
+ *
+ * Two missions' Workers writing one file is no conflict between missions any
+ * more (§4.7: each mission has its own branch): `writers.observed` stays an
+ * alert inside a placement.
  *
  * A conflict an arbitration of the same two missions already settled — the
  * same repo, its area covering the conflict's (`areaCovers`) — is not raised
@@ -38,7 +40,9 @@ import { timeOrZero } from "../shared/time";
 import { writtenFilesOf } from "../shared/writers-observed";
 import { createJsonFileStore, entriesOf } from "./data-files";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
-import type { BmEvent, MissionConflictEvent, WritersObservedEvent } from "./event-bus";
+import type { MissionConflictEvent } from "./event-bus";
+import { cachedLineOf, newestPlacementsOf, refreshLines } from "./line-watch";
+import type { GitRunner } from "./repo-tool";
 import { createMissionRoster, requestIndexOf } from "./mission-roster";
 import { createMissionStore, type Mission } from "./mission-store";
 import { ORCHESTRATOR_DIR_NAME } from "./orchestrator-store";
@@ -144,11 +148,20 @@ export function areasOverlap(a: string, b: string): boolean {
   return areaCovers(a, b) || areaCovers(b, a);
 }
 
+/**
+ * The newest arbitration of the conflict's two missions, in its repo, whose
+ * area covers the conflict's: the standing call `bm_arbitrate` returns
+ * instead of sending (delivery line design §8.2). Null when none. Pure.
+ */
+export function standingArbitrationOf(event: Pick<MissionConflictEvent, "missions" | "workspaceId" | "area">, arbitrations: readonly Arbitration[]): Arbitration | null {
+  const pair = new Set(event.missions);
+  if (pair.size !== 2) return null;
+  return arbitrations.findLast((entry) => entry.workspaceId === event.workspaceId && entry.missions.every((missionId) => pair.has(missionId)) && areaCovers(entry.area, event.area)) ?? null;
+}
+
 /** Whether an arbitration of the conflict's two missions, in its repo, settled its area already. Pure. */
 export function isArbitrated(event: Pick<MissionConflictEvent, "missions" | "workspaceId" | "area">, arbitrations: readonly Arbitration[]): boolean {
-  const pair = new Set(event.missions);
-  if (pair.size !== 2) return false;
-  return arbitrations.some((entry) => entry.workspaceId === event.workspaceId && entry.missions.every((missionId) => pair.has(missionId)) && areaCovers(entry.area, event.area));
+  return standingArbitrationOf(event, arbitrations) !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,34 +209,39 @@ export function openMissionsOf(home: string): Mission[] {
 
 const sample = (files: ReadonlySet<string>): string => `${files.size} file${files.size === 1 ? "" : "s"}, e.g. ${[...files].sort()[0] ?? ""}`;
 
-/** Two open charters with one repo and one area written in the last 7 days (§9.6). Never throws. */
-export function charterConflictsOf(home: string, now: Date): MissionConflictEvent[] {
+/**
+ * Two open missions whose placements of one repo change one area against
+ * their integration branch (delivery line design §4.7): "expect a merge
+ * conflict". Reads the lines as `line-watch.ts` last read them; no git here.
+ * Never throws.
+ */
+export function overlapConflictsOf(home: string): MissionConflictEvent[] {
   const open = openMissionsOf(home);
-  // Only a mission whose charter shares a repo with another open one can conflict: the others' traces are not read.
-  const sharing = open.filter((mission) => open.some((other) => other !== mission && other.charter.repos.some((repo) => mission.charter.repos.includes(repo))));
-  if (sharing.length < 2) return [];
-  const since = now.getTime() - CONFLICT_WINDOW_MS;
-  const areas = new Map(sharing.map((mission) => [mission.missionId, missionAreasOf(home, mission, since)]));
+  if (open.length < 2) return [];
+  const lines = open.flatMap((mission) =>
+    newestPlacementsOf(mission)
+      .filter((placement) => placement.state === "ready")
+      .flatMap((placement) => {
+        const changed = cachedLineOf(home, placement.workspaceId)?.changed ?? null;
+        return changed === null || changed.length === 0 ? [] : [{ mission, placement, changed: new Set(changed) }];
+      }),
+  );
   const events: MissionConflictEvent[] = [];
-  sharing.forEach((a, index) => {
-    for (const b of sharing.slice(index + 1)) {
-      for (const workspaceId of a.charter.repos.filter((repo) => b.charter.repos.includes(repo))) {
-        const ofA = areas.get(a.missionId)?.get(workspaceId);
-        const ofB = areas.get(b.missionId)?.get(workspaceId);
-        if (ofA === undefined || ofB === undefined) continue;
-        const shared = [...ofA.keys()]
-          .filter((area) => ofB.has(area))
-          .sort((x, y) => ofA.get(y)!.size + ofB.get(y)!.size - (ofA.get(x)!.size + ofB.get(x)!.size) || x.localeCompare(y))
-          .slice(0, MAX_AREAS_PER_PAIR);
-        for (const area of shared) {
-          events.push({
-            type: "mission.conflict",
-            missions: [a.missionId, b.missionId],
-            workspaceId,
-            area,
-            evidence: `both charters hold this repo and both missions wrote ${area} in the last 7 days: ${a.code} ${sample(ofA.get(area)!)}; ${b.code} ${sample(ofB.get(area)!)}`,
-          });
-        }
+  lines.forEach((a, index) => {
+    for (const b of lines.slice(index + 1)) {
+      if (a.mission.missionId === b.mission.missionId || a.placement.repo !== b.placement.repo) continue;
+      const byArea = new Map<string, Set<string>>();
+      for (const file of a.changed) if (b.changed.has(file)) byArea.set(areaOfFile(file), (byArea.get(areaOfFile(file)) ?? new Set()).add(file));
+      const target = a.placement.target === b.placement.target ? `origin/${a.placement.target}` : `origin/${a.placement.target} and origin/${b.placement.target}`;
+      const areas = [...byArea.keys()].sort((x, y) => byArea.get(y)!.size - byArea.get(x)!.size || x.localeCompare(y)).slice(0, MAX_AREAS_PER_PAIR);
+      for (const area of areas) {
+        events.push({
+          type: "mission.conflict",
+          missions: [a.mission.missionId, b.mission.missionId],
+          workspaceId: a.placement.repo,
+          area,
+          evidence: `expect a merge conflict: ${a.mission.code} (${a.placement.branch}) and ${b.mission.code} (${b.placement.branch}) both change ${area} against ${target}: ${sample(byArea.get(area)!)}`,
+        });
       }
     }
   });
@@ -235,28 +253,6 @@ function missionOfWriter(home: string, open: readonly Mission[], writer: { agent
   const place = writer.requestId === null ? null : requestIndexOf(home, writer.requestId);
   if (place !== null) return open.find((mission) => mission.missionId === place.missionId) ?? null;
   return open.find((mission) => mission.mainId === writer.agentId) ?? null;
-}
-
-/** The `writers.observed` collisions among `events` between two open missions (§9.6). Never throws. */
-export function writerConflictsOf(home: string, events: readonly BmEvent[]): MissionConflictEvent[] {
-  const collisions = events.filter((event): event is WritersObservedEvent => event.type === "writers.observed");
-  if (collisions.length === 0) return [];
-  const open = openMissionsOf(home);
-  if (open.length < 2) return [];
-  return collisions.flatMap((event): MissionConflictEvent[] => {
-    const [a, b] = event.writers.map((writer) => missionOfWriter(home, open, writer));
-    if (a === null || b === null || a === undefined || b === undefined || a.missionId === b.missionId) return [];
-    const [first, second] = event.writers;
-    return [
-      {
-        type: "mission.conflict",
-        missions: [a.missionId, b.missionId],
-        workspaceId: event.workspaceId,
-        area: event.file,
-        evidence: `${first.agentId} (request ${first.requestId ?? "not known"}, mission ${a.code}) and ${second.agentId} (request ${second.requestId ?? "not known"}, mission ${b.code}) wrote it in overlapping turns, at ${event.at}`,
-      },
-    ];
-  });
 }
 
 /** Live links from one mission into another's area (§9.6). Never throws. */
@@ -304,13 +300,13 @@ export interface ConflictWatchDeps extends DataHomeDeps {
   home?: () => string | null;
   now?: () => Date;
   log?: (message: string) => void;
+  /** How the lines' read-only git runs; `runGit` by default. */
+  git?: GitRunner;
 }
 
 export interface ConflictWatch {
-  /** The charter and link conflicts now, those not arbitrated (the 60-second pass). Never throws. */
-  pass(): MissionConflictEvent[];
-  /** The conflicts the turn's `writers.observed` events show, those not arbitrated. Never throws. */
-  writersCollided(events: readonly BmEvent[]): MissionConflictEvent[];
+  /** The overlap and link conflicts now, those not arbitrated (the 60-second pass, after the governor's: its lines are read). Never throws. */
+  pass(): Promise<MissionConflictEvent[]>;
 }
 
 export function createConflictWatch(deps: ConflictWatchDeps = {}): ConflictWatch {
@@ -339,7 +335,11 @@ export function createConflictWatch(deps: ConflictWatchDeps = {}): ConflictWatch
     }
   };
   return {
-    pass: () => unsettled((home) => [...charterConflictsOf(home, now()), ...linkConflictsOf(home)]),
-    writersCollided: (events) => (events.some((event) => event.type === "writers.observed") ? unsettled((home) => writerConflictsOf(home, events)) : []),
+    async pass() {
+      const home = homeOf();
+      // Delivery line design §4.7: a line the governor's pass read this minute is not read again.
+      if (home !== null) await refreshLines(home, { now, log, ...(deps.git === undefined ? {} : { git: deps.git }) });
+      return unsettled((home) => [...overlapConflictsOf(home), ...linkConflictsOf(home)]);
+    },
   };
 }

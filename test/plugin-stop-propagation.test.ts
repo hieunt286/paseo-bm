@@ -158,7 +158,7 @@ describe("on(\"agent.turn_ended\") stop propagation", () => {
   it("registers on the entry's lifecycle hook names", () => {
     const { registered } = setup();
     expect(new Set(registered)).toEqual(
-      new Set(["agent.archived", "agent.created", "agent.permission_requested", "agent.permission_resolved", "agent.turn_ended", "agent.turn_started"]),
+      new Set(["agent.archived", "agent.created", "agent.permission_requested", "agent.permission_resolved", "agent.turn_ended", "agent.turn_started", "workspace.archived"]),
     );
   });
 

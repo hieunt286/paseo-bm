@@ -25,7 +25,9 @@
  *
  * Every answer is written through `transition`, so it is where the owner's
  * answer to a request's question becomes project memory (missions design
- * §2.5, `rememberOwnerAnswer`).
+ * §2.5, `rememberOwnerAnswer`), and where a question leaving the open states
+ * settles the structured wait that names it (delivery line design §6.3,
+ * `settleQuestionWait`).
  */
 import { lstatSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -44,6 +46,7 @@ import { assertNoSymlink, capBy, createJsonFileStore, type JsonFileStore } from 
 import { createMemoryStore } from "./memory-store";
 import { errorText } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, assertWorkspaceId } from "./trace-store";
+import { settleQuestionWait } from "./waits";
 import { timeOrZero } from "../shared/time";
 
 /** The folder inside the data folder; cleanup deletes it whole. */
@@ -358,6 +361,8 @@ export function createDecisionStore(home: string, deps: DecisionStoreDeps = {}):
       found.entries[found.index] = next;
       write(found.workspaceId, found.entries);
       rememberOwnerAnswer(home, previous, next, log);
+      // Delivery line design §6.3: a question that leaves the open states settles the wait that names it.
+      settleQuestionWait(home, previous, next, log);
       return { status: "updated", decision: next, previous };
     },
 

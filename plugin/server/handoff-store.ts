@@ -26,6 +26,9 @@
  *   whose successor appeared: they count toward `handoff.maxPerRequest`, key
  *   the `threshold.crossed` cycle (design §G.7), and the newest one's time is
  *   where the request's tokens are counted from again.
+ * - **Its tries** (`handoffTriesOf`, delivery line design §6.6) are its
+ *   handoffs so far and its entries dropped `no-safe-point`: they count
+ *   toward `handoff.maxPerRequest`, so a handoff never re-arms without end.
  *
  * - **A request of a mission** (missions design §3.4): the entry keeps its
  *   `missionId` (from the request index when `add` is not given it), and a
@@ -207,6 +210,14 @@ export function handoffsDoneOf(entries: readonly HandoffEntry[], requestId: stri
   return entries
     .filter((entry) => entry.requestId === requestId && entry.successorId !== null)
     .sort((a, b) => (timeOrNull(a.successorAt) ?? 0) - (timeOrNull(b.successorAt) ?? 0));
+}
+
+/**
+ * Delivery line design §6.6: what counts toward `handoff.maxPerRequest` — the
+ * request's handoffs so far and its entries dropped `no-safe-point`. Pure.
+ */
+export function handoffTriesOf(entries: readonly HandoffEntry[], requestId: string): number {
+  return entries.filter((entry) => entry.requestId === requestId && (entry.successorId !== null || entry.ending === "no-safe-point")).length;
 }
 
 /** When the request's newest handoff happened (its successor appeared), or null. Pure. */

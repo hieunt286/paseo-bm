@@ -8,6 +8,7 @@ import { clearJsonFileCache } from "../plugin/server/data-files";
 import { eventScopeOf } from "../plugin/server/event-bus";
 import { handleInsightsSummary } from "../plugin/server/insights-rpc";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
+import { createMissionStore } from "../plugin/server/mission-store";
 import { orchestratorHomeOf } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorTools } from "../plugin/server/orchestrator-tools";
 import { listedWorkspaces, type DashboardPaseo } from "../plugin/server/paseo-directory";
@@ -122,6 +123,30 @@ describe("the project views leave the homes out", () => {
     const note = await tools.call("bm_note", { workspaceId: ORCHESTRATOR_WS, text: "x" });
     expect(note.ok).toBe(false);
     expect(note.text).toContain(`${ORCHESTRATOR_WS} is a paseo-bm home, not a project`);
+  });
+
+  it("bm_projects folds a mission placement into its repo, naming the placement of its requests (delivery line design §3.1)", async () => {
+    const PLACE = "wks_place";
+    const missions = createMissionStore(home);
+    const made = missions.create({ code: "ABC", name: "Alpha", goal: "", repos: [PROJECT], createdBy: "owner", mainId: null });
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    const placement = { repo: PROJECT, workspaceId: PLACE, directory: "/wt/m-abc-api", branch: "m/ABC/api", target: "develop", base: "origin/develop", worktreeSlug: "m-abc-api", state: "ready" as const, requestKey: "bm-place", createdAt: NOW.toISOString(), deps: { cloned: [], at: null, note: null }, integration: null };
+    missions.update(made.mission.missionId, (mission) => ({ ...mission, placements: [placement] }));
+    const requests = { [PROJECT]: "req-20260926T100000Z", [PLACE]: "req-20260926T100100Z" };
+    for (const [workspaceId, requestId] of Object.entries(requests)) {
+      const at = "2026-09-26T10:00:00.000Z";
+      await appendRecord(location(), turn({ workspaceId, agentId: `mgr-${workspaceId}`, requestId, at, endedAt: at, sent: [msg(`mgr-${workspaceId}`, at, "A request", "user")] }));
+    }
+    const fake = fakePaseo<MissionsPaseo & DashboardPaseo>({ workspaces: [{ id: PROJECT, directory: "/repo/api" }, { id: PLACE, directory: "/wt/m-abc-api" }] });
+    const tools = createOrchestratorTools({ env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, redactEnv: {} });
+    tools.usePaseo(fake.paseo);
+    const answer = await tools.call("bm_projects", { sinceHours: 168, detail: "full" });
+    const projects = (JSON.parse(answer.text.slice(answer.text.indexOf("{"))) as { projects: Array<{ workspaceId: string; requests: Array<{ requestId: string; workspaceId?: string }> }> }).projects;
+    expect(projects.map((project) => project.workspaceId)).toEqual([PROJECT]);
+    expect(projects[0]!.requests.map((request) => [request.requestId, request.workspaceId ?? null]).sort()).toEqual([
+      [requests[PROJECT], null],
+      [requests[PLACE], PLACE],
+    ]);
   });
 
   it("the overview counts and the stored workspaces leave them out, and traces.workspaces names the listed homes", async () => {

@@ -90,6 +90,15 @@ It closes with "Read the whole mission with bm_mission." The cap is `MISSION_STA
 | The governor's wake brief (`governor-brief.ts` `missionBriefOf`) | `governor`, `requests`, `questions`, `journal` of the same state | the brief's own reads (ADR-032 §20.1) |
 | `mission.get` (Missions screen, §7) | the structured `MissionState` (`inFlight`, `mainHistory`) | — |
 
+
+*Since 2026-10-21* (delivery line design §4.9, §9.3), the rendering gains two sections after In flight:
+- **Lines:** one line per repository with a placement.
+- **Contracts:** the open contracts, proposed first, at most 10.
+
+Each link shows its latest message with its refs, and links closed in the last 24 hours are listed. When the text must shrink, the sections drop in this order: Recently, Governor, the owner's recent words, Contracts, Links.
+
+A Worker's compaction brief carries its request's links and the contracts touching its repository, within a 2,400-character block.
+
 ### 2.3 Writes that make it complete
 
 Each write is code, at the event, through `journalQuietly` (a failed line is one log line; the event itself stands):
@@ -183,23 +192,23 @@ Every bound Main tool resolves its caller's mission (`mainOf`). When the caller 
 - `policy` (the repo cells);
 - `missionOf(requestId)`;
 - `missionDelegates(missionId, cell)`;
-- `reviewFigures(requestId)`: the tier budget, and the code and Main grants used.
+- `finishedUnverified?(requestId)` (optional; the `f:` rule below). Review figures left the resolver on 2026-10-20 (delivery line design §5).
 
 Rules, the first that holds:
 
 | # | Decision | Decider |
 |---|---|---|
 | 1 | `ownerOnly`; `o:`; `r:`; `h:`; an option carrying a prepared change | owner |
-| 2 | `f:` whose class (`environment`) the project delegates | orchestrator |
-| 3 | `q:` with subject `review-budget`, `cost` delegated by the repo cell or the mission's `answer-effects`, and its recommended option within the **code cap** (§4.3) | code |
-| 4 | `q:` of a request of a mission, its class delegated by the repo cell or the mission cell (`answer-technical` / `answer-effects`), and, for a review grant, within the **Main cap** (§4.3) | main |
+| 2 | `f:` whose class (`environment`) the project delegates, unless every acting option is refused for an unverified finish (then the owner) | orchestrator |
+| 3 | retired on 2026-10-20 (review budgets): reviews past a request's cap are one owner-only `review-cap` question, rule 1 (delivery line design §5.4) | — |
+| 4 | `q:` of a request of a mission, its class delegated by the repo cell or the mission cell (`answer-technical` / `answer-effects`). When only the mission cell delegates it, the Main is named only if an option leaves no effect (rule `mission-effects`), and `bm_answer_worker` refuses an option with effects (delivery line design §7.1) | main |
 | 5 | `q:` of a request of a mission, repo cell `shadow` | owner, the Main recommending |
 | 6 | anything else | owner |
 
 A precedent (`resolveAtOpen`) still answers first, at open, wherever it applies today. It is code acting on the owner's own earlier words, so it is not a row of the table.
 
 The resolver is the only place these rules live. Its callers:
-- the materialiser at open (rule 3 acts there);
+- the materialiser at open;
 - `bm_answer_worker` (it answers only where the decider is the Main, or records a recommendation at rule 5);
 - `bm_decide` (rule 2);
 - `missionStateOf` (§2);
@@ -217,11 +226,12 @@ The owner answers any unsettled decision at any time, on its card or in a chat; 
 
 ### 4.3 Review budgets
 
-- **Code cap:** the existing policy cap, `max(2, tier budget)` further calls per request (`policyGrantCapOf`), less what code granted before.
-- **Main cap:** the same figure again, less what the Main granted.
-- **`untilClean`:** a grant `{ untilClean: "bX" }` given by code or the Main counts each review call of batch `bX` beyond the budget against that grantor's cap. When the cap is spent, the grant no longer covers further calls. The owner's `untilClean` stays unbounded.
-- **Delegation:** beyond the Main cap the decider is the owner. A request at a level that delegates `cost` therefore asks the owner only after the budget was exceeded twice over.
-- **The Main is not told:** `BM-BUDGET` is retired (§6.1). The budget shows in the mission state through the Worker's question when one opens.
+Retired on 2026-10-20 by [ADR-035](../adr/ADR-035-a-delivery-line.md) decision 4. The things that are gone:
+- the code and Main caps;
+- delegated `untilClean`;
+- the `review-budget` question.
+
+A request's reviews converge by themselves under a computed cap, and past the cap paseo-bm asks the owner once ([delivery line design](paseo-bm-delivery-line.md) §5). The Main is not told about reviews: `BM-BUDGET` stays retired (§6.1).
 
 ### 4.4 The Main is told at once
 
@@ -237,7 +247,9 @@ It refuses, before writing anything:
 - an unknown option;
 - a request outside the caller's mission.
 
-A review grant inside the Main cap is allowed. The answer is `by: main`, `via: main`, delivered to the Worker as the Main's.
+It writes the Main's recommendation with `withMainPrediction`. The same writer attaches a recommendation when `bm_owner_question` refuses a repeat of an open Worker question (delivery line design §7.2).
+
+Under the mission-only delegation it also refuses an option with effects (delivery line design §7.1). The answer is `by: main`, `via: main`, delivered to the Worker as the Main's.
 
 ### 4.6 The Main asks the owner with a stored decision
 
@@ -297,7 +309,7 @@ Moving requests to another mission needs the owner's yes:
 
 ### 5.4 Closing
 
-A close (and a merge) waits only for `busyRequestsOf`: a roster request whose Worker is `running` or `initializing` in Paseo; idle and unknown Workers do not hold it. `runningRequestsOf` keeps counting live Workers for the staffing rule, where an idle Worker should be given the work. When a mission closes — on its card or from the Missions screen — its `active` roster entries become `stopped` (`stopActiveRequests`).
+A close (and a merge) waits only for `busyRequestsOf`: a roster request whose Worker is `running` or `initializing` in Paseo; idle and unknown Workers do not hold it. `runningRequestsOf` keeps counting live Workers for the staffing rule, where an idle Worker should be given the work. When a mission closes — on its card or from the Missions screen — its `active` roster entries become `stopped` (`stopActiveRequests`). *Since 2026-10-21 (ADR-035):* its placements become `retired`, and one owner-only `worktree-archive` card lists each with its uncommitted, unpushed and merge-request state. Archiving a worktree is the owner's, in Paseo, because Paseo's archive deletes uncommitted work (delivery line design §3.6).
 
 ### 5.5 Entry points
 
@@ -323,6 +335,9 @@ A close (and a merge) waits only for `busyRequestsOf`: a roster request whose Wo
 | `BM-BUDGET` | Main | none ("for your information") | **removed** (§4.3) |
 | `BM-SETTINGS` mode changes | unbound Managers, Workers | update the child mode | keep |
 | `BM-INTERRUPTED`, `BM-TOOLS`, `BM-RESUME`, `BM-FORMAT`, `BM-STOP`, `BM-REPLACED`, `BM-HANDOFF`, `BM-FALLBACK`, `BM-ASK`, `BM-ANSWER`, `BM-EVENTS` | as today | as today | keep |
+| `BM-DELIVERY message`, `answers`, review, override | a Worker waiting by structure | settles an item it waits on, or nothing | **held** while it settles none (delivery line design §6.4); released with the wait |
+| `BM-UPDATES` (with a `BM-DELIVERY wait` facts block) | a Worker whose wait is met | act on each block | added (delivery line design §6.4) |
+| `BM-ROLLOVER soft` / `now` | a Worker | finish, with what remains listed | added (delivery line design §2.6) |
 
 ### 6.2 The Main's channel
 
@@ -345,7 +360,7 @@ One item alone goes as its block, with no `BM-UPDATES` wrapper: the commonest ca
 - `command-send.ts` for a command to a Main;
 - the Worker watch for `BM-SIGNAL`.
 
-Records to Workers and to unbound Managers keep one message each.
+Records to unbound Managers keep one message each. Records to Workers keep one message each, except the release of a Worker that waited by structure: its held items and the facts of what settled go as one `BM-UPDATES` (`enqueueUpdates`, delivery line design §6.4).
 
 **The chat** (`client/chat-card-parse.ts`): a `BM-UPDATES` message is split at its `BM-ITEM` lines, and each block is drawn as the card it would be alone, in order. One whose items draw nothing is a single notice line, "Updates from paseo-bm".
 
@@ -353,7 +368,7 @@ Records to Workers and to unbound Managers keep one message each.
 
 ### 6.3 The governor counts waiting as waiting
 
-The `stalled` figure (`governor-figures.ts`, `waitingOrStoppedOf`) leaves out a request that is:
+The `stalled` figure (`governor-figures.ts`, `waitingOrStoppedOf`) reads a request's structured wait first: `waiting.items`, judged by `structuralWaitOf` (delivery line design §6.5). A wait on live items is waiting. The rule below applies to reports without items. It leaves out a request that is:
 - **waiting**: its newest report is `blocked` and its `waiting for` (`waitingOnOf`, `shared/mission-state.ts`) names, by id, a request or Worker of the same mission that is not `finished`/`stopped`;
 - **stopped**: its roster state is `stopped`, or its newest report is `stopped`.
 
@@ -456,3 +471,7 @@ The role-file changes flag running Mains outdated once.
 | 2026-10-10 | Claude (Phase 5 as built) | §5.1: refusals, a target without a Main, the split's order and undo. §5.2: `offerMerges`, the start-up sweep, asked once per pair, `mergedInto`. §5.3: `transferDecisionId`, duplicate card refused. §5.4: `busyRequestsOf` for close and merge; `runningRequestsOf` stays for staffing. §5.5: no per-request client entry point |
 | 2026-10-10 | Claude (Phases 2–3 as built) | §3.2: the settings are the `main` group (`main.compact`, …), `hardShare` bounds 0.35–0.95 with the `contextShare` + 0.05 floor in the figure. §4.6: the owner's chat answer is recorded with `bm_owner_question`'s `answered`. §8: the role file as built. `bm_decide` keeps its own refusal (`decideRefusalOf`), equivalent to rule 2 of §4.1 |
 | 2026-10-10 | Claude (Phase 6 as built) | §7: the owner approved the mockup (artboards G, H); the cards as built, `asks[].byMain`/`recommended`, "Answer" opens the Inbox. §9: the optional fields added. Every phase built; the drill is the owner's |
+| 2026-10-20 | Claude (as built, ADR-035 Phase 6) | §4.1: rule 3 retired, rule 4's mission-effects condition, rule 2's unverified-finish exception, `reviewFigures` gone; §4.3 retired (the review cap, delivery line design §5); §4.5 the effects refusal and `withMainPrediction` |
+| 2026-10-21 | Claude (as built, ADR-035 Phase 7) | §6.1 held deliveries, the Worker's `BM-UPDATES` release, `BM-ROLLOVER`; §6.2 records to Workers except a release; §6.3 structured waits first (delivery line design §6) |
+| 2026-10-21 | Claude (as built, ADR-035 Phase 8) | §5.4 a close retires the mission's placements and offers their archive card |
+| 2026-10-21 | Claude (as built, ADR-035 Phases 8–9) | §2.2 the Lines and Contracts sections, links by their latest message, the Worker brief's links and contracts |

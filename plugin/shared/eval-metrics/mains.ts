@@ -21,7 +21,8 @@
  *
  * This module is `shared/`: no Node and no React Native imports.
  */
-import type { TraceRecord } from "../contracts";
+import type { TraceRecord, TurnTrigger } from "../contracts";
+import type { MessageOrigin } from "../message-origin";
 import { COMMAND_NOTICE_MARKER, STATE_NOTICE_MARKER, isPluginNotice, isPluginPrompt, noticeMarkerOf, parseDelivery, updatesItemsOf } from "../notices";
 import { ratio } from "./helpers";
 import type { EvalMetrics } from "./types";
@@ -42,6 +43,22 @@ function noticeTriggerOf(text: string): MainTrigger {
   if (marker === COMMAND_NOTICE_MARKER) return "command";
   if (marker === STATE_NOTICE_MARKER) return "state";
   return "other";
+}
+
+/**
+ * The trace record's `trigger` (delivery line design §8.4), set by the
+ * collector from a turn's first inbound message and its `originOf`: the A-14
+ * classification above, folded — `owner` is A-14's `owner`, `report` its
+ * `report` (a `BM-UPDATES` message by its first item), every other notice or
+ * prompt `plugin`, another agent's message `agent`. Pure.
+ */
+export function turnTriggerOf(text: string, origin: MessageOrigin): TurnTrigger {
+  if (origin === "owner") return "owner";
+  if (origin === "agent") return "agent";
+  if (origin === "plugin-prompt") return "plugin";
+  const items = updatesItemsOf(text);
+  const first = items === null ? text : items[0];
+  return first !== undefined && noticeTriggerOf(first) === "report" ? "report" : "plugin";
 }
 
 /** What started one turn, and whether a `BM-UPDATES` message did. Pure. */

@@ -1488,7 +1488,7 @@ const PATHS: BoundaryPath[] = [
     },
   },
   {
-    name: "tool bm_ask_owner with prepared changes of the owner's settings (a review budget among them) stores the decision and writes no setting; neither the policy nor bm_decide answers it (autonomy design §G.4)",
+    name: "tool bm_ask_owner with prepared changes of the owner's settings (a review setting among them) stores the decision and writes no setting; neither the policy nor bm_decide answers it (autonomy design §G.4)",
     rpc: null,
     tool: "bm_ask_owner",
     run: async () => {
@@ -1506,8 +1506,8 @@ const PATHS: BoundaryPath[] = [
           { label: "Every 10", effects: ["none"], recommended: true, change: { kind: "coordination.set", key: "advice.everyFinished", value: 10 } },
           { label: "Shadow scope", effects: ["none"], change: { kind: "autonomy.set", class: "scope", mode: "shadow" } },
           { label: "Save the date format", effects: ["none"], change: { kind: "precedent.save", scope: "project", subject: "date-format", text: "dd/mm/yyyy" } },
-          // §G.4's review.budget (bead 7gxw.12): a coordination.set on a review-budget key, the owner's only.
-          { label: "Large: 6 review calls", effects: ["none"], change: { kind: "coordination.set", key: "review.largeBudget", value: 6 } },
+          // Delivery line design §5.6: a coordination.set on a review setting, the owner's only.
+          { label: "4 calls per batch", effects: ["none"], change: { kind: "coordination.set", key: "review.callsPerBatch", value: 4 } },
           { label: "Keep", effects: ["none"] },
         ],
       });

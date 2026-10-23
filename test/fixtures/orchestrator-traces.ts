@@ -20,7 +20,7 @@
  * The run record has no transcript; the messages are rebuilt from what it
  * says, in the language the user wrote in (Vietnamese).
  */
-import { REVIEW_BUDGET } from "../../plugin/server/review-budget";
+import { REVIEW_CALLS_PER_BATCH } from "../../plugin/shared/coordination";
 import { reconstructTraces, type AgentFacts } from "../../plugin/server/traces";
 import { ruleInputOf } from "../../plugin/server/request-trace";
 import { TRACE_STORE_SCHEMA_VERSION, type Evidence, type ParsedReport, type TraceRecord } from "../../plugin/shared/contracts";
@@ -132,7 +132,7 @@ export function agent(overrides: Partial<AgentFacts> & Pick<AgentFacts, "id" | "
 }
 
 export function factsWith(overrides: Partial<RuleFacts> = {}): RuleFacts {
-  return { reviewBudget: REVIEW_BUDGET, ...overrides };
+  return { review: { callsPerBatch: REVIEW_CALLS_PER_BATCH.default }, ...overrides };
 }
 
 /** The `RuleInput` of one request, rebuilt from records and agents as the server does. */

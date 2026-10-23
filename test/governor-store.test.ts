@@ -28,8 +28,8 @@ import { fakePaseo } from "./helpers/fake-paseo";
 /**
  * The governor's ladder (missions design §9.3, §9.4): the pure steps, the
  * nudge command, the store `orchestrator/governor.json`, and the runner on a
- * temporary data folder — steps 1 and 2 with no model, the reset on
- * recovery. No daemon: a fake Paseo handle and a fake notice queue.
+ * temporary data folder — steps 1 and 2 with no model, the reset once
+ * recovered for the window. No daemon: a fake Paseo handle and a fake notice queue.
  */
 
 const T0 = new Date("2026-10-09T12:00:00.000Z");
@@ -61,12 +61,23 @@ describe("ladderStepOf: the steps code takes (§9.3)", () => {
     expect(ladderStepOf({ ...three.state, step: 4 }, [stalled(true)], facts(minutes(90), 40)).action).toBe("none");
   });
 
-  it("resets the family to 0 when its figures are back under their thresholds, from any step", () => {
+  it("resets the family to 0 once its figures stayed under their thresholds for the window, from any step (delivery line design §8.4)", () => {
     for (const step of [1, 2, 3, 4]) {
       const current: FamilyState = { step, since: T0.toISOString(), figures: [stalled(true)], lastAction: { at: T0.toISOString(), kind: "nudge", id: "cmd-1" }, mainTurnsAt: 3 };
-      const reset = ladderStepOf(current, [stalled(false)], facts(minutes(5)));
+      // Under at minute 5: the family keeps its step and notes when the quiet began.
+      const quiet = ladderStepOf(current, [stalled(false)], facts(minutes(5)));
+      expect(quiet, `step ${step}`).toEqual({ state: { ...current, figures: [stalled(false)], underSince: minutes(5).toISOString() }, action: "none" });
+      expect(ladderStepOf(quiet.state, [stalled(false)], facts(minutes(34))).action, `step ${step}`).toBe("none");
+      const reset = ladderStepOf(quiet.state, [stalled(false)], facts(minutes(35)));
       expect(reset.action, `step ${step}`).toBe("reset");
-      expect(reset.state).toEqual({ step: 0, since: null, figures: [stalled(false)], lastAction: { at: minutes(5).toISOString(), kind: "reset", id: null }, mainTurnsAt: null });
+      expect(reset.state).toEqual({
+        step: 0,
+        since: null,
+        figures: [stalled(false)],
+        lastAction: { at: minutes(35).toISOString(), kind: "reset", id: null },
+        mainTurnsAt: null,
+        underSince: minutes(5).toISOString(),
+      });
     }
     // At rest, figures under their thresholds change nothing but the figures.
     expect(ladderStepOf(null, [stalled(false)], facts(T0))).toEqual({ state: { step: 0, since: null, figures: [stalled(false)], lastAction: null, mainTurnsAt: null }, action: "none" });
@@ -76,6 +87,35 @@ describe("ladderStepOf: the steps code takes (§9.3)", () => {
     const failed: FamilyState = { step: 1, since: T0.toISOString(), figures: [], lastAction: { at: T0.toISOString(), kind: "nudge-failed", id: null }, mainTurnsAt: null };
     expect(ladderStepOf(failed, [stalled(true)], facts(new Date(T0.getTime() + NUDGE_RETRY_MS - 1))).action).toBe("none");
     expect(ladderStepOf(failed, [stalled(true)], facts(new Date(T0.getTime() + NUDGE_RETRY_MS))).action).toBe("nudge");
+  });
+
+  it("keeps a family held for a spent pool at its step, with no retry, until the hold ends; the nudge then drops the hold (delivery line design §8.3)", () => {
+    const until = minutes(600).toISOString();
+    const held: FamilyState = { step: 1, since: T0.toISOString(), figures: [], lastAction: { at: T0.toISOString(), kind: "record", id: null }, mainTurnsAt: null, held: { pool: "codeNudge", until } };
+    expect(ladderStepOf(held, [stalled(true)], facts(minutes(30))).action).toBe("none");
+    expect(ladderStepOf(held, [stalled(true)], facts(minutes(599))).action).toBe("none");
+    const nudged = ladderStepOf(held, [stalled(true)], facts(minutes(600)));
+    expect(nudged.action).toBe("nudge");
+    expect(nudged.state.held).toBeUndefined();
+    // A reset drops the hold too.
+    const quiet = ladderStepOf(held, [stalled(false)], facts(minutes(30))).state;
+    expect(quiet.held).toEqual({ pool: "codeNudge", until });
+    expect(ladderStepOf(quiet, [stalled(false)], facts(minutes(60))).state.held).toBeUndefined();
+  });
+
+  it("keeps the step of a family whose figure flickers under and back: the quiet starts again (delivery line design §8.4)", () => {
+    const nudged = ladderStepOf(ladderStepOf(null, [stalled(true)], facts(T0, 10)).state, [stalled(true)], facts(minutes(1), 10)).state;
+    let state = nudged;
+    // Under for 20 minutes, crossed for one pass, under again: never 30 minutes in a row.
+    for (const [minute, crossed] of [[5, false], [25, false], [26, true], [27, false], [50, false]] as const) {
+      const next = ladderStepOf(state, [stalled(crossed)], facts(minutes(minute), 10));
+      expect(next.action, `minute ${minute}`).toBe("none");
+      state = next.state;
+    }
+    expect(state).toMatchObject({ step: 2, underSince: minutes(27).toISOString() });
+    // Crossing again drops the quiet.
+    expect(ladderStepOf(state, [stalled(true)], facts(minutes(51), 10)).state).not.toHaveProperty("underSince");
+    expect(ladderStepOf(state, [stalled(false)], facts(minutes(57), 10)).action).toBe("reset");
   });
 
   it("counts the window again from a bm_govern step on a family at step 1 or 2: both its minutes and its Main turns (governedLadderOf)", () => {
@@ -219,12 +259,16 @@ describe("the store and the runner on a data folder", () => {
 
     alerts.clearWhere((alert) => alert.subject === REQUEST);
     clock = minutes(3);
+    // Under its thresholds, but not yet for the window (delivery line design §8.4): the family stays at 2.
+    expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([]);
+    expect(createGovernorStore(home).ladder(MISSION_ID).stuck).toMatchObject({ step: 2, underSince: minutes(3).toISOString() });
+    clock = minutes(33);
     const third = await governor().recompute(MISSION_ID, paseo());
     expect(third?.actions).toEqual([{ family: "stuck", action: "reset", commandId: null, reason: null }]);
     expect(createGovernorStore(home).ladder(MISSION_ID).stuck).toMatchObject({ step: 0, since: null, lastAction: { kind: "reset" } });
     expect(journal().at(-1)?.text).toBe("stuck back under its thresholds");
-    // Back under within its window: the nudge met its outcome.
-    expect(checkInterventions(home, { now: () => minutes(3), log: () => {} }).map((entry) => [entry.kind, entry.outcome])).toEqual([["govern", "met"]]);
+    // Back under within its window (from minute 3), reset after the quiet: the nudge met its outcome.
+    expect(checkInterventions(home, { now: () => minutes(33), log: () => {} }).map((entry) => [entry.kind, entry.outcome])).toEqual([["govern", "met"]]);
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(logs).toEqual([]);
   });
@@ -252,6 +296,9 @@ describe("the store and the runner on a data folder", () => {
     expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([{ family: "drift", action: "record", commandId: null, reason: null }]);
     createCoordinationStore(home).set({ key: "governor.outsideCharter", value: 2 });
     clock = minutes(1);
+    expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([]);
+    // Under the owner's new threshold for the window: reset.
+    clock = minutes(31);
     expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([{ family: "drift", action: "reset", commandId: null, reason: null }]);
     expect(DEFAULT_COORDINATION_SETTINGS.governor.outsideCharter).toBe(1);
   });
@@ -268,6 +315,81 @@ describe("the store and the runner on a data folder", () => {
     clock = minutes(5);
     expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([]);
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("holds a family when the code-nudge pool is spent: one journal line, no retry, the Main's daily digest at most once in 24 hours (delivery line design §8.3)", async () => {
+    createAlertStore(home).raise({ workspaceId: "repo-a", kind: "request-stalled", subject: REQUEST });
+    const spend = (at: Date) => {
+      const store = createOrchestratorStore(home, { now: () => at });
+      for (let i = 0; i < 6; i += 1) {
+        store.appendCommand({ workspaceId: "home", managerId: "main-1", requestId: null, situation: "", command: "c", reason: "", sentText: "c", outcome: "sent", missionId: MISSION_ID, governorStep: "nudge", by: "code" });
+      }
+    };
+    spend(new Date(T0.getTime() - 3_600_000));
+    // Other pools spent take nothing from the code nudges' (a model's nudges count in other).
+    const others = createOrchestratorStore(home, { now: () => T0 });
+    for (let i = 0; i < 4; i += 1) {
+      others.appendCommand({ workspaceId: "home", managerId: "main-1", requestId: null, situation: "", command: "c", reason: "", sentText: "c", outcome: "sent", missionId: MISSION_ID, governorStep: "nudge", by: "model" });
+    }
+    await governor().recompute(MISSION_ID, paseo());
+
+    clock = minutes(1);
+    const until = new Date(T0.getTime() + 23 * 3_600_000).toISOString();
+    const first = await governor().recompute(MISSION_ID, paseo());
+    expect(first?.actions).toEqual([{ family: "stuck", action: "held", commandId: null, reason: `the code-nudge pool is spent until ${until}` }]);
+    expect(createGovernorStore(home).ladder(MISSION_ID).stuck).toMatchObject({ step: 1, held: { pool: "codeNudge", until }, lastAction: { kind: "record" } });
+    expect(journal().at(-1)?.text).toBe(`stuck: the code-nudge commands are spent until ${until}; held at step 1, in the Main's daily digest`);
+    // The digest: one message from the plugin to the Main, not a command.
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    const [target, , text] = enqueue.mock.calls[0]!;
+    expect(target).toBe("main-1");
+    expect(text).toMatch(/^BM-DELIVERY message out-[0-9a-f]{12}\n/);
+    expect(text).toContain("The governor's daily digest of mission PAY");
+    expect(text).toContain(`stuck (held until ${until}):`);
+    expect(text).toContain("- Charter: Goal: Ship card payments");
+    expect(parseCommandBlock(text)).toBeNull();
+    expect(first?.digest).toMatch(/^out-/);
+    expect(createOrchestratorStore(home).listCommands()).toHaveLength(10);
+
+    // Held: no retry after the 10 minutes, no second journal line, no second digest.
+    const lines = journal().length;
+    for (const at of [minutes(11), minutes(60)]) {
+      clock = at;
+      expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([]);
+    }
+    expect(journal()).toHaveLength(lines);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+
+    // The pool is spent again when the hold ends: held anew, still no digest within 24 hours of the first.
+    spend(new Date(T0.getTime() + 20 * 3_600_000));
+    clock = new Date(T0.getTime() + 23 * 3_600_000 + 60_000);
+    expect((await governor().recompute(MISSION_ID, paseo()))?.actions.map((entry) => entry.action)).toEqual(["held"]);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    clock = new Date(T0.getTime() + 24 * 3_600_000 + 120_000);
+    const later = await governor().recompute(MISSION_ID, paseo());
+    expect(later?.actions).toEqual([]);
+    expect(later?.digest).toMatch(/^out-/);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+
+    // The pool has room again: the family is nudged, and the hold is gone.
+    clock = new Date(T0.getTime() + 44 * 3_600_000 + 60_000);
+    const nudged = await governor().recompute(MISSION_ID, paseo());
+    expect(nudged?.actions.map((entry) => entry.action)).toEqual(["nudge"]);
+    expect(createGovernorStore(home).ladder(MISSION_ID).stuck).toMatchObject({ step: 2, lastAction: { kind: "nudge" } });
+    expect(createGovernorStore(home).ladder(MISSION_ID).stuck?.held).toBeUndefined();
+    expect(createOrchestratorStore(home).listCommands().find((entry) => entry.id === nudged!.actions[0]!.commandId)).toMatchObject({ governorStep: "nudge", by: "code" });
+    expect(logs).toEqual([]);
+  });
+
+  it("keeps the daily digests beside the ladders, and an older file without them still reads", () => {
+    const store = createGovernorStore(home);
+    expect(store.digestAt(MISSION_ID)).toBeNull();
+    store.put(MISSION_ID, {});
+    store.markDigest(MISSION_ID, T0.toISOString());
+    store.update(MISSION_ID, () => ({}));
+    expect(createGovernorStore(home).digestAt(MISSION_ID)).toBe(T0.toISOString());
+    writeFileSync(store.path, JSON.stringify({ version: 1, missions: {} }));
+    expect(createGovernorStore(home).digestAt(MISSION_ID)).toBeNull();
   });
 
   it("recomputes on a recorded turn of the mission's Worker or Main, and every open mission on the pass; never a closed one", async () => {

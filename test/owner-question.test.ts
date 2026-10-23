@@ -112,6 +112,58 @@ describe("bm_owner_question (design §4.6)", () => {
     expect((await tools().call("bm_owner_question", { answered: `m:${MISSION}:9`, option: "a" }, CALLER)).ok).toBe(false);
   });
 
+  describe("one card per question (delivery line design §7.2)", () => {
+    const workerQuestion = (over: Partial<Parameters<typeof makeDecision>[0]> = {}) =>
+      makeDecision({
+        id: `q:${REQ}:Q3`,
+        workspaceId: REPO,
+        requestId: REQ,
+        class: "release",
+        subject: "env-serve-local",
+        question: "Commit .env.serve.local?",
+        options: [
+          { key: "a", label: "Commit", recommended: true, effects: ["commit"] },
+          { key: "b", label: "Leave it untracked", recommended: false, effects: ["none"] },
+        ],
+        ...over,
+      });
+    const nothingStored = () => expect(createMissionDecisionStore(home).get(`m:${MISSION}:1`)).toBeNull();
+
+    it("a Main question of the same subject as an open Worker question is refused, the Main's recommendation attached to it", async () => {
+      createDecisionStore(home).open(workerQuestion());
+      const result = await tools().call("bm_owner_question", { question: "Should the env file be committed?", options: [{ label: "Commit" }, { label: "Leave it untracked", recommended: true }], class: "release", subject: "env-serve-local" }, CALLER);
+      expect(result).toEqual({ ok: false, text: `Refused: the Worker's question q:${REQ}:Q3 already asks the owner this. Your recommendation (b — Leave it untracked) is attached to it. Nothing new was stored.` });
+      expect(createDecisionStore(home).get(`q:${REQ}:Q3`, REPO)?.prediction?.main).toEqual({ optionKey: "b", reason: "Leave it untracked", at: NOW.toISOString() });
+      nothingStored();
+      // Asked again: the first recommendation stays.
+      const again = await tools().call("bm_owner_question", { question: "Commit .env.serve.local?", options: [{ label: "Commit", recommended: true }, { label: "No" }], class: "release" }, CALLER);
+      expect(again.text).toBe(`Refused: the Worker's question q:${REQ}:Q3 already asks the owner this. Your earlier recommendation (b — Leave it untracked) stays attached to it. Nothing new was stored.`);
+      expect(createDecisionStore(home).get(`q:${REQ}:Q3`, REPO)?.prediction?.main?.optionKey).toBe("b");
+      nothingStored();
+    });
+
+    it("the same text, or the question named by about.decisionId, is the same question; an option matches by label, else by key", async () => {
+      createDecisionStore(home).open(workerQuestion({ subject: null }));
+      const byText = await tools().call("bm_owner_question", { question: "commit  .ENV.serve.local", options: [{ label: "Yes, commit", recommended: true }, { label: "No" }], class: "release", subject: "other" }, CALLER);
+      expect(byText.text).toContain("Your recommendation (a — Yes, commit) is attached to it.");
+      createDecisionStore(home).open(workerQuestion({ id: `q:${REQ}:Q4`, subject: null, question: "Which branch?", options: [{ key: "a", label: "main", recommended: true, effects: ["none"] }, { key: "b", label: "dev", recommended: false, effects: ["none"] }] }));
+      const named = await tools().call("bm_owner_question", { question: "Where should the work land?", options: [{ label: "On main" }, { label: "On a feature branch", recommended: true }, { label: "On dev" }], class: "scope", about: { decisionId: `q:${REQ}:Q4` } }, CALLER);
+      expect(named.text).toBe(`Refused: the Worker's question q:${REQ}:Q4 already asks the owner this. Your recommendation (b — On a feature branch) is attached to it. Nothing new was stored.`);
+      expect(createDecisionStore(home).get(`q:${REQ}:Q4`, REPO)?.prediction?.main).toMatchObject({ optionKey: "b", reason: "On a feature branch" });
+      nothingStored();
+    });
+
+    it("a question no open Worker question asks is stored as before; an about naming nothing of the mission is refused", async () => {
+      createDecisionStore(home).open(workerQuestion());
+      const asked = await tools().call("bm_owner_question", { question: "Deploy now?", options: [{ label: "Deploy", recommended: true }, { label: "Wait" }], class: "release", subject: "deploy" }, CALLER);
+      expect(asked.ok).toBe(true);
+      expect(createMissionDecisionStore(home).get(`m:${MISSION}:1`)).toMatchObject({ status: "open", subject: "deploy" });
+      expect(createDecisionStore(home).get(`q:${REQ}:Q3`, REPO)?.prediction?.main ?? null).toBeNull();
+      const stranger = await tools().call("bm_owner_question", { question: "x?", options: [{ label: "a", recommended: true }, { label: "b" }], class: "scope", about: { requestId: "req-20260101T000000Z" } }, CALLER);
+      expect(stranger).toMatchObject({ ok: false, text: expect.stringContaining("about.requestId: req-20260101T000000Z is not a request of mission XAI") });
+    });
+  });
+
   it("an answer on the card is journaled and told to the Main", async () => {
     await tools().call("bm_owner_question", { question: "Open the MR?", options: [{ label: "Open it", recommended: true }, { label: "Wait" }], class: "release" }, CALLER);
     const id = `m:${MISSION}:1`;

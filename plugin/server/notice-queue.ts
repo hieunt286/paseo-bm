@@ -28,6 +28,14 @@
  *   own; `onDropped(targetId, kind, reason)` when a queued notice is dropped
  *   later (target gone, send failed). Neither is called for a notice replaced
  *   or forgotten by `clear()` (a reload), and a throw costs one log line.
+ *   `options.first` (delivery line design §6.6: maintenance, `BM-STATE`)
+ *   sends it before every other notice queued for the target, as a batch's
+ *   `first` group goes; among `first` notices the oldest goes first.
+ *   `options.isHeld` (delivery line design §6.4, the wake gate at the send):
+ *   read at the idle moment, synchronously, just before the send; true takes
+ *   the notice off the queue unsent and tells `callbacks.onHeld`, so its
+ *   sender keeps it in its own held state. A throw counts as false (it
+ *   goes). A notice held during the `enqueue` call answers `"queued"`.
  * - `retarget(oldId, newId, paseo?)` (missions design §3.4): when a Main is
  *   replaced, what is queued for the old one is queued for its successor.
  * - `noticeQueue`: the one shared queue `enqueue` uses. `createNoticeQueue()`
@@ -51,7 +59,9 @@
  *   that item as a single notice's are (mission runtime design §6.2: the
  *   Main's channel settles each outbox record it carries): `onSent` once its
  *   message went out, `onDropped` when it is dropped (target gone, send
- *   failed, or its subject settled before delivery).
+ *   failed, or its subject settled before delivery). An item's `isHeld` is
+ *   read as a single notice's is: a held item leaves the message, and its
+ *   `onHeld` is told.
  * - `registerNoticeQueue(host)` → `{ host, remove }`: the queue does not add a
  *   lifecycle hook of its own. It rides on an existing `agent.turn_ended` hook:
  *   pass the returned `host` to the module that registers one (index.server.ts
@@ -67,8 +77,8 @@
  * - **One notice per idle moment.** The notice sent starts a turn on the
  *   target, and a second `send()` would replace that turn; so each chance
  *   sends the oldest queued notice only — a batch group counts as one notice,
- *   at the place of its oldest item, and a `first` group goes ahead of the
- *   rest — and that turn's end carries the next
+ *   at the place of its oldest item, and a `first` group or notice goes
+ *   ahead of the rest — and that turn's end carries the next
  *   (the lesson `review-budget.ts` records). Queued notices therefore go out
  *   in order, one turn apart. A send that fails costs one log line and drops
  *   that notice; the next queued one is tried at once, after a fresh
@@ -155,6 +165,8 @@ export interface BatchItem {
   first?: boolean;
   /** What this item's sender is told of it, as for a single notice (mission runtime design §6.2). */
   callbacks?: NoticeCallbacks;
+  /** The wake gate at the send (delivery line design §6.4), read as `EnqueueOptions.isHeld` is. */
+  isHeld?: () => boolean;
 }
 
 /** What a single notice's sender is told about it later (design §16.7). */
@@ -163,11 +175,21 @@ export interface NoticeCallbacks {
   onSent?(targetId: string, kind: NoticeKind): void;
   /** The notice was dropped: the target is archived, closed or gone, or the send failed. */
   onDropped?(targetId: string, kind: NoticeKind, reason: string): void;
+  /** Its `isHeld` held it at the send (delivery line design §6.4): it left the queue unsent; the sender holds it. */
+  onHeld?(targetId: string, kind: NoticeKind): void;
+}
+
+/** How a single notice is queued. */
+export interface EnqueueOptions {
+  /** It goes before every other notice queued for the target (delivery line design §6.6). */
+  first?: boolean;
+  /** Read just before the send: true holds it instead (delivery line design §6.4: the wake gate at the send). */
+  isHeld?: () => boolean;
 }
 
 export interface NoticeQueue {
   /** Sends now when the target is idle, otherwise holds the notice for its next turn end. Never rejects. */
-  enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks): Promise<NoticeOutcome>;
+  enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks, options?: EnqueueOptions): Promise<NoticeOutcome>;
   /** Queues every item, then delivers once: the batched items pending at the idle moment go as one message. Never rejects. */
   enqueueBatch(targetId: string, batch: NoticeBatch, items: readonly BatchItem[], paseo?: NoticePaseo): Promise<NoticeOutcome[]>;
   /** One `agent.turn_ended`: delivers the ended agent's queued notices when it is idle. Never rejects. */
@@ -191,13 +213,14 @@ export interface NoticeQueueDeps {
 }
 
 interface Entry extends QueuedNotice {
-  state: "queued" | "sending" | NoticeOutcome;
-  /** Set on a batched item: its batch, its own key, and whether it is still worth sending. */
+  state: "queued" | "sending" | "held" | NoticeOutcome;
+  /** Set on a batched item: its batch, its own key, and whether it is still worth sending; `first` on a single notice too. */
   batch?: NoticeBatch;
   itemKey?: string;
   isCurrent?: () => boolean;
   group?: string;
   first?: boolean;
+  isHeld?: () => boolean;
   /** Set on a notice, single or batched, whose sender wants its outcome. */
   callbacks?: NoticeCallbacks;
 }
@@ -226,6 +249,11 @@ function isBusy(status: string | null | undefined): boolean {
   return status === "running" || status === "initializing";
 }
 
+/** What an enqueue answers for its entry: one being sent, or held by its sender at the send, is `queued` (told later or told already). */
+function outcomeOf(entry: Entry): NoticeOutcome {
+  return entry.state === "sending" || entry.state === "held" ? "queued" : entry.state;
+}
+
 export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
   const log = deps.log ?? ((message: string) => console.warn(message));
   /** Target agent id → its queued notices, oldest first. */
@@ -251,11 +279,14 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     queued.set(targetId, kept);
   }
 
-  function take(targetId: string): Entry | undefined {
+  /** Takes `entry` off the target's queue; other notices stay in order. */
+  function take(targetId: string, entry: Entry | undefined): Entry | undefined {
     const list = queued.get(targetId);
-    const first = list?.shift();
-    if (list !== undefined && list.length === 0) queued.delete(targetId);
-    return first;
+    const index = entry === undefined || list === undefined ? -1 : list.indexOf(entry);
+    if (index === -1) return undefined;
+    list!.splice(index, 1);
+    if (list!.length === 0) queued.delete(targetId);
+    return entry;
   }
 
   /** Takes every queued item of `name` and `group` for the target, in order; other notices stay. */
@@ -279,10 +310,22 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     }
   }
 
+  /** The wake gate at the send (delivery line design §6.4): true holds the entry; a throw lets it go. */
+  function heldNow(entry: Entry): boolean {
+    if (entry.isHeld === undefined) return false;
+    try {
+      return entry.isHeld() === true;
+    } catch (error) {
+      log(`[paseo-bm] could not tell whether the ${entry.kind} notice is held: ${errorText(error)}; it goes.`);
+      return false;
+    }
+  }
+
   /** Tells a single notice's sender what became of it; a throw is logged. */
-  function tell(targetId: string, entry: Entry, outcome: "sent" | "dropped", reason = ""): void {
+  function tell(targetId: string, entry: Entry, outcome: "sent" | "dropped" | "held", reason = ""): void {
     try {
       if (outcome === "sent") entry.callbacks?.onSent?.(targetId, entry.kind);
+      else if (outcome === "held") entry.callbacks?.onHeld?.(targetId, entry.kind);
       else entry.callbacks?.onDropped?.(targetId, entry.kind, reason);
     } catch (error) {
       log(`[paseo-bm] after the ${entry.kind} notice to ${targetId} was ${outcome}: ${errorText(error)}`);
@@ -300,10 +343,10 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     for (const entry of list) tell(targetId, entry, "dropped", "the target is archived, closed or gone");
   }
 
-  /** The notice that goes next: the oldest item of a `first` group, else the oldest notice. */
+  /** The notice that goes next: the oldest `first` notice or item of a `first` group, else the oldest notice. */
   function headOf(targetId: string): Entry | undefined {
     const list = queued.get(targetId);
-    return list?.find((entry) => entry.first === true && entry.batch !== undefined) ?? list?.[0];
+    return list?.find((entry) => entry.first === true) ?? list?.[0];
   }
 
   /** One look at the target: sends its next notice (`headOf`) when it is idle. */
@@ -327,11 +370,17 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     const group = next?.group ?? "";
     // A batch: every item of its group pending now, less those whose subject settled, as one message.
     // Taken and judged synchronously right after the idle read, so nothing is added or settles in between.
-    const entries = batch === undefined ? [take(targetId)].filter((entry): entry is Entry => entry !== undefined) : takeBatch(targetId, batch.name, group);
+    const entries = batch === undefined ? [take(targetId, next)].filter((entry): entry is Entry => entry !== undefined) : takeBatch(targetId, batch.name, group);
     const sending = entries.filter((entry) => {
-      if (stillCurrent(entry)) return true;
-      entry.state = "dropped";
-      tell(targetId, entry, "dropped", "its subject settled before delivery");
+      if (!stillCurrent(entry)) {
+        entry.state = "dropped";
+        tell(targetId, entry, "dropped", "its subject settled before delivery");
+        return false;
+      }
+      // Delivery line design §6.4: the wake gate decides again at the send, not only when it was queued.
+      if (!heldNow(entry)) return true;
+      entry.state = "held";
+      tell(targetId, entry, "held");
       return false;
     });
     if (entries.length === 0) return "empty";
@@ -393,7 +442,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     }
   }
 
-  async function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks): Promise<NoticeOutcome> {
+  async function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks, options?: EnqueueOptions): Promise<NoticeOutcome> {
     try {
       if (!nonEmpty(targetId) || !nonEmpty(kind) || !nonEmpty(text)) {
         log("[paseo-bm] a plugin notice without a target, a kind or a text was not queued.");
@@ -401,10 +450,12 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       }
       const entry: Entry = { kind, text, state: "queued" };
       if (callbacks !== undefined) entry.callbacks = callbacks;
+      if (options?.first === true) entry.first = true;
+      if (typeof options?.isHeld === "function") entry.isHeld = options.isHeld;
       put(targetId, entry);
       const handle = handleFor(paseo);
       if (handle !== null) await deliver(targetId, handle);
-      return entry.state === "sending" ? "queued" : entry.state;
+      return outcomeOf(entry);
     } catch (error) {
       log(`[paseo-bm] queueing the ${String(kind)} notice for ${String(targetId)} failed: ${errorText(error)}`);
       return "dropped";
@@ -428,6 +479,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         if (typeof item.isCurrent === "function") entry.isCurrent = item.isCurrent;
         if (nonEmpty(item.group)) entry.group = item.group;
         if (item.first === true) entry.first = true;
+        if (typeof item.isHeld === "function") entry.isHeld = item.isHeld;
         if (item.callbacks !== undefined) entry.callbacks = item.callbacks;
         put(targetId, entry);
         return entry;
@@ -435,7 +487,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       if (entries.includes(null)) log(`[paseo-bm] ${batch.name}: an item without a key or a line was not queued.`);
       const handle = handleFor(paseo);
       if (handle !== null && entries.some((entry) => entry !== null)) await deliver(targetId, handle);
-      return entries.map((entry) => (entry === null ? "dropped" : entry.state === "sending" ? "queued" : entry.state));
+      return entries.map((entry) => (entry === null ? "dropped" : outcomeOf(entry)));
     } catch (error) {
       log(`[paseo-bm] queueing the ${String(batch?.name)} batch for ${String(targetId)} failed: ${errorText(error)}`);
       return items.map(() => "dropped");
@@ -501,8 +553,8 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
 export const noticeQueue: NoticeQueue = createNoticeQueue();
 
 /** `noticeQueue.enqueue`: send now when `targetId` is idle, otherwise at its next turn end. Never rejects. */
-export function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks): Promise<NoticeOutcome> {
-  return noticeQueue.enqueue(targetId, kind, text, paseo, callbacks);
+export function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks, options?: EnqueueOptions): Promise<NoticeOutcome> {
+  return noticeQueue.enqueue(targetId, kind, text, paseo, callbacks, options);
 }
 
 export type NoticeHost = Partial<Pick<PluginServerContext, "on">>;

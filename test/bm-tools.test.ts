@@ -8,6 +8,12 @@ import {
   BOUND_REPORT_TOOL,
   QUESTIONS_FACE,
   TELL_WORKER_FACE,
+  MESSAGE_ACTS,
+  MISSION_LINK_FACES,
+  NO_TURN_ACTS,
+  actHeaderOf,
+  boundToolFacesFor,
+  refIdsOf,
   questionsRules,
   MANAGER_SERVER_TOOLS,
   ORCHESTRATOR_SERVER_TOOLS,
@@ -64,6 +70,34 @@ describe("bm_report", () => {
     expect(full).toContain("blockers: none. Suggestion (not done): rename the helper");
     const [report] = parseReports(full, { agentId: "w", at: "" });
     expect(report).toMatchObject({ requestId: REQ, phase: "finished", beadsClosed: ["bm-uepx.1", "bm-uepx.2"] });
+  });
+
+  it("writes the git fields last, read back by the parser; a report without them keeps its shape (delivery line design §4.4)", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const mr = "https://gitlab.example.com/group/fe/-/merge_requests/7";
+    const built = text(run("bm_report", { ...base, phase: "finished", filesChanged: ["src/a.ts"], integration: { branch: "m/ABC/fe", commit: sha.toUpperCase(), pushed: true, mr, ci: "success" } }));
+    clean(built);
+    expect(built.split("\n").slice(-5)).toEqual(["branch: m/ABC/fe", `commit: ${sha}`, "pushed: yes", `mr: ${mr}`, "ci: success"]);
+    expect(parseReports(built, { agentId: "w", at: "" })[0]).toMatchObject({ phase: "finished", integration: { branch: "m/ABC/fe", commit: sha, pushed: true, mr, ci: "success" }, unparsedFields: [] });
+    // mr and ci only when known; the bound tool writes the same lines.
+    const local = text(BOUND_REPORT_TOOL.run({ ...base, phase: "finished", integration: { branch: "m/ABC/fe", commit: "abc1234", pushed: false } }));
+    clean(local);
+    expect(local.split("\n").slice(-3)).toEqual(["branch: m/ABC/fe", "commit: abc1234", "pushed: no"]);
+    expect(parseReports(local, { agentId: "w", at: "" })[0]?.integration).toEqual({ branch: "m/ABC/fe", commit: "abc1234", pushed: false });
+    const plain = text(run("bm_report", { ...base, phase: "finished" }));
+    expect(plain).not.toMatch(/^(?:branch|commit|pushed|mr|ci):/m);
+    expect(parseReports(plain, { agentId: "w", at: "" })[0]).not.toHaveProperty("integration");
+    // The schema: a sha of 7-40 hex digits, a URL, a known CI state, the three required fields.
+    const issues = (integration: unknown) => {
+      const result = run("bm_report", { ...base, phase: "finished", integration });
+      return result.ok ? [] : result.issues;
+    };
+    expect(issues({ branch: "m/ABC/fe", commit: "abc12", pushed: true })[0]).toMatch(/^input\.integration\.commit: must match/);
+    expect(issues({ branch: "m/ABC/fe", commit: "g".repeat(7), pushed: true })[0]).toMatch(/^input\.integration\.commit: must match/);
+    expect(issues({ branch: "m/ABC/fe", commit: "abc1234", pushed: true, mr: "gitlab mr 7" })[0]).toMatch(/^input\.integration\.mr: must match/);
+    expect(issues({ branch: "m/ABC/fe", commit: "abc1234", pushed: true, ci: "green" })[0]).toMatch(/^input\.integration\.ci: must be one of none, pending, success, failure, not-run/);
+    expect(issues({ branch: "m/ABC/fe", commit: "abc1234" })[0]).toMatch(/^input\.integration\.pushed: /);
+    expect(issues({ branch: "m/ABC/fe", commit: "abc1234", pushed: true, ci: "none" })).toEqual([]);
   });
 
   it("adds the handoff note, when asked, as its last field: one line, masked by the collector, read back by the parser (autonomy design §G.6)", () => {
@@ -267,29 +301,53 @@ describe("the bound tools (design §16.6)", () => {
     expect(issues({ ...base, phase: "blocked", waitingFor: "x".repeat(501) })).toEqual(["input.waitingFor: must be at most 500 characters"]);
   });
 
-  it("bm_questions' rules: one recommended, keys in order, a grant only on review-budget, at least one there, and exactly one kind of grant", () => {
+  it("a bound blocked report waits on requests and batches by id, with wakeOn (delivery line design §6.2)", () => {
+    const OTHER = "req-20260924T000000Z";
+    const issues = (input: unknown) => {
+      const result = bound(input);
+      return result.ok ? [] : result.issues;
+    };
+    const block = text(bound({ ...base, phase: "blocked", waitingOnRequests: [OTHER, OTHER], waitingOnBatches: ["b2"], wakeOn: "any" }));
+    clean(block);
+    expect(block).toContain(`blockers: waiting on requests: ${OTHER}. waiting on review: b2. wake on: any`);
+    expect(text(bound({ ...base, phase: "blocked", waitingOnBatches: ["b1"] }))).toMatch(/^blockers: waiting on review: b1$/m);
+    // wakeOn all is the default and is not written.
+    expect(text(bound({ ...base, phase: "blocked", waitingOnRequests: [OTHER], wakeOn: "all" }))).toMatch(new RegExp(`^blockers: waiting on requests: ${OTHER}$`, "m"));
+    expect(issues({ ...base, phase: "blocked", wakeOn: "any" })[0]).toMatch(/^input\.waitingOn: a blocked report names what it waits on: waitingOn \(open questions from bm_questions\), waitingOnRequests/);
+    expect(issues({ ...base, phase: "blocked", waitingOnRequests: [REQ] })).toEqual([`input.waitingOnRequests[0]: ${REQ} is your own request; name what it waits on instead`]);
+    expect(issues({ ...base, phase: "finished", waitingOnBatches: ["b1"], wakeOn: "all" })).toEqual([
+      "input.waitingOnBatches: only a blocked report waits; leave it out",
+      "input.wakeOn: only a blocked report waits; leave it out",
+    ]);
+    expect(issues({ ...base, phase: "blocked", waitingOnRequests: Array.from({ length: 11 }, (_, i) => `req-20260924T0000${String(i).padStart(2, "0")}Z`) })).toEqual([
+      "input.waitingOnRequests: takes at most 10 items",
+    ]);
+    expect(issues({ ...base, phase: "blocked", waitingOnBatches: ["b1", "b2", "b3", "b4", "b5", "b6"] })).toEqual(["input.waitingOnBatches: takes at most 5 items"]);
+    expect(issues({ ...base, phase: "blocked", waitingOnBatches: ["batch-1"] })[0]).toMatch(/^input\.waitingOnBatches\[0\]: must match/);
+    expect(issues({ ...base, phase: "blocked", waitingOnRequests: [OTHER], wakeOn: "first" })[0]).toMatch(/^input\.wakeOn: must be one of/);
+  });
+
+  it("bm_questions' rules: one recommended, keys in order; no grant, and no review-cap or review-budget subject (delivery line design §5.4, §5.6)", () => {
     const options = (over: Array<Record<string, unknown>> = []) => [
       { key: "a", text: "Yes", effects: ["none"], recommended: true, ...over[0] },
       { key: "b", text: "No", effects: ["none"], ...over[1] },
     ];
-    const question = (over: Record<string, unknown> = {}) => ({ text: "More reviews?", subject: "review-budget", class: "cost", options: options([{ grant: { calls: 2 } }]), ...over });
+    const question = (over: Record<string, unknown> = {}) => ({ text: "Which table?", subject: "user-list-storage", class: "data", options: options(), ...over });
     expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: [question()] })).toEqual([]);
     expect(questionsRules({ questions: [question()] } as never)).toEqual([]);
-    // Acceptance finding F1: a review-budget question with no grant on any option lets the owner's yes grant nothing.
-    expect(questionsRules({ questions: [question({ options: options() })] } as never)).toEqual([
-      'input.questions[0].options: a "review-budget" question gives at least one option a grant ({ calls: n } or { untilClean: "<batchId>" }); without one, the owner\'s yes grants nothing',
+    // Past the review cap paseo-bm asks the owner itself; the Worker asks neither subject, and no option grants.
+    expect(questionsRules({ questions: [question({ subject: "review-cap", class: "cost" })] } as never)).toEqual([
+      'input.questions[0].subject: "review-cap" is a question paseo-bm itself asks the owner, once, at your request\'s review cap',
     ]);
-    expect(questionsRules({ questions: [question({ subject: "push", options: options() })] } as never)).toEqual([]);
-    expect(questionsRules({ questions: [question({ options: options([{ grant: { calls: 2 } }, { grant: { untilClean: "b1" } }]) })] } as never)).toEqual([]);
-    expect(questionsRules({ questions: [question({ subject: "push", options: options([{ grant: { calls: 2 } }]) })] } as never)).toEqual([
-      'input.questions[0].options[0].grant: only a question of subject "review-budget" grants',
+    expect(questionsRules({ questions: [question({ subject: "review-budget", class: "cost" })] } as never)).toEqual([
+      "input.questions[0].subject: review budgets are retired: paseo-bm asks once, at the request's review cap",
     ]);
-    expect(questionsRules({ questions: [question({ options: options([{ grant: {} }]) })] } as never)).toEqual(["input.questions[0].options[0].grant: give exactly one of calls or untilClean"]);
-    expect(questionsRules({ questions: [question({ options: options([{ recommended: false, grant: { calls: 2 } }]) })] } as never)).toEqual(["input.questions[0].options: exactly one option is recommended (found 0)"]);
-    expect(questionsRules({ questions: [question({ options: options([{ grant: { calls: 2 } }, { key: "c" }]) })] } as never)).toEqual(["input.questions[0].options[1].key: must be b (keys run a, b, c … in order)"]);
-    expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: [question({ options: options([{ grant: { calls: 11 } }]) })] })).toEqual([
-      "input.questions[0].options[0].grant.calls: must be at most 10",
+    expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: [question({ options: options([{ grant: { calls: 2 } }]) })] })).toEqual([
+      "input.questions[0].options[0].grant: is not a field of this tool",
     ]);
+    expect(QUESTIONS_FACE.description).not.toMatch(/untilClean|grant/);
+    expect(questionsRules({ questions: [question({ options: options([{ recommended: false }]) })] } as never)).toEqual(["input.questions[0].options: exactly one option is recommended (found 0)"]);
+    expect(questionsRules({ questions: [question({ options: options([{}, { key: "c" }]) })] } as never)).toEqual(["input.questions[0].options[1].key: must be b (keys run a, b, c … in order)"]);
     expect(schemaIssues(QUESTIONS_FACE.inputSchema, { questions: Array.from({ length: 6 }, () => question()) })).toEqual(["input.questions: takes at most 5 items"]);
   });
 
@@ -299,6 +357,43 @@ describe("the bound tools (design §16.6)", () => {
       "input.text: must be at most 8000 characters",
       "input.source: must be at most 300 characters",
     ]);
+  });
+});
+
+describe("typed messages (delivery line design §9.1)", () => {
+  const face = (role: "manager" | "worker", name: string) => boundToolFacesFor(role).find((entry) => entry.name === name)!;
+
+  it("bm_peer_reply and bm_ask_mission take act and refs; bm_tell_worker and bm_link_workers take refs only", () => {
+    expect(MESSAGE_ACTS).toEqual(["ask", "answer", "agree", "ack", "close", "supersede"]);
+    expect(NO_TURN_ACTS).toEqual(["ack", "close"]);
+    for (const role of ["manager", "worker"] as const) {
+      const reply = face(role, "bm_peer_reply").inputSchema.properties!;
+      expect(Object.keys(reply)).toEqual(["linkId", "text", "act", "refs", "close"]);
+      expect(reply["act"]!.enum).toEqual(MESSAGE_ACTS);
+    }
+    const ask = MISSION_LINK_FACES.find((entry) => entry.name === "bm_ask_mission")!.inputSchema.properties!;
+    expect(Object.keys(ask)).toEqual(["mission", "text", "kind", "act", "refs"]);
+    const link = MISSION_LINK_FACES.find((entry) => entry.name === "bm_link_workers")!.inputSchema.properties!;
+    expect(Object.keys(link)).toEqual(["requestIds", "topic", "refs"]);
+    expect(TELL_WORKER_FACE.inputSchema.properties!["refs"]).toBe(link["refs"]);
+    expect(TELL_WORKER_FACE.inputSchema.properties!["act"]).toBeUndefined();
+  });
+
+  it("refs: at most 10 ids of each kind, each of its shape", () => {
+    const schema = face("worker", "bm_peer_reply").inputSchema;
+    const base = { linkId: "peer-000000000001", text: "x" };
+    expect(schemaIssues(schema, { ...base, act: "agree", refs: { contracts: ["C2@v3"], records: ["out-0123456789ab"], decisions: ["q:req-20261009T100000Z:Q1", "m:mis-0123456789:2", "arb-0123456789"] } })).toEqual([]);
+    expect(schemaIssues(schema, { ...base, refs: { contracts: Array.from({ length: 11 }, (_, n) => `C${n + 1}@v1`) } })).toEqual(["input.refs.contracts: takes at most 10 items"]);
+    expect(schemaIssues(schema, { ...base, refs: { contracts: ["C2"], records: ["peer-000000000001"], other: [] } }).length).toBe(3);
+    expect(schemaIssues(schema, { ...base, act: "maybe" })).toHaveLength(1);
+  });
+
+  it("the header line: act, then every id refs names", () => {
+    expect(actHeaderOf("agree", { contracts: ["C2@v3"] })).toBe("act: agree · refs: C2@v3");
+    expect(actHeaderOf("ack", undefined)).toBe("act: ack");
+    expect(actHeaderOf(null, { records: ["out-0123456789ab"], decisions: ["m:mis-0123456789:2"], contracts: ["C1@v1"] })).toBe("refs: C1@v1, out-0123456789ab, m:mis-0123456789:2");
+    expect(actHeaderOf(null, {})).toBeNull();
+    expect(refIdsOf(undefined)).toEqual([]);
   });
 });
 

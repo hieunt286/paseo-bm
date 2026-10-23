@@ -38,11 +38,14 @@ import { z } from "zod";
 import { parentOf } from "./agent-role";
 import { createBindingStore, liveBindingOf, type AgentBinding } from "./agent-bindings";
 import { assertNoSymlink, clearJsonFileCache, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
-import { clearRequestIndexCache, missionManagerOf, requestIndex } from "./mission-roster";
+import { clearRequestIndexCache, missionManagerOf, requestIndex, requestIndexOf } from "./mission-roster";
 import { createOutbox, isOpenRecord } from "./outbox";
 import { dataHome } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, readRecords } from "./trace-store";
+import { parseReviews } from "../shared/bm-report";
+import { REVIEW_MILESTONES, type ReviewMilestone } from "../shared/bm-tools";
 import { timeOrZero } from "../shared/time";
+import { settleItemsOf, waitingSchema, type WaitItem, type Waiting } from "../shared/waits";
 
 /** The registry's folder in the data folder (§16.4); the cleanup button deletes it (§7.13.7). */
 export const REQUESTS_DIR_NAME = "requests";
@@ -61,6 +64,32 @@ const reviewCallSchema = z.object({
   kind: z.enum(["create", "rereview"]),
   reviewerId: z.string(),
   at: z.string(),
+  /** Delivery line design §17.2: the working tree at the call, as a git tree object id; none without git or from an older build. */
+  tree: z.string().optional(),
+});
+
+/**
+ * One result of a batch (delivery line design §5.2): a review record's verdict
+ * and blocking count, or a no-verdict (`verdict: "no-verdict"`, `blocking:
+ * null`). The convergence rule reads them; never the outbox, which keeps
+ * records for 7 days.
+ */
+const reviewResultSchema = z.object({
+  at: z.string(),
+  recordId: z.string(),
+  verdict: z.string(),
+  blocking: z.number().int().nonnegative().nullable(),
+});
+
+const reviewBatchSchema = z.object({
+  batchId: z.string(),
+  reviewerIds: z.array(z.string()),
+  brief: z.string(),
+  calls: z.array(reviewCallSchema),
+  /** Delivery line design §5.1: the batch's milestone; none on a batch an older build opened. */
+  milestone: z.enum(REVIEW_MILESTONES).optional(),
+  /** Delivery line design §5.2: its results, oldest first; none on a batch an older build opened (read from the trace instead). */
+  results: z.array(reviewResultSchema).optional(),
 });
 
 const requestSchema = z.object({
@@ -75,12 +104,68 @@ const requestSchema = z.object({
   tier: z.enum(["Small", "Medium", "Large"]).nullable(),
   finishedAt: z.string().nullable(),
   reviews: z.object({
-    batches: z.array(z.object({ batchId: z.string(), reviewerIds: z.array(z.string()), brief: z.string(), calls: z.array(reviewCallSchema) })),
+    batches: z.array(reviewBatchSchema),
     grants: z.array(z.object({ decisionId: z.string(), calls: z.number().int().nullable(), untilCleanBatch: z.string().nullable() })),
   }),
+  /** Delivery line design §2.2: the request this one continues; absent on the first of a chain. */
+  continuationOf: z.string().regex(REQUEST_ID_PATTERN).optional(),
+  /** Delivery line design §2.2: the first request of the chain; absent = the request itself. */
+  chainRootId: z.string().regex(REQUEST_ID_PATTERN).optional(),
+  /** Delivery line design §2.2: the request that continues this one, set on the predecessor. */
+  continuedBy: z.string().regex(REQUEST_ID_PATTERN).optional(),
+  /** Delivery line design §2.2: why this request was continued, by what figure, and when. */
+  rollover: z.object({ reason: z.enum(["follow-up", "size"]), figure: z.string(), at: z.string() }).optional(),
+  /** Delivery line design §2.6: the newest rollover notice its Worker got (`soft` or `now`), at what figure, and when. */
+  rolloverAsked: z.object({ level: z.enum(["soft", "now"]), figure: z.string(), at: z.string() }).optional(),
+  /** Delivery line design §6.2: what a `blocked` report waits on, by id; absent (or null) = no structured wait. */
+  waiting: waitingSchema.nullable().optional(),
+  /**
+   * Delivery line design §4.8: the workspaces it was moved out of (`move`), oldest first; its outbox
+   * records and traces stay readable under those. Absent: it never moved.
+   */
+  movedFrom: z.array(z.object({ workspaceId: z.string().min(1), at: z.string() })).optional(),
 });
 
 export type RegisteredRequest = z.infer<typeof requestSchema>;
+
+/**
+ * True for a bound request (delivery line design §2.3): one the plugin's tools
+ * created (`bm_create_worker` → `generate`, `source: "tool"`). Its `finished`
+ * and `stopped` are terminal; a hand-written (`agent-typed`) or backfilled one
+ * keeps today's reopening. Pure.
+ */
+export function isBoundRequest<T extends Pick<RegisteredRequest, "source">>(request: T | null | undefined): request is T {
+  return request?.source === "tool";
+}
+
+/**
+ * A request's place in its chain (delivery line design §2.7): 2 for the first
+ * continuation, walking `previousOf` back from the request it continues
+ * (`continuationOf`) until a request continues none or is not known; null
+ * when it continues none. Bounded against a loop. Pure.
+ */
+export function chainPositionOf(continuationOf: string | null | undefined, previousOf: (requestId: string) => string | null | undefined): number | null {
+  if (continuationOf === null || continuationOf === undefined) return null;
+  const seen = new Set<string>();
+  let position = 1;
+  let previous: string | null | undefined = continuationOf;
+  while (previous !== null && previous !== undefined && !seen.has(previous) && position < 1_000) {
+    seen.add(previous);
+    position += 1;
+    previous = previousOf(previous);
+  }
+  return position;
+}
+
+/**
+ * The refusal of a later `bm_report` on a finished bound request (delivery
+ * line design §2.3): it names the request that goes on with its work, or the
+ * Main. Pure.
+ */
+export function finishedRequestRefusal(request: Pick<RegisteredRequest, "requestId" | "continuedBy">): string {
+  const next = request.continuedBy === undefined ? "ask your Main" : `its work goes on as ${request.continuedBy}`;
+  return `Request ${request.requestId} is finished; ${next}. Nothing was stored or sent.`;
+}
 
 interface RegistryFile {
   requests: RegisteredRequest[];
@@ -176,8 +261,13 @@ export interface RequestRegistry {
   get(workspaceId: string, requestId: string): RegisteredRequest | null;
   /** True when the workspace's registry holds `requestId`. Never throws. */
   has(workspaceId: string, requestId: string): boolean;
-  /** A new request with a fresh id (`source: "tool"`), with its mission when it has one (§2.3). Throws when the file cannot be written. */
-  generate(workspaceId: string, init: { managerId: string | null; missionId?: string | null }): RegisteredRequest;
+  /**
+   * A new request with a fresh id (`source: "tool"`), with its mission when it
+   * has one (§2.3), and for a continuation the request it continues and its
+   * chain's root (delivery line design §2.2). Throws when the file cannot be
+   * written.
+   */
+  generate(workspaceId: string, init: { managerId: string | null; missionId?: string | null; continuationOf?: string; chainRootId?: string }): RegisteredRequest;
   /**
    * Registers `requestId` when the workspace does not hold it yet, and adds
    * `workerId` to its Workers (newest last) and `managerId` when it has none.
@@ -198,10 +288,24 @@ export interface RequestRegistry {
    * A report of the request was stored (design §16.6, `bm_report`): `tier`
    * becomes the report's, and `finishedAt` is `at` for a `finished` report and
    * null for any other phase (a request its Worker goes on with is not
-   * finished; a stopped one is not either). False when the request is not
-   * registered. Throws when the file cannot be written.
+   * finished; a stopped one is not either). A bound request's `finishedAt`,
+   * once set, is never cleared (delivery line design §2.3). False when the
+   * request is not registered. Throws when the file cannot be written.
    */
   noteReport(workspaceId: string, requestId: string, report: { tier: "Small" | "Medium" | "Large"; phase: string; at: string }): boolean;
+  /**
+   * Delivery line design §2.2, §2.4: the request `continuedBy` continues this
+   * one, why and by what figure. False when the request is not registered.
+   * Throws when the file cannot be written.
+   */
+  noteContinuedBy(workspaceId: string, requestId: string, continuedBy: string, rollover: NonNullable<RegisteredRequest["rollover"]>): boolean;
+  /**
+   * Delivery line design §2.6: a rollover notice went to the request's Worker;
+   * null forgets it (a soft notice the wake gate held at its send, asked again
+   * later). False when the request is not registered. Throws when the file
+   * cannot be written.
+   */
+  noteRolloverAsked(workspaceId: string, requestId: string, asked: NonNullable<RegisteredRequest["rolloverAsked"]> | null): boolean;
   /**
    * Records one review call (design §16.8), in one write: `bm_create_reviewer`
    * opens the batch with its brief (`kind: create`, refused with
@@ -216,7 +320,15 @@ export interface RequestRegistry {
     batchId: string,
     call: ReviewCall,
     brief?: string,
+    milestone?: ReviewMilestone,
   ): "added" | "no-request" | "no-batch" | "batch-taken";
+  /**
+   * Appends one result to its batch (delivery line design §5.2), once per
+   * record. A batch an older build opened has no `results` and gets none
+   * (`"older-batch"`): its results are read from the trace. Throws when the
+   * file cannot be written.
+   */
+  addReviewResult(workspaceId: string, requestId: string, batchId: string, result: ReviewResult): "added" | "known" | "no-request" | "no-batch" | "older-batch";
   /**
    * A failed creation or send removes its call (design §16.8); a batch left
    * with neither a call nor a Reviewer goes with it. Throws when the file
@@ -233,16 +345,48 @@ export interface RequestRegistry {
    * per decision. Throws when the file cannot be written.
    */
   addGrant(workspaceId: string, requestId: string, grant: ReviewBudgetGrant): "added" | "known" | "no-request";
+  /**
+   * Delivery line design §6.2: the request's structured wait — set by a
+   * `blocked` report, cleared (null) by any other report or by the wake; a
+   * cleared wait leaves no key. False when the request is not registered.
+   * Throws when the file cannot be written.
+   */
+  setWaiting(workspaceId: string, requestId: string, waiting: Waiting | null): boolean;
+  /**
+   * Delivery line design §6.3: the unsettled items of the request's wait that
+   * `match` takes become settled at `settle.at`, with their fact. The wait as
+   * it is now, or null when none changed (no wait, no such item). Throws when
+   * the file cannot be written.
+   */
+  settleWaitItems(workspaceId: string, requestId: string, match: (item: WaitItem) => boolean, settle: { at: string; fact?: string | ((item: WaitItem) => string | undefined) }): Waiting | null;
+  /**
+   * Delivery line design §4.8: the request leaves `fromWorkspaceId`'s file and
+   * joins `toWorkspaceId`'s as it is, its `workspaceId` the new one and the old
+   * one appended to `movedFrom` (a handoff of a request from before the
+   * cut-over into its mission's placement). Its outbox records and traces stay
+   * where they were written. Safe because request ids are unique. `"moved"`;
+   * `"no-request"` when the source does not hold it; `"taken"` when the target
+   * already does (nothing written). Throws when a file cannot be written (a
+   * copy written to the target is taken out again first).
+   */
+  move(fromWorkspaceId: string, toWorkspaceId: string, requestId: string): "moved" | "no-request" | "taken";
 }
 
 /** One review call the registry holds (design §16.4). */
 export type ReviewCall = z.infer<typeof reviewCallSchema>;
 /** One review batch of a request (design §16.4). */
 export type ReviewBatch = RegisteredRequest["reviews"]["batches"][number];
+/** One result of a batch (delivery line design §5.2). */
+export type ReviewResult = z.infer<typeof reviewResultSchema>;
 
-/** True for a create call whose Reviewer never got its id: Paseo's late error, or a reload in the creation. */
+/**
+ * True for a creating call whose Reviewer never got its id: Paseo's late
+ * error, or a reload in the creation. A create creates; since ADR-036 a
+ * re-review does too (delivery line design §17.2), and an older build's
+ * re-review always named its Reviewer.
+ */
 export function isEmptyCreateCall(call: Pick<ReviewCall, "kind" | "reviewerId">): boolean {
-  return call.kind === "create" && call.reviewerId === "";
+  return (call.kind === "create" || call.kind === "rereview") && call.reviewerId === "";
 }
 /**
  * The newest call of a batch by its time (of those `keep` accepts; the last
@@ -280,6 +424,41 @@ export function outboxKeeps(home: string): (workspaceId: string, requestId: stri
     }
     return read.open.has(requestId);
   };
+}
+
+/** The verdict a no-verdict record stands for in a batch's results (delivery line design §5.2). */
+export const NO_VERDICT_RESULT = "no-verdict";
+
+/**
+ * Appends the result a `review` or `no-verdict` outbox record carries to its
+ * batch (delivery line design §5.2): the review's verdict and its
+ * `blockingCount`, or `no-verdict` with `blocking: null`. `bm_review` and the
+ * unbound final-answer path call it with the review they store, the
+ * missing-verdict check with its no-verdict. The request is read in its
+ * repo's registry (missions design §6), else in `workspaceId`'s. Never
+ * throws: a failure is one log line.
+ */
+export function noteReviewResult(
+  home: string,
+  workspaceId: string,
+  record: { id: string; kind: string; requestId: string | null; batchId: string | null; from: string; createdAt: string; text: string },
+  log: (message: string) => void = (message) => console.warn(message),
+): void {
+  if (record.requestId === null || record.batchId === null || (record.kind !== "review" && record.kind !== "no-verdict")) return;
+  try {
+    let result: ReviewResult;
+    if (record.kind === "no-verdict") {
+      result = { at: record.createdAt, recordId: record.id, verdict: NO_VERDICT_RESULT, blocking: null };
+    } else {
+      const review = parseReviews(record.text, { agentId: record.from, at: record.createdAt }).find((entry) => entry.verdict !== null);
+      if (review === undefined) return;
+      result = { at: record.createdAt, recordId: record.id, verdict: review.verdict!, blocking: review.blockingCount };
+    }
+    const place = requestIndexOf(home, record.requestId)?.workspaceId ?? workspaceId;
+    createRequestRegistry(home, { log }).addReviewResult(place, record.requestId, record.batchId, result);
+  } catch (error) {
+    log(`[paseo-bm] could not record the result ${record.id} of batch ${record.batchId} of ${record.requestId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Drops the read cache and the once-per-run log memory; tests only. */
@@ -369,7 +548,11 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
           requestId = requestIdAt(new Date(second));
         }
         const entry = newEntry(workspaceId, requestId, at.toISOString(), "tool", init.managerId, []);
-        made = typeof init.missionId === "string" && init.missionId !== "" ? { ...entry, missionId: init.missionId } : entry;
+        made = {
+          ...entry,
+          ...(typeof init.missionId === "string" && init.missionId !== "" ? { missionId: init.missionId } : {}),
+          ...(init.continuationOf === undefined ? {} : { continuationOf: init.continuationOf, chainRootId: init.chainRootId ?? init.continuationOf }),
+        };
         return [...requests, made];
       });
       return made!;
@@ -426,13 +609,37 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
         if (index === -1) return null;
         found = true;
         const request = requests[index]!;
-        const finishedAt = report.phase === "finished" ? report.at : null;
+        // Delivery line design §2.3: a finished bound request stays finished; the hand path reopens.
+        const finishedAt = isBoundRequest(request) && request.finishedAt !== null ? request.finishedAt : report.phase === "finished" ? report.at : null;
         if (request.tier === report.tier && request.finishedAt === finishedAt) return null;
         return requests.map((entry, at) => (at === index ? { ...entry, tier: report.tier, finishedAt } : entry));
       });
       return found;
     },
-    addReviewCall(workspaceId, requestId, batchId, call, brief) {
+    noteContinuedBy(workspaceId, requestId, continuedBy, rollover) {
+      let found = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          found = true;
+          return { ...request, continuedBy, rollover };
+        }),
+      );
+      return found;
+    },
+    noteRolloverAsked(workspaceId, requestId, rolloverAsked) {
+      let found = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          found = true;
+          if (rolloverAsked !== null) return { ...request, rolloverAsked };
+          const rest = { ...request };
+          delete rest.rolloverAsked;
+          return rest;
+        }),
+      );
+      return found;
+    },
+    addReviewCall(workspaceId, requestId, batchId, call, brief, milestone) {
       let outcome: "added" | "no-request" | "no-batch" | "batch-taken" = "no-request";
       update(workspaceId, (requests) =>
         withRequest(requests, requestId, (request) => {
@@ -444,7 +651,15 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
               outcome = "batch-taken";
               return null;
             }
-            const opened = { batchId, reviewerIds: batch?.reviewerIds ?? [], brief: brief ?? batch?.brief ?? "", calls: [...(batch?.calls ?? []), call] };
+            const opened: ReviewBatch = {
+              batchId,
+              reviewerIds: batch?.reviewerIds ?? [],
+              brief: brief ?? batch?.brief ?? "",
+              calls: [...(batch?.calls ?? []), call],
+              ...(milestone !== undefined ? { milestone } : batch?.milestone !== undefined ? { milestone: batch.milestone } : {}),
+              // A batch this build opens records its results from the start (§5.2).
+              results: batch?.results ?? [],
+            };
             outcome = "added";
             return { ...request, reviews: { ...request.reviews, batches: batch === null ? [...batches, opened] : batches.map((entry, at) => (at === index ? opened : entry)) } };
           }
@@ -474,6 +689,31 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
         }),
       );
       return removed;
+    },
+    addReviewResult(workspaceId, requestId, batchId, result) {
+      let outcome: "added" | "known" | "no-request" | "no-batch" | "older-batch" = "no-request";
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          const index = request.reviews.batches.findIndex((batch) => batch.batchId === batchId);
+          if (index === -1) {
+            outcome = "no-batch";
+            return null;
+          }
+          const batch = request.reviews.batches[index]!;
+          if (batch.results === undefined) {
+            outcome = "older-batch";
+            return null;
+          }
+          if (batch.results.some((entry) => entry.recordId === result.recordId)) {
+            outcome = "known";
+            return null;
+          }
+          outcome = "added";
+          const next = { ...batch, results: [...batch.results, result] };
+          return { ...request, reviews: { ...request.reviews, batches: request.reviews.batches.map((entry, at) => (at === index ? next : entry)) } };
+        }),
+      );
+      return outcome;
     },
     noteReviewer(workspaceId, requestId, batchId, reviewerId, callId = null) {
       let noted = false;
@@ -506,6 +746,52 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
         }),
       );
       return outcome;
+    },
+    setWaiting(workspaceId, requestId, waiting) {
+      let found = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          found = true;
+          if (waiting === null) {
+            if (request.waiting === undefined) return null;
+            const rest = { ...request };
+            delete rest.waiting;
+            return rest;
+          }
+          return { ...request, waiting };
+        }),
+      );
+      return found;
+    },
+    settleWaitItems(workspaceId, requestId, match, settle) {
+      let now: Waiting | null = null;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          if (request.waiting === undefined || request.waiting === null) return null;
+          now = settleItemsOf(request.waiting, match, settle);
+          return now === null ? null : { ...request, waiting: now };
+        }),
+      );
+      return now;
+    },
+    move(fromWorkspaceId, toWorkspaceId, requestId) {
+      const found = list(fromWorkspaceId).find((request) => request.requestId === requestId);
+      if (found === undefined || fromWorkspaceId === toWorkspaceId) return "no-request";
+      if (list(toWorkspaceId).some((request) => request.requestId === requestId)) return "taken";
+      const moved: RegisteredRequest = { ...found, workspaceId: toWorkspaceId, movedFrom: [...(found.movedFrom ?? []), { workspaceId: fromWorkspaceId, at: now().toISOString() }] };
+      const written = { taken: false };
+      update(toWorkspaceId, (requests) => {
+        written.taken = requests.some((request) => request.requestId === requestId);
+        return written.taken ? null : [...requests, moved];
+      });
+      if (written.taken) return "taken";
+      try {
+        update(fromWorkspaceId, (requests) => (requests.some((request) => request.requestId === requestId) ? requests.filter((request) => request.requestId !== requestId) : null));
+      } catch (error) {
+        update(toWorkspaceId, (requests) => requests.filter((request) => request.requestId !== requestId));
+        throw error;
+      }
+      return "moved";
     },
   };
 }

@@ -16,7 +16,7 @@ import {
   fullInstructions,
   precedentFactsOf,
   precedentLine,
-  reviewBudgetLine,
+  reviewCapLine,
   actionBoundaryLine,
   actionBoundaryOfPrompt,
   creationProjectOf,
@@ -42,7 +42,7 @@ import { PRECEDENT_SCOPE_ALL, type Precedent } from "../plugin/shared/precedents
  */
 
 const LINE = "Worker mode: `bypassPermissions` — pass it as `settings.modeId` when you create a Worker.";
-const DEFAULT_BUDGET = { Small: 2, Medium: 2, Large: 4 };
+const DEFAULT_REVIEW = { maxRereviews: 3, callsPerBatch: 3 };
 const REVIEWER_LINE = "Reviewer mode: `auto` — pass it as `settings.modeId` when you create a Reviewer.";
 const HAND = { manager: MANAGER_HAND_PATH, worker: WORKER_HAND_PATH, reviewer: REVIEWER_HAND_PATH } as const;
 /** An unbound agent's Runtime facts (design §16.12): the heading, the fact lines, then its hand path. */
@@ -209,8 +209,8 @@ describe("currentInstructions (the manager.ensure path)", () => {
   it("adds the Reviewer mode to the Worker and never adds facts to the Reviewer", async () => {
     const api = { providers: { listModes: async () => ({ modes: [{ id: "full-access", colorTier: "dangerous" }, { id: "auto", colorTier: "moderate" }] }) } };
     const worker = await currentInstructions("worker", api, { homedir: () => "/nonexistent-home-for-test" });
-    // With no data folder the review budget reads its defaults (bead 7gxw.12).
-    expect(worker).toBe(fullInstructions("worker", { reviewerModeId: "auto", reviewBudget: DEFAULT_BUDGET }));
+    // With no data folder the review cap reads its defaults (delivery line design §5.6).
+    expect(worker).toBe(fullInstructions("worker", { reviewerModeId: "auto", reviewCap: DEFAULT_REVIEW }));
     expect(worker).toContain("Reviewer mode: `auto`");
     expect(await currentInstructions("reviewer", api, { homedir: () => "/nonexistent-home-for-test" })).toBe(fullInstructions("reviewer", {}));
   });
@@ -409,6 +409,13 @@ describe("## Owner precedents (autonomy design §B.6, §B.9; PRD REQ-124 b, REQ-
     expect(capped.precedents?.map((p) => p.subject)).toEqual(many.slice(0, 20).map((p) => p.subject));
   });
 
+  it("never gives an inert precedent: a subject no precedent answers (delivery line design §7.4)", async () => {
+    const stored = [precedent("budget", { subject: "review-budget" }), precedent("cap", { subject: "review-cap", scope: PRECEDENT_SCOPE_ALL }), precedent("mine")];
+    const facts = await precedentFactsOf("worker", undefined, { workspaceId: "ws-1", read: () => stored });
+    expect(facts.precedents?.map((p) => p.subject)).toEqual(["subject-mine"]);
+    expect(await precedentFactsOf("manager", undefined, { workspaceId: "ws-1", read: () => stored.slice(0, 2) })).toEqual({});
+  });
+
   it("injects only the global ones when the workspace cannot be told, and nothing when the read fails", async () => {
     const stored = [precedent("global", { scope: PRECEDENT_SCOPE_ALL }), precedent("mine"), precedent("theirs", { scope: "ws-2" })];
     const read = () => stored;
@@ -422,9 +429,9 @@ describe("## Owner precedents (autonomy design §B.6, §B.9; PRD REQ-124 b, REQ-
     const broken = () => {
       throw new Error("EACCES");
     };
-    expect(await runtimeFactsOf("worker", noModes, "/repo", log, undefined, { workspaceId: "ws-1", read: broken, reviewBudget: () => DEFAULT_BUDGET })).toEqual({
+    expect(await runtimeFactsOf("worker", noModes, "/repo", log, undefined, { workspaceId: "ws-1", read: broken, reviewCap: () => DEFAULT_REVIEW })).toEqual({
       reviewerModeId: "auto",
-      reviewBudget: DEFAULT_BUDGET,
+      reviewCap: DEFAULT_REVIEW,
     });
     expect(log).toHaveBeenCalledWith("[paseo-bm] reading the owner's precedents for a new worker failed: EACCES");
   });
@@ -462,48 +469,49 @@ describe("## Owner precedents (autonomy design §B.6, §B.9; PRD REQ-124 b, REQ-
   });
 });
 
-// Bead 7gxw.12 (autonomy design §C.4, §G.7; change-008 C6): the review budget per tier is the owner's setting, and a
-// new Worker is told it in its Runtime facts; worker.md's budget line points there.
-describe("the review budget in a new Worker's Runtime facts", () => {
-  const BUDGET_LINE = "Review calls per request: Small 2, Medium 3, Large 6.";
-  const budget = { Small: 2, Medium: 3, Large: 6 };
+// Delivery line design §5.6: the review cap is made of the owner's settings (`review.maxRereviews`,
+// `review.callsPerBatch`), and a new Worker is told it in its Runtime facts.
+describe("the review cap in a new Worker's Runtime facts", () => {
+  const CAP_LINE = "Review: up to 2 re-reviews per batch while blocking findings fall; cap per request: Small 4, Medium 8, Large 16 calls.";
+  const review = { maxRereviews: 2, callsPerBatch: 4 };
 
-  it("states the budget per tier after the Reviewer mode, word for word, and only for the Worker", () => {
-    expect(reviewBudgetLine(budget)).toBe(BUDGET_LINE);
-    expect(runtimeFactsText("worker", { reviewerModeId: "auto", reviewBudget: budget })).toBe(unbound("worker", REVIEWER_LINE, BUDGET_LINE));
-    expect(runtimeFactsText("worker", { reviewBudget: budget })).toBe(unbound("worker", BUDGET_LINE));
-    // A bound Worker keeps the budget line: its tools enforce the budget, and the role file points at the line.
-    expect(runtimeFactsText("worker", { bound: true, reviewerModeId: "auto", reviewBudget: budget })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${BUDGET_LINE}`);
-    for (const role of ["manager", "reviewer"] as const) expect(runtimeFactsText(role, { reviewBudget: budget }), role).toBe(unbound(role));
-    expect(runtimeFactsText("orchestrator", { reviewBudget: budget })).toBe("");
+  it("states the re-reviews and each tier's cap after the Reviewer mode, word for word, and only for the Worker", () => {
+    expect(reviewCapLine(DEFAULT_REVIEW)).toBe("Review: up to 3 re-reviews per batch while blocking findings fall; cap per request: Small 3, Medium 6, Large 12 calls.");
+    expect(reviewCapLine(review)).toBe(CAP_LINE);
+    expect(runtimeFactsText("worker", { reviewerModeId: "auto", reviewCap: review })).toBe(unbound("worker", REVIEWER_LINE, CAP_LINE));
+    expect(runtimeFactsText("worker", { reviewCap: review })).toBe(unbound("worker", CAP_LINE));
+    // A bound Worker keeps the line: its tools enforce the cap, and the role file points at the line.
+    expect(runtimeFactsText("worker", { bound: true, reviewerModeId: "auto", reviewCap: review })).toBe(`${RUNTIME_FACTS_HEADING}\n\n${CAP_LINE}`);
+    for (const role of ["manager", "reviewer"] as const) expect(runtimeFactsText(role, { reviewCap: review }), role).toBe(unbound(role));
+    expect(runtimeFactsText("orchestrator", { reviewCap: review })).toBe("");
   });
 
   it("reads it when a Worker is created, never without the creation's lookup, and never for another role", async () => {
-    const reviewBudget = vi.fn(() => budget);
+    const reviewCap = vi.fn(() => review);
     const api = { providers: { listModes: async () => ({ modes: [{ id: "auto", colorTier: "moderate" }] }) } };
-    expect(await runtimeFactsOf("worker", api, "/repo", () => {}, undefined, { workspaceId: "ws-1", read: () => [], reviewBudget })).toEqual({
+    expect(await runtimeFactsOf("worker", api, "/repo", () => {}, undefined, { workspaceId: "ws-1", read: () => [], reviewCap })).toEqual({
       reviewerModeId: "auto",
-      reviewBudget: budget,
+      reviewCap: review,
     });
     expect(await runtimeFactsOf("worker", api, "/repo", () => {})).toEqual({ reviewerModeId: "auto" });
-    expect((await runtimeFactsOf("manager", api, "/repo", () => {}, () => ({ skills: [] }) as never, { workspaceId: "ws-1", read: () => [], reviewBudget })).reviewBudget).toBeUndefined();
-    expect(reviewBudget).toHaveBeenCalledOnce();
+    expect((await runtimeFactsOf("manager", api, "/repo", () => {}, () => ({ skills: [] }) as never, { workspaceId: "ws-1", read: () => [], reviewCap })).reviewCap).toBeUndefined();
+    expect(reviewCap).toHaveBeenCalledOnce();
     // A read that throws costs the line nothing: the defaults, and one log line.
     const log = vi.fn();
-    const facts = await runtimeFactsOf("worker", api, "/repo", log, undefined, { read: () => [], reviewBudget: () => { throw new Error("EACCES"); } });
-    expect(facts.reviewBudget).toEqual(DEFAULT_BUDGET);
-    expect(log).toHaveBeenCalledWith("[paseo-bm] reading the review budget for a new Worker failed: EACCES");
+    const facts = await runtimeFactsOf("worker", api, "/repo", log, undefined, { read: () => [], reviewCap: () => { throw new Error("EACCES"); } });
+    expect(facts.reviewCap).toEqual(DEFAULT_REVIEW);
+    expect(log).toHaveBeenCalledWith("[paseo-bm] reading the review cap for a new Worker failed: EACCES");
   });
 
-  it("gives a Worker created through currentInstructions the budget stored in Settings → Coordination", async () => {
+  it("gives a Worker created through currentInstructions the review settings stored in Settings → Coordination", async () => {
     const root = mkdtempSync(join(tmpdir(), "bm-budget-facts-"));
     try {
-      createCoordinationStore(join(root, ".paseo-bm")).set({ key: "review.mediumBudget", value: 3 });
-      createCoordinationStore(join(root, ".paseo-bm")).set({ key: "review.largeBudget", value: 6 });
+      createCoordinationStore(join(root, ".paseo-bm")).set({ key: "review.maxRereviews", value: 2 });
+      createCoordinationStore(join(root, ".paseo-bm")).set({ key: "review.callsPerBatch", value: 4 });
       const api = { providers: { listModes: async () => ({ modes: [{ id: "auto", colorTier: "moderate" }] }) } };
       const worker = await currentInstructions("worker", api, { homedir: () => root });
-      expect(worker).toBe(fullInstructions("worker", { reviewerModeId: "auto", reviewBudget: budget }));
-      expect(worker.endsWith(`${REVIEWER_LINE}\n${BUDGET_LINE}\n\n${WORKER_HAND_PATH}\n`)).toBe(true);
+      expect(worker).toBe(fullInstructions("worker", { reviewerModeId: "auto", reviewCap: review }));
+      expect(worker.endsWith(`${REVIEWER_LINE}\n${CAP_LINE}\n\n${WORKER_HAND_PATH}\n`)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -563,12 +571,13 @@ describe("the Action boundary facts line and the child mode by the project's swi
   it("the project of a creation and its switch: on, off, or unknown when the folder names no project", async () => {
     createAutonomyStore(home).setBoundary({ workspaceId: "ws-on", enabled: true, confirmed: true }, "2026-10-01T08:00:00.000Z");
     const workspaceOf = async (cwd: string) => ({ "/on": "ws-on", "/off": "ws-off" })[cwd] ?? null;
-    expect(await creationProjectOf("/on", { workspaceOf })).toEqual({ workspaceId: "ws-on", boundary: "on" });
-    expect(await creationProjectOf("/off", { workspaceOf })).toEqual({ workspaceId: "ws-off", boundary: "off" });
-    expect(await creationProjectOf("/elsewhere", { workspaceOf })).toEqual({ workspaceId: null, boundary: "unknown" });
-    expect(await creationProjectOf("/on", {})).toEqual({ workspaceId: null, boundary: "unknown" });
-    expect(await creationProjectOf(undefined, { workspaceId: "ws-on" })).toEqual({ workspaceId: "ws-on", boundary: "on" });
-    expect(await creationProjectOf("/on", { workspaceOf: async () => { throw new Error("busy"); } })).toEqual({ workspaceId: null, boundary: "unknown" });
+    // Delivery line design §3.1: with the repo key the owner's settings follow (the workspace itself: no placement here).
+    expect(await creationProjectOf("/on", { workspaceOf })).toEqual({ workspaceId: "ws-on", repoKey: "ws-on", boundary: "on" });
+    expect(await creationProjectOf("/off", { workspaceOf })).toEqual({ workspaceId: "ws-off", repoKey: "ws-off", boundary: "off" });
+    expect(await creationProjectOf("/elsewhere", { workspaceOf })).toEqual({ workspaceId: null, repoKey: null, boundary: "unknown" });
+    expect(await creationProjectOf("/on", {})).toEqual({ workspaceId: null, repoKey: null, boundary: "unknown" });
+    expect(await creationProjectOf(undefined, { workspaceId: "ws-on" })).toEqual({ workspaceId: "ws-on", repoKey: "ws-on", boundary: "on" });
+    expect(await creationProjectOf("/on", { workspaceOf: async () => { throw new Error("busy"); } })).toEqual({ workspaceId: null, repoKey: null, boundary: "unknown" });
   });
 
   it("the Manager is told its project's Worker mode (manager.ensure), the Worker its Reviewer's; a hand-set profile mode or another provider keeps today's", async () => {
@@ -600,7 +609,7 @@ describe("the Action boundary facts line and the child mode by the project's swi
 describe("a bound agent's Runtime facts and an unbound agent's hand path (design §16.5, §16.12; ADR-027 decision 9)", () => {
   it("says the agent is bound when the creation hook kept its token URL", async () => {
     const api = { providers: { listModes: vi.fn(async () => ({ modes: [] })) } };
-    const lookup = { read: () => [], boundary: "off" as const, reviewBudget: () => ({ Small: 2, Medium: 2, Large: 4 }) };
+    const lookup = { read: () => [], boundary: "off" as const, reviewCap: () => DEFAULT_REVIEW };
     expect(await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, { ...lookup, bound: true })).toEqual({ bound: true });
     expect(await runtimeFactsOf("reviewer", api, "/repo", () => {}, undefined, lookup)).toEqual({});
   });

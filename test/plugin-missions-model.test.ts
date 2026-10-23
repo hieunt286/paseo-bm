@@ -25,7 +25,10 @@ import {
   missionDraftErrors,
   missionListOf,
   missionPageOf,
+  mrNumberOf,
   renameInputOf,
+  repositoriesOf,
+  revokeIntegrationDialog,
   toggleRepo,
   type MissionDraft,
 } from "../plugin/client/missions-model";
@@ -353,6 +356,13 @@ describe("a mission's page (artboards B and D; §10.2)", () => {
 
   it("offers to add the listed projects not in the charter yet", () => {
     expect(addableReposOf([{ id: "ws-ui", name: "xspace-ai-assistant" }, { id: "ws-site", name: "paseo-bm site" }], page.charter.repos)).toEqual([{ id: "ws-site", name: "paseo-bm site" }]);
+    // By project too: a repo chosen through another workspace of its project is in the mission (mission-projects.html, artboard N).
+    const projects = [
+      { id: "ws-ui-root", projectId: "p-ui", name: "xspace-ai-assistant" },
+      { id: "project:p-site", projectId: "p-site", name: "paseo-bm-site" },
+    ];
+    const projectOf = (id: string) => ({ "ws-ui": "p-ui", "ws-be": "p-be" })[id] ?? null;
+    expect(addableReposOf(projects, page.charter.repos, projectOf).map((project) => project.id)).toEqual(["project:p-site"]);
   });
 });
 
@@ -364,7 +374,7 @@ describe("New mission and Rename (artboard E; §10.2)", () => {
     expect(missionDraftErrors(EMPTY_MISSION_DRAFT)).toEqual([
       "Name: 1 to 80 characters.",
       "Short code: a capital letter, then 1 to 7 capitals or digits (AIX, ORA2).",
-      "Repositories: choose at least one.",
+      "Projects: choose at least one.",
     ]);
     expect(missionDraftErrors(valid)).toEqual([]);
     expect(missionDraftErrors({ ...valid, name: "x".repeat(81) })).toEqual(["Name: 1 to 80 characters."]);
@@ -469,9 +479,11 @@ describe("the hook-free pieces of the Missions screen (renderTree)", () => {
     expect(texts(renderTree(MissionList({ list: null, error: "E_X: down", compact: false, closedShown: false, onToggleClosed: noop, onOpen: noop, onNew: noop, styles, theme })))).toContain("Could not read the missions: E_X: down");
   });
 
-  const actions = () => ({ back: vi.fn(), openMain: vi.fn(), ui: vi.fn(), saveRename: vi.fn(), close: vi.fn(), addRepo: vi.fn(), level: vi.fn(), confirmLevel: vi.fn(), memory: vi.fn() });
+  const actions = () => ({ back: vi.fn(), openMain: vi.fn(), ui: vi.fn(), saveRename: vi.fn(), close: vi.fn(), addRepos: vi.fn(), level: vi.fn(), confirmLevel: vi.fn(), memory: vi.fn() });
+  const SITE = { id: "ws-site", projectId: "p-site", name: "paseo-bm-site", path: "~/…/self/paseo-plugins/paseo-bm-site", rootPath: "/Users/me/work/self/paseo-plugins/paseo-bm-site", workspaceId: "ws-site" };
+  const SHELL = { id: "project:p-shell", projectId: "p-shell", name: "xspace-shell", path: "~/…/dx/frontend/xspace/xspace-shell", rootPath: "/Users/me/work/dx/frontend/xspace/xspace-shell", workspaceId: null };
   const body = (ui: Record<string, unknown>, compact: boolean, on = actions(), view = missionPageOf(PAGE, NOW)) =>
-    renderTree(MissionPageBody({ page: view, ui: { ...PAGE_UI_IDLE, ...ui }, addable: [{ id: "ws-site", name: "paseo-bm site" }], compact, on, styles, theme }));
+    renderTree(MissionPageBody({ page: view, ui: { ...PAGE_UI_IDLE, ...ui }, addable: [SHELL, SITE], compact, on, styles, theme }));
 
   it("draws the wide page as artboard B", () => {
     const on = actions();
@@ -513,9 +525,28 @@ describe("the hook-free pieces of the Missions screen (renderTree)", () => {
   it("shows every criterion, the add picker, the rename fields and the confirmations in place", () => {
     expect(texts(body({ allCriteria: true }, false))).toEqual(expect.arrayContaining(["D11 criterion D11", "Show fewer"]));
     const on = actions();
+    // Artboard N: "+ Add" opens the same list — only projects not in the mission —, with Cancel and Add.
+    const plusAdd = allNodes(body({}, false, on)).find((node) => node.type === "Text" && textOf(node) === "+ Add")!;
+    expect(flat(plusAdd.props["style"])).toMatchObject({ fontSize: 12, color: "#accent" });
+    pressByLabel(body({}, false, on), "Add a repository to the mission");
+    expect(on.ui).toHaveBeenCalledWith({ adding: true, addChosen: [], addFilter: "" });
     const adding = body({ adding: true }, false, on);
-    pressByLabel(adding, "Add paseo-bm site to the mission");
-    expect(on.addRepo).toHaveBeenCalledWith("ws-site");
+    const shownAdding = texts(adding);
+    for (const text of ["xspace-shell", "~/…/dx/frontend/xspace/xspace-shell", "paseo-bm-site", "~/…/self/paseo-plugins/paseo-bm-site", "Cancel", "Add"]) expect(shownAdding, text).toContain(text);
+    // Two projects: no "Find a project…" (it shows above six), no header or footnote in the panel.
+    expect(allNodes(adding).filter((node) => node.type === "TextInput" && node.props["placeholder"] === "Find a project…")).toHaveLength(0);
+    expect(shownAdding.some((text) => text.startsWith("Named as in Paseo's sidebar"))).toBe(false);
+    const addButton = (nodes: Array<RNode | string>) => pressables(nodes).find((node) => node.props["accessibilityLabel"] === "Add the chosen projects to the mission")!;
+    expect(addButton(adding).props["disabled"]).toBe(true);
+    pressByLabel(adding, "paseo-bm-site, ~/…/self/paseo-plugins/paseo-bm-site");
+    expect(on.ui).toHaveBeenCalledWith({ addChosen: ["ws-site"] });
+    const ticked = body({ adding: true, addChosen: ["ws-site", "project:p-shell"] }, false, on);
+    expect(addButton(ticked).props["disabled"]).toBe(false);
+    (addButton(ticked).props["onPress"] as () => void)();
+    expect(on.addRepos).toHaveBeenCalledWith(["ws-site", "project:p-shell"]);
+    pressByLabel(ticked, "Cancel");
+    expect(on.ui).toHaveBeenCalledWith({ adding: false, addChosen: [], addFilter: "" });
+    expect(texts(renderTree(MissionPageBody({ page: missionPageOf(PAGE, NOW), ui: { ...PAGE_UI_IDLE, adding: true }, addable: [], compact: false, on, styles, theme })))).toContain("Every listed project is in this mission already.");
     const renaming = body({ rename: { name: "AI Assistant", code: "A" } }, false, on);
     const inputs = allNodes(renaming).filter((node) => node.type === "TextInput");
     expect(inputs.map((input) => input.props["value"])).toEqual(["AI Assistant", "A"]);
@@ -552,13 +583,28 @@ describe("the hook-free pieces of the Missions screen (renderTree)", () => {
     for (const gone of ["Open Main", "Rename", "Close mission", "+ Add"]) expect(closed).not.toContain(gone);
   });
 
-  it("draws New mission as artboard E, the selected repositories with the accent square", () => {
+  // The projects of artboards L and M (mission-projects.html): the mockup's own rows.
+  const project = (name: string, folder: string, id = `ws-${name}`) => ({ id, projectId: `p-${name}`, name, path: folder, rootPath: folder.replace("~", "/Users/me"), workspaceId: id.startsWith("project:") ? null : id });
+  const PROJECTS = [
+    project("xspace-ai-assistant", "~/…/dx/frontend/xspace/xspace-ai-assistant", "ws-ui"),
+    project("ai-assistant", "~/…/dx/backends/ai-assistant", "ws-be"),
+    project("xspace-shell", "~/…/dx/frontend/xspace/xspace-shell"),
+    project("paseo-bm", "~/…/self/paseo-plugins/paseo-bm", "ws-bm"),
+    project("paseo-bm-site", "~/…/self/paseo-plugins/paseo-bm-site", "project:p-paseo-bm-site"),
+  ];
+  const FOOTNOTE = "Named as in Paseo's sidebar; rename a project in Paseo to change its name here. The mission works in each project's own branch and worktree.";
+  const filterOf = (nodes: Array<RNode | string>) => allNodes(nodes).filter((node) => node.type === "TextInput" && node.props["placeholder"] === "Find a project…");
+
+  it("draws New mission as artboards E and L: one row per project, a checkbox, the bold name, the folder in mono", () => {
     const onDraft = vi.fn();
     const onCreate = vi.fn();
+    const onFilter = vi.fn();
     const props = {
-      draft: { name: "AI Assistant ↔ xOne", code: "AIX", goal: "", repos: ["ws-ui"], level: 2 },
+      draft: { name: "AI Assistant ↔ xOne", code: "AIX", goal: "", repos: ["ws-ui", "ws-be"], level: 2 },
       errors: [],
-      projects: [{ id: "ws-ui", name: "xspace-ai-assistant" }, { id: "ws-bm", name: "paseo-bm" }],
+      projects: PROJECTS,
+      filter: "",
+      onFilter,
       confirming: null,
       busy: false,
       error: null,
@@ -574,28 +620,78 @@ describe("the hook-free pieces of the Missions screen (renderTree)", () => {
     };
     const nodes = renderTree(NewMissionForm(props));
     const shown = texts(nodes);
-    for (const text of ["New mission", "Name", "Short code", "Goal (the Main can draft the rest of the charter with you)", "Repositories", "xspace-ai-assistant", "paseo-bm", "Mission level", "Level 2: the Main goes on to next steps and creates Workers by itself.", "Cancel", "Create and open Main"]) {
+    for (const text of [
+      "New mission", "Name", "Short code", "Goal (the Main can draft the rest of the charter with you)",
+      "Projects · the repositories this mission works in", "2 chosen",
+      "xspace-ai-assistant", "~/…/dx/frontend/xspace/xspace-ai-assistant", "ai-assistant", "xspace-shell", "paseo-bm", "paseo-bm-site", "~/…/self/paseo-plugins/paseo-bm-site",
+      FOOTNOTE, "Mission level", "Level 2: the Main goes on to next steps and creates Workers by itself.", "Cancel", "Create and open Main",
+    ]) {
       expect(shown, text).toContain(text);
     }
-    const repos = pressables(nodes).filter((node) => node.props["accessibilityRole"] === "checkbox");
-    expect(repos.map((node) => (node.props["accessibilityState"] as { checked: boolean }).checked)).toEqual([true, false]);
-    expect(allNodes([repos[0]!]).some((node) => flat(node.props["style"])["backgroundColor"] === "#accent" && flat(node.props["style"])["width"] === 7)).toBe(true);
-    expect(allNodes([repos[1]!]).some((node) => flat(node.props["style"])["width"] === 7)).toBe(false);
-    (repos[1]!.props["onPress"] as () => void)();
-    expect(onDraft).toHaveBeenCalledWith(expect.objectContaining({ repos: ["ws-ui", "ws-bm"] }));
+    // The mockup's order: the header, the rows, the footnote, then Mission level.
+    expect(shown.indexOf("Projects · the repositories this mission works in")).toBeLessThan(shown.indexOf("xspace-ai-assistant"));
+    expect(shown.indexOf("paseo-bm-site")).toBeLessThan(shown.indexOf(FOOTNOTE));
+    expect(shown.indexOf(FOOTNOTE)).toBeLessThan(shown.indexOf("Mission level"));
+    expect(shown).not.toContain("Repositories");
+    // "2 chosen" in the accent; the name bold, the folder mono and muted.
+    const chosen = allNodes(nodes).find((node) => node.type === "Text" && textOf(node) === "2 chosen")!;
+    expect(flat(chosen.props["style"])).toMatchObject({ color: "#accent", fontSize: 12 });
+    const name = allNodes(nodes).find((node) => node.type === "Text" && textOf(node) === "paseo-bm")!;
+    expect(flat(name.props["style"])).toMatchObject({ fontSize: 13, fontWeight: "600", color: "#foreground" });
+    const folder = allNodes(nodes).find((node) => node.type === "Text" && textOf(node) === "~/…/self/paseo-plugins/paseo-bm")!;
+    expect(flat(folder.props["style"])).toMatchObject({ fontSize: 11, color: "#foregroundMuted" });
+    expect(flat(folder.props["style"])["fontFamily"]).toBeDefined();
+    // Five projects: every row, no "Find a project…" (it shows above six).
+    expect(filterOf(nodes)).toHaveLength(0);
+    const rows = pressables(nodes).filter((node) => node.props["accessibilityRole"] === "checkbox");
+    expect(rows.map((node) => node.props["accessibilityLabel"])).toEqual(PROJECTS.map((entry) => `${entry.name}, ${entry.path}`));
+    expect(rows.map((node) => (node.props["accessibilityState"] as { checked: boolean }).checked)).toEqual([true, true, false, false, false]);
+    // A ticked box: the accent fill and its tick in the accent's foreground.
+    expect(allNodes([rows[0]!]).some((node) => flat(node.props["style"])["backgroundColor"] === "#accent" && flat(node.props["style"])["width"] === 16)).toBe(true);
+    expect(texts([rows[0]!])).toContain("✓");
+    expect(texts([rows[2]!])).not.toContain("✓");
+    (rows[4]!.props["onPress"] as () => void)();
+    expect(onDraft).toHaveBeenCalledWith(expect.objectContaining({ repos: ["ws-ui", "ws-be", "project:p-paseo-bm-site"] }));
+    (rows[0]!.props["onPress"] as () => void)();
+    expect(onDraft).toHaveBeenCalledWith(expect.objectContaining({ repos: ["ws-be"] }));
     const code = allNodes(nodes).filter((node) => node.type === "TextInput")[1]!;
     (code.props["onChangeText"] as (text: string) => void)("ora2");
     expect(onDraft).toHaveBeenCalledWith(expect.objectContaining({ code: "ORA2" }));
     pressByLabel(nodes, "Create and open Main");
     expect(onCreate).toHaveBeenCalled();
-    const confirming = texts(renderTree(NewMissionForm({ ...props, confirming: 3, errors: ["Repositories: choose at least one."] })));
-    expect(confirming).toEqual(expect.arrayContaining(["Use level 3?", "Set level 3", "Repositories: choose at least one."]));
+    const confirming = texts(renderTree(NewMissionForm({ ...props, confirming: 3, errors: ["Projects: choose at least one."] })));
+    expect(confirming).toEqual(expect.arrayContaining(["Use level 3?", "Set level 3", "Projects: choose at least one."]));
     // Review U1: Create waits while a level 3 or 4 waits for its confirmation.
     const create = (form: Record<string, unknown>) => pressables(renderTree(NewMissionForm({ ...props, ...form }))).find((node) => textOf(node) === "Create and open Main")!;
     expect(create({ confirming: 3 }).props["disabled"]).toBe(true);
     expect(create({ confirming: 3 }).props["accessibilityState"]).toMatchObject({ disabled: true });
     expect(create({}).props["disabled"]).toBe(false);
     expect(texts(renderTree(NewMissionForm({ ...props, busy: true })))).toContain("Creating…");
+    expect(texts(renderTree(NewMissionForm({ ...props, projects: [] })))).toContain("No project is listed yet.");
+
+    // More than six projects: "Find a project…", filtering by name and folder as typed.
+    const many = [...PROJECTS, project("oracle", "~/…/dx/backends/oracle"), project("xone", "~/…/dx/backends/xone")];
+    const filtered = renderTree(NewMissionForm({ ...props, projects: many, filter: "backends" }));
+    const input = filterOf(filtered);
+    expect(input).toHaveLength(1);
+    expect(input[0]!.props["value"]).toBe("backends");
+    (input[0]!.props["onChangeText"] as (text: string) => void)("xsp");
+    expect(onFilter).toHaveBeenCalledWith("xsp");
+    expect(pressables(filtered).filter((node) => node.props["accessibilityRole"] === "checkbox").map((node) => node.props["accessibilityLabel"])).toEqual(["ai-assistant, ~/…/dx/backends/ai-assistant", "oracle, ~/…/dx/backends/oracle", "xone, ~/…/dx/backends/xone"]);
+    expect(texts(renderTree(NewMissionForm({ ...props, projects: many, filter: "nothing-like-it" })))).toContain("No project matches.");
+  });
+
+  it("draws New mission on a phone as artboard M: Projects, N chosen, the first four rows, then + N more", () => {
+    const nodes = renderTree(
+      NewMissionForm({ draft: { ...EMPTY_MISSION_DRAFT, repos: ["ws-ui", "ws-be"] }, errors: [], projects: PROJECTS, filter: "", onFilter: noop, confirming: null, busy: false, error: null, onDraft: noop, onLevel: noop, onConfirmLevel: noop, onCancelLevel: noop, onCancel: noop, onCreate: noop, compact: true, styles, theme }),
+    );
+    const shown = texts(nodes);
+    for (const text of ["Projects", "2 chosen", "xspace-ai-assistant", "ai-assistant", "xspace-shell", "paseo-bm", "+ 1 more · type to find it", FOOTNOTE]) expect(shown, text).toContain(text);
+    expect(shown).not.toContain("Projects · the repositories this mission works in");
+    expect(shown).not.toContain("paseo-bm-site");
+    // The phone cuts the list, so it shows the filter its "type to find it" needs.
+    expect(filterOf(nodes)).toHaveLength(1);
+    expect(pressables(nodes).filter((node) => node.props["accessibilityRole"] === "checkbox")).toHaveLength(4);
   });
 
   it("draws a project's memory as artboard F", () => {
@@ -687,8 +783,43 @@ describe("the mission page's Main card and In flight card (mission runtime desig
     expect(flight.links).toEqual([{ id: "link-1", who: "waiting 44 min", text: "0545c7a ↔ 733918b · the catalogue endpoint's shape" }]);
   });
 
-  const actions = () => ({ back: vi.fn(), openMain: vi.fn(), ui: vi.fn(), saveRename: vi.fn(), close: vi.fn(), addRepo: vi.fn(), level: vi.fn(), confirmLevel: vi.fn(), memory: vi.fn(), openAgent: vi.fn(), openInbox: vi.fn() });
+  const actions = () => ({ back: vi.fn(), openMain: vi.fn(), ui: vi.fn(), saveRename: vi.fn(), close: vi.fn(), addRepos: vi.fn(), level: vi.fn(), confirmLevel: vi.fn(), memory: vi.fn(), openAgent: vi.fn(), openInbox: vi.fn() });
   const body = (compact: boolean, on = actions()) => renderTree(MissionPageBody({ page: view, ui: PAGE_UI_IDLE, addable: [], compact, on, styles, theme }));
+
+  // Delivery line design §2.7 (mockup delivery-line.html, artboards I and J): a request chain in In flight.
+  const CHAINED: NonNullable<MissionGetOutput["inFlight"]> = {
+    ...STATE,
+    requests: [
+      { ...STATE.requests[0]!, requestId: R(6), topic: "Widget flows W13", continuationOf: R(5), continuedBy: null, chainPosition: 3 },
+      { ...STATE.requests[1]!, continuationOf: "req-20261009T132118Z", continuedBy: null, chainPosition: 2 },
+      { ...STATE.requests[4]!, topic: "Review and propose the feature", continuationOf: "req-20261009T090000Z", continuedBy: R(6), chainPosition: 2 },
+    ],
+  };
+  const chained = missionPageOf({ ...RUNTIME, inFlight: CHAINED }, new Date(2026, 9, 10, 10, 15));
+
+  it("reads a chain: continues <id> · nth of its chain on its newest request, finished → <id> on the one it continues (delivery line design §2.7)", () => {
+    const flight = chained.inFlight!;
+    expect(flight.requests.map((request) => [request.request, request.state.text, request.chain, request.phoneChain, request.next])).toEqual([
+      ["req-…060000Z", "working", { request: "req-…050000Z", position: "3rd of its chain" }, "continues Review and propose the feature · 3rd", null],
+      ["req-…020000Z", "waiting for you · Q1", { request: "req-…132118Z", position: null }, "continues req-…132118Z", null],
+      ["req-…050000Z", "finished", null, null, "→ req-…060000Z"],
+    ]);
+    expect(flight.restLine).toBe("+ 1 finished");
+    // An older server sends no chain fields.
+    expect(view.inFlight!.requests.every((request) => request.chain === null && request.phoneChain === null && request.next === null)).toBe(true);
+  });
+
+  it("draws the chain as artboards I and J", () => {
+    const wide = texts(renderTree(MissionPageBody({ page: chained, ui: PAGE_UI_IDLE, addable: [], compact: false, on: actions(), styles, theme })));
+    for (const text of ["req-…060000Z Widget flows W13", "continues req-…050000Z · 3rd of its chain", "continues req-…132118Z", "finished → req-…060000Z"]) {
+      expect(wide, text).toContain(text);
+    }
+    const phone = texts(renderTree(MissionPageBody({ page: chained, ui: PAGE_UI_IDLE, addable: [], compact: true, on: actions(), styles, theme })));
+    for (const text of ["Widget flows W13 · working", "continues Review and propose the feature · 3rd", "continues req-…132118Z", "+ 1 finished"]) {
+      expect(phone, text).toContain(text);
+    }
+    expect(phone.some((entry) => entry.includes("→ req-"))).toBe(false);
+  });
 
   it("draws artboard G: the Main card under the title, In flight between the Workers and the contracts", () => {
     const on = actions();
@@ -720,5 +851,217 @@ describe("the mission page's Main card and In flight card (mission runtime desig
     }
     const order = ["Open Main", "Main", "Done", "In flight", "Charter"].map((text) => shown.findIndex((entry) => entry === text));
     expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+});
+
+describe("the mission page's Repositories card (delivery line design §4.9; mockup delivery-line.html, artboards I and J)", () => {
+  const T = (h: number, m: number) => new Date(2026, 9, 20, h, m).toISOString();
+  const LATER = new Date(2026, 9, 20, 12, 45);
+  type Placement = NonNullable<MissionSummary["repos"][number]["placement"]>;
+  const line = (over: Partial<Placement>): Placement => ({
+    branch: "m/INO/xspace-ai-assistant",
+    target: "develop",
+    state: "ready",
+    dirty: false,
+    ahead: 0,
+    behind: 0,
+    lastCommitAt: null,
+    pushed: null,
+    mr: null,
+    ci: null,
+    readAt: T(12, 40),
+    integration: { state: "none", at: null, decisionId: null },
+    ...over,
+  });
+  const INO: MissionSummary = {
+    ...AIX,
+    code: "INO",
+    repos: [
+      { ...UI, placement: line({ dirty: true, ahead: 4, lastCommitAt: T(11, 52), pushed: true, mr: { url: "https://gitlab.example/x/-/merge_requests/42", state: "opened", mergeable: true }, ci: "success", integration: { state: "allowed", at: T(10, 42), decisionId: "m:mis-0123456789:1" } }) },
+      { ...BE, placement: line({ branch: "m/INO/ai-assistant", ahead: 2, behind: 7, lastCommitAt: T(12, 5), readAt: T(12, 38), integration: { state: "waiting", at: null, decisionId: "m:mis-0123456789:2" } }) },
+      { workspaceId: "ws-docs", name: "docs" },
+    ],
+  };
+  const PLACED: MissionGetOutput = {
+    ...PAGE,
+    summary: INO,
+    inFlight: {
+      at: T(12, 40),
+      mission: { missionId: INO.missionId, code: "INO", name: INO.name, state: "open", goal: "g", charterConfirmed: true, repos: [], mainId: null, mainHistory: [] },
+      criteria: { met: 0, total: 0, open: [] },
+      requests: [
+        { requestId: "req-20261020T105259Z", workspaceId: "ws-ui", repo: "xspace-ai-assistant", topic: "Review and propose the feature", workerId: "6689326aa", state: "finished", lastReport: { phase: "finished", at: T(11, 58), line: "" }, followUpAt: null, waitingOn: null, committed: true, verified: "verified", commit: "a1b2c3d4e5f6" },
+        { requestId: "req-20261020T110000Z", workspaceId: "ws-be", repo: "ai-assistant", topic: "Env template", workerId: "112e496aa", state: "finished", lastReport: { phase: "finished", at: T(12, 0), line: "" }, followUpAt: null, waitingOn: null, committed: false, verified: null, commit: null },
+      ],
+      questions: [],
+      asks: [],
+      links: [],
+      owner: [],
+      governor: [],
+      journal: [],
+      unknown: [],
+    },
+  };
+  const view = missionPageOf(PLACED, LATER);
+
+  it("reads each repo's line in the mockup's words; a repo with no worktree has no row, a mission with none no card", () => {
+    expect(view.repositories!.meta).toBe("each mission writes on its own branch · read 12:40");
+    expect(view.repositories!.rows.map((row) => [row.name, row.branch, row.target, row.shortBranch, row.counts, row.dirty, row.lastCommit, row.mr, row.ci, row.push])).toEqual([
+      [
+        "xspace-ai-assistant",
+        "m/INO/xspace-ai-assistant",
+        "develop",
+        "m/INO/…",
+        "↑4 ↓0",
+        { text: "● uncommitted", tone: "warning" },
+        "last commit 11:52",
+        { text: "!42 open", short: "!42", tone: "info", url: "https://gitlab.example/x/-/merge_requests/42" },
+        { text: "CI passed", tone: "success" },
+        { text: "allowed since 10:42", tone: "plain", phone: "Push & MR allowed", action: "revoke", decisionId: "m:mis-0123456789:1" },
+      ],
+      [
+        "ai-assistant",
+        "m/INO/ai-assistant",
+        "develop",
+        "m/INO/…",
+        "↑2 ↓7",
+        { text: "clean", tone: "plain" },
+        "last commit 12:05",
+        null,
+        null,
+        { text: "waiting for you", tone: "warning", phone: "Push & MR: waiting for you", action: "answer", decisionId: "m:mis-0123456789:2" },
+      ],
+    ]);
+    expect(missionPageOf(PAGE, LATER).repositories).toBeNull();
+    expect(repositoriesOf({ code: "INO", repos: [{ ...UI, placement: line({ readAt: null, dirty: null, ahead: null, behind: null }) }] }, LATER)).toEqual({
+      meta: "each mission writes on its own branch",
+      mrHeader: "Merge request · CI",
+      rows: [expect.objectContaining({ counts: "not read yet", dirty: null, lastCommit: null })],
+    });
+  });
+
+  it("names the merge request, its state and CI, and push and merge request, in the mockup's words", () => {
+    expect([mrNumberOf("https://gitlab.example/x/-/merge_requests/42"), mrNumberOf("https://github.com/o/r/pull/7"), mrNumberOf("https://forge.example/x")]).toEqual(["!42", "#7", "MR"]);
+    const rowOf = (over: Partial<Placement>) => repositoriesOf({ code: "INO", repos: [{ ...UI, placement: line(over) }] }, LATER)!.rows[0]!;
+    const mr = (state: string | null, mergeable: boolean | null) => rowOf({ mr: { url: "https://gitlab.example/x/-/merge_requests/9", state, mergeable } }).mr!.text;
+    expect([mr("opened", null), mr("merged", null), mr("opened", false), mr(null, false)]).toEqual(["!9 open", "!9 merged", "!9 conflicting", "!9 conflicting"]);
+    expect(["success", "failure", "pending", "not-run", "none"].map((ci) => rowOf({ ci }).ci?.text ?? null)).toEqual(["CI passed", "CI failed", "CI running", "CI not run", null]);
+    expect(rowOf({ integration: { state: "not-now", at: null, decisionId: "m:x:1" } }).push).toMatchObject({ text: "not now", phone: "Push & MR: not now", action: "ask" });
+    expect(rowOf({ integration: { state: "revoked", at: T(12, 10), decisionId: "m:x:1" } }).push).toMatchObject({ text: "revoked 12:10", phone: "Push & MR: revoked", action: "ask" });
+    expect(rowOf({ integration: { state: "none", at: null, decisionId: null } }).push).toMatchObject({ text: "—", phone: null, action: null });
+    expect(rowOf({ branch: "feature/x" }).shortBranch).toBe("feature/x");
+  });
+
+  it("with integration.ci off (ADR-036 §17.1), the merge request without CI; on, or from an older server, with it", () => {
+    const repos = [{ ...UI, placement: line({ ci: "failure", mr: { url: "https://gitlab.example/x/-/merge_requests/9", state: "opened", mergeable: null } }) }];
+    const off = repositoriesOf({ code: "INO", repos, ci: "off" }, LATER)!;
+    expect(off.mrHeader).toBe("Merge request");
+    expect(off.rows[0]!.ci).toBeNull();
+    expect(off.rows[0]!.mr?.text).toBe("!9 open");
+    for (const ci of ["on", undefined] as const) {
+      const shown = repositoriesOf({ code: "INO", repos, ...(ci === undefined ? {} : { ci }) }, LATER)!;
+      expect(shown.mrHeader).toBe("Merge request · CI");
+      expect(shown.rows[0]!.ci).toEqual({ text: "CI failed", tone: "danger" });
+    }
+  });
+
+  it("reads a committed finish's commit in In flight's Last report (artboard I)", () => {
+    expect(view.inFlight!.requests.map((request) => [request.lastReport, request.commit])).toEqual([
+      ["finished · committed a1b2c3d · 11:58", "a1b2c3d"],
+      ["finished · 12:00", null],
+    ]);
+    expect(texts(draw(false))).toContain("finished · committed a1b2c3d · 11:58");
+  });
+
+  const actions = () => ({ back: vi.fn(), openMain: vi.fn(), ui: vi.fn(), saveRename: vi.fn(), close: vi.fn(), addRepos: vi.fn(), level: vi.fn(), confirmLevel: vi.fn(), memory: vi.fn(), openAgent: vi.fn(), openInbox: vi.fn(), revoke: vi.fn(), askAgain: vi.fn() });
+  const draw = (compact: boolean, on = actions(), ui: Record<string, unknown> = {}) => renderTree(MissionPageBody({ page: view, ui: { ...PAGE_UI_IDLE, ...ui }, addable: [], compact, on, styles, theme }));
+  const byLabel = (nodes: Array<RNode | string>, label: string) => allNodes(nodes).find((node) => node.props["accessibilityLabel"] === label);
+
+  it("draws artboard I: the table between the Workers and In flight; Revoke asks first, Answer opens the Inbox", () => {
+    const on = actions();
+    const nodes = draw(false, on);
+    const shown = texts(nodes);
+    for (const text of [
+      "Repositories", "each mission writes on its own branch · read 12:40", "Repository", "Branch → integration", "State", "Merge request · CI", "Push & merge request",
+      "m/INO/xspace-ai-assistant → develop", "↑4 ↓0 · ● uncommitted", "last commit 11:52", "!42 open · CI passed", "allowed since 10:42", "Revoke",
+      "↑2 ↓7 · clean", "no merge request yet", "waiting for you", "Answer",
+      "↑ commits on the mission branch not yet in the integration branch · ↓ commits of the integration branch not yet merged into it. Merging stays on GitLab. A worktree is removed only by you, when the mission closes.",
+    ]) {
+      expect(shown, text).toContain(text);
+    }
+    // The charter's own "Repositories" label comes first: the card is found by its meta.
+    const order = ["Workers by repository", "each mission writes on its own branch · read 12:40", "In flight"].map((text) => shown.indexOf(text));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    pressByLabel(nodes, "Revoke push and merge request for xspace-ai-assistant");
+    expect(on.ui).toHaveBeenCalledWith({ confirm: { kind: "revoke", repo: "ws-ui" }, menu: false, rename: null });
+    expect(on.revoke).not.toHaveBeenCalled();
+    pressByLabel(nodes, "Answer push and merge request for ai-assistant in the Inbox");
+    expect(on.openInbox).toHaveBeenCalledTimes(1);
+
+    const confirming = draw(false, on, { confirm: { kind: "revoke", repo: "ws-ui" } });
+    expect(texts(confirming)).toContain("Revoke push and merge request for xspace-ai-assistant?");
+    pressByLabel(confirming, "Revoke");
+    expect(on.revoke).toHaveBeenCalledWith("ws-ui");
+    pressByLabel(confirming, "Cancel");
+    expect(on.ui).toHaveBeenLastCalledWith({ confirm: null });
+  });
+
+  it("draws artboard J: each repo's lines on a phone, Revoke and Answer as words", () => {
+    const on = actions();
+    const nodes = draw(true, on);
+    const shown = texts(nodes);
+    for (const text of ["Repositories", "xspace-ai-assistant · ↑4 ↓0 · ● uncommitted", "m/INO/… → develop · !42 · CI passed", "Push & MR allowed · Revoke", "ai-assistant · ↑2 ↓7 · clean", "Push & MR: waiting for you · Answer"]) {
+      expect(shown, text).toContain(text);
+    }
+    // The second repo has no merge request and no CI: no branch line (artboard J).
+    expect(shown.filter((entry) => entry.startsWith("m/INO/… → "))).toHaveLength(1);
+    const order = ["Done", "Repositories", "In flight"].map((text) => shown.indexOf(text));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    (byLabel(nodes, "Revoke push and merge request for xspace-ai-assistant")!.props["onPress"] as () => void)();
+    expect(on.ui).toHaveBeenCalledWith({ confirm: { kind: "revoke", repo: "ws-ui" }, menu: false, rename: null });
+    (byLabel(nodes, "Answer push and merge request for ai-assistant in the Inbox")!.props["onPress"] as () => void)();
+    expect(on.openInbox).toHaveBeenCalledTimes(1);
+    expect(texts(draw(true, on, { confirm: { kind: "revoke", repo: "ws-ui" } }))).toContain("Revoke push and merge request for xspace-ai-assistant?");
+  });
+
+  it("draws no CI with integration.ci off (ADR-036 §17.1): the column reads Merge request, the phone's branch line the merge request alone", () => {
+    const page = missionPageOf({ ...PLACED, summary: { ...INO, ci: "off" } }, LATER);
+    const wide = texts(renderTree(MissionPageBody({ page, ui: PAGE_UI_IDLE, addable: [], compact: false, on: actions(), styles, theme })));
+    expect(wide).toContain("Merge request");
+    expect(wide).toContain("!42 open");
+    expect(wide).not.toContain("Merge request · CI");
+    expect(wide.filter((text) => /\bCI\b/.test(text))).toEqual([]);
+    const phone = texts(renderTree(MissionPageBody({ page, ui: PAGE_UI_IDLE, addable: [], compact: true, on: actions(), styles, theme })));
+    expect(phone).toContain("m/INO/… → develop · !42");
+    expect(phone.filter((text) => /\bCI\b/.test(text))).toEqual([]);
+  });
+
+  it("offers Ask me again after not now or a revoke (§4.3), on a wide screen and a phone; none on a closed mission", () => {
+    const repos = (state: "not-now" | "revoked") => [{ ...UI, placement: line({ integration: { state, at: state === "revoked" ? T(12, 10) : null, decisionId: "m:mis-0123456789:1" } }) }];
+    for (const state of ["not-now", "revoked"] as const) {
+      const page = missionPageOf({ ...PLACED, summary: { ...INO, repos: repos(state) } }, LATER);
+      for (const compact of [false, true]) {
+        const on = actions();
+        const nodes = renderTree(MissionPageBody({ page, ui: PAGE_UI_IDLE, addable: [], compact, on, styles, theme }));
+        const shown = texts(nodes);
+        expect(shown, `${state} ${compact}`).toContain(compact ? `Push & MR: ${state === "not-now" ? "not now" : "revoked"} · Ask me again` : state === "not-now" ? "not now" : "revoked 12:10");
+        (byLabel(nodes, "Ask me again about push and merge request for xspace-ai-assistant")!.props["onPress"] as () => void)();
+        expect(on.askAgain).toHaveBeenCalledWith("ws-ui");
+      }
+      const closed = missionPageOf({ ...PLACED, summary: { ...INO, state: "closed", closedAt: T(12, 0), repos: repos(state) } }, LATER);
+      expect(byLabel(renderTree(MissionPageBody({ page: closed, ui: PAGE_UI_IDLE, addable: [], compact: false, on: actions(), styles, theme })), "Ask me again about push and merge request for xspace-ai-assistant")).toBeUndefined();
+    }
+  });
+
+  it("asks before a revoke, in place", () => {
+    expect(revokeIntegrationDialog("INO", { name: "xspace-ai-assistant", branch: "m/INO/xspace-ai-assistant", target: "develop" })).toEqual({
+      title: "Revoke push and merge request for xspace-ai-assistant?",
+      body: "INO's Workers stop pushing m/INO/xspace-ai-assistant and updating its merge request into develop; they go on committing on the branch. The merge request stays as it is.",
+      bodyTone: "plain",
+      confirmLabel: "Revoke",
+      confirmKind: "danger",
+      cancelLabel: "Cancel",
+      defaultAction: "cancel",
+    });
   });
 });

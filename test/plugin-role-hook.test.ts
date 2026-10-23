@@ -47,7 +47,7 @@ const orchestratorMd = roleMd("orchestrator");
  * a mode. Before that delta it got the role text alone.
  */
 /** The owner's review budget a new Worker is told, at its defaults (autonomy design §G.7, bead 7gxw.12). */
-const BUDGET_LINE = "Review calls per request: Small 2, Medium 2, Large 4.";
+const BUDGET_LINE = "Review: up to 3 re-reviews per batch while blocking findings fall; cap per request: Small 3, Medium 6, Large 12 calls.";
 /**
  * A Worker's and a Reviewer's own `Action boundary` facts line (autonomy design
  * §D.2, change-010): off, with why, unless the project's switch is on. A host
@@ -1029,18 +1029,18 @@ describe("before(\"agent.create\") — the owner's precedents (design §B.6)", (
     }
   });
 
-  it("gives a new Worker the owner's review budget from Settings → Coordination; a Worker created before keeps its own (bead 7gxw.12)", async () => {
+  it("gives a new Worker the owner's review cap from Settings → Coordination; a Worker created before keeps its own (delivery line design §5.6)", async () => {
     const { run } = setup(listing);
     const before = String((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt);
     expect(before).toContain(`\n${BUDGET_LINE}\n`);
-    createCoordinationStore(dataHome).set({ key: "review.largeBudget", value: 6 });
+    createCoordinationStore(dataHome).set({ key: "review.callsPerBatch", value: 2 });
     const after = String((await run({ config: { provider: "bm-worker", cwd: "/repo" } }))?.config?.systemPrompt);
-    expect(after).toContain("\nReview calls per request: Small 2, Medium 2, Large 6.\n");
-    // The earlier Worker's instructions were fixed when it was created: nothing sends it the new budget.
+    expect(after).toContain("\nReview: up to 3 re-reviews per batch while blocking findings fall; cap per request: Small 2, Medium 4, Large 8 calls.\n");
+    // The earlier Worker's instructions were fixed when it was created: nothing sends it the new cap.
     expect(before).toContain(`\n${BUDGET_LINE}\n`);
-    // Only a Worker is told a budget.
+    // Only a Worker is told a cap.
     for (const provider of ["bm-manager", "bm-reviewer", "bm-orchestrator"]) {
-      expect(String((await run({ config: { provider, cwd: "/repo" } }))?.config?.systemPrompt), provider).not.toContain("Review calls per request");
+      expect(String((await run({ config: { provider, cwd: "/repo" } }))?.config?.systemPrompt), provider).not.toContain("cap per request");
     }
   });
 

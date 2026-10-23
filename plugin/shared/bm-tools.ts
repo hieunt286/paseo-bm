@@ -39,7 +39,18 @@
  * check built with Zod (the daemon's copy of Zod is the host's, not ours).
  */
 import { AUTONOMY_MODES } from "./autonomy";
-import { REPORT_PHASES, WAITING_FOR_PREFIX, WAITING_ON_OWNER_PREFIX, WAITING_ON_PROJECT_PREFIX, checkBlocks, issueText, type BlockKind } from "./bm-format";
+import {
+  REPORT_PHASES,
+  WAITING_FOR_PREFIX,
+  WAITING_ON_OWNER_PREFIX,
+  WAITING_ON_PROJECT_PREFIX,
+  WAITING_ON_REQUESTS_PREFIX,
+  WAITING_ON_REVIEW_PREFIX,
+  WAKE_ON_ANY_TEXT,
+  checkBlocks,
+  issueText,
+  type BlockKind,
+} from "./bm-format";
 import { MAX_OPTIONS, MAX_SUBJECT_CHARS } from "./bm-questions";
 import { COORDINATION_KEYS, coordinationRuleOf } from "./coordination";
 import {
@@ -54,10 +65,12 @@ import {
   MAX_DECISION_TEXT_CHARS,
   OPTION_KEY_PATTERN,
   PREPARED_CHANGE_KINDS,
-  REVIEW_BUDGET_SUBJECT,
+  LEGACY_REVIEW_BUDGET_SUBJECT,
   SUBJECT_PATTERN,
   type DecisionClass,
 } from "./decisions";
+import { REVIEW_CAP_SUBJECT } from "./question-subjects";
+import { REPORT_CI_STATES, type ReportCiState } from "./contracts/persisted";
 import { DEFAULT_PRECEDENT_DAYS, MAX_PRECEDENT_DAYS, MAX_PRECEDENT_TEXT_CHARS } from "./precedents";
 import { MAX_NOTE_CHARS } from "./orchestrator";
 import { MAX_THREAD_TEXT_CHARS } from "./decision-threads";
@@ -328,8 +341,18 @@ interface ReportInput {
   waitingFor?: string;
   /** A bound Worker's blocked report: the live peer links its request asked and waits on (design §7.17.3). */
   waitingOnPeers?: string[];
+  /** A bound Worker's blocked report: the other requests it waits on, by id (delivery line design §6.2). */
+  waitingOnRequests?: string[];
+  /** A bound Worker's blocked report: its batches whose verdict it waits on (delivery line design §6.2). */
+  waitingOnBatches?: string[];
+  /** A bound Worker's blocked report: met when every item it waits on is settled (`all`, the default) or at the first (`any`). */
+  wakeOn?: "all" | "any";
   /** What the project whose link the request answers needs to know; it goes in the `peer-reply`, never in the block. */
   forPeer?: string;
+  /** A bound Worker's `finished` after a `BM-ROLLOVER` (delivery line design §2.6): the work its continuation takes. */
+  remaining?: string[];
+  /** The mission branch's commit of the work (delivery line design §4.4), as the Worker read it with git and glab. */
+  integration?: { branch: string; commit: string; pushed: boolean; mr?: string; ci?: ReportCiState };
 }
 
 /** Empty is `[]` or left out; a model used to the text template writes `none`, which is not JSON (live run, 2026-09-24). */
@@ -369,7 +392,7 @@ const CHANGE_FIELD: JsonSchema = {
     mode: { type: "string", enum: AUTONOMY_MODES, description: "autonomy.set: owner, shadow, or delegate." },
     key: { type: "string", enum: COORDINATION_KEYS, description: "coordination.set: the setting." },
     value: {
-      type: ["number", "boolean"],
+      type: ["number", "boolean", "string"],
       description: `coordination.set: its new value, in the setting's bounds: ${COORDINATION_KEYS.map((key) => coordinationRuleOf(key)).join("; ")}.`,
     },
   },
@@ -425,6 +448,19 @@ const REPORT_SCHEMA: JsonSchema = {
     },
     blockers: { ...TEXT, description: "Only what waits for the user; omit when nothing does. When blocked, the tool writes the questions line itself." },
     suggestions: { type: "array", items: TEXT, description: `What you noticed but did not do: extra tests, refactors, docs, cleanups, related bugs, other beads. ${EMPTY}` },
+    integration: {
+      type: "object",
+      additionalProperties: false,
+      required: ["branch", "commit", "pushed"],
+      description: "When your worktree is on a mission branch (your ## Runtime facts \"Integration:\" line): the commit of your work on it. Required on finished when you changed files there.",
+      properties: {
+        branch: { type: "string", pattern: "^[^\\s]+$", maxLength: 200, description: "The branch you committed on, as git branch --show-current prints it." },
+        commit: { type: "string", pattern: "^[0-9a-fA-F]{7,40}$", description: "The commit's sha, as git rev-parse HEAD prints it (7 to 40 hex digits)." },
+        pushed: { type: "boolean", description: "True when that commit is pushed to origin." },
+        mr: { type: "string", pattern: "^https?://[^\\s]+$", maxLength: 500, description: "The merge request's URL, once one exists." },
+        ci: { type: "string", enum: REPORT_CI_STATES, description: "Ignored while paseo-bm does not use CI (the default): never read, wait for or poll a pipeline to fill it. When the owner turns CI on, the merge request's pipeline state; none when there is no pipeline." },
+      },
+    },
     handoffNote: {
       type: "string",
       minLength: 1,
@@ -508,17 +544,26 @@ function questionNumberOf(decisionId: string): string {
 /**
  * What a bound Worker's blocked report waits on (design §16.6, §16.11), as
  * its `blockers` line opens: `waiting on the owner: Q2, Q3`, then `waiting
- * for: <the other request or Worker>`, then `waiting on project: <title>
- * (<linkId>), …` (`titleOf` names a link's project); null when it names none.
+ * on requests: req-…, …` and `waiting on review: b2, …` (delivery line design
+ * §6.2), then `waiting for: <the other request or Worker>`, then `waiting on
+ * project: <title> (<linkId>), …` (`titleOf` names a link's project), and
+ * `wake on: any` when the first settled item is enough; null when it names none.
  */
-function waitingText(input: Pick<ReportInput, "waitingOn" | "waitingFor" | "waitingOnPeers">, titleOf: (linkId: string) => string): string | null {
+function waitingText(
+  input: Pick<ReportInput, "waitingOn" | "waitingFor" | "waitingOnPeers" | "waitingOnRequests" | "waitingOnBatches" | "wakeOn">,
+  titleOf: (linkId: string) => string,
+): string | null {
   const numbers = [...new Set((input.waitingOn ?? []).map(questionNumberOf))].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+  const ids = (values: readonly string[] | undefined) => [...new Set(values ?? [])].join(", ");
   const parts = [
     numbers.length === 0 ? null : `${WAITING_ON_OWNER_PREFIX} ${numbers.join(", ")}`,
+    (input.waitingOnRequests ?? []).length === 0 ? null : `${WAITING_ON_REQUESTS_PREFIX} ${ids(input.waitingOnRequests)}`,
+    (input.waitingOnBatches ?? []).length === 0 ? null : `${WAITING_ON_REVIEW_PREFIX} ${ids(input.waitingOnBatches)}`,
     input.waitingFor === undefined || line(input.waitingFor) === "" ? null : `${WAITING_FOR_PREFIX} ${line(input.waitingFor)}`,
     (input.waitingOnPeers ?? []).length === 0 ? null : `${WAITING_ON_PROJECT_PREFIX} ${input.waitingOnPeers!.map((id) => `${line(titleOf(id))} (${id})`).join(", ")}`,
   ].filter((part): part is string => part !== null);
-  return parts.length === 0 ? null : parts.join(". ");
+  if (parts.length === 0) return null;
+  return [...parts, ...(input.wakeOn === "any" ? [WAKE_ON_ANY_TEXT] : [])].join(". ");
 }
 
 function blockersText(input: ReportInput, titleOf: (linkId: string) => string): string {
@@ -563,6 +608,8 @@ function buildReport(input: ReportInput, titleOf: (linkId: string) => string = (
     `decided: ${list((input.decided ?? []).map((entry) => `${item(entry.choice)} — ${item(entry.why)}`), "; ")}`,
     `blockers: ${blockersText(input, titleOf)}`,
     ...(input.handoffNote === undefined || line(input.handoffNote) === "" ? [] : [`handoffNote: ${line(input.handoffNote)}`]),
+    ...((input.remaining ?? []).length === 0 ? [] : [`remaining: ${list(input.remaining!.map(item), "; ")}`]),
+    ...integrationLines(input.integration),
   ];
   if (input.phase !== "blocked" || input.questions === undefined) return lines.join("\n");
   const asked = ["BM-QUESTIONS", `requestId: ${input.requestId}`];
@@ -579,6 +626,18 @@ function buildReport(input: ReportInput, titleOf: (linkId: string) => string = (
     });
   }
   return `${lines.join("\n")}\n\n${asked.join("\n")}`;
+}
+
+/** The report's git lines (delivery line design §4.4): `branch:`, `commit:`, `pushed:`, then `mr:` and `ci:` when known. */
+function integrationLines(integration: ReportInput["integration"]): string[] {
+  if (integration === undefined) return [];
+  return [
+    `branch: ${integration.branch}`,
+    `commit: ${integration.commit.toLowerCase()}`,
+    `pushed: ${integration.pushed ? "yes" : "no"}`,
+    ...(integration.mr === undefined ? [] : [`mr: ${integration.mr}`]),
+    ...(integration.ci === undefined ? [] : [`ci: ${integration.ci}`]),
+  ];
 }
 
 function tierRules(input: Pick<ReportInput, "tier">): string[] {
@@ -935,7 +994,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_ask_owner",
     role: "orchestrator",
     description:
-      "Put a decision to the owner (security, cost, a release, a large change of scope, anything irreversible or on real data): it is stored as a decision the owner answers in paseo-bm, with your recommendation. Give each option the effects it involves (information for the owner: no answer grants them) and, when choosing it should act at once, the command to a Main (never a Worker: the Main directs its Workers): the plugin then delivers that command itself with the owner's authority as soon as the owner picks it. For advice, an option may carry instead a change of the owner's settings (a precedent, an autonomy cell of this project, a coordination setting): the question then says what it applies, and the plugin applies it only when the owner picks it — never on a precedent's, the policy's or your answer. An answer in the owner's own words comes back to you as a BM-ANSWER notice. One open question per request: a new one replaces your open question of the same request (the answer names the replaced id) unless separate: true. Sends nothing to any agent now.",
+      "Put a decision to the owner (security, cost, a release, a large change of scope, anything irreversible or on real data): it is stored as a decision the owner answers in paseo-bm, with your recommendation. Give each option the effects it involves (information for the owner: no answer grants them) and, when choosing it should act at once, the command to a Main (never a Worker: the Main directs its Workers): the plugin then delivers that command itself with the owner's authority as soon as the owner picks it. For advice, an option may carry instead a change of the owner's settings (a precedent, an autonomy cell of this project, a coordination setting): the question then says what it applies, and the plugin applies it only when the owner picks it — never on a precedent's, the policy's or your answer. About a mission's process, it is accepted only from the governor's ladder step 4, when the owner wrote to you in the last 2 hours, or for a goal change or split (`goal` or `split` in the subject). An answer in the owner's own words comes back to you as a BM-ANSWER notice. One open question per request: a new one replaces your open question of the same request (the answer names the replaced id) unless separate: true. Sends nothing to any agent now.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1178,7 +1237,7 @@ export const CREATE_WORKER_LIMITS = { request: 20_000, contextItems: 20, fact: 5
 // ---------------------------------------------------------------------------
 
 /** The bounds of the bound delivering tools (design §16.6). */
-export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, waitingOnPeers: 10, forPeer: 4_000, questions: 5, tellText: 8_000, tellSource: 300, grantCalls: 10 } as const;
+export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, waitingOnPeers: 10, waitingOnRequests: 10, waitingOnBatches: 5, forPeer: 4_000, questions: 5, tellText: 8_000, tellSource: 300, remaining: 30 } as const;
 /** A peer link id: `peer-` + 12 hex digits. */
 export const PEER_LINK_ID_SOURCE = "^peer-[0-9a-f]{12}$";
 /** An open peer link a Manager gives the request (design §7.17.3). */
@@ -1189,6 +1248,61 @@ const PEER_LINK: JsonSchema = {
 };
 /** A `q:` decision id: `q:<requestId>:<Qn>`. */
 export const QUESTION_DECISION_ID_SOURCE = "^q:req-\\d{8}T\\d{6}Z:Q[1-9]\\d{0,2}$";
+
+/**
+ * What a message on a link does (delivery line design §9.1): `ack` and
+ * `close` start no turn; `agree` names a contract, `supersede` the record it
+ * replaces.
+ */
+export const MESSAGE_ACTS = ["ask", "answer", "agree", "ack", "close", "supersede"] as const;
+export type MessageAct = (typeof MESSAGE_ACTS)[number];
+/** The acts that start no turn (delivery line design §9.1). */
+export const NO_TURN_ACTS: readonly MessageAct[] = ["ack", "close"];
+/** The most ids of each kind a message's `refs` names (delivery line design §9.1). */
+export const MAX_MESSAGE_REFS = 10;
+/** A contract at a version: `C2@v3`. */
+export const CONTRACT_REF_SOURCE = "^C\\d{1,4}@v[1-9]\\d{0,3}$";
+
+/** What a message names by id (delivery line design §9.1). */
+export interface MessageRefs {
+  contracts?: string[];
+  records?: string[];
+  decisions?: string[];
+}
+
+const refList = (pattern: string, description: string): JsonSchema => ({ type: "array", minItems: 1, maxItems: MAX_MESSAGE_REFS, items: { type: "string", pattern }, description });
+
+/** A message's `refs` (delivery line design §9.1); paseo-bm checks that every id exists. */
+const MESSAGE_REFS: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  description: "What the message means, by id; paseo-bm refuses an id it does not know.",
+  properties: {
+    contracts: refList(CONTRACT_REF_SOURCE, "Contracts at a version, as bm_mission lists them: C2@v3."),
+    records: refList("^out-[0-9a-f]{12}$", "Delivered records: out-…, as a delivery's first line names them."),
+    decisions: refList("^\\S{1,260}$", "Questions, cards and arbitrations: q:…, m:…, arb-…."),
+  },
+};
+
+/** A message's `act` (delivery line design §9.1). */
+const MESSAGE_ACT: JsonSchema = {
+  type: "string",
+  enum: MESSAGE_ACTS,
+  description:
+    "What the message does: ask, answer, agree (to a contract in refs.contracts), ack (needs no answer; wakes no one), close (closes the link; wakes no one), supersede (replaces the record in refs.records).",
+};
+
+/** Every id `refs` names, in order: contracts, records, decisions. Pure. */
+export function refIdsOf(refs: MessageRefs | undefined): string[] {
+  return refs === undefined ? [] : [...(refs.contracts ?? []), ...(refs.records ?? []), ...(refs.decisions ?? [])];
+}
+
+/** The header line a typed message's delivery gains (delivery line design §9.1): `act: agree · refs: C2@v3`. Pure. */
+export function actHeaderOf(act: MessageAct | null, refs: MessageRefs | undefined): string | null {
+  const ids = refIdsOf(refs);
+  const parts = [...(act === null ? [] : [`act: ${act}`]), ...(ids.length === 0 ? [] : [`refs: ${ids.join(", ")}`])];
+  return parts.length === 0 ? null : parts.join(" · ");
+}
 
 /** What a bound tool's description ends with: it delivers, so there is nothing to send. */
 const DELIVERED = "Arguments are JSON: leave out a field you have nothing for. On error, fix the listed fields and call again; nothing was stored or sent.";
@@ -1224,26 +1338,63 @@ const BOUND_REPORT_SCHEMA: JsonSchema = {
       items: { type: "string", pattern: PEER_LINK_ID_SOURCE },
       description: "Only when blocked, and only when nothing else can go on: the live links your request asked with bm_ask_project that you wait on.",
     },
+    waitingOnRequests: {
+      type: "array",
+      minItems: 1,
+      maxItems: DELIVERING_LIMITS.waitingOnRequests,
+      items: { ...REQUEST_ID, description: "Another request's id, req-YYYYMMDDTHHMMSSZ." },
+      description: "Only when blocked: the other requests you wait on, by id. Each counts as done when it, or the request that continues it, reports finished or stopped.",
+    },
+    waitingOnBatches: {
+      type: "array",
+      minItems: 1,
+      maxItems: DELIVERING_LIMITS.waitingOnBatches,
+      items: { ...BATCH_ID, description: "A batch of your request whose verdict has not come yet." },
+      description: "Only when blocked: your batches whose verdict you wait on.",
+    },
+    wakeOn: {
+      type: "string",
+      enum: ["all", "any"],
+      description: "Only when blocked: all (the default) when you go on once everything you wait on is settled; any when the first is enough.",
+    },
     forPeer: {
       type: "string",
       minLength: 1,
       maxLength: DELIVERING_LIMITS.forPeer,
       description: "Required on finished when your first prompt has a peer: line: what that project needs to know. paseo-bm delivers it to the project.",
     },
+    remaining: {
+      type: "array",
+      minItems: 1,
+      maxItems: DELIVERING_LIMITS.remaining,
+      items: TEXT,
+      description: "Only on finished after a BM-ROLLOVER message: the work left, one item each (beads ready, open review findings, the work in progress). paseo-bm opens the continuation that takes it.",
+    },
   },
 };
 
 function boundReportRules(input: ReportInput): string[] {
   const out = tierRules(input);
-  const waits = (input.waitingOn?.length ?? 0) > 0 || input.waitingFor !== undefined || (input.waitingOnPeers?.length ?? 0) > 0;
+  const waits =
+    (input.waitingOn?.length ?? 0) > 0 ||
+    input.waitingFor !== undefined ||
+    (input.waitingOnPeers?.length ?? 0) > 0 ||
+    (input.waitingOnRequests?.length ?? 0) > 0 ||
+    (input.waitingOnBatches?.length ?? 0) > 0;
   if (input.phase === "blocked" && !waits) {
-    out.push("input.waitingOn: a blocked report names what it waits on: waitingOn (open questions from bm_questions), waitingFor (another request or Worker) or waitingOnPeers (links you asked)");
+    out.push(
+      "input.waitingOn: a blocked report names what it waits on: waitingOn (open questions from bm_questions), waitingOnRequests (other requests, by id), waitingOnBatches (your batches under review), waitingFor (another request or Worker) or waitingOnPeers (links you asked)",
+    );
   }
-  for (const field of ["waitingOn", "waitingFor", "waitingOnPeers"] as const) {
+  for (const field of ["waitingOn", "waitingFor", "waitingOnPeers", "waitingOnRequests", "waitingOnBatches", "wakeOn"] as const) {
     if (input.phase !== "blocked" && input[field] !== undefined) out.push(`input.${field}: only a blocked report waits; leave it out`);
   }
+  if (input.phase !== "finished" && input.remaining !== undefined) out.push("input.remaining: only a finished report lists what remains; leave it out");
   (input.waitingOn ?? []).forEach((id, index) => {
     if (!id.startsWith(`q:${input.requestId}:`)) out.push(`input.waitingOn[${index}]: ${id} is not a question of ${input.requestId}`);
+  });
+  (input.waitingOnRequests ?? []).forEach((id, index) => {
+    if (id === input.requestId) out.push(`input.waitingOnRequests[${index}]: ${id} is your own request; name what it waits on instead`);
   });
   return out;
 }
@@ -1258,7 +1409,7 @@ export function boundReportTool(titleOf?: (linkId: string) => string): AgentTool
     name: "bm_report",
     role: "worker",
     description:
-      "Report to your Manager: paseo-bm builds your BM-REPORT, stores it and delivers it to the Manager that created you, at its next idle moment. phase: received first, beads-done, blocked (with waitingOn, waitingFor or waitingOnPeers), finished when the request is done, stopped when your run was stopped. Ask the owner with bm_questions, never here. Returns JSON { recordId, delivery } — delivery sent, queued (the Manager is busy; it arrives at its next idle moment) or dropped.",
+      "Report to your Manager: paseo-bm builds your BM-REPORT, stores it and delivers it to the Manager that created you, at its next idle moment. phase: received first, beads-done, blocked (with waitingOn, waitingOnRequests, waitingOnBatches, waitingFor or waitingOnPeers), finished when the request is done, stopped when your run was stopped. Ask the owner with bm_questions, never here. Returns JSON { recordId, delivery } — delivery sent, queued (the Manager is busy; it arrives at its next idle moment) or dropped.",
     inputSchema: BOUND_REPORT_SCHEMA,
     rules: boundReportRules,
     build: (input) => buildReport(input, titleOf),
@@ -1317,7 +1468,6 @@ export interface QuestionsInput {
       text: string;
       effects: Array<(typeof EFFECTS)[number]>;
       recommended?: boolean;
-      grant?: { calls?: number; untilClean?: string };
     }>;
   }>;
 }
@@ -1325,7 +1475,7 @@ export interface QuestionsInput {
 export const QUESTIONS_FACE: ToolFace = {
   name: "bm_questions",
   role: "worker",
-  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. A question of subject "${REVIEW_BUDGET_SUBJECT}" gives at least one option a grant ({ calls: n } or { untilClean: batchId }); leave it out on the option that grants nothing. Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
+  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1344,7 +1494,7 @@ export const QUESTIONS_FACE: ToolFace = {
             subject: {
               type: "string",
               pattern: SUBJECT_PATTERN.source,
-              description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most 60 characters. Keep it when you ask the same thing again; "${REVIEW_BUDGET_SUBJECT}" for more review calls.`,
+              description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most 60 characters. Keep it when you ask the same thing again. Never "${REVIEW_CAP_SUBJECT}" or "${LEGACY_REVIEW_BUDGET_SUBJECT}": past your request's review cap paseo-bm asks the owner itself.`,
             },
             class: CLASS_FIELD,
             supersedes: { ...QUESTION_ID, description: "The earlier question of this request that this one asks again, such as Q2; leave it out for a new question." },
@@ -1371,15 +1521,6 @@ export const QUESTIONS_FACE: ToolFace = {
                     description: 'What choosing it lets you do beyond the workspace or the undoable, such as push or migration; ["none"] when nothing of the kind.',
                   },
                   recommended: { type: "boolean", description: "True on exactly one option." },
-                  grant: {
-                    type: "object",
-                    additionalProperties: false,
-                    description: `Only on a "${REVIEW_BUDGET_SUBJECT}" question: what choosing this option grants — { calls: n } (1-${DELIVERING_LIMITS.grantCalls} more review calls) or { untilClean: "<batchId>" }. Leave it out on the option that grants nothing.`,
-                    properties: {
-                      calls: { type: "integer", minimum: 1, maximum: DELIVERING_LIMITS.grantCalls },
-                      untilClean: BATCH_ID,
-                    },
-                  },
                 },
               },
             },
@@ -1397,20 +1538,15 @@ export function questionsRules(input: QuestionsInput): string[] {
     const path = `input.questions[${q}]`;
     const recommended = question.options.filter((option) => option.recommended === true).length;
     if (recommended !== 1) out.push(`${path}.options: exactly one option is recommended (found ${recommended})`);
-    // Design §16.8: the owner's yes to more review calls is the chosen option's grant; without one, answering grants nothing.
-    if (question.subject === REVIEW_BUDGET_SUBJECT && !question.options.some((option) => option.grant !== undefined)) {
-      out.push(`${path}.options: a "${REVIEW_BUDGET_SUBJECT}" question gives at least one option a grant ({ calls: n } or { untilClean: "<batchId>" }); without one, the owner's yes grants nothing`);
-    }
+    // Delivery line design §5.4, §5.6: past the review cap paseo-bm asks the owner itself; review budgets are retired.
+    if (question.subject === REVIEW_CAP_SUBJECT) out.push(`${path}.subject: "${REVIEW_CAP_SUBJECT}" is a question paseo-bm itself asks the owner, once, at your request's review cap`);
+    if (question.subject === LEGACY_REVIEW_BUDGET_SUBJECT) out.push(`${path}.subject: review budgets are retired: paseo-bm asks once, at the request's review cap`);
     question.options.forEach((option, o) => {
       const at = `${path}.options[${o}]`;
       const expected = String.fromCharCode(97 + o);
       if (option.key !== expected) out.push(`${at}.key: must be ${expected} (keys run a, b, c … in order)`);
       if (RECOMMENDED_MARK.test(option.text)) out.push(`${at}.text: leave out "(recommended)"; set recommended: true instead`);
       if (option.effects.includes("none") && new Set(option.effects).size > 1) out.push(`${at}.effects: "none" stands alone; leave it out when the option has effects`);
-      if (option.grant === undefined) return;
-      if (question.subject !== REVIEW_BUDGET_SUBJECT) out.push(`${at}.grant: only a question of subject "${REVIEW_BUDGET_SUBJECT}" grants`);
-      const kinds = (option.grant.calls === undefined ? 0 : 1) + (option.grant.untilClean === undefined ? 0 : 1);
-      if (kinds !== 1) out.push(`${at}.grant: give exactly one of calls or untilClean`);
     });
   });
   return out;
@@ -1421,7 +1557,7 @@ export const TELL_WORKER_FACE: ToolFace = {
   name: "bm_tell_worker",
   role: "manager",
   description:
-    "Give a request's Worker the owner's words or a fact it needs: paseo-bm delivers them to that request's one live Worker at its next idle moment, never into a running turn. Only a request of yours. Returns JSON { workerId, delivery }.",
+    "Give a request's Worker the owner's words or a fact it needs: paseo-bm delivers them to that request's one live Worker at its next idle moment, never into a running turn. While the Worker waits on items by id, a tell is held and goes with them (delivery \"held\", with a note naming them); now: true delivers it at once, for owner words that change the wait. A finished or stopped request goes on as its continuation: a new request and Worker, briefed by paseo-bm, returning { requestId, continuationOf, workerId, delivery, opened }. Only a request of yours. Returns JSON { workerId, delivery, note? }.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1431,6 +1567,8 @@ export const TELL_WORKER_FACE: ToolFace = {
       text: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellText, description: "The owner's words, verbatim, or the fact." },
       source: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellSource, description: "Where it comes from: the owner's message, a document, a decision id." },
       peerLink: PEER_LINK,
+      now: { type: "boolean", description: "true: deliver at once even while the Worker waits on items by id — only for the owner's words that change what it waits on." },
+      refs: MESSAGE_REFS,
     },
   },
 };
@@ -1440,21 +1578,38 @@ export const REVIEW_TOOL_LIMITS = { scope: 4_000, checks: 8_000, fixed: 4_000, s
 /** The stages a Reviewer can be asked to review (design §16.6). */
 export const REVIEW_STAGES = ["implementation", "plan", "beads", "documents"] as const;
 export type ReviewStage = (typeof REVIEW_STAGES)[number];
+/** The milestones a review batch belongs to (delivery line design §5.1). */
+export const REVIEW_MILESTONES = ["plan", "wave", "finished"] as const;
+export type ReviewMilestone = (typeof REVIEW_MILESTONES)[number];
 
-/** What `bm_create_reviewer` takes (design §16.6). */
+/** A commit, as a batch's or a re-review's `since` names it: one word, no spaces. */
+const COMMIT: JsonSchema = { type: "string", minLength: 1, maxLength: 100, pattern: "^\\S+$" };
+
+/** What `bm_create_reviewer` takes (design §16.6; delivery line design §5.1). */
 export interface CreateReviewerInput {
   batchId: string;
   stages: ReviewStage[];
   scope: string;
   checks?: string;
+  milestone?: ReviewMilestone;
+  since?: string;
 }
 
-/** `bm_create_reviewer`'s face (design §16.6): a bound Worker creates the Reviewer of one batch, within its request's review budget. */
+/**
+ * The batch's milestone (delivery line design §5.1): the one given, else
+ * `plan` when the stages include `plan` or `beads`, else `finished`. Pure.
+ */
+export function reviewMilestoneOf(input: Pick<CreateReviewerInput, "stages" | "milestone">): ReviewMilestone {
+  if (input.milestone !== undefined) return input.milestone;
+  return input.stages.includes("plan") || input.stages.includes("beads") ? "plan" : "finished";
+}
+
+/** `bm_create_reviewer`'s face (design §16.6): a bound Worker creates the Reviewer of one batch, within its request's review cap. */
 export const CREATE_REVIEWER_FACE: ToolFace = {
   name: "bm_create_reviewer",
   role: "worker",
   description:
-    "Create the Reviewer of one new batch of your request: paseo-bm checks your request's review budget, creates the Reviewer in your folder with its labels, mode and tools, and gives it its first prompt — the stages, the scope and the checks you ran. Its verdict reaches you as a delivery; you do not wait on it. Send your received report first. Refused, creating nothing, when the batch already has a Reviewer (use bm_rereview) or the budget is reached (ask the owner with bm_questions, subject review-budget). Returns JSON { reviewerId, batchId, reviewCalls }. " +
+    "Create the Reviewer of one new milestone batch of your request (plan, wave or finished): paseo-bm checks your request's review cap, creates the Reviewer in your folder with its labels, mode and tools, and gives it its first prompt — the milestone, the stages, the scope and the checks you ran. Its verdict reaches you as a delivery; you do not wait on it. Send your received report first. Refused, creating nothing, when the batch already has a Reviewer (use bm_rereview), when a plan batch is asked below Large or after a plan batch passed, when the milestone contradicts the stages, or when the request's review cap is reached (paseo-bm asks the owner once and names the question). Returns JSON { reviewerId, batchId, reviewCalls }. " +
     DELIVERED,
   inputSchema: {
     type: "object",
@@ -1476,6 +1631,12 @@ export const CREATE_REVIEWER_FACE: ToolFace = {
         maxLength: REVIEW_TOOL_LIMITS.checks,
         description: "Required with implementation: the checks you ran and their result.",
       },
+      milestone: {
+        type: "string",
+        enum: REVIEW_MILESTONES,
+        description: "plan (Large only, once: the plan, its documents and the bead graph), wave (the diff since the previous implementation batch, after a planned wave) or finished (before finished). When left out: plan if the stages include plan or beads, else finished.",
+      },
+      since: { ...COMMIT, description: "The commit the scope's diff starts from: the previous implementation batch's base, or the request's base for the first." },
     },
   },
 };
@@ -1490,12 +1651,12 @@ export function createReviewerRules(input: CreateReviewerInput): string[] {
   return out;
 }
 
-/** `bm_rereview`'s face (design §16.6): the batch's one re-review, within the review budget. */
+/** `bm_rereview`'s face (design §16.6; delivery line design §5.2, §17.2): a fresh Reviewer on the fix diff while the batch converges, within the review cap. */
 export const REREVIEW_FACE: ToolFace = {
   name: "bm_rereview",
   role: "worker",
   description:
-    "Ask a batch's Reviewer to check your fixes: paseo-bm delivers the re-review to that batch's Reviewer at its next idle moment, within your request's review budget. One re-review per batch unless the owner granted more. Returns JSON { reviewerId, delivery, reviewCalls }. " +
+    "Ask for a batch's re-review: a fresh Reviewer checks the diff of your fixes against the previous blocking findings, within your request's review cap. paseo-bm records your tree at every review call and gives the new Reviewer the files changed since the batch's last call and their diff; the earlier Reviewer is left idle. Allowed while the batch's latest verdict is changes-required, up to the owner's re-reviews per batch (3 by default), and from the second re-review on only while its blocking findings fall; otherwise refused, creating nothing and asking no one. Returns JSON { reviewerId, reviewCalls }. " +
     DELIVERED,
   inputSchema: {
     type: "object",
@@ -1503,7 +1664,8 @@ export const REREVIEW_FACE: ToolFace = {
     required: ["batchId", "fixed"],
     properties: {
       batchId: { ...BATCH_ID, description: "The batch bm_create_reviewer opened." },
-      fixed: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.fixed, description: "How each blocking finding was fixed." },
+      fixed: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.fixed, description: "How each blocking finding was fixed, and the checks you ran for the files you fixed." },
+      since: { ...COMMIT, description: "Not needed: paseo-bm finds the diff itself. Only for a folder without git: the commit your fixes start from." },
     },
   },
 };
@@ -1570,15 +1732,17 @@ function peerFaces(role: "manager" | "worker"): ToolFace[] {
     {
       name: "bm_peer_reply",
       role,
-      description: `Write on a peer link you are a party to: paseo-bm delivers the text to the agent on the link's other side at its next idle moment. close: true closes the link after this message (decline an ask, or withdraw yours). Returns JSON { recordId, to, delivery, state }. ${DELIVERED}`,
+      description: `Write on a peer link you are a party to: paseo-bm delivers the text to the agent on the link's other side at its next idle moment. act says what it does (default: answer from the answering side, ask from the asking side); ack and close start no turn: the other side reads them in its BM-STATE and at the head of its next delivery (delivery "no-turn"). close (or close: true) closes the link after this message (decline an ask, or withdraw yours). refs names what you mean by id. Returns JSON { recordId, to, delivery, state, note? }. ${DELIVERED}`,
       inputSchema: {
         type: "object",
         additionalProperties: false,
         required: ["linkId", "text"],
         properties: {
           linkId: { ...PEER_LINK, description: "The link, peer-…, as bm_ask_project or the delivery gave it." },
-          text: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.text, description: "The message." },
-          close: { type: "boolean", description: "True to close the link after this message." },
+          text: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.text, description: "The message, in full sentences a newcomer to the work understands." },
+          act: MESSAGE_ACT,
+          refs: MESSAGE_REFS,
+          close: { type: "boolean", description: "True: the same as act close." },
         },
       },
     },
@@ -1684,11 +1848,11 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
           type: "array",
           minItems: 1,
           maxItems: MISSION_TOOL_LIMITS.contracts,
-          description: "Without id: a new contract (title, providerRepo, text, source). With id: its new version (text, source).",
+          description:
+            "Without id: a new contract (title, providerRepo, text, source). With id: its new version (text, source), or only its status. A new version is proposed until both sides agree to it on a link (act agree), unless you state status agreed.",
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["text", "source"],
             properties: {
               id: { type: "string", pattern: "^C\\d{1,4}$" },
               title: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.contractTitle },
@@ -1696,6 +1860,7 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
               consumerRepos: { type: "array", maxItems: MISSION_TOOL_LIMITS.repos, items: MISSION_REPO },
               text: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.contractText },
               source: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.contractSource, description: "Where the contract comes from: a document, a decision, a request." },
+              status: { type: "string", enum: ["proposed", "agreed", "superseded", "withdrawn"], description: "proposed (a new version's default), agreed, superseded or withdrawn." },
             },
           },
         },
@@ -1723,7 +1888,7 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
   {
     name: "bm_answer_worker",
     role: "manager",
-    description: `Answer your Workers' open questions (Qn) yourself, as the mission's Main, where paseo-bm names you the decider: a class the repo delegates, or one your mission level delegates (answer-technical: scope, preference, reversible-technical; answer-effects: the rest), review grants within your share included; paseo-bm tells you when one opens. In a shadow cell you may not decide, your choice is recorded as your recommendation and the owner decides. paseo-bm delivers your answer to the Worker as yours, never the owner's, and it grants nothing: an effect it allows still passes the repo's action boundary. Refused for a question paseo-bm names someone else to decide (an ownerOnly fact, a class nobody delegated, a review budget paseo-bm decides itself), a review grant beyond your share, a settled one, or a request outside your mission; the owner may answer any question first. Returns JSON [{ qn, decisionId, state }]. ${DELIVERED}`,
+    description: `Answer your Workers' open questions (Qn) yourself, as the mission's Main, where paseo-bm names you the decider: a class the repo delegates, or one your mission level delegates (answer-technical: scope, preference, reversible-technical; answer-effects: the rest); paseo-bm tells you when one opens. In a shadow cell you may not decide, your choice is recorded as your recommendation and the owner decides. paseo-bm delivers your answer to the Worker as yours, never the owner's, and it grants nothing: an effect it allows still passes the repo's action boundary. Refused for a question paseo-bm names someone else to decide (an ownerOnly fact such as a request's review cap, a class nobody delegated), a settled one, or a request outside your mission; the owner may answer any question first. Returns JSON [{ qn, decisionId, state, said }]: said is what paseo-bm did with each, as stored — delivered, queued for the Worker's turn end, not delivered, or recorded as your recommendation. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1780,6 +1945,15 @@ export const OWNER_QUESTION_FACE: ToolFace = {
       class: { type: "string", enum: [...DECISION_CLASSES], description: "To ask: the question's class." },
       subject: { type: "string", minLength: 1, maxLength: 60, description: "To ask: a short subject, kebab-case." },
       ownerOnly: { type: "boolean", description: "To ask: true for a fact only the owner knows." },
+      about: {
+        type: "object",
+        additionalProperties: false,
+        description: "To ask: the request, or the Worker's question (q:…), this question is about. A question a Worker of your mission already asks the owner is refused; your recommended option is attached to it instead.",
+        properties: {
+          requestId: REQUEST_ID,
+          decisionId: { type: "string", pattern: QUESTION_DECISION_ID_SOURCE, description: "The Worker's question, as bm_mission lists it." },
+        },
+      },
       answered: { type: "string", pattern: "^m:mis-[0-9a-f]{10}:[1-9][0-9]{0,5}$", description: "To record the owner's answer typed here: the m: id of your question." },
       option: { type: "string", minLength: 1, maxLength: 20, description: "With answered: the option key the owner chose (a, b, …)." },
       words: { type: "string", minLength: 1, maxLength: 2_000, description: "With answered: the owner's answer in their words, when it is no option." },
@@ -1902,21 +2076,24 @@ export const MISSION_LINK_FACES: readonly ToolFace[] = [
       properties: {
         requestIds: { type: "array", minItems: 2, maxItems: 2, items: REQUEST_ID, description: "The two requests of your mission whose Workers talk, as bm_mission lists them." },
         topic: { type: "string", minLength: 1, maxLength: MISSION_LINK_LIMITS.topic, description: "What they must agree on." },
+        refs: MESSAGE_REFS,
       },
     },
   },
   {
     name: "bm_ask_mission",
     role: "manager",
-    description: `Ask another mission's Main for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that Main, who answers with bm_peer_reply. Never message another mission's agents yourself. Returns JSON { linkId, mission, mainId, delivery }. ${DELIVERED}`,
+    description: `Ask another mission's Main for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that Main, who answers with bm_peer_reply. act (default ask) may be agree or supersede; ack opens the link with a note that starts no turn (delivery "no-turn"). Never message another mission's agents yourself. Returns JSON { linkId, mission, mainId, delivery, note? }. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["mission", "text"],
       properties: {
         mission: { type: "string", pattern: MISSION_CODE_SOURCE, description: "The other mission's code (bm_peers lists the missions)." },
-        text: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.request, description: "The ask in full: what is needed, why, and the contract you expect back." },
+        text: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.request, description: "The ask in full sentences: what is needed, why, and the contract you expect back." },
         kind: { type: "string", enum: ["work", "question"], description: "work (the default): the mission does something; question: what reading answers." },
+        act: MESSAGE_ACT,
+        refs: MESSAGE_REFS,
       },
     },
   },

@@ -2,7 +2,8 @@
  * The governor's ladder (missions design §9.3, §9.4; ADR-029):
  * `<data folder>/orchestrator/governor.json` =
  * `{ version: 1, missions: { <missionId>: { <family>: { step, since, figures,
- * lastAction: { at, kind, id } | null, mainTurnsAt } } } }`, and the code that
+ * lastAction: { at, kind, id, figures? } | null, mainTurnsAt, held?, underSince? } } },
+ * digests?: { <missionId>: <at> } }`, and the code that
  * climbs it. Steps 1 and 2 are code's, with no model; step 3 is only recorded
  * as due here (the governor's wake reads it).
  *
@@ -19,20 +20,30 @@
  *     the crossed figures.
  *   - 1 → 2 *nudge*: still crossed at the next recomputation; a `BM-COMMAND`
  *     to the mission's current Main (`nudgeCommandOf`: `from: orchestrator`,
- *     `authority: governor:nudge`, `effects: none`) through `command-send.ts`,
- *     whose loop guard counts per mission; once delivered it is logged as a
- *     `govern` intervention (`interventionOfGovern`). A mission without a Main, a
- *     refused or undelivered command leaves the family at 1
+ *     `authority: governor:nudge`, `effects: none`, `by: code`) through
+ *     `command-send.ts`, whose loop guard counts per mission in the code-nudge
+ *     pool; once delivered it is logged as a `govern` intervention
+ *     (`interventionOfGovern`). With that pool spent (delivery line design
+ *     §8.3) the family stays at 1 and records `held: { pool, until }` with one
+ *     journal line; it is nudged again only once `until` has passed. A mission
+ *     without a Main, a refused or undelivered command leaves the family at 1
  *     (`nudge-failed`), tried again after `NUDGE_RETRY_MS`.
  *   - 2 → 3 *re-plan due*: still crossed `governor.windowMinutes` after the
  *     nudge **and** `governor.windowTurns` Main turns after it; a journal
  *     line. A `bm_govern` step on a family at step 1 or 2 restarts both
  *     (`governedLadderOf`, `command-authority.ts`). Steps 3 and 4 are the
  *     model's.
- *   - Any step → 0 *reset*: no figure of the family crossed any more; a
- *     journal line.
+ *   - Any step → 0 *reset*: no figure of the family crossed for
+ *     `governor.windowMinutes` (delivery line design §8.4: `underSince`, so a
+ *     figure that flickers under and back keeps its step); a journal line.
  * - **Journal lines** are kind `governor`, by `governor`, in the mission's
  *   journal (`mission-store.ts`); a nudge's names its command id as `ref`.
+ * - **The daily digest** (delivery line design §8.3): while a family of the
+ *   mission is held, its Main gets, at most once in 24 hours, one `message`
+ *   from `plugin` through the outbox (`BM-DELIVERY message`, on the Main's
+ *   channel): the held families, their crossed figures and the charter line
+ *   each concerns. It is not a command and spends no pool; when it went is
+ *   kept in the file's `digests`.
  * - **The write** (`GovernorStore.update`) replaces only the families the file
  *   still holds as the recomputation read them: a `bm_govern` step written
  *   while a nudge was being delivered stands.
@@ -48,12 +59,15 @@ import type { TraceRecord } from "../shared/contracts";
 import type { GovernorSettings } from "../shared/coordination";
 import { governorAuthorityOf, type CommandInput } from "../shared/orchestrator-command";
 import { timeOrZero } from "../shared/time";
-import { sendCommand } from "./command-send";
+import { missionPoolSpentUntil, sendCommand } from "./command-send";
+import { GOVERNOR_POOLS } from "../shared/orchestrator";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { createJsonFileStore } from "./data-files";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
-import { GOVERNOR_FAMILIES, GOVERNOR_FIGURE_IDS, familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure } from "../shared/governor-figures";
+import { GOVERNOR_FAMILIES, GOVERNOR_FIGURE_IDS, familyFiguresOf, figureText, storedFigureIdOf, type GovernorFamily, type GovernorFigure } from "../shared/governor-figures";
+
 import { governorFiguresOf, readGovernorSnapshot, type ListedAgent } from "./governor-figures";
+import { refreshLines, type LinePaseo } from "./line-watch";
 import { interventionOfGovern, recordIntervention } from "./intervention-store";
 import { requestIndexOf } from "./mission-roster";
 import { createMissionStore, type Mission } from "./mission-store";
@@ -61,19 +75,26 @@ import { missionsHomeIdOf } from "./missions-home";
 import type { NoticeQueue } from "./notice-queue";
 import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
 import { ORCHESTRATOR_DIR_NAME, type OrchestratorStoreDeps } from "./orchestrator-store";
+import { storeAndDeliver } from "./outbox";
+import type { NoticePaseo } from "./notice-queue";
 import { errorText } from "./rpc-kit";
 
 export const GOVERNOR_FILE = "governor.json";
 export const GOVERNOR_FILE_VERSION = 1;
-/** A nudge that could not go is tried again after this long. */
+/** A nudge that could not go is tried again after this long; a spent pool holds the family instead (delivery line design §8.3). */
 export const NUDGE_RETRY_MS = 10 * 60_000;
+/** A mission's Main gets at most one daily digest in this long (§8.3). */
+export const DIGEST_EVERY_MS = 24 * 3_600_000;
 
 /** What the ladder last did for a family; `replan` and `arbitrate` are the model's `bm_govern` (`command-authority.ts`). */
 export const LADDER_ACTIONS = ["record", "nudge", "nudge-failed", "replan-due", "reset", "replan", "arbitrate"] as const;
 
+/** A figure id as stored: one an older build named differently reads by its new name (delivery line design §5.6). */
+const figureIdSchema = z.preprocess(storedFigureIdOf, z.enum(GOVERNOR_FIGURE_IDS));
+
 const figureSchema = z.object({
   family: z.enum(GOVERNOR_FAMILIES),
-  id: z.enum(GOVERNOR_FIGURE_IDS),
+  id: figureIdSchema,
   value: z.number(),
   threshold: z.number(),
   op: z.enum([">=", ">"]),
@@ -87,10 +108,30 @@ const familyStateSchema = z.object({
   since: z.string().nullable(),
   /** The family's figures at the last recomputation. */
   figures: z.array(figureSchema),
-  /** `id`: the nudge's command id; null for every other action. */
-  lastAction: z.object({ at: z.string(), kind: z.enum(LADDER_ACTIONS), id: z.string().nullable() }).nullable(),
+  /**
+   * `id`: the command's id (a nudge, a `bm_govern` step); null for every other
+   * action. `figures`: a re-plan's figure values as it went (delivery line
+   * design §8.2: a repeat with figures no worse is free); additive.
+   */
+  lastAction: z
+    .object({
+      at: z.string(),
+      kind: z.enum(LADDER_ACTIONS),
+      id: z.string().nullable(),
+      figures: z.array(z.object({ id: figureIdSchema, value: z.number() })).optional(),
+    })
+    .nullable(),
   /** How many Main turns the mission had when the nudge (or a later `bm_govern` step at step 1 or 2) went: the window's turns count from there. */
   mainTurnsAt: z.number().int().nonnegative().nullable(),
+  /** The code-nudge pool was spent (delivery line design §8.3): the family waits at its step until `until`. Additive. */
+  held: z.object({ pool: z.enum(GOVERNOR_POOLS), until: z.string() }).optional(),
+  /**
+   * When every figure of the family went back under its threshold (delivery
+   * line design §8.4): above step 0 the family resets only once they stayed
+   * under for `governor.windowMinutes`; after a reset, when that quiet began.
+   * Additive.
+   */
+  underSince: z.string().optional(),
 });
 
 export type FamilyState = z.infer<typeof familyStateSchema>;
@@ -98,6 +139,8 @@ export type MissionLadder = Partial<Record<GovernorFamily, FamilyState>>;
 
 interface GovernorFile {
   missions: Record<string, MissionLadder>;
+  /** When each mission's Main last got its daily digest (§8.3). Additive. */
+  digests: Record<string, string>;
 }
 
 function objectOf(value: unknown): Record<string, unknown> | null {
@@ -115,7 +158,9 @@ function ladderFileOf(body: Record<string, unknown>): GovernorFile {
     }
     missions[missionId] = ladder;
   }
-  return { missions };
+  const digests: Record<string, string> = {};
+  for (const [missionId, at] of Object.entries(objectOf(body["digests"]) ?? {})) if (typeof at === "string") digests[missionId] = at;
+  return { missions, digests };
 }
 
 export interface GovernorStore {
@@ -134,6 +179,10 @@ export interface GovernorStore {
    * cannot be written.
    */
   update(missionId: string, change: (current: MissionLadder) => MissionLadder): MissionLadder;
+  /** When the mission's Main last got its daily digest; null for never. Never throws. */
+  digestAt(missionId: string): string | null;
+  /** Records the mission's daily digest as sent at `at`. Throws when the file cannot be written. */
+  markDigest(missionId: string, at: string): void;
 }
 
 /** The ladder store of the data folder `home`. Creating it touches nothing on disk. */
@@ -144,30 +193,35 @@ export function createGovernorStore(home: string): GovernorStore {
     file: GOVERNOR_FILE,
     version: GOVERNOR_FILE_VERSION,
     parse: ladderFileOf,
-    empty: () => ({ missions: {} }),
+    empty: () => ({ missions: {}, digests: {} }),
     codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
   });
-  const list = (): Record<string, MissionLadder> => {
+  const read = (): GovernorFile => {
     try {
-      return file.read().missions;
+      return file.read();
     } catch {
-      return {};
+      return { missions: {}, digests: {} };
     }
   };
+  const list = (): Record<string, MissionLadder> => read().missions;
   return {
     path: file.path,
     ladder: (missionId) => list()[missionId] ?? {},
     list,
     put(missionId, ladder) {
-      file.update((current) => ({ missions: { ...current.missions, [missionId]: ladder } }));
+      file.update((current) => ({ ...current, missions: { ...current.missions, [missionId]: ladder } }));
     },
     update(missionId, change) {
       let next: MissionLadder = {};
       file.update((current) => {
         next = change(current.missions[missionId] ?? {});
-        return { missions: { ...current.missions, [missionId]: next } };
+        return { ...current, missions: { ...current.missions, [missionId]: next } };
       });
       return next;
+    },
+    digestAt: (missionId) => read().digests[missionId] ?? null,
+    markDigest(missionId, at) {
+      file.update((current) => ({ ...current, digests: { ...current.digests, [missionId]: at } }));
     },
   };
 }
@@ -201,15 +255,24 @@ export function ladderStepOf(current: FamilyState | null | undefined, figures: r
   const crossed = figures.some((entry) => entry.crossed);
   if (!crossed) {
     if (base.step === 0) return { state: base, action: "none" };
-    return { state: { ...RESTING, figures: [...figures], lastAction: { at, kind: "reset", id: null } }, action: "reset" };
+    // Delivery line design §8.4: back to 0 only after the figures stayed under their thresholds for the window.
+    const underSince = base.underSince ?? at;
+    if (now - timeOrZero(underSince) < facts.settings.windowMinutes * 60_000) return { state: { ...base, underSince }, action: "none" };
+    return { state: { ...RESTING, figures: [...figures], lastAction: { at, kind: "reset", id: null }, underSince }, action: "reset" };
   }
+  // Crossed again: the quiet, if any, is over.
+  delete base.underSince;
   switch (base.step) {
     case 0:
       return { state: { ...base, step: 1, since: at, lastAction: { at, kind: "record", id: null }, mainTurnsAt: null }, action: "record" };
     case 1: {
+      // Delivery line design §8.3: a family held for a spent pool waits, with no retry, until the pool has room.
+      if (base.held !== undefined && now < timeOrZero(base.held.until)) return { state: base, action: "none" };
       const failed = base.lastAction?.kind === "nudge-failed" && now - timeOrZero(base.lastAction.at) < NUDGE_RETRY_MS;
       if (failed) return { state: base, action: "none" };
-      return { state: { ...base, step: 2, lastAction: { at, kind: "nudge", id: null }, mainTurnsAt: facts.mainTurns }, action: "nudge" };
+      const next: FamilyState = { ...base, step: 2, lastAction: { at, kind: "nudge", id: null }, mainTurnsAt: facts.mainTurns };
+      delete next.held;
+      return { state: next, action: "nudge" };
     }
     case 2: {
       const nudgedAt = timeOrZero(base.lastAction?.at ?? base.since);
@@ -305,11 +368,13 @@ export interface GovernorDeps extends DataHomeDeps {
   redactEnv?: NodeJS.ProcessEnv;
 }
 
-/** What one recomputation did, per family that moved. */
+/** What one recomputation did, per family that moved; `held`: the code-nudge pool was spent (§8.3). */
 export interface GovernorOutcome {
   missionId: string;
   figures: GovernorFigure[];
-  actions: Array<{ family: GovernorFamily; action: Exclude<LadderAction, "none"> | "nudge-failed"; commandId: string | null; reason: string | null }>;
+  actions: Array<{ family: GovernorFamily; action: Exclude<LadderAction, "none"> | "nudge-failed" | "held"; commandId: string | null; reason: string | null }>;
+  /** The daily digest's outbox record, when this recomputation sent one. */
+  digest?: string;
 }
 
 export interface Governor {
@@ -327,7 +392,34 @@ const journalText = {
   replan: (family: GovernorFamily, settings: Pick<GovernorSettings, "windowMinutes" | "windowTurns">) =>
     `${family} still crossed ${settings.windowMinutes} minutes and ${settings.windowTurns} Main turns after the nudge: re-plan due (step 3)`,
   reset: (family: GovernorFamily) => `${family} back under its thresholds`,
+  held: (family: GovernorFamily, until: string) => `${family}: the code-nudge commands are spent until ${until}; held at step 1, in the Main's daily digest`,
 };
+
+/**
+ * The daily digest to the Main (delivery line design §8.3): each held
+ * family, its crossed figures and the charter line it concerns. Not a
+ * command. Pure.
+ */
+export function digestTextOf(mission: Pick<Mission, "code" | "charter">, ladder: MissionLadder): string | null {
+  const held = GOVERNOR_FAMILIES.filter((family) => ladder[family]?.held !== undefined);
+  if (held.length === 0) return null;
+  const lines = held.flatMap((family) => {
+    const state = ladder[family]!;
+    return [
+      `${family} (held until ${state.held!.until}):`,
+      ...state.figures.filter((entry) => entry.crossed).map((entry) => `- ${figureText(entry)}`),
+      `- Charter: ${charterLineOf(mission, family)}`,
+    ];
+  });
+  return [
+    `The governor's daily digest of mission ${mission.code}: its code-nudge commands are spent, so these figures come here instead of a nudge.`,
+    ...lines,
+    "",
+    "This is not a command: read the figures against your plan, and re-plan where they show it.",
+  ]
+    .join("\n")
+    .slice(0, 4_000);
+}
 
 export function createGovernor(deps: GovernorDeps = {}): Governor {
   const log = deps.log ?? ((message: string) => console.warn(message));
@@ -375,6 +467,15 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
         outcome.actions.push({ family, action, commandId: null, reason: null });
         continue;
       }
+      // Delivery line design §8.3: a spent code-nudge pool holds the family at 1, one journal line, no retry loop.
+      const until = missionPoolSpentUntil(home, mission.missionId, "codeNudge", at, { store: { now, ...deps.store }, settings: settings.governor, log });
+      if (until !== null) {
+        const held = { pool: "codeNudge" as const, until: until.toISOString() };
+        ladder[family] = { ...state, step: 1, lastAction: before[family]?.lastAction ?? null, mainTurnsAt: null, held };
+        journal(home, mission.missionId, journalText.held(family, held.until));
+        outcome.actions.push({ family, action: "held", commandId: null, reason: `the code-nudge pool is spent until ${held.until}` });
+        continue;
+      }
       const sent =
         mission.mainId === null
           ? ({ ok: false, reason: `mission ${mission.code} has no Main` } as const)
@@ -386,6 +487,7 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
               command: nudgeCommandOf(mission, family, own, settings.governor),
               targetId: mission.mainId,
               missionId: mission.missionId,
+              governorBy: "code",
               copyTo: null,
               // Code wrote the text: it declares no effect and asks for none.
               backstop: false,
@@ -424,7 +526,35 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
         log(`[paseo-bm] the governor could not write the ladder of mission ${mission.code}: ${errorText(error)}`);
       }
     }
+    const digest = await sendDigest(home, mission, ladder, at, paseo, workspaceId);
+    if (digest !== null) outcome.digest = digest;
     return outcome;
+  }
+
+  /**
+   * The daily digest (§8.3): while a family is held, one `message` to the
+   * Main from `plugin`, at most once in `DIGEST_EVERY_MS`. Returns its record
+   * id, or null when none went. Never throws.
+   */
+  async function sendDigest(home: string, mission: Mission, ladder: MissionLadder, at: Date, paseo: GovernorPaseo, workspaceId: string): Promise<string | null> {
+    const text = digestTextOf(mission, ladder);
+    if (text === null || mission.mainId === null) return null;
+    const store = createGovernorStore(home);
+    const last = store.digestAt(mission.missionId);
+    if (last !== null && at.getTime() - timeOrZero(last) < DIGEST_EVERY_MS) return null;
+    try {
+      // Addressed by the mission (`requestId`): the outbox delivers it to whichever Main holds the mission.
+      const { record } = await storeAndDeliver(
+        workspaceId,
+        { kind: "message", requestId: mission.missionId, from: "plugin", to: mission.mainId, text },
+        { home, now: () => at, log, paseo: paseo as unknown as NoticePaseo, ...(deps.queue === undefined ? {} : { queue: deps.queue }) },
+      );
+      store.markDigest(mission.missionId, at.toISOString());
+      return record.id;
+    } catch (error) {
+      log(`[paseo-bm] the governor could not send the daily digest of mission ${mission.code}: ${errorText(error)}`);
+      return null;
+    }
   }
 
   async function recompute(missionId: string, paseo: GovernorPaseo, agents?: readonly ListedAgent[]): Promise<GovernorOutcome | null> {
@@ -458,6 +588,8 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
       try {
         const open = createMissionStore(home).list().filter((entry) => entry.state === "open");
         if (open.length === 0) return [];
+        // Delivery line design §4.9: the lines are read here, at most once a minute each; a turn's recomputation reads them as they are.
+        await refreshLines(home, { now, paseo: paseo as unknown as LinePaseo, log });
         const agents = (await agentsOf(paseo)).bm;
         const outcomes: GovernorOutcome[] = [];
         for (const entry of open) {

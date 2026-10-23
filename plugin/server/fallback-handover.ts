@@ -9,7 +9,7 @@
  * |---|---|
  * | `requestId` | the replaced Worker's `bm.requestId` label, recorded on the incident |
  * | report fields | the LATEST `BM-REPORT` of that request in the workspace trace store |
- * | `reviewCalls` | the request's reconstructed trace, against its tier's budget in Settings → Coordination (autonomy design §G.7); a replacement Reviewer's first message is not counted (§4.5.1) |
+ * | `reviewCalls` | the request's reconstructed trace, against its review cap and grants (delivery line design §5.3: `reviewCapOf` with the owner's `review` settings, the request registry's batches and grants); a replacement Reviewer's first message is not counted (§4.5.1) |
  * | `questions` | the decision store: every question the request asked the owner (`q:<requestId>:<Qn>`) with its answer, `open`, or how it ended (autonomy design §A.4) |
  * | original request | the first `user_message` of the replaced Worker's timeline |
  *
@@ -43,8 +43,10 @@ import { LIVE_MAX_PAGES, LIVE_PAGE_LIMIT, readTimelinePages, type LiveTimelinePa
 import { HANDOVER_PROMPT_MARKER, briefLineOf } from "./notices";
 import { agentFactsOf, bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { providerId } from "./provider-id";
-import { REVIEW_BUDGET } from "./review-budget";
-import { readReviewBudget } from "./coordination-rpc";
+import { readCoordinationSettings } from "./coordination-rpc";
+import { ruleReviewGrantOf } from "./review-tools";
+import { DEFAULT_COORDINATION_SETTINGS } from "../shared/coordination";
+import { reviewCapOf } from "../shared/orchestrator-rules";
 import { asRecord, nonEmpty } from "./role-choices";
 import { TRUNCATION_MARKER, readRecords, type TraceStoreLocation } from "./trace-store";
 import { reconstructTraces } from "./traces";
@@ -89,7 +91,7 @@ const MANAGER_CLOSING =
  * worker.md does not have to).
  */
 export const WORKER_CLOSING =
-  "You continue this request in place of the Worker that stopped. Read `git status` and `git diff` first: every change there belongs to the request, so never revert it. Reopen a closed bead only if a review blocks it. Continue the review budget from `reviewCalls` and open no new batch for one in review. The `questions` above are settled: never ask an answered one again; ask an `open` one at your next `blocked` under its own number, and number new ones after the highest listed (from Q100 when it reads `unknown`). Then send `received` to `managerAgentId`.";
+  "You continue this request in place of the Worker that stopped. Read `git status` and `git diff` first: every change there belongs to the request, so never revert it. Reopen a closed bead only if a review blocks it. Continue the review cap from `reviewCalls` and open no new batch for one in review. The `questions` above are settled: never ask an answered one again; ask an `open` one at your next `blocked` under its own number, and number new ones after the highest listed (from Q100 when it reads `unknown`). Then send `received` to `managerAgentId`.";
 
 export interface HandoverDeps {
   /** Agent listing and timelines; `PaseoApi` is structurally assignable. */
@@ -176,7 +178,7 @@ function latestReport(records: readonly TraceRecord[], requestId: string): Parse
 }
 
 /** The first `user_message` of an agent's timeline (bounded walk back to its start), masked; null when none. */
-async function firstUserMessage(paseo: unknown, agentId: string): Promise<string | null> {
+export async function firstUserMessage(paseo: unknown, agentId: string): Promise<string | null> {
   let first: string | null = null;
   await readTimelinePages(paseo as LiveTimelinePaseo, agentId, { pages: LIVE_MAX_PAGES, limit: LIVE_PAGE_LIMIT }, (entries) => {
     // Pages come newest first, each oldest first: every older page's first message replaces the last one found.
@@ -239,9 +241,12 @@ export async function workerHandoverFacts(subject: { workspaceId: string; reques
 
   const tier = report?.tier ?? review?.tier ?? null;
   const calls = review?.reviewCalls ?? null;
-  // The owner's budget, from the data folder the traces are in (§G.7); without a store, the defaults.
-  const reviewBudget = deps.location === null ? REVIEW_BUDGET : readReviewBudget({ home: dirname(deps.location.tracesDir), ...(deps.log === undefined ? {} : { log: deps.log }) });
-  const reviewCalls = calls === null ? "unknown" : tier === null ? `${calls} of an unknown budget` : `${calls} of ${reviewBudget[tier]}`;
+  // Delivery line design §5.3: the request's cap and grants, with the owner's settings from the data folder
+  // the traces are in; without a store, the defaults and one milestone batch.
+  const settings = deps.location === null ? DEFAULT_COORDINATION_SETTINGS : readCoordinationSettings({ home: dirname(deps.location.tracesDir), ...(deps.log === undefined ? {} : { log: deps.log }) });
+  const registered = deps.location === null || requestId === null ? undefined : registeredRequestsOf({ location: deps.location }, workspaceId).find((entry) => entry.requestId === requestId);
+  const grant = registered === undefined ? { calls: 0, milestones: 1 } : ruleReviewGrantOf(registered);
+  const reviewCalls = calls === null ? "unknown" : tier === null ? `${calls} of an unknown budget` : `${calls} of ${reviewCapOf(tier, grant.milestones, settings.review) + grant.calls}`;
   return { report, tier, reviewCalls, questions: questionsBlock(questions, requestId), original };
 }
 

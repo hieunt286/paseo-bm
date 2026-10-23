@@ -33,7 +33,7 @@ import type { Alert, AlertKind } from "../shared/alerts";
 import { MAX_COMMAND_RE_CHARS, commandInputProblems, parseCommandBlock, type CommandInput } from "../shared/orchestrator-command";
 import { listAllAgents } from "./agent-role";
 import { createAlertStore } from "./alert-store";
-import { bmAgentsOf, directoryIn, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { bmAgentsOf, directoryIn, listedWorkspaces, projectNameIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { TRACES_DIR_NAME, type DataHomeDeps } from "./data-home";
 import type { NoticeAgentSnapshot } from "./notice-queue";
 import {
@@ -213,8 +213,13 @@ export async function agentsOf(paseo: Pick<OrchestratorStatePaseo, "agents">): P
   };
 }
 
-/** What a project is called: the name the trace store last saw, else its folder, else its id. */
+/**
+ * What a project is called: its project name as Paseo lists it (`mission-projects.html`: named as in
+ * Paseo's sidebar), else the name the trace store last saw, else its folder, else its id.
+ */
 export function workspaceLabelOf(workspaceId: string, listed: readonly ListedWorkspace[] | null, location: TraceStoreLocation | null): string {
+  const listedName = projectNameIn(listed, workspaceId);
+  if (listedName !== null) return listedName;
   let name: string | null = null;
   try {
     name = location === null ? null : (readWorkspaceMeta(location, workspaceId)?.lastKnownName ?? null);

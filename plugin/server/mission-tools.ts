@@ -7,7 +7,7 @@
  * | `bm_mission` | reads the caller's mission: charter, plan, contracts, roster (each request's repo, Worker, phase, newest report), its Workers' open questions, the open `m:` cards, the mission level, the newest `MISSION_JOURNAL_SHOWN` journal lines |
  * | `bm_mission_start` | an unassigned Main in the Missions home proposes the mission the owner named (`proposed-mission-starts.ts`); `settleMissionStart` records it at the turn's end only when the turn holds the owner's own message (the decision materialiser), then binds, labels and titles the Main |
  * | `bm_mission_update` | writes the free changes at once (plan, contracts, new criteria, a criterion's status open or met, a repo added at a mission level that delegates `scope-repo`), each with a journal line; everything else opens one `m:` decision whose "apply" option carries the change |
- * | `bm_answer_worker` | answers open `q:` questions of the mission's requests whose decider is the Main (mission runtime design §4.1, `deciderOf`): `by: main`, `via: main`, no grant on the decision (a review grant within the Main's cap is applied to the request), handed to `onSettled` (the Worker gets it cited as the Main's); where the Main only recommends (a `shadow` cell) it records `prediction.main`. Refused for a question someone else decides, a review grant beyond the Main's cap, a settled one, a request of another mission |
+ * | `bm_answer_worker` | answers open `q:` questions of the mission's requests whose decider is the Main (mission runtime design §4.1, `deciderOf`): `by: main`, `via: main`, no grant on the decision, handed to `onSettled` (the Worker gets it cited as the Main's); where the Main only recommends (a `shadow` cell) it records `prediction.main`. Refused for a question someone else decides, a settled one, a request of another mission |
  *
  * **The owner's card.** An `m:<missionId>:<n>` decision lives in the
  * mission's own store (`mission-decisions.ts`), asked by `plugin` with the
@@ -27,7 +27,7 @@
  * the input. Text is masked by the stores. Nothing here throws into the
  * endpoint.
  */
-import { deciderOf, grantWithin } from "../shared/authority";
+import { deciderOf, heldEffectsOf } from "../shared/authority";
 import { authorityFactsOf } from "./authority-facts";
 import { isAbsolute, resolve } from "node:path";
 import type { ToolCaller } from "./agent-bindings";
@@ -47,18 +47,21 @@ import { redactText } from "./collector";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { isEmptyMissionChange, missionChangeLinesOf, type MissionChange, type MissionChangeAction } from "../shared/mission-change";
 import { createDecisionStore } from "./decision-store";
+import { answerEffect, missionCardEffect, nothingWasSentence, recommendationEffect } from "./effects";
 import { decisionSummaryOf, type ServerToolAnswer, type ServerTools } from "./decision-tools";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionDecisionStore, isMainQuestion, missionOfDecisionId } from "./mission-decisions";
 import { busyRequestsOf, createMissionRoster, requestIndexOf, stopActiveRequests } from "./mission-roster";
 import { offerMerges, offerTransfer } from "./mission-ownership";
 import { transferRefusalsOf } from "./mission-transfer";
-import { createMissionStore, journalQuietly, type Mission, type MissionContract } from "./mission-store";
+import { contractStatusOf, createMissionStore, journalQuietly, metAtOf, type ContractStatus, type Mission, type MissionContract } from "./mission-store";
 import { ensureMissionWorkspace, isMissionsHome, markMain, missionsHomeIdOf, syncMainTitle, type MissionsPaseo } from "./missions-home";
 import type { NoticePaseo } from "./notice-queue";
 import { newestReportRecordOf, reportPhaseOf, storeAndDeliver } from "./outbox";
 import { setAgentLabel, type PaseoCliDeps } from "./paseo-cli";
 import { directoryIn, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { placementOf, repoKeyOf } from "./placements";
+import { openArchiveCards, retiredPlacements, retitlePlacements } from "./placement-create";
 import { isPluginHomeIn } from "./plugin-homes";
 import { proposeMissionStart, takeProposedMissionStart } from "./proposed-mission-starts";
 import { cutText } from "./request-render";
@@ -71,13 +74,13 @@ export const MISSION_JOURNAL_SHOWN = 50;
 /** How much of a request's newest report `bm_mission` shows. */
 export const MISSION_REPORT_SHOWN = 1_500;
 
-const NOTHING = "Nothing was changed.";
+const NOTHING = nothingWasSentence("changed");
 /** A caller that is not a bound Manager. */
-export const MISSION_NOT_BOUND_MESSAGE = "The mission tools are only for a Main paseo-bm created with its own tools. Nothing was read or changed.";
+export const MISSION_NOT_BOUND_MESSAGE = `The mission tools are only for a Main paseo-bm created with its own tools. ${nothingWasSentence("read or changed")}`;
 /** A bound Manager that is not the current Main of a mission. */
 export const NOT_A_MAIN_MESSAGE =
-  "You are not the Main of a mission: a Main with no mission yet records the one the owner names with bm_mission_start. Nothing was read or changed.";
-const NO_PASEO = "paseo-bm has no connection to Paseo yet; try again in a moment. Nothing was changed.";
+  `You are not the Main of a mission: a Main with no mission yet records the one the owner names with bm_mission_start. ${nothingWasSentence("read or changed")}`;
+const NO_PASEO = `paseo-bm has no connection to Paseo yet; try again in a moment. ${NOTHING}`;
 
 const faceOf = (name: string): ToolFace => MISSION_TOOL_FACES.find((face) => face.name === name)!;
 
@@ -102,7 +105,8 @@ export function missionOfMain(home: string, caller: Pick<ToolCaller, "agentId" |
 /**
  * The workspace ids of `given` (ids or absolute folders), or why each cannot
  * be in a charter (§3.3): not a listed, unarchived workspace, or a paseo-bm
- * home. Pure but for the home check.
+ * home. A placement names its repo (delivery line design §3.1). Pure but for
+ * the home and placement reads.
  */
 export function resolveRepos(given: readonly string[], listed: readonly ListedWorkspace[] | null, home: string, field: string): { ids: string[]; reasons: string[] } {
   if (listed === null) return { ids: [], reasons: ["Paseo's workspaces cannot be read right now; try again in a moment"] };
@@ -115,15 +119,15 @@ export function resolveRepos(given: readonly string[], listed: readonly ListedWo
     if (entry === undefined) reasons.push(`${field}: ${repo} is not a workspace Paseo lists`);
     else if (entry.archived) reasons.push(`${field}: ${repo} is archived`);
     else if (isPluginHomeIn(entry.id, listed, home)) reasons.push(`${field}: ${repo} is a paseo-bm home, not a repository`);
-    else if (!ids.includes(entry.id)) ids.push(entry.id);
+    else if (!ids.includes(repoKeyOf(home, entry.id))) ids.push(repoKeyOf(home, entry.id));
   }
   return { ids, reasons };
 }
 
-/** `repo` as a workspace id: the listed workspace of that id or folder, else as given. Pure. */
-function idOf(repo: string, listed: readonly ListedWorkspace[] | null): string {
+/** `repo` as a repo key: the listed workspace of that id or folder (a placement's repo, delivery line design §3.1), else as given. */
+function idOf(repo: string, listed: readonly ListedWorkspace[] | null, home: string): string {
   const entry = listed?.find((candidate) => candidate.id === repo || (isAbsolute(repo) && candidate.directory !== null && resolve(candidate.directory) === resolve(repo)));
-  return entry?.id ?? repo;
+  return repoKeyOf(home, entry?.id ?? repo);
 }
 
 /** The ids of the mission's requests whose Worker is running a turn (`busyRequestsOf`, mission runtime design §5.4): what a close waits for. */
@@ -139,8 +143,9 @@ export interface FreeMissionUpdate {
   plan?: string;
   newCriteria: string[];
   statuses: Array<{ id: string; status: "open" | "met"; evidence: string | null }>;
-  newContracts: Array<Pick<MissionContract, "title" | "providerRepo" | "consumerRepos" | "text" | "source">>;
-  versions: Array<{ id: string; text: string; source: string; title?: string; providerRepo?: string; consumerRepos?: string[] }>;
+  newContracts: Array<Pick<MissionContract, "title" | "providerRepo" | "consumerRepos" | "text" | "source"> & { status?: ContractStatus }>;
+  /** A new version (`text`, `source`), or only a new status (delivery line design §9.2). */
+  versions: Array<{ id: string; text?: string; source?: string; title?: string; providerRepo?: string; consumerRepos?: string[]; status?: ContractStatus }>;
   addRepos: string[];
 }
 
@@ -159,17 +164,24 @@ export function applyFreeUpdate(mission: Mission, free: FreeMissionUpdate, at: s
   const doneCriteria = [
     ...charter.doneCriteria.map((criterion) => {
       const status = free.statuses.find((entry) => entry.id === criterion.id);
-      return status === undefined ? criterion : { ...criterion, status: status.status, at, evidence: status.evidence ?? criterion.evidence };
+      if (status === undefined) return criterion;
+      const evidence = status.evidence ?? criterion.evidence;
+      // Delivery line design §8.4: `metAt` moves only when the criterion becomes met with evidence; back to open, or a status sent again, keeps it.
+      const metAt = status.status === "met" && criterion.status !== "met" && evidence !== null ? at : metAtOf(criterion);
+      return { ...criterion, status: status.status, at, evidence, ...(metAt === null ? {} : { metAt }) };
     }),
     ...free.newCriteria.map((text) => ({ id: `D${next++}`, text, status: "open" as const, at: null, evidence: null })),
   ];
   let contractNumber = nextNumber(mission.contracts.map((contract) => contract.id));
+  // Delivery line design §9.2: a new version is `proposed` unless stated otherwise; a status alone keeps the version.
   const contracts = [
     ...mission.contracts.map((contract) => {
       const version = free.versions.find((entry) => entry.id === contract.id);
-      return version === undefined ? contract : { ...contract, ...version, version: contract.version + 1, updatedAt: at };
+      if (version === undefined) return contract;
+      if (version.text === undefined) return { ...contract, status: version.status ?? contractStatusOf(contract), updatedAt: at };
+      return { ...contract, ...version, status: version.status ?? "proposed", version: contract.version + 1, updatedAt: at };
     }),
-    ...free.newContracts.map((contract) => ({ ...contract, id: `C${contractNumber++}`, version: 1, updatedAt: at })),
+    ...free.newContracts.map((contract) => ({ ...contract, status: contract.status ?? "proposed", id: `C${contractNumber++}`, version: 1, updatedAt: at })),
   ];
   return {
     ...mission,
@@ -188,6 +200,8 @@ export function applyMissionChange(mission: Mission, change: MissionChange, at: 
   const removed = new Set(change.removeRepos ?? []);
   return {
     ...mission,
+    // Delivery line design §3.6: a repo leaving the charter, or the mission closing, retires its placements.
+    ...(mission.placements === undefined ? {} : { placements: retiredPlacements(mission.placements, removed, change.close === true) }),
     ...(change.name === undefined ? {} : { name: change.name }),
     ...(change.code === undefined ? {} : { code: change.code }),
     ...(change.close === true ? { state: "closed" as const, closedAt: at } : {}),
@@ -201,7 +215,13 @@ export function applyMissionChange(mission: Mission, change: MissionChange, at: 
       doneCriteria: charter.doneCriteria.map((criterion) => {
         const entry = change.criteria?.find((candidate) => candidate.id === criterion.id);
         if (entry === undefined) return criterion;
-        return { ...criterion, ...(entry.text === undefined ? {} : { text: entry.text }), ...(entry.status === undefined ? {} : { status: entry.status, at }) };
+        // A drop or a restore keeps when it was last met (delivery line design §8.4).
+        const metAt = metAtOf(criterion);
+        return {
+          ...criterion,
+          ...(entry.text === undefined ? {} : { text: entry.text }),
+          ...(entry.status === undefined ? {} : { status: entry.status, at, ...(metAt === null ? {} : { metAt }) }),
+        };
       }),
     },
   };
@@ -238,6 +258,16 @@ export function missionCardOf(mission: Mission, change: MissionChange, input: { 
     supersedes: null,
     supersededBy: null,
   };
+}
+
+/**
+ * `decision` with the Main's recommendation as `prediction.main` (missions
+ * design §8): `bm_answer_worker` where the Main only recommends, and
+ * `bm_owner_question` refused for a Worker's question already open (delivery
+ * line design §7.2). The other predictions stay. Pure.
+ */
+export function withMainPrediction(decision: Decision, main: { optionKey: string; reason: string; at: string }): Decision {
+  return { ...decision, prediction: { recommended: decision.prediction?.recommended ?? null, orchestrator: decision.prediction?.orchestrator ?? null, main } };
 }
 
 /** The mission change the chosen option of an `m:` decision carries, or null (keep as is, words, any other decision). Pure. */
@@ -386,15 +416,21 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
     const result = store.update(missionId, (mission) => applyMissionChange(mission, action.change, at));
     if (!result.ok) {
       deps.log(`[paseo-bm] the owner chose to apply ${decision.id}, but it could not be applied: ${result.reasons.join("; ")}`);
-      journalQuietly(store, missionId, { kind: "decision", by: "plugin", text: `${decision.id} could not be applied: ${result.reasons.join("; ")}`, ref: decision.id }, deps.log);
-      await tellMain(missionId, decision.id, `The owner chose to apply your card ${decision.id}, but it could not be applied: ${result.reasons.join("; ")}.`, deps);
+      const failed = missionCardEffect(decision.id, "your card", { ok: false, reasons: result.reasons });
+      journalQuietly(store, missionId, { kind: "decision", by: "plugin", text: failed.journal, ref: decision.id }, deps.log);
+      await tellMain(missionId, decision.id, failed.sentence, deps);
       return;
     }
     if (action.change.close === true) stopActiveRequests(deps.home, missionId, deps.log);
+    // Delivery line design §3.6: the owner's archive card for the placements just retired; §3.3: a new code retitles them.
+    if (action.change.close === true || (action.change.removeRepos ?? []).length > 0) await openArchiveCards(deps.home, missionId, { log: deps.log, now: () => deps.now });
+    if (action.change.code !== undefined) await retitlePlacements(deps.paseo, result.mission, deps.log);
     if ((action.change.addRepos ?? []).length > 0) offerMerges(deps.home, missionId, { now: deps.now, log: deps.log });
+    // Delivery line design §7.3: said from the mission as written.
     const lines = missionChangeLinesOf(action.change).join("; ");
-    journalQuietly(store, missionId, { kind: "charter", by: "owner", text: `The owner applied ${decision.id}: ${lines}.`, ref: decision.id }, deps.log);
-    await tellMain(missionId, decision.id, `The owner applied your card ${decision.id}: ${lines}.`, deps);
+    const applied = missionCardEffect(decision.id, "your card", { ok: true, journal: lines, main: lines });
+    journalQuietly(store, missionId, { kind: "charter", by: "owner", text: applied.journal, ref: decision.id }, deps.log);
+    await tellMain(missionId, decision.id, applied.sentence, deps);
     await syncMainAfterChange(result.mission, action.change, deps);
   } catch (error) {
     deps.log(`[paseo-bm] applying ${decision.id} failed: ${errorText(error)}`);
@@ -511,7 +547,7 @@ interface UpdateInput {
   doneCriteria?: Array<{ id?: string; text?: string; status?: "open" | "met" | "dropped"; evidence?: string }>;
   budget?: { requests?: number; workers?: number; reviewCalls?: number; days?: number };
   plan?: string;
-  contracts?: Array<{ id?: string; title?: string; providerRepo?: string; consumerRepos?: string[]; text: string; source: string }>;
+  contracts?: Array<{ id?: string; title?: string; providerRepo?: string; consumerRepos?: string[]; text?: string; source?: string; status?: ContractStatus }>;
   repos?: { add?: string[]; remove?: string[] };
   confirmCharter?: boolean;
   close?: boolean;
@@ -563,9 +599,21 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     const delegated = MISSION_CLASSES.filter((name) => autonomy.cells[name].mode === "delegate");
     return answered({
       mission: { missionId: mission.missionId, code: mission.code, name: mission.name, state: mission.state, createdAt: mission.createdAt, closedAt: mission.closedAt },
-      charter: { ...mission.charter, repos: mission.charter.repos.map((workspaceId) => ({ workspaceId, folder: folderOf(workspaceId) })) },
+      // Delivery line design §3.4: each repo's placement — folder, branch, target, state.
+      charter: {
+        ...mission.charter,
+        repos: mission.charter.repos.map((workspaceId) => {
+          const placement = placementOf(home, mission.missionId, workspaceId);
+          return {
+            workspaceId,
+            folder: folderOf(workspaceId),
+            ...(placement === null ? {} : { placement: { folder: placement.directory, branch: placement.branch, target: placement.target, state: placement.state } }),
+          };
+        }),
+      },
       plan: mission.plan,
-      contracts: mission.contracts,
+      // Delivery line design §9.2: an older contract reads agreed.
+      contracts: mission.contracts.map((contract) => ({ ...contract, status: contractStatusOf(contract) })),
       requests,
       ownerCards: createMissionDecisionStore(home).list(mission.missionId, UNSETTLED_STATUSES).map(summary),
       level: { level: autonomy.level, delegated, owner: MISSION_CLASSES.filter((name) => !delegated.includes(name)) },
@@ -581,7 +629,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     if (issues.length > 0) return fixThese("bm_mission_start", issues);
     const { main, mission } = found;
     const home = deps.home();
-    const nothing = "Nothing was recorded.";
+    const nothing = nothingWasSentence("recorded");
     if (mission !== null || (main.missionId ?? null) !== null) {
       return refused(`You are the Main of mission ${mission?.code ?? main.missionId} already: change it with bm_mission_update. ${nothing}`);
     }
@@ -651,7 +699,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       }
     }
     if (input.repos?.remove !== undefined) {
-      const removed = input.repos.remove.map((repo) => idOf(repo, listed));
+      const removed = input.repos.remove.map((repo) => idOf(repo, listed, home));
       removed.forEach((id, index) => {
         if (!charter.repos.includes(id)) reasons.push(`input.repos.remove[${index}]: ${input.repos!.remove![index]} is not a repo of mission ${mission.code}`);
       });
@@ -693,14 +741,25 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     // Contracts: free, a new one or a new version.
     (input.contracts ?? []).forEach((entry, index) => {
       const at = `input.contracts[${index}]`;
-      const repos = { ...(entry.providerRepo === undefined ? {} : { providerRepo: idOf(entry.providerRepo, listed) }), ...(entry.consumerRepos === undefined ? {} : { consumerRepos: entry.consumerRepos.map((repo) => idOf(repo, listed)) }) };
+      const repos = { ...(entry.providerRepo === undefined ? {} : { providerRepo: idOf(entry.providerRepo, listed, home) }), ...(entry.consumerRepos === undefined ? {} : { consumerRepos: entry.consumerRepos.map((repo) => idOf(repo, listed, home)) }) };
+      const status = entry.status === undefined ? {} : { status: entry.status };
       if (entry.id === undefined) {
-        if (entry.title === undefined || entry.providerRepo === undefined) return void reasons.push(`${at}: a new contract needs its title and providerRepo`);
-        free.newContracts.push({ title: entry.title, providerRepo: repos.providerRepo!, consumerRepos: repos.consumerRepos ?? [], text: entry.text, source: entry.source });
+        if (entry.title === undefined || entry.providerRepo === undefined || entry.text === undefined || entry.source === undefined) {
+          return void reasons.push(`${at}: a new contract needs its title, providerRepo, text and source`);
+        }
+        free.newContracts.push({ title: entry.title, providerRepo: repos.providerRepo!, consumerRepos: repos.consumerRepos ?? [], text: entry.text, source: entry.source, ...status });
         return;
       }
       if (!mission.contracts.some((contract) => contract.id === entry.id)) return void reasons.push(`${at}.id: no contract ${entry.id} (bm_mission lists them)`);
-      free.versions.push({ id: entry.id, text: entry.text, source: entry.source, ...(entry.title === undefined ? {} : { title: entry.title }), ...repos });
+      // Delivery line design §9.2: a new version is its text and source; a status alone changes only the status.
+      if (entry.text === undefined || entry.source === undefined) {
+        if (entry.text !== undefined || entry.source !== undefined || entry.status === undefined || entry.title !== undefined || Object.keys(repos).length > 0) {
+          return void reasons.push(`${at}: give a new version (text and source) or only its status`);
+        }
+        free.versions.push({ id: entry.id, status: entry.status });
+        return;
+      }
+      free.versions.push({ id: entry.id, text: entry.text, source: entry.source, ...(entry.title === undefined ? {} : { title: entry.title }), ...repos, ...status });
     });
 
     // Mission runtime design §5.3: a move of requests to another mission is the owner's own card.
@@ -731,7 +790,10 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       for (const status of free.statuses) journal("criterion", `${status.id} is ${status.status}${status.evidence === null ? "" : `: ${status.evidence}`}.`);
       const newContracts = written.mission.contracts.slice(mission.contracts.length).map((contract) => contract.id);
       if (newContracts.length > 0) journal("contract", `The Main added the contracts ${newContracts.join(", ")}.`);
-      for (const version of free.versions) journal("contract", `The Main wrote a new version of ${version.id} (source: ${version.source}).`);
+      for (const version of free.versions) {
+        if (version.source !== undefined) journal("contract", `The Main wrote a new version of ${version.id} (source: ${version.source})${version.status === undefined ? "" : `, ${version.status}`}.`);
+        else journal("contract", `The Main marked ${version.id} ${version.status}.`);
+      }
       if (free.addRepos.length > 0) journal("charter", `The Main added the repos ${free.addRepos.join(", ")} (scope-repo is delegated).`);
     }
     let decisionId: string | null = null;
@@ -760,8 +822,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
   /**
    * `bm_answer_worker` (§4, §8): every answer is checked on the decision as
    * read — open, a known option, the Main named its decider by `deciderOf`
-   * (mission runtime design §4.1), a review grant within the Main's cap — and any refusal
-   * writes nothing; then each is written in one transition that checks again.
+   * (mission runtime design §4.1) — and any refusal writes nothing; then each is written in one transition that checks again.
    * From the reads to the writes nothing awaits.
    */
   const answerWorker = async (raw: unknown, caller: ToolCaller | null): Promise<ServerToolAnswer> => {
@@ -790,20 +851,17 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       if (notOpen !== null) return { refusal: notOpen };
       const chosen = decision.options.find((entry) => entry.key === option);
       if (chosen === undefined) return { refusal: `${qn} has no option ${option}; its options are ${decision.options.map((entry) => entry.key).join(", ")}` };
-      // Mission runtime design §4.1, §4.5: the one resolver names the decider; no time window, review grants within the Main's cap.
+      // Mission runtime design §4.1, §4.5: the one resolver names the decider; no time window. Delivery line design §5.6: no review grant is the Main's.
       const decider = deciderOf(decision, facts);
-      if (decider.decider === "main") {
-        if (chosen.grant !== undefined && !grantWithin(chosen.grant, facts.reviewCaps(decision.workspaceId, decision.requestId)?.mainLeft ?? 0)) {
-          return { refusal: `option ${option} of ${qn} grants more review calls than your share leaves: choose another or leave it to the owner` };
-        }
-        return { rule: "answer" };
-      }
+      // Delivery line design §7.1: named by the mission's delegation alone, the Main's answer covers no effect.
+      const held = decider.withoutEffects === true ? heldEffectsOf(chosen) : [];
+      if (held.length > 0) return { refusal: `Refused: option ${option} of ${qn} declares ${held.join(", ")}, which only the owner's answer covers here; choose an option without effects or leave it to the owner. ${nothingWasSentence("answered")}` };
+      if (decider.decider === "main") return { rule: "answer" };
       if (decider.recommend) {
         if ((decision.prediction?.main ?? null) !== null) return { refusal: `you recommended an option for ${qn} already; the owner decides it` };
         return { rule: "predict" };
       }
       if (decider.rule === "owner-only") return { refusal: ownerOnlyRefusalText(decision.id) };
-      if (decider.decider === "code") return { refusal: `${qn} is paseo-bm's to decide (${decider.why}): nothing for you to answer` };
       return { refusal: `${qn} is the owner's (${decider.why}): give your recommendation in your reply to the owner` };
     };
 
@@ -820,7 +878,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
 
     const iso = at.toISOString();
     const answeredNow: Decision[] = [];
-    const results: Array<{ qn: string; decisionId: string; state: "answered" | "recommended" }> = [];
+    const results: Array<{ qn: string; decisionId: string; state: "answered" | "recommended"; written: Decision }> = [];
     for (const entry of input.answers) {
       const id = questionDecisionId(input.requestId, entry.qn);
       const reason = reasonOf(entry.why);
@@ -832,8 +890,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
           if ("refusal" in rule) return { ok: false, refusal: "invalid-answer", message: rule.refusal };
           if (rule.rule === "answer") return answerDecision(current, { by: "main", via: "main", optionKey: entry.option, class: decisionClassOf(current), reason, at: iso });
           state = "recommended";
-          const prediction = { recommended: current.prediction?.recommended ?? null, orchestrator: current.prediction?.orchestrator ?? null, main: { optionKey: entry.option, reason, at: iso } };
-          return { ok: true, decision: { ...current, prediction } };
+          return { ok: true, decision: withMainPrediction(current, { optionKey: entry.option, reason, at: iso }) };
         },
         place.workspaceId,
       );
@@ -842,7 +899,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
         continue;
       }
       if (state === "answered") answeredNow.push(mutation.decision);
-      results.push({ qn: entry.qn, decisionId: id, state });
+      results.push({ qn: entry.qn, decisionId: id, state, written: mutation.decision });
     }
     if (results.length > 0) {
       const text = results.map((result) => `${result.state === "answered" ? "answered" : "recommended an option for"} ${result.qn}`).join(", ");
@@ -855,11 +912,13 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
         log(`[paseo-bm] ${answeredNow.map((decision) => decision.id).join(", ")} answered by Main ${main.agentId}, but the delivery failed: ${errorText(error)}`);
       }
     }
+    // Delivery line design §7.3: each result says what the store holds after the delivery — the answer, its delivery and grant, or the recommendation.
     return answered(
-      results.map((result) => ({
-        ...result,
-        said: result.state === "answered" ? "delivered to the Worker as your answer, not the owner's; it grants nothing" : "recorded as your recommendation; the owner decides it",
-      })),
+      results.map((result) => {
+        const written = store.get(result.decisionId, place.workspaceId) ?? result.written;
+        const effect = result.state === "answered" ? answerEffect(written, "your answer, not the owner's") : recommendationEffect(written);
+        return { qn: result.qn, decisionId: result.decisionId, state: result.state, said: effect.sentence };
+      }),
     );
   };
 

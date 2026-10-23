@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, createBindingStore } from "../plugin/server/agent-bindings";
 import { BUILDER_SEND_LINES, answer, answerWithServerTools, withAgentTools } from "../plugin/server/agent-tools";
@@ -20,6 +21,7 @@ import {
 import { noteIn, peerBlockOf } from "../plugin/server/handoff";
 import { CUT_NOTE_LINE, clearSeenTurns, createInterruptionWatch } from "../plugin/server/interruption-watch";
 import { createMissionRoster } from "../plugin/server/mission-roster";
+import { createMissionStore, type Placement } from "../plugin/server/mission-store";
 import { PEER_RULES, createPeerLinkStore } from "../plugin/server/peer-links";
 import { peerReplyText } from "../plugin/server/peer-tools";
 import { offToolAlertOf } from "../plugin/server/off-tool-reviewer";
@@ -35,7 +37,8 @@ import type { Decision } from "../plugin/shared/decisions";
 import { parseDelivery } from "../plugin/shared/notices";
 import { originOf } from "../plugin/shared/message-origin";
 import { msg, turn } from "./fixtures/orchestrator-traces";
-import { fakePaseo } from "./helpers/fake-paseo";
+import { fakePaseo, type FakeTimeline } from "./helpers/fake-paseo";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 import { MANAGER_CALLER, REVIEWER_CALLER, WORKER_CALLER, bindAgent } from "./helpers/bindings";
 import type { TraceRecord } from "../plugin/shared/contracts";
@@ -75,9 +78,9 @@ const AGENTS: Agent[] = [
   { id: REVIEWER, provider: "bm-reviewer/claude-opus-5", status: "idle", workspaceId: WS, labels: { "bm.role": "reviewer", "bm.requestId": REQ, "bm.batchId": "b1" } },
 ];
 
-function setup(options: { home?: string; agents?: Agent[]; paseo?: boolean; turnStart?: string | null } = {}) {
+function setup(options: { home?: string; agents?: Agent[]; paseo?: boolean; turnStart?: string | null; timelines?: Record<string, FakeTimeline> } = {}) {
   const home = options.home ?? dataFolder();
-  const fake = fakePaseo({ agents: options.agents ?? AGENTS });
+  const fake = fakePaseo({ agents: options.agents ?? AGENTS, ...(options.timelines === undefined ? {} : { timelines: options.timelines }) });
   const queue = createNoticeQueue({ log: () => {} });
   const logs: string[] = [];
   const opened: Decision[][] = [];
@@ -179,10 +182,10 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
   it("a stopped report stops the Worker's running Reviewers (design §7.9); finished does not", async () => {
     const { home, tools, stopsAsked } = setup();
     register(home);
-    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
-    expect(stopsAsked).toEqual([]);
     expect((await tools.worker.call("bm_report", { ...REPORT, phase: "stopped" }, WORKER_CALLER)).ok).toBe(true);
     expect(stopsAsked).toEqual([{ workerId: WORKER, workspaceId: WS }]);
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    expect(stopsAsked).toHaveLength(1);
   });
 
   it("finished waits for every review call's verdict to reach the Worker; stopped and blocked never wait (acceptance finding F3)", async () => {
@@ -206,7 +209,7 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     const verdict = outbox.add(WS, { kind: "review", requestId: REQ, batchId: "b1", from: REVIEWER, to: WORKER, text: "BM-REVIEW" });
     expect(await tools.worker.call("bm_report", finished, WORKER_CALLER)).toEqual(waiting);
     outbox.settle(WS, verdict.id, "delivered");
-    expect((await tools.worker.call("bm_report", finished, WORKER_CALLER)).ok).toBe(true);
+    expect(batchesAwaitingVerdict(createRequestRegistry(home).get(WS, REQ), createOutbox(home).list(WS), at(2_000))).toEqual([]);
     // A re-review is a new call: the verdict before it does not answer it; a no-verdict delivery settles it.
     tick(10_000);
     expect(registry.addReviewCall(WS, REQ, "b1", { callId: "call-2", kind: "rereview", reviewerId: REVIEWER, at: at(11_000).toISOString() })).toBe("added");
@@ -362,8 +365,8 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     }
   });
 
-  it("a mission request's roster state follows its reports: finished, then active again on a later report, then stopped (missions design §2.3)", async () => {
-    const { home, tools } = setup();
+  it("a mission request's roster state follows its reports, and a finished bound request is final: a later report is refused (delivery line design §2.3)", async () => {
+    const { home, fake, tools } = setup();
     register(home);
     const roster = createMissionRoster(home);
     roster.add("mis-0123456789", { requestId: REQ, workspaceId: WS, topic: "Export", workerId: WORKER });
@@ -372,9 +375,43 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     expect(state()).toBe("active");
     expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
     expect(state()).toBe("finished");
-    // A follow-up through bm_tell_worker reopened the work.
+    const finishedAt = createRequestRegistry(home).get(WS, REQ)!.finishedAt;
+    expect(finishedAt).toBe(T0.toISOString());
+    const records = createOutbox(home).list(WS).length;
+    const sends = fake.sends.length;
+    for (const phase of ["received", "blocked", "finished", "stopped"]) {
+      const late = await tools.worker.call("bm_report", { ...REPORT, phase, ...(phase === "blocked" ? { waitingFor: "x" } : {}) }, WORKER_CALLER);
+      expect(late, phase).toEqual({ ok: false, text: `Request ${REQ} is finished; ask your Main. Nothing was stored or sent.` });
+    }
+    expect(state()).toBe("finished");
+    expect(createRequestRegistry(home).get(WS, REQ)!.finishedAt).toBe(finishedAt);
+    expect(createOutbox(home).list(WS)).toHaveLength(records);
+    expect(fake.sends).toHaveLength(sends);
+  });
+
+  it("a later report on a finished bound request names the request its work goes on as (delivery line design §2.3)", async () => {
+    const { home, tools } = setup();
+    register(home);
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    // A continuation (WP-7.2) sets continuedBy on the predecessor.
+    const file = join(home, "requests", `${WS}.json`);
+    const body = JSON.parse(readFileSync(file, "utf8")) as { requests: Array<Record<string, unknown>> };
+    body.requests[0]!["continuedBy"] = OTHER_REQ;
+    writeFileSync(file, JSON.stringify(body), { mode: 0o600 });
+    clearRequestRegistryCache();
+    expect(await tools.worker.call("bm_report", REPORT, WORKER_CALLER)).toEqual({ ok: false, text: `Request ${REQ} is finished; its work goes on as ${OTHER_REQ}. Nothing was stored or sent.` });
+  });
+
+  it("the hand path keeps today's reopening: a request registered agent-typed is active again after finished, and its finishedAt cleared", async () => {
+    const { home, tools } = setup();
+    createRequestRegistry(home, { backfill: () => [] }).register(WS, REQ, { source: "agent-typed", managerId: MANAGER, workerId: WORKER });
+    createMissionRoster(home).add("mis-0123456789", { requestId: REQ, workspaceId: WS, topic: "Export", workerId: WORKER });
+    const state = () => createMissionRoster(home).get("mis-0123456789", REQ)?.state;
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    expect(state()).toBe("finished");
     expect((await tools.worker.call("bm_report", REPORT, WORKER_CALLER)).ok).toBe(true);
     expect(state()).toBe("active");
+    expect(createRequestRegistry(home).get(WS, REQ)!.finishedAt).toBeNull();
     expect((await tools.worker.call("bm_report", { ...REPORT, phase: "stopped" }, WORKER_CALLER)).ok).toBe(true);
     expect(state()).toBe("stopped");
   });
@@ -395,6 +432,133 @@ describe("bm_report for a bound Worker (design §16.6)", () => {
     // A bound one reaches the delivering tool.
     const bound = await answerWithServerTools("worker", call("bm_report", { ...REPORT, requestId: OTHER_REQ }), tools.worker, WORKER_CALLER);
     expect((bound as { result: { isError?: boolean } }).result.isError).toBe(true);
+  });
+});
+
+describe("bm_report in a mission's placement (delivery line design §4.4, §4.6)", () => {
+  const BRANCH = "m/ABC/fe";
+  const hasGit = (() => {
+    try {
+      execFileSync("git", ["--version"], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const gitIn = (repo: string, ...args: string[]): string =>
+    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args], {
+      cwd: repo,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+      stdio: "pipe",
+      encoding: "utf8",
+    }).trim();
+
+  /** A worktree on the mission branch with one commit, and WS as that mission's placement of it. Returns the commit's sha. */
+  function placed(home: string): { repo: string; sha: string } {
+    const repo = join(home, "..", "repo");
+    mkdirSync(repo);
+    gitIn(repo, "init", "-q", "-b", "main");
+    writeFileSync(join(repo, "a.ts"), "a\n");
+    gitIn(repo, "add", "a.ts");
+    gitIn(repo, "commit", "-q", "-m", "a");
+    gitIn(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
+    gitIn(repo, "checkout", "-q", "-b", BRANCH);
+    writeFileSync(join(repo, "b.ts"), "b\n");
+    gitIn(repo, "add", "b.ts");
+    gitIn(repo, "commit", "-q", "-m", "b");
+    const placement: Placement = {
+      repo: "wks_repo",
+      workspaceId: WS,
+      directory: repo,
+      branch: BRANCH,
+      target: "main",
+      base: "origin/main",
+      worktreeSlug: "m-abc-fe",
+      state: "ready",
+      requestKey: "bm-place-x",
+      createdAt: T0.toISOString(),
+      deps: { cloned: [], at: null, note: null },
+      integration: null,
+    };
+    const store = createMissionStore(home, { now: () => T0 });
+    const made = store.create({ code: "ABC", name: "Alpha", goal: "Ship it.", repos: ["wks_repo"], createdBy: "owner", mainId: MANAGER });
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    const updated = store.update(made.mission.missionId, (mission) => ({ ...mission, placements: [placement] }));
+    if (!updated.ok) throw new Error(updated.reasons.join("\n"));
+    return { repo, sha: gitIn(repo, "rev-parse", "HEAD") };
+  }
+  const FINISHED = { ...REPORT, phase: "finished", filesChanged: ["b.ts"] };
+
+  it.skipIf(!hasGit)("finished with changed files and no commit is refused, naming the branch; nothing is stored or sent", async () => {
+    const { home, fake, tools } = setup();
+    register(home);
+    placed(home);
+    expect(await tools.worker.call("bm_report", FINISHED, WORKER_CALLER)).toEqual({
+      ok: false,
+      text: `The call was refused. Fix these and call bm_report again:\n- input.integration.commit: commit on ${BRANCH} and report its sha`,
+    });
+    expect(createOutbox(home).list(WS)).toEqual([]);
+    expect(fake.sends).toEqual([]);
+    expect(createRequestRegistry(home).get(WS, REQ)?.finishedAt).toBeNull();
+    // Another phase, or finished with no file changed, is not held for a commit.
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "beads-done", filesChanged: ["b.ts"] }, WORKER_CALLER)).ok).toBe(true);
+    expect((await tools.worker.call("bm_report", { ...REPORT, phase: "finished" }, WORKER_CALLER)).ok).toBe(true);
+    expect(createOutbox(home).list(WS).at(-1)!.text).not.toMatch(/^finished, /m);
+  });
+
+  it.skipIf(!hasGit)("a committed finish: the delivery says so, from read-only git", async () => {
+    const { home, fake, tools } = setup();
+    register(home);
+    const { sha } = placed(home);
+    const result = await tools.worker.call("bm_report", { ...FINISHED, integration: { branch: BRANCH, commit: sha, pushed: false } }, WORKER_CALLER);
+    expect(result.ok).toBe(true);
+    const [record] = createOutbox(home).list(WS);
+    expect(record!.text.endsWith(`\npushed: no\n\nfinished, committed on ${BRANCH}.`)).toBe(true);
+    expect(checkBlocks(record!.text).flatMap((block) => block.issues)).toEqual([]);
+    expect(parseReports(record!.text, { agentId: WORKER, at: "" })[0]?.integration).toEqual({ branch: BRANCH, commit: sha, pushed: false });
+    expect(fake.sends[0]!.text).toContain(`finished, committed on ${BRANCH}.`);
+  });
+
+  it.skipIf(!hasGit)("integration.ci off, the default (ADR-036 §17.1): verified is a check detected in the Worker's own turns; the report's ci is ignored; on restores CI", async () => {
+    const shell = (status: string, at: string) => ({ item: { type: "tool_call", callId: "c1", name: "Bash", status, error: null, detail: { type: "shell", command: "npm test" } }, timestamp: at });
+    const turns = (repo: string) => [
+      { item: { type: "tool_call", callId: "e1", name: "Edit", status: "completed", error: null, detail: { type: "edit", filePath: join(repo, "b.ts") } }, timestamp: "2026-10-23T10:01:00.000Z" },
+      shell("running", "2026-10-23T10:02:00.000Z"),
+      shell("completed", "2026-10-23T10:03:00.000Z"),
+    ];
+    const finish = (sha: string) => ({ ...FINISHED, buildAndTests: "`npm test` passed", integration: { branch: BRANCH, commit: sha, pushed: true, mr: "https://gitlab.example/mr/7", ci: "failure" } });
+    for (const ci of ["off", "on"] as const) {
+      const home = dataFolder();
+      const { repo, sha } = placed(home);
+      const run = setup({ home, timelines: { [WORKER]: turns(repo) } });
+      register(home);
+      if (ci === "on") createCoordinationStore(home).set({ key: "integration.ci", value: "on" });
+      expect((await run.tools.worker.call("bm_report", finish(sha), WORKER_CALLER)).ok).toBe(true);
+      expect(run.fake.sends[0]!.text.endsWith(ci === "off" ? `\n\nfinished, committed on ${BRANCH}; verified.` : `\n\nfinished, committed on ${BRANCH}; CI red.`), ci).toBe(true);
+    }
+    // Off, with no detected check (none run after the last edit): committed, with no CI words.
+    const home = dataFolder();
+    const { repo, sha } = placed(home);
+    const run = setup({ home, timelines: { [WORKER]: turns(repo).slice(1).concat([{ ...turns(repo)[0]!, timestamp: "2026-10-23T10:04:00.000Z" }]) } });
+    register(home);
+    expect((await run.tools.worker.call("bm_report", finish(sha), WORKER_CALLER)).ok).toBe(true);
+    expect(run.fake.sends[0]!.text.endsWith(`\n\nfinished, committed on ${BRANCH}.`)).toBe(true);
+  });
+
+  it.skipIf(!hasGit)("a dirty tree, or a sha not on the branch: the Main's delivery reads finished, uncommitted", async () => {
+    const dirty = setup();
+    register(dirty.home);
+    const { repo, sha } = placed(dirty.home);
+    writeFileSync(join(repo, "c.ts"), "c\n");
+    expect((await dirty.tools.worker.call("bm_report", { ...FINISHED, integration: { branch: BRANCH, commit: sha, pushed: false } }, WORKER_CALLER)).ok).toBe(true);
+    expect(dirty.fake.sends[0]!.text).toMatch(/\n\nfinished, uncommitted: the worktree has changes not committed\.$/);
+
+    const other = setup();
+    register(other.home);
+    placed(other.home);
+    const result = await other.tools.worker.call("bm_report", { ...FINISHED, integration: { branch: BRANCH, commit: "abcdef1", pushed: true, ci: "failure" } }, WORKER_CALLER);
+    expect(result.ok).toBe(true);
+    expect(other.fake.sends[0]!.text.endsWith(`\n\nfinished, uncommitted: abcdef1 is not in the history of ${BRANCH}.`)).toBe(true);
   });
 });
 
@@ -446,23 +610,15 @@ describe("bm_questions for a bound Worker (design §16.6)", () => {
     expect(createDecisionStore(home).get(`q:${REQ}:Q1`, WS)).toMatchObject({ status: "answered", answer: { by: "precedent", optionKey: "a" }, delivery: { to: WORKER, outcome: "sent" } });
   });
 
-  it("a review-budget question keeps its grants and is never answered by a precedent", async () => {
+  it("a review-cap or review-budget question is refused, opening nothing (delivery line design §5.4, §5.6)", async () => {
     const { home, tools } = setup();
     register(home);
-    createPrecedentStore(home).save({ scope: WS, subject: "review-budget", text: "Two more calls", sourceDecisionId: null, expiresInDays: 30 }, T0);
-    const question = QUESTION({
-      text: "Review budget reached: allow more review calls?",
-      subject: "review-budget",
-      class: "cost",
-      options: [
-        { key: "a", text: "Two more calls", effects: ["none"], recommended: true, grant: { calls: 2 } },
-        { key: "b", text: "Until batch b2 is clean", effects: ["none"], grant: { untilClean: "b2" } },
-        { key: "c", text: "No more reviews", effects: ["none"] },
-      ],
-    });
-    const [result] = parsed(await tools.worker.call("bm_questions", { questions: [question] }, WORKER_CALLER)) as unknown as Array<Record<string, unknown>>;
-    expect(result).toMatchObject({ state: "open" });
-    expect(createDecisionStore(home).get(`q:${REQ}:Q1`, WS)?.options.map((option) => option.grant ?? null)).toEqual([{ calls: 2 }, { untilClean: "b2" }, null]);
+    for (const subject of ["review-cap", "review-budget"]) {
+      const result = await tools.worker.call("bm_questions", { questions: [QUESTION({ text: "More review calls?", subject, class: "cost" })] }, WORKER_CALLER);
+      expect(result.ok, subject).toBe(false);
+      expect(result.text).toContain("input.questions[0].subject: ");
+    }
+    expect(createDecisionStore(home).list({ workspaceId: WS })).toEqual([]);
   });
 
   it("refuses the whole call on any invalid question, opening nothing", async () => {
@@ -471,13 +627,8 @@ describe("bm_questions for a bound Worker (design §16.6)", () => {
     const cases: Array<[unknown, string]> = [
       [{ questions: [QUESTION(), QUESTION({ options: [{ key: "a", text: "x", effects: ["none"] }, { key: "b", text: "y", effects: ["none"] }] })] }, "input.questions[1].options: exactly one option is recommended (found 0)"],
       [{ questions: [QUESTION({ options: [{ key: "a", text: "x", effects: ["none"], recommended: true }, { key: "b", text: "y", effects: ["none"], recommended: true }] })] }, "exactly one option is recommended (found 2)"],
-      [{ questions: [QUESTION({ options: [{ key: "a", text: "x", effects: ["none"], recommended: true, grant: { calls: 2 } }, { key: "b", text: "y", effects: ["none"] }] })] }, 'input.questions[0].options[0].grant: only a question of subject "review-budget" grants'],
-      [{ questions: [QUESTION({ subject: "review-budget", options: [{ key: "a", text: "x", effects: ["none"], recommended: true, grant: { calls: 2, untilClean: "b1" } }, { key: "b", text: "y", effects: ["none"] }] })] }, "give exactly one of calls or untilClean"],
-      // Acceptance finding F1: without a grant on any option, the owner's yes would grant nothing.
-      [
-        { questions: [QUESTION({ subject: "review-budget", class: "cost", options: [{ key: "a", text: "Two more calls", effects: ["none"], recommended: true }, { key: "b", text: "No", effects: ["none"] }] })] },
-        'input.questions[0].options: a "review-budget" question gives at least one option a grant',
-      ],
+      // Delivery line design §5.6: no Worker question grants review calls.
+      [{ questions: [QUESTION({ options: [{ key: "a", text: "x", effects: ["none"], recommended: true, grant: { calls: 2 } }, { key: "b", text: "y", effects: ["none"] }] })] }, "input.questions[0].options[0].grant: is not a field of this tool"],
       [{ questions: [QUESTION({ options: [{ key: "b", text: "x", effects: ["none"], recommended: true }, { key: "c", text: "y", effects: ["none"] }] })] }, "input.questions[0].options[0].key: must be a"],
       [{ questions: [QUESTION({ supersedes: "Q9" })] }, `input.questions[0].supersedes: Q9 is not a question of ${REQ}`],
       [{ questions: [QUESTION({ class: undefined })] }, "input.questions[0].class: is required"],
@@ -513,6 +664,47 @@ describe("bm_review for a bound Reviewer (design §16.6)", () => {
     expect(record!.text).toContain("verdict: changes-required");
     expect(fake.sends.map((send) => send.id)).toEqual([WORKER]);
     expect(parseDelivery(fake.sends[0]!.text)?.kind).toBe("review");
+  });
+
+  it("records the review's verdict and blocking count on its batch before its Worker is woken (delivery line design §5.2)", async () => {
+    const { home, tools } = setup();
+    register(home);
+    createRequestRegistry(home).addReviewCall(WS, REQ, "b1", { callId: "out-00000000000a", kind: "create", reviewerId: REVIEWER, at: T0.toISOString() }, "brief", "finished");
+    const blocking = (location: string) => ({ severity: "blocking", location, reason: "Off by one.", suggestedFix: "Use <=." });
+    const result = await tools.reviewer.call("bm_review", { ...REVIEW, findings: [blocking("src/a.ts:3"), blocking("src/b.ts:9"), { ...blocking("src/c.ts:1"), severity: "non-blocking" }] }, REVIEWER_CALLER);
+    expect(result.ok).toBe(true);
+    expect(createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!.results).toEqual([
+      { at: T0.toISOString(), recordId: parsed(result)["recordId"], verdict: "changes-required", blocking: 2 },
+    ]);
+    // A request the registry does not hold: delivered all the same.
+    expect((await setup().tools.reviewer.call("bm_review", REVIEW, REVIEWER_CALLER)).ok).toBe(true);
+  });
+
+  it("after a handoff, delivers the verdict of a batch the replaced Worker opened to the request's current Worker (delivery line design §6.4)", async () => {
+    const SUCCESSOR = "agent-worker-successor";
+    const replaced = AGENTS.map((agent) => (agent.id === WORKER ? { ...agent, labels: { ...agent.labels, "bm.replacedBy": SUCCESSOR } } : agent));
+    const agents = [...replaced, { id: SUCCESSOR, provider: "bm-worker/claude-opus-5", status: "idle", workspaceId: WS, labels: { "bm.role": "worker", "bm.requestId": REQ, "bm.handoffFrom": WORKER } }];
+    const { home, fake, tools } = setup({ agents });
+    register(home);
+    createRequestRegistry(home).addWorker(WS, REQ, SUCCESSOR);
+    // The successor waits on b1; the replaced Worker is no longer the request's, so nothing gates it — or is held for it.
+    createRequestRegistry(home).setWaiting(WS, REQ, { since: T0.toISOString(), reportRecordId: "out-0000000000ff", wakeOn: "all", items: [{ kind: "batch", id: "b1", settled: false }] });
+    const result = await tools.reviewer.call("bm_review", REVIEW, REVIEWER_CALLER);
+    expect(parsed(result)).toEqual({ recordId: "out-000000000001", delivery: "sent" });
+    expect(createOutbox(home).list(WS)[0]).toMatchObject({ kind: "review", batchId: "b1", to: SUCCESSOR, state: "delivered" });
+    expect(fake.sends.map((send) => send.id)).toEqual([SUCCESSOR]);
+    // Its wait settled and was released with it.
+    expect(createRequestRegistry(home).get(WS, REQ)?.waiting).toBeUndefined();
+  });
+
+  it("keeps the Reviewer's parent when the request has no single live Worker to send to instead", async () => {
+    const OTHER_WORKER = "agent-worker-2";
+    const agents = [...AGENTS, { id: OTHER_WORKER, provider: "bm-worker/claude-opus-5", status: "idle", workspaceId: WS, labels: { "bm.role": "worker", "bm.requestId": REQ } }];
+    const { home, tools } = setup({ agents });
+    register(home);
+    createRequestRegistry(home).addWorker(WS, REQ, OTHER_WORKER);
+    expect((await tools.reviewer.call("bm_review", REVIEW, REVIEWER_CALLER)).ok).toBe(true);
+    expect(createOutbox(home).list(WS)[0]).toMatchObject({ kind: "review", to: WORKER });
   });
 
   it("refuses another request or batch than the binding's, naming both, and stores and sends nothing", async () => {
@@ -706,6 +898,44 @@ describe("bm_tell_worker for a bound Manager (design §16.6)", () => {
     );
   });
 
+  it("refs (delivery line design §9.1): each unknown id is one refusal line and nothing is sent; known ids go on a refs: line after the words", async () => {
+    const MAIN = "agent-main";
+    const MISSION = "mis-0123456789";
+    const BACK = "wks_back";
+    const worker: Agent = { id: "agent-back-worker", provider: "bm-worker/claude-opus-5", status: "idle", workspaceId: BACK, labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MAIN } };
+    const main: Agent = { id: MAIN, provider: "bm-manager/claude-opus-5", status: "idle", workspaceId: "wks_home", labels: { "bm.role": "manager" } };
+    const { home, fake, tools } = setup({ agents: [main, worker] });
+    const made = createMissionStore(home, { newId: () => MISSION, env: {} }).create({ code: "ORD", name: "Orders", goal: "Sell", repos: [BACK], createdBy: "owner", mainId: MAIN });
+    if (!made.ok) throw new Error(made.reasons.join("; "));
+    createMissionStore(home).update(MISSION, (mission) => ({
+      ...mission,
+      contracts: [{ id: "C1", title: "Orders API", providerRepo: BACK, consumerRepos: [], text: "GET /orders", version: 2, updatedAt: "2026-10-03T10:00:00.000Z", source: "PRD", status: "proposed" as const }],
+    }));
+    createRequestRegistry(home, { backfill: () => [] }).register(BACK, REQ, { source: "tool", managerId: MAIN, workerId: worker.id });
+    createMissionRoster(home).add(MISSION, { requestId: REQ, workspaceId: BACK, topic: "Orders API", workerId: worker.id });
+    const caller = { ...MANAGER_CALLER, agentId: MAIN, workspaceId: "wks_home", missionId: MISSION };
+    expect((await tools.manager.call("bm_tell_worker", { ...TELL, refs: { contracts: ["C1@v3", "C2@v1"], records: ["out-0000000000aa"], decisions: [`m:${MISSION}:9`] } }, caller)).text).toBe(
+      [
+        "refs.contracts: unknown contract C1@v3; bm_mission lists the contracts and their versions",
+        "refs.contracts: unknown contract C2@v1; bm_mission lists the contracts and their versions",
+        "refs.records: unknown record out-0000000000aa",
+        `refs.decisions: unknown decision m:${MISSION}:9`,
+        "Nothing was sent.",
+      ].join("\n"),
+    );
+    expect((await tools.manager.call("bm_tell_worker", { ...TELL, refs: { contracts: ["C1"] } }, caller)).text).toContain("input.refs.contracts[0]");
+    expect(fake.sends).toEqual([]);
+    expect(parsed(await tools.manager.call("bm_tell_worker", { ...TELL, refs: { contracts: ["C1@v2", "C1@v1"] } }, caller))).toEqual({ workerId: worker.id, delivery: "sent" });
+    const [record] = createOutbox(home).list(BACK);
+    expect(fake.sends).toEqual([
+      { id: worker.id, text: [`BM-DELIVERY message ${record!.id}`, `Continue ${REQ}.`, "Use dd/mm/yyyy.", "Everywhere.", "refs: C1@v2, C1@v1", "source: owner message, 10:04"].join("\n") },
+    ]);
+    // A record the outbox holds is a known ref.
+    fake.byId(worker.id)!.status = "idle";
+    expect(parsed(await tools.manager.call("bm_tell_worker", { requestId: REQ, text: "As said.", refs: { records: [record!.id] } }, caller))).toMatchObject({ delivery: "sent" });
+    expect(fake.sends[1]!.text.split("\n").slice(1)).toEqual([`Continue ${REQ}.`, "As said.", `refs: ${record!.id}`]);
+  });
+
   it("refuses an unknown request, another Manager's, no live Worker, and an unbound caller, sending nothing", async () => {
     const { home, fake, tools } = setup({ agents: [AGENTS[0]!] });
     register(home);
@@ -786,13 +1016,13 @@ describe("peer links through bm_report and bm_tell_worker (design §7.17.3)", ()
     expect(link(home, ANSWERED)).toMatchObject({ state: "answered", answeredAt: T0.toISOString() });
     expect(link(home, ANSWERED).messages).toMatchObject([{ recordId: "out-000000000002", workspaceId: WS, side: "answerer", agentId: WORKER, kind: "peer-reply", phase: "finished" }]);
 
-    // A later finished announces again; the link stays answered.
+    // A later finished is refused (delivery line design §2.3): nothing more is announced; the link stays answered.
     fake.byId(MANAGER)!.status = "idle";
     fake.byId(ASKER.id)!.status = "idle";
-    expect((await tools.worker.call("bm_report", { ...finished, forPeer: "Also GET /api/orders/:id." }, WORKER_CALLER)).ok).toBe(true);
-    await vi.waitFor(() => expect(fake.sends.map((send) => send.id)).toEqual([MANAGER, ASKER.id, MANAGER, ASKER.id]));
+    expect((await tools.worker.call("bm_report", { ...finished, forPeer: "Also GET /api/orders/:id." }, WORKER_CALLER)).ok).toBe(false);
+    expect(fake.sends.map((send) => send.id)).toEqual([MANAGER, ASKER.id]);
     expect(link(home, ANSWERED).state).toBe("answered");
-    expect(link(home, ANSWERED).messages.map((message) => message.phase)).toEqual(["finished", "finished"]);
+    expect(link(home, ANSWERED).messages.map((message) => message.phase)).toEqual(["finished"]);
   });
 
   it("a finished reply answers its link only once delivered: queued for a running asker the link stays taken; one dropped leaves it taken", async () => {

@@ -47,7 +47,8 @@
  * `precedent-store.ts` in the same folder:
  *
  * - `precedents.list { workspaceId? }` reads only: the active precedents,
- *   newest first — every one, or a project's and the global ones.
+ *   newest first — every one, or a project's and the global ones; one on a
+ *   subject no precedent answers is marked `inert` (delivery line design §7.4).
  * - `precedents.save { decisionId?, scope, subject?, text?, expiresInDays? }`
  *   saves one from the owner's answered decision (**Save as precedent** on its
  *   card) or from Settings, superseding an active one of the same scope and
@@ -96,12 +97,13 @@ import {
   type MissionAutonomy,
 } from "../shared/autonomy";
 import type { Alert } from "../shared/alerts";
-import { PRECEDENT_ID_PATTERN, checkPrecedentSaveInput, precedentDraftOf, type Precedent } from "../shared/precedents";
+import { PRECEDENT_ID_PATTERN, checkPrecedentSaveInput, listedPrecedentOf, precedentDraftOf, type Precedent } from "../shared/precedents";
 import { createAlertStore } from "./alert-store";
 import { createAutonomyStore, currentPolicy, invalidWorkspace } from "./autonomy-store";
 import { createDecisionStore } from "./decision-store";
 import { createMissionAutonomyStore, type MissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionStore } from "./mission-store";
+import { repoKeyOf } from "./placements";
 import { createPrecedentStore, type PrecedentStoreDeps } from "./precedent-store";
 import { READ_FAILED, coded, dataHome, errorText, logOf, readOr, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
 
@@ -252,9 +254,11 @@ export function readActivePrecedents(deps: AutonomyRpcDeps = {}, workspaceId?: s
   return readOr(deps, "the precedents", [], (home) => createPrecedentStore(home, deps).active(nowOf(deps), workspaceId));
 }
 
-/** `precedents.list`: reads only. */
+/** `precedents.list`: reads only; one on a subject no precedent answers is marked `inert: <why>` (delivery line design §7.4). */
 export function handlePrecedentsList(input: { workspaceId?: string } = {}, deps: AutonomyRpcDeps = {}): PrecedentsListOutput {
-  return { precedents: readActivePrecedents(deps, input.workspaceId) };
+  const precedents = readActivePrecedents(deps, input.workspaceId).map(listedPrecedentOf);
+  const repoKey = input.workspaceId === undefined ? undefined : repoKeyOf(dataHome(deps), input.workspaceId);
+  return repoKey === undefined || repoKey === input.workspaceId ? { precedents } : { precedents, repoKey };
 }
 
 /** Runs a precedent write with the data folder, coded by rpc-kit `coded` as `E_PRECEDENT_WRITE_FAILED`. */
@@ -280,7 +284,10 @@ export function handlePrecedentsSave(input: unknown, deps: AutonomyRpcDeps = {})
         ? null
         : coded(READ_FAILED, "read the decision", () => createDecisionStore(home, deps.log === undefined ? {} : { log: deps.log }).get(decisionId));
     if (decisionId !== undefined && decision === null) throw new DashboardError("E_DECISION_NOT_FOUND", `no decision ${decisionId}`);
-    const drafted = precedentDraftOf(checked.input, decision);
+    // Delivery line design §3.1: a precedent saved from a placement's decision holds in its repo.
+    const keyed = decision === null ? null : { ...decision, workspaceId: repoKeyOf(home, decision.workspaceId) };
+    const scoped = decision !== null && checked.input.scope === decision.workspaceId ? { ...checked.input, scope: keyed!.workspaceId } : checked.input;
+    const drafted = precedentDraftOf(scoped, keyed);
     if ("refusal" in drafted) throw new DashboardError(drafted.refusal.code, drafted.refusal.detail);
     return createPrecedentStore(home, deps).save(drafted.draft, now);
   });

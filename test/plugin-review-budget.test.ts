@@ -6,7 +6,6 @@ import { BUDGET_TOLD_SCHEMA_VERSION, budgetToldPath, createBudgetTold, type Budg
 import { looksLikeReport, parseReports, requestIdFromText } from "../plugin/server/bm-report";
 import {
   BUDGET_NOTICE_MARKER,
-  REVIEW_BUDGET,
   budgetNotice,
   checkReviewBudget,
   overrunOf,
@@ -19,7 +18,8 @@ import { reconstructTraces, type ReconstructedTrace } from "../plugin/server/tra
 import { TRACE_STORE_SCHEMA_VERSION, type FallbackIncident, type TraceRecord } from "../plugin/shared/contracts";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
-import { readReviewBudget } from "../plugin/server/coordination-rpc";
+import { readCoordinationSettings } from "../plugin/server/coordination-rpc";
+import { DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
 import { ruleInputOf } from "../plugin/server/request-trace";
 import { flagsOf } from "../plugin/shared/orchestrator-rules";
 import { createRequestRegistry } from "../plugin/server/request-registry";
@@ -76,23 +76,22 @@ function trace(overrides: Partial<ReconstructedTrace> = {}): ReconstructedTrace 
 }
 
 describe("overrunOf", () => {
-  it("uses the budgets of PRD delta 20260924-worker-autonomy (REQ-037d)", () => {
-    // One implementation batch (a review and one re-review) at every tier,
-    // plus the documents-and-beads batch of a Large request.
-    expect(REVIEW_BUDGET).toEqual({ Small: 2, Medium: 2, Large: 4 });
+  it("is null inside the request's review cap and at it (delivery line design §5.3)", () => {
+    // Without the registry's batches: one milestone batch, a cap of review.callsPerBatch (3) at every tier.
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 3 }))).toBeNull();
+    expect(overrunOf(trace({ tier: "Large", reviewCalls: 3 }))).toBeNull();
+    // With them: pooled across the batches, up to Mmax[tier].
+    expect(overrunOf(trace({ tier: "Large", reviewCalls: 12 }), undefined, { calls: 0, milestones: 4 })).toBeNull();
+    expect(overrunOf(trace({ tier: "Medium", reviewCalls: 6 }), undefined, { calls: 0, milestones: 3 })).toBeNull();
+    expect(overrunOf(trace({ tier: "Medium", reviewCalls: 7 }), undefined, { calls: 0, milestones: 3 })).toMatchObject({ calls: 7, budget: 6 });
   });
 
-  it("is null inside the budget and at it", () => {
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 2 }))).toBeNull();
-    expect(overrunOf(trace({ tier: "Large", reviewCalls: 4 }))).toBeNull();
-  });
-
-  it("names the request, the count and the budget once it is passed", () => {
-    expect(overrunOf(trace({ tier: "Medium", reviewCalls: 3 }))).toEqual({
+  it("names the request, the count and the cap once it is passed", () => {
+    expect(overrunOf(trace({ tier: "Medium", reviewCalls: 4 }))).toEqual({
       requestId: REQ,
       tier: "Medium",
-      calls: 3,
-      budget: 2,
+      calls: 4,
+      budget: 3,
       managerAgentId: MANAGER,
     });
   });
@@ -117,15 +116,15 @@ describe("budgetNotice", () => {
     expect(looksLikeReport(text)).toBe(false);
   });
 
-  // Design delta 20260924-qa-ledger §6 replaces delta 20260917c §4.7 here: the
-  // Worker asks the user before any review beyond its budget, so the Manager
-  // asking again about the same calls put one question to the user twice
-  // (2026-09-23T05:59Z). The notice now informs; it still never cancels.
-  it("is exactly the text design delta 20260924-qa-ledger §6 decided: inform, do not ask, never cancel on it alone", () => {
+  // Design delta 20260924-qa-ledger §6 replaces delta 20260917c §4.7 here: one
+  // side asks — since delivery line design §5.4 paseo-bm, at the review cap —
+  // so the Manager asking again about the same calls would put one question to
+  // the user twice (2026-09-23T05:59Z). The notice informs; it never cancels.
+  it("is the text design delta 20260924-qa-ledger §6 decided, with paseo-bm asking at the cap (delivery line design §5.4): inform, do not ask, never cancel on it alone", () => {
     expect(text).toBe(
       `BM-BUDGET requestId: ${REQ}\n` +
-        "The Worker has used 3 review calls; the Small budget is 2. " +
-        "For your information only: the Worker asks the user itself before any review beyond its budget, so do not ask the user about it. " +
+        "The Worker has used 3 review calls; the Small review cap is 2. " +
+        "For your information only: paseo-bm asks the owner itself, once, at the request's review cap, so do not ask the user about it. " +
         "Tell the user in one line. Do not cancel on this notice alone; if the user asks you to stop the Worker, cancel its run.",
     );
     expect(text).not.toMatch(/ask the user whether/i);
@@ -186,9 +185,10 @@ function report(requestId: string, at: string) {
 
 /**
  * A Small request: the Manager's turn carries the Worker's report, so the trace
- * knows its tier. It has already used ONE review call, so each scenario's next
- * call reaches the budget of 2 and the one after passes it — the same steps
- * these tests took when the Small budget was 1 (PRD delta 20260924-worker-autonomy).
+ * knows its tier. It has already used TWO review calls, so each scenario's next
+ * call reaches its cap of 3 (delivery line design §5.3: one milestone batch of
+ * review.callsPerBatch 3) and the one after passes it — the same steps these
+ * tests took when the Small budget was 1, and then 2.
  */
 async function seedRequest(): Promise<void> {
   await appendRecord(
@@ -204,6 +204,7 @@ async function seedRequest(): Promise<void> {
     turn({ agentId: WORKER, role: "worker", requestId: REQ, parentAgentId: MANAGER, at: "2026-09-17T01:02:00.000Z" }),
   );
   await reviewCall("agent-rev-1", 3);
+  await reviewCall("agent-rev-1", 4);
 }
 
 /** One recorded Reviewer turn per review request it received. */
@@ -250,45 +251,49 @@ function daemonWith(options: { managerStatus?: string; managerArchivedAt?: strin
 const ended = (id: string, provider: string) =>
   ({ agent: { id, workspaceId: WS, parentAgentId: null, provider, cwd: "/repo", title: null }, turnId: "t", outcome: { kind: "completed" }, timeline: [] }) as never;
 
-// Bead 7gxw.12 (autonomy design §C.4, §G.7; change-008 C6): the budget is the owner's, in Settings → Coordination.
-describe("the owner's review budget per tier (Settings → Coordination)", () => {
+// Delivery line design §5.3: the cap is made of the owner's review settings, in Settings → Coordination.
+describe("the owner's review settings (Settings → Coordination)", () => {
   const store = () => createCoordinationStore(home);
 
-  it("a changed budget changes the notice: a Small request within 3 calls is quiet, past it the notice names 3", async () => {
+  it("a changed review.callsPerBatch changes the notice: a Small request within a cap of 4 is quiet, past it the notice names 4", async () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
-    store().set({ key: "review.smallBudget", value: 3 });
+    store().set({ key: "review.callsPerBatch", value: 4 });
     const { paseo, sends } = daemonWith();
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("within");
     await reviewCall("agent-rev-1", 9);
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("sent");
-    expect(sends.map((send) => send.text)).toEqual([budgetNotice({ requestId: REQ, tier: "Small", calls: 4, budget: 3, managerAgentId: MANAGER })]);
-    expect(sends[0]!.text).toContain("the Small budget is 3.");
+    expect(sends.map((send) => send.text)).toEqual([budgetNotice({ requestId: REQ, tier: "Small", calls: 5, budget: 4, managerAgentId: MANAGER })]);
+    expect(sends[0]!.text).toContain("the Small review cap is 4.");
   });
 
-  it("a changed budget changes the review.over-budget rule the stall pass reads", () => {
-    const rule = (budget: ReturnType<typeof readReviewBudget>, calls: number) =>
-      flagsOf(ruleInputOf(trace({ tier: "Large", reviewCalls: calls, reviewerIds: ["agent-rev-1"] })), { reviewBudget: budget }).find((flag) => flag.rule === "review.over-budget")?.state;
-    expect(rule(readReviewBudget({ home }), 5)).toBe("raised");
-    store().set({ key: "review.largeBudget", value: 6 });
-    expect(readReviewBudget({ home })).toEqual({ Small: 2, Medium: 2, Large: 6 });
-    expect(rule(readReviewBudget({ home }), 5)).toBeUndefined();
-    expect(rule(readReviewBudget({ home }), 7)).toBe("raised");
-    expect(overrunOf(trace({ tier: "Large", reviewCalls: 5 }), readReviewBudget({ home }))).toBeNull();
-    expect(overrunOf(trace({ tier: "Large", reviewCalls: 7 }), readReviewBudget({ home }))).toMatchObject({ calls: 7, budget: 6 });
+  it("a changed review.callsPerBatch changes the review.over-budget rule the stall pass reads", () => {
+    const review = () => readCoordinationSettings({ home }).review;
+    const rule = (calls: number) =>
+      flagsOf(ruleInputOf(trace({ tier: "Large", reviewCalls: calls, reviewerIds: ["agent-rev-1"] }), { calls: 0, milestones: 2 }), { review: review() }).find(
+        (flag) => flag.rule === "review.over-budget",
+      )?.state;
+    // A Large request of two milestone batches: a cap of 6.
+    expect(rule(7)).toBe("raised");
+    store().set({ key: "review.callsPerBatch", value: 4 });
+    expect(rule(7)).toBeUndefined();
+    expect(rule(9)).toBe("raised");
+    expect(overrunOf(trace({ tier: "Large", reviewCalls: 8 }), review(), { calls: 0, milestones: 2 })).toBeNull();
+    expect(overrunOf(trace({ tier: "Large", reviewCalls: 9 }), review(), { calls: 0, milestones: 2 })).toMatchObject({ calls: 9, budget: 8 });
   });
 
-  it("an unreadable store reads 2 / 2 / 4, with one log line; a missing one, silently", () => {
+  it("an unreadable store reads the default review settings, with one log line; a missing one, silently", () => {
     const log = vi.fn();
-    expect(readReviewBudget({ home, log })).toEqual(REVIEW_BUDGET);
+    const review = (deps: Parameters<typeof readCoordinationSettings>[0]) => readCoordinationSettings(deps).review;
+    expect(review({ home, log })).toEqual(DEFAULT_COORDINATION_SETTINGS.review);
     expect(log).not.toHaveBeenCalled();
     const elsewhere = mkdtempSync(join(tmpdir(), "bm-budget-elsewhere-"));
     try {
       symlinkSync(elsewhere, join(home, "coordination"));
-      expect(readReviewBudget({ home, log })).toEqual({ Small: 2, Medium: 2, Large: 4 });
+      expect(review({ home, log })).toEqual({ maxRereviews: 3, callsPerBatch: 3 });
       expect(log).toHaveBeenCalledOnce();
     } finally {
       rmSync(join(home, "coordination"), { force: true });
@@ -296,8 +301,8 @@ describe("the owner's review budget per tier (Settings → Coordination)", () =>
     }
     // A file from a newer paseo-bm reads as the defaults too.
     mkdirSync(join(home, "coordination"), { recursive: true });
-    writeFileSync(join(home, "coordination", "settings.json"), JSON.stringify({ version: 99, review: { smallBudget: 5 } }));
-    expect(readReviewBudget({ home, log: () => {} })).toEqual(REVIEW_BUDGET);
+    writeFileSync(join(home, "coordination", "settings.json"), JSON.stringify({ version: 99, review: { callsPerBatch: 5 } }));
+    expect(review({ home, log: () => {} })).toEqual(DEFAULT_COORDINATION_SETTINGS.review);
   });
 });
 
@@ -316,7 +321,7 @@ describe("checkReviewBudget", () => {
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("sent");
   });
 
-  it("tells the Manager once when a Small request passes its budget of two review calls", async () => {
+  it("tells the Manager once when a Small request passes its cap of three review calls", async () => {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
     await reviewCall("agent-rev-1", 7);
@@ -325,7 +330,7 @@ describe("checkReviewBudget", () => {
     const pending = new Map<string, BudgetOverrun>();
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told, pending })).toBe("sent");
     expect(sends).toHaveLength(1);
-    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
+    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 4, budget: 3, managerAgentId: MANAGER }));
 
     // A later turn of the Worker or of a new Reviewer does not repeat it.
     await reviewCall("agent-rev-2", 9);
@@ -551,7 +556,7 @@ describe("the review-budget notice survives a reload", () => {
     ).toBe("already-told");
     expect(sends).toHaveLength(1);
     expect(JSON.parse(readFileSync(budgetToldPath(location), "utf8")).told).toEqual([
-      { key: `${WS}::${REQ}`, calls: 3, at: expect.any(String) },
+      { key: `${WS}::${REQ}`, calls: 4, at: expect.any(String) },
     ]);
   });
 
@@ -665,12 +670,12 @@ describe("the review-budget notice survives a reload", () => {
 
 // Design §16.8: a bound request's tools refuse every call past its ceiling; the notice compares the same way.
 describe("a bound request (design §16.8)", () => {
-  it("the ceiling is the budget plus the calls granted; a live untilClean batch's calls are left out", () => {
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 4 }), REVIEW_BUDGET, { calls: 2, exempt: 0 })).toBeNull();
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, { calls: 2, exempt: 0 })).toMatchObject({ calls: 5, budget: 4 });
-    // A live untilClean batch's three tool calls: within, until other calls pass the ceiling.
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), REVIEW_BUDGET, { calls: 0, exempt: 3 })).toBeNull();
-    expect(overrunOf(trace({ tier: "Small", reviewCalls: 6 }), REVIEW_BUDGET, { calls: 0, exempt: 3 })).toMatchObject({ calls: 6, budget: 2 });
+  it("the ceiling is the cap plus the calls granted; no call is exempt (delivery line design §5.6)", () => {
+    const review = { callsPerBatch: 3 };
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 5 }), review, { calls: 2, milestones: 1 })).toBeNull();
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 6 }), review, { calls: 2, milestones: 1 })).toMatchObject({ calls: 6, budget: 5 });
+    // A Small request's cap stays at one batch, whatever its batches.
+    expect(overrunOf(trace({ tier: "Small", reviewCalls: 4 }), review, { calls: 0, milestones: 2 })).toMatchObject({ calls: 4, budget: 3 });
   });
 
   it("still sends BM-BUDGET for an overrun on a bound request: tool calls and hand-sent messages, by the one counter", async () => {
@@ -688,18 +693,18 @@ describe("a bound request (design §16.8)", () => {
     const { paseo, sends } = daemonWith();
     const told = createBudgetTold(() => {});
     const pending = new Map<string, BudgetOverrun>();
-    // One hand call (seedRequest's) and one tool call: 2 of a ceiling of 3.
+    // Two hand calls (seedRequest's) and one tool call: 3 of a ceiling of 4 (one batch: a cap of 3, plus 1 granted).
     expect(await checkReviewBudget(ended("agent-rev-2", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("within");
     // Two more messages sent to a Reviewer by hand: off-tool, past the ceiling.
     await reviewCall("agent-rev-1", 6);
     await reviewCall("agent-rev-1", 7);
     expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer/gpt"), { location, paseo, told, pending })).toBe("sent");
-    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 4, budget: 3, managerAgentId: MANAGER }));
+    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 5, budget: 4, managerAgentId: MANAGER }));
   });
 });
 
 describe("checkReviewBudget with a replacement Reviewer", () => {
-  /** The Small request's one review call, then the same message resent to the replacement. */
+  /** The Small request's review calls, then the last one resent to the replacement. */
   async function resent(): Promise<void> {
     await seedRequest();
     await reviewCall("agent-rev-1", 5);
@@ -730,10 +735,10 @@ describe("checkReviewBudget with a replacement Reviewer", () => {
     expect(await check(paseo, home)).toBe("within");
     expect(sends).toEqual([]);
 
-    // A second message to the replacement is a new call, and over a Small budget.
+    // A second message to the replacement is a new call, and over a Small cap.
     await reviewCall("agent-rev-2", 9);
     expect(await check(paseo, home)).toBe("sent");
-    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 3, budget: 2, managerAgentId: MANAGER }));
+    expect(sends[0]!.text).toBe(budgetNotice({ requestId: REQ, tier: "Small", calls: 4, budget: 3, managerAgentId: MANAGER }));
   });
 
   it("counts the resend as today when the replacement is not recorded, or the file cannot be used", async () => {

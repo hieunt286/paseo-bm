@@ -8,7 +8,7 @@
  * This module is `shared/`: no Node and no React Native imports.
  */
 import type { Evidence, TraceRecord } from "../contracts";
-import { compareText, median, percentile, roleOf, tokenProviderOf, tokensOf, zeroRoles } from "./helpers";
+import { compareText, inputIncludesCached, median, percentile, roleOf, tokenProviderOf, tokensOf, zeroRoles } from "./helpers";
 
 export { tokenProviderOf };
 import type { EvalScope, RequestFacts } from "./scope";
@@ -47,8 +47,9 @@ export interface TurnTokens {
   coverage: TokenCoverage;
   /**
    * Tokens read in the turn: input + cached — Codex's input alone, its cached
-   * tokens being part of it. On Claude the whole turn's; on Codex and OpenCode
-   * the last model call's. null without usage; 0 for a repeated turn.
+   * tokens being part of it (`inputIncludesCached`). On Claude the whole
+   * turn's; on Codex and OpenCode the last model call's. null without usage;
+   * 0 for a repeated turn.
    */
   tokensRead: number | null;
   /** The turn repeated its agent's previous counts: OpenCode keeps them over a turn with no model call. */
@@ -96,7 +97,7 @@ export function turnTokensOf(record: TraceRecord, previous: TraceRecord | null =
     usage.inputTokens === before.inputTokens &&
     usage.cachedInputTokens === before.cachedInputTokens &&
     usage.outputTokens === before.outputTokens;
-  const tokensRead = repeated ? 0 : provider === "codex" ? usage.inputTokens : usage.inputTokens + usage.cachedInputTokens;
+  const tokensRead = repeated ? 0 : inputIncludesCached(usage, provider) ? usage.inputTokens : usage.inputTokens + usage.cachedInputTokens;
   let context: TurnTokens["context"] = null;
   if (!repeated) {
     if (usage.contextUsed !== undefined) context = { tokens: usage.contextUsed, basis: "reported" };

@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { MISSION_CLASSES } from "../autonomy";
+import { INTEGRATION_CI_MODES } from "../coordination";
 import { agentIdSchema, workspaceIdSchema } from "./persisted";
 
 /**
@@ -92,8 +93,40 @@ export const missionSignalSchema = z.object({
   replanDueAt: z.string().nullable(),
 });
 
-/** A repository of a mission, by its project name. */
-export const missionRepoSchema = z.object({ workspaceId: workspaceIdSchema, name: z.string() });
+/** A mission's line in one repo (delivery line design §4.9, `shared/mission-state.ts` `MissionStatePlacement`). */
+const missionLineFields = {
+  branch: z.string(),
+  target: z.string(),
+  state: z.string(),
+  dirty: z.boolean().nullable(),
+  ahead: z.number().int().nullable(),
+  behind: z.number().int().nullable(),
+  lastCommitAt: z.string().nullable(),
+  pushed: z.boolean().nullable(),
+  mr: z.object({ url: z.string(), state: z.string().nullable(), mergeable: z.boolean().nullable() }).nullable(),
+  ci: z.string().nullable(),
+  readAt: z.string().nullable(),
+};
+
+/**
+ * The repo row's placement (delivery line design §4.9, artboards I and J):
+ * its line, and push and merge request — allowed since the grant, waiting
+ * for the owner on the open integration card, not now, revoked, or not asked
+ * yet.
+ */
+export const missionPlacementSchema = z.object({
+  ...missionLineFields,
+  integration: z.object({
+    state: z.enum(["allowed", "waiting", "not-now", "revoked", "none"]),
+    /** When it was allowed or revoked; null otherwise. */
+    at: z.string().nullable(),
+    /** The integration card's id (`m:<missionId>:<n>`); null when none was opened. */
+    decisionId: z.string().nullable(),
+  }),
+});
+
+/** A repository of a mission, by its project name; `placement` only in `mission.get`'s summary, for a repo the mission has a worktree of (absent from an older server). */
+export const missionRepoSchema = z.object({ workspaceId: workspaceIdSchema, name: z.string(), placement: missionPlacementSchema.optional() });
 
 /** A mission as the list shows it (§10.2, artboards A and C). */
 export const missionSummarySchema = z.object({
@@ -116,6 +149,8 @@ export const missionSummarySchema = z.object({
   questions: z.number().int().min(0),
   /** The families at step 1 or more, in `GOVERNOR_FAMILIES` order. */
   signals: z.array(missionSignalSchema),
+  /** ADR-036 (delivery line design §17.1): the owner's `integration.ci`, only in `mission.get`'s summary; off: the repo rows show no CI. Absent (`missions.list`, an older server): CI as the placements give it. */
+  ci: z.enum(INTEGRATION_CI_MODES).optional(),
 });
 
 /**
@@ -169,8 +204,20 @@ export const missionStateSchema = z.object({
       lastReport: z.object({ phase: z.string(), at: z.string(), line: z.string() }).nullable(),
       followUpAt: z.string().nullable(),
       waitingOn: z.string().nullable(),
+      /** Delivery line design §2.7: the request this one continues, the one that continues it, and its place in its chain. Optional: an older server sends none. */
+      continuationOf: z.string().nullable().optional(),
+      continuedBy: z.string().nullable().optional(),
+      chainPosition: z.number().int().positive().nullable().optional(),
+      /** Delivery line design §4.6: a placement request's finish committed on its branch, its CI, and the commit it reported. Optional: an older server sends none. */
+      committed: z.boolean().nullable().optional(),
+      verified: z.enum(["verified", "ci-red", "pending", "unverified"]).nullable().optional(),
+      commit: z.string().nullable().optional(),
     }),
   ),
+  /** Delivery line design §4.9: one line per repo with a placement. Optional: an older server sends none. */
+  placements: z
+    .array(z.object({ repo: z.string(), name: z.string().nullable(), workspaceId: z.string().nullable(), ...missionLineFields, grant: z.object({ at: z.string() }).nullable() }))
+    .optional(),
   questions: z.array(
     z.object({
       id: z.string(),
@@ -253,6 +300,37 @@ export const missionChangeRpc = defineRpc({
   output: z.object({ summary: missionSummarySchema }),
 });
 
+/**
+ * `mission.integration.revoke` — the owner's revoke of a mission's standing
+ * integration grant for one repo (delivery line design §4.3): `revokedAt` is
+ * set, the placement's live Workers get `BM-SETTINGS`, the journal a
+ * `decision` line. No worktree of the repo, or no grant to revoke →
+ * `E_MISSION_INVALID`.
+ */
+export const missionIntegrationRevokeRpc = defineRpc({
+  name: "mission.integration.revoke",
+  input: z.object({ missionId: z.string().min(1), repo: workspaceIdSchema }),
+  output: z.object({ revokedAt: z.string(), notified: z.number().int().min(0) }),
+});
+
+/**
+ * `mission.integration.ask` — the owner's "Ask me again" (delivery line design
+ * §4.3): a fresh owner-only integration card for the mission's worktree of
+ * one repo, after "Not now" or a revoke. A card already open, a grant that
+ * holds, no ready worktree of the repo, or a mission not open →
+ * `E_MISSION_INVALID`.
+ */
+export const missionIntegrationAskRpc = defineRpc({
+  name: "mission.integration.ask",
+  input: z.object({ missionId: z.string().min(1), repo: workspaceIdSchema }),
+  output: z.object({ decisionId: z.string() }),
+});
+
+export type MissionIntegrationAskInput = z.infer<typeof missionIntegrationAskRpc.input>;
+export type MissionIntegrationAskOutput = z.infer<typeof missionIntegrationAskRpc.output>;
+export type MissionIntegrationRevokeInput = z.infer<typeof missionIntegrationRevokeRpc.input>;
+export type MissionIntegrationRevokeOutput = z.infer<typeof missionIntegrationRevokeRpc.output>;
+
 /** `memory.list` — one repository's project memory, active entries newest first (§10.2, artboard F). Reads only. */
 export const memoryListRpc = defineRpc({
   name: "memory.list",
@@ -278,6 +356,7 @@ export type MissionSummary = z.infer<typeof missionSummarySchema>;
 export type MissionSignal = z.infer<typeof missionSignalSchema>;
 export type MissionFigure = z.infer<typeof missionFigureSchema>;
 export type MissionRow = z.infer<typeof missionRowSchema>;
+export type MissionPlacement = z.infer<typeof missionPlacementSchema>;
 export type MissionsListOutput = z.infer<typeof missionsListRpc.output>;
 export type MissionGetOutput = z.infer<typeof missionGetRpc.output>;
 export type MissionChangeInput = z.infer<typeof missionChangeRpc.input>;

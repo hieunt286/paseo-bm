@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createBindingStore, type AgentBinder, type BindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import { COMMAND_LIMIT_PER_REQUEST, HANDOFF_OFF_MESSAGE, commandsSentFor, sendCommand } from "../plugin/server/command-send";
-import { createRequestRegistry } from "../plugin/server/request-registry";
+import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
@@ -17,6 +17,7 @@ import { createCoordinationStore } from "../plugin/server/coordination-store";
 import {
   HANDOFF_BRIEF_MAX_CHARS,
   HANDOFF_FROM_LABEL,
+  NOTE_SEND_MS,
   PEER_RULES,
   REPLACED_BY_LABEL,
   briefClosingOf,
@@ -31,7 +32,18 @@ import {
   replacedNoticeOf,
   type HandoffRunner,
 } from "../plugin/server/handoff";
-import { CREATING_WAIT_MS, HANDOFFS_DIR_NAME, MANAGER_WAIT_MS, NOTE_WAIT_MS, SUCCESSOR_WAIT_MS, createHandoffStore, type HandoffEntry } from "../plugin/server/handoff-store";
+import {
+  CREATING_WAIT_MS,
+  HANDOFFS_DIR_NAME,
+  HANDOFF_SAFE_POINT_WAIT_MS,
+  MANAGER_WAIT_MS,
+  NOTE_WAIT_MS,
+  SUCCESSOR_WAIT_MS,
+  createHandoffStore,
+  endedHandoff,
+  type HandoffEntry,
+} from "../plugin/server/handoff-store";
+import { MAINTENANCE_WAIT_MS } from "../plugin/shared/interventions";
 import { createInterventionStore } from "../plugin/server/intervention-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
@@ -94,6 +106,7 @@ beforeEach(() => {
 afterEach(() => {
   clearTraceStoreCache();
   clearDecisionStoreCache();
+  clearRequestRegistryCache();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -545,6 +558,111 @@ describe("the whole sequence (design §G.6) with the one fake daemon", () => {
     );
     clock = new Date(clock.getTime() + 60 * MIN);
     expect(handoffs().expire().map((ended) => [ended.id, ended.state, ended.ending])).toEqual([[waiting.id, "dropped", "no-safe-point"]]);
+  });
+});
+
+describe("the maintenance ceiling (delivery line design §6.6)", () => {
+  const firstLines = (fake: FakePaseo<unknown>) => fake.sends.map((sent) => sent.text.split("\n")[0]);
+  /** A delivery queued for the Worker while it runs; then it is idle. */
+  async function queuedItem(fake: FakePaseo<unknown>): Promise<void> {
+    await queue.enqueue(WORKER, "BM-DELIVERY:a", "BM-DELIVERY a", fake.paseo as never);
+    fake.byId(WORKER)!.status = "idle";
+  }
+
+  it("at twice its threshold the note is asked at that turn end with no safe point and an item queued, ahead of it; the item goes after", async () => {
+    // 310M: over twice the 150M threshold, in a turn that closed nothing.
+    const heavy = workerTurn(10, { usage: usageOf(310_000_000) });
+    await store(heavy);
+    const fake = daemon({ worker: "running" });
+    await queuedItem(fake);
+    await start(fake, runnerOf(), heavy);
+    expect(firstLines(fake)).toEqual([HANDOFF_NOTICE_MARKER]);
+    expect(queue.pending(WORKER).map((notice) => notice.kind)).toEqual(["BM-DELIVERY:a"]);
+    expect(handoffs().list()).toMatchObject([{ state: "noting" }]);
+    fake.byId(WORKER)!.status = "idle";
+    await queue.turnEnded({ agent: { id: WORKER } }, fake.paseo);
+    expect(firstLines(fake)).toEqual([HANDOFF_NOTICE_MARKER, "BM-DELIVERY a"]);
+  });
+
+  it("queued at its ceiling behind a notice sent at that turn end, the note request still goes at the next turn end, past NOTE_SEND_MS", async () => {
+    const heavy = workerTurn(10, { usage: usageOf(310_000_000) });
+    await store(heavy);
+    // The queue ran first at this turn end and started another turn: the Worker reads running.
+    const fake = daemon({ worker: "running" });
+    await start(fake, runnerOf(), heavy);
+    expect(fake.sends).toEqual([]);
+    expect(queue.pending(WORKER).map((notice) => notice.kind)).toEqual([`${HANDOFF_NOTICE_MARKER}:${handoffs().list()[0]!.id}`]);
+    clock = new Date(clock.getTime() + NOTE_SEND_MS + 2 * MIN);
+    fake.byId(WORKER)!.status = "idle";
+    await queue.turnEnded({ agent: { id: WORKER } }, fake.paseo);
+    expect(firstLines(fake)).toEqual([HANDOFF_NOTICE_MARKER]);
+    expect(handoffs().list()).toMatchObject([{ state: "noting" }]);
+  });
+
+  it("below it, a safe point with an item queued still waits", async () => {
+    await store(...heavyRequest());
+    const fake = daemon({ worker: "running" });
+    await queuedItem(fake);
+    // 160M and a closed bead: a safe point, but something is queued for the Worker.
+    await start(fake);
+    expect(fake.sends).toEqual([]);
+    expect(handoffs().list()).toMatchObject([{ state: "waiting" }]);
+  });
+
+  it("waiting 30 minutes, half its window, the note is asked at the Worker's next turn end without a safe point, ahead of what is queued", async () => {
+    expect(MAINTENANCE_WAIT_MS.handoff).toBe(30 * MIN);
+    expect(MAINTENANCE_WAIT_MS.handoff).toBe(HANDOFF_SAFE_POINT_WAIT_MS / 2);
+    await store(workerTurn(10, { usage: usageOf(160_000_000) }));
+    const fake = daemon({ worker: "running" });
+    const runner = await start(fake, runnerOf(), workerTurn(10, { usage: usageOf(160_000_000) }));
+    await queuedItem(fake);
+    clock = new Date(T0 + 59 * MIN);
+    await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(59), fake.paseo);
+    expect(fake.sends).toEqual([]);
+    clock = new Date(T0 + 60 * MIN);
+    await runner.turnRecorded({ agent: { id: WORKER }, timeline: [] }, workerTurn(60), fake.paseo);
+    expect(firstLines(fake)).toEqual([HANDOFF_NOTICE_MARKER]);
+    expect(queue.pending(WORKER).map((notice) => notice.kind)).toEqual(["BM-DELIVERY:a"]);
+  });
+
+  it("a Worker waiting by structure is at a safe point: its note is asked though its turn closed nothing", async () => {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.setWaiting(WORKSPACE_ID, REQUEST, { since: clock.toISOString(), reportRecordId: "out-0000000000ff", wakeOn: "all", items: [{ kind: "batch", id: "b1", settled: false }] });
+    await store(workerTurn(10, { usage: usageOf(160_000_000) }));
+    const fake = daemon();
+    await start(fake, runnerOf(), workerTurn(10, { usage: usageOf(160_000_000) }));
+    expect(firstLines(fake)).toEqual([HANDOFF_NOTICE_MARKER]);
+    expect(handoffs().list()).toMatchObject([{ state: "noting" }]);
+  });
+
+  it("a no-safe-point drop counts toward handoff.maxPerRequest: the handoff re-arms at most that many times", async () => {
+    const heavy = workerTurn(10, { usage: usageOf(160_000_000) });
+    await store(heavy);
+    const fake = daemon({ worker: "running" });
+    const dropAll = () => {
+      for (const entry of handoffs().list()) {
+        if (entry.state === "waiting") handoffs().update(entry.id, (current) => endedHandoff(current, "no-safe-point", clock.toISOString()));
+      }
+    };
+    // The first try, dropped with no safe point: one of the owner's two.
+    await start(fake, runnerOf(), heavy);
+    dropAll();
+    // It re-arms once.
+    clock = new Date(clock.getTime() + MIN);
+    await start(fake, runnerOf(), heavy);
+    expect(handoffs().list().map((entry) => entry.state)).toEqual(["dropped", "waiting"]);
+    dropAll();
+    const written = { handoffs: handoffs().list(), interventions: interventions() };
+    // Two drops: none more.
+    clock = new Date(clock.getTime() + MIN);
+    await start(fake, runnerOf(), heavy);
+    expect(handoffs().list()).toEqual(written.handoffs);
+    expect(interventions()).toEqual(written.interventions);
+    // At the owner's 3, a third try.
+    createCoordinationStore(home).set({ key: "handoff.maxPerRequest", value: 3 });
+    await start(fake, runnerOf(), heavy);
+    expect(handoffs().list().map((entry) => entry.state)).toEqual(["dropped", "dropped", "waiting"]);
   });
 });
 

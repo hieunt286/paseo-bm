@@ -14,6 +14,7 @@ import { DashboardSettingsScreen, SETTINGS_ICON, SETTINGS_SCREEN_ID } from "./cl
 import { CHAT_CARD_KIND, CHAT_CARD_VERSION, chatCardSchema, toChatCards } from "./client/chat-card-parse";
 import { ChatCardView } from "./client/chat-card";
 import { ChatBeadsPanel } from "./client/chat-beads-panel";
+import { workerNewNoticeOf, workerNewNotices } from "./client/worker-new";
 import { BeadsTabPanel } from "./client/beads-tab";
 import { registerBeadsHeaderButtons } from "./client/beads-header-button";
 import { registerBeadsManagerSidebarItem } from "./client/sidebar-item";
@@ -47,12 +48,18 @@ type WorkspaceCommand = PluginWorkspaceCommandContext & { args: string };
  * `paseo.agents.ref().send()` is the path the app's own composer uses, so the
  * request is recorded as a real user message (verified fact P2) and none of the
  * three role prompts has to learn about this command.
+ *
+ * After sending, the owner reads where it went in THIS workspace (field report
+ * 2026-10-21): the Beads tab opens here with the Main that got it, an "Open
+ * Main" action, and where the new Worker will appear (`worker-new.ts`).
  */
 async function runWorkerNew(context: WorkspaceCommand): Promise<void> {
   const request = context.args.trim();
   // `manager.ensure` is the same call the launcher button makes: it finds this
   // workspace's live Manager or starts one, and de-duplicates server-side.
-  const { agentId } = await context.rpc(managerEnsureRpc, { workspaceId: context.workspace.id });
+  // `forNewRequest` also answers the Main's mission and where its Worker appears.
+  const ensured = await context.rpc(managerEnsureRpc, { workspaceId: context.workspace.id, forNewRequest: true });
+  const { agentId } = ensured;
   // Verbatim: anything we prefixed would be quoted back at the user as their
   // own words, and would land in the trace store as part of the request. No
   // args sends nothing at all, because an empty message would force the Manager
@@ -63,8 +70,13 @@ async function runWorkerNew(context: WorkspaceCommand): Promise<void> {
   // opposite of what this command is for (delta 20260917f §2, bug A).
   if (request !== "") {
     await context.paseo.agents.ref(agentId).send(`${NEW_REQUEST_MARKER}\n${request}`);
+    // Sent: the notice is drawn by this workspace's Beads tab, a workspace
+    // panel (it has `navigation.openAgent`; a command context has none).
+    workerNewNotices.put(workerNewNoticeOf(ensured, context.workspace.id));
+    context.openPanel(BEADS_TAB_PANEL_ID);
+    return;
   }
-  // Either way the chat opens, so the user can keep typing into it. That goes
+  // Nothing typed: the chat opens, so the user can type into it. That goes
   // through the Command Center hand-off, because a command context has no
   // `navigation.openAgent` — only a surface does. The surface calls
   // `manager.ensure` a second time on the way; that call is idempotent and

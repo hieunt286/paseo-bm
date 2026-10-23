@@ -3,7 +3,10 @@
  * ADR-029; REQ-194), served with the Orchestrator's (`orchestrator-tools.ts`).
  *
  * - **`bm_arbitrate { missions, workspaceId, area, owner, reason, goal? }`**
- *   gives one area of a repo to one of two open missions: it writes the call
+ *   gives one area of a repo to one of two open missions. An arbitration of
+ *   both missions in that repo whose area covers it already stands
+ *   (`standingArbitrationOf`, delivery line design §8.2): the tool returns it
+ *   and sends, writes and spends nothing. Otherwise it writes the call
  *   to `orchestrator/arbitrations.json` (`governor-conflicts.ts`), adds a
  *   `governor` journal line to both missions and sends both Mains a
  *   `governor:arbitrate` command (`governSend`, `command-authority.ts`). With
@@ -45,6 +48,7 @@ import {
   type MissionSplitAction,
 } from "../shared/mission-change";
 import { governSend, type CommandToolDeps } from "./command-authority";
+import { arbitrationEffect, missionCardEffect, nothingWasSentence } from "./effects";
 import {
   CONFLICT_WINDOW_MS,
   areaCovers,
@@ -54,6 +58,7 @@ import {
   newArbitrationId,
   normalArea,
   openMissionsOf,
+  standingArbitrationOf,
   type Arbitration,
 } from "./governor-conflicts";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
@@ -74,7 +79,7 @@ import { refused } from "./tool-kit";
 /** At most this many splits of one mission in 24 hours (§9.6). */
 export const MAX_SPLITS_PER_DAY = 2;
 const DAY_MS = 86_400_000;
-const NOTHING = "Nothing was recorded or sent.";
+const NOTHING = nothingWasSentence("recorded or sent");
 
 /** What creating a new Main needs of the plugin: the endpoint's binder and bindings, the `paseo` CLI. */
 export interface GovernorMissionDeps {
@@ -353,6 +358,11 @@ export async function bmCreateMain(input: CreateMainInput, context: ToolContext,
 // bm_arbitrate.
 // ---------------------------------------------------------------------------
 
+/** What `bm_arbitrate` answers for an area a standing arbitration covers (delivery line design §8.2, §7.3: `arbitrationEffect`). Pure. */
+export function standingArbitrationText(area: string, standing: Pick<Arbitration, "id" | "at">, ownerCode: string): string {
+  return arbitrationEffect({ standing, area, ownerCode }).sentence;
+}
+
 /** `bm_arbitrate` (see the module comment). */
 export async function bmArbitrate(input: ArbitrateInput, context: ToolContext, deps: GovernorToolDeps): Promise<ServerToolResult> {
   const log = deps.log ?? ((message: string) => console.warn(message));
@@ -371,12 +381,21 @@ export async function bmArbitrate(input: ArbitrateInput, context: ToolContext, d
   if (reasons.length > 0 || first === null || second === null || first === undefined || second === undefined) return why(reasons);
   const owner = first.missionId === input.owner ? first : second;
   const loser = owner === first ? second : first;
+  const area = normalArea(input.area);
+  const arbitrations = createArbitrationStore(context.home);
+  // Delivery line design §8.2: a standing call on the area and both missions is returned; nothing is sent or spent.
+  const standing = standingArbitrationOf({ missions: [first.missionId, second.missionId], workspaceId: input.workspaceId, area }, arbitrations.list());
+  if (standing !== null) {
+    const standingOwner = store.get(standing.owner)?.code ?? standing.owner;
+    return {
+      ok: true,
+      text: `${standingArbitrationText(area, standing, standingOwner)}\n${json({ arbitrationId: standing.id, commandIds: [], decisionId: standing.decisionId, standing: true })}`,
+    };
+  }
   const goal = input.goal?.trim();
   if (goal !== undefined && goal === loser.charter.goal.trim()) return why([`goal: it is mission ${loser.code}'s goal already; leave goal out`]);
 
-  const area = normalArea(input.area);
   const reason = input.reason.trim();
-  const arbitrations = createArbitrationStore(context.home);
   const entry: Arbitration = {
     id: newArbitrationId(),
     at: context.now.toISOString(),
@@ -431,7 +450,7 @@ export async function bmArbitrate(input: ArbitrateInput, context: ToolContext, d
     try {
       const sent = await governSend({ missionId: mission.missionId, step: "arbitrate", text, ownWords: `${input.area}\n${reason}` }, context, deps);
       // A command the store could not record is named nowhere, as `bm_govern` names none.
-      const id = sent.ok && sent.unrecorded === null ? sent.id : null;
+      const id = sent.ok && sent.repeated === undefined && sent.unrecorded === null ? sent.id : null;
       if (id !== null) entry.commandIds.push(id);
       told.push(sent.ok ? `the Main of ${mission.code} is told${id === null ? "" : ` (command ${id})`}` : `the Main of ${mission.code} could not be told: ${sent.text}`);
     } catch (error) {
@@ -443,12 +462,8 @@ export async function bmArbitrate(input: ArbitrateInput, context: ToolContext, d
   } catch (error) {
     log(`[paseo-bm] bm_arbitrate could not record the commands of ${entry.id}: ${errorText(error)}`);
   }
-  return {
-    ok: true,
-    text: `Arbitration ${entry.id} recorded: ${area} in ${input.workspaceId} belongs to mission ${owner.code}; ${told.join("; ")}.${
-      entry.decisionId === null ? "" : ` The owner is asked on card ${entry.decisionId} to change mission ${loser.code}'s goal.`
-    }\n${json({ arbitrationId: entry.id, commandIds: entry.commandIds, decisionId: entry.decisionId })}`,
-  };
+  const recorded = arbitrationEffect({ recorded: entry, area, workspaceId: input.workspaceId, ownerCode: owner.code, loserCode: loser.code, told });
+  return { ok: true, text: `${recorded.sentence}\n${json({ arbitrationId: entry.id, commandIds: entry.commandIds, decisionId: entry.decisionId })}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -496,7 +511,7 @@ export async function applyGovernorDecision(decision: Decision, deps: GovernorAn
       const done = source === null ? ({ ok: false, reasons: [`mission ${action.missionId} no longer exists`] } as const) : await executeSplit(source, action.split, "owner", decision.id, { ...deps, paseo: deps.paseo });
       if (!done.ok) {
         deps.log(`[paseo-bm] the owner chose to apply ${decision.id}, but the split could not run: ${done.reasons.join("; ")}`);
-        store.appendJournal(missionId, { kind: "decision", by: "plugin", text: `${decision.id} could not be applied: ${done.reasons.join("; ")}`, ref: decision.id });
+        store.appendJournal(missionId, { kind: "decision", by: "plugin", text: missionCardEffect(decision.id, "the governor's card", { ok: false, reasons: done.reasons }).journal, ref: decision.id });
       }
       return;
     }
@@ -505,8 +520,14 @@ export async function applyGovernorDecision(decision: Decision, deps: GovernorAn
       deps.log(`[paseo-bm] the owner chose to apply ${decision.id}, but it could not be applied: ${result.reasons.join("; ")}`);
       return;
     }
-    store.appendJournal(action.missionId, { kind: "charter", by: "owner", text: `The owner applied ${decision.id}: the goal as arbitration ${action.arbitrationId} leaves it.`, ref: decision.id });
-    await tellMain(action.missionId, decision.id, `The owner applied the governor's card ${decision.id}: your goal is now ${JSON.stringify(action.goal.slice(0, 300))}.`, deps);
+    // Delivery line design §7.3: said from the mission as written.
+    const applied = missionCardEffect(decision.id, "the governor's card", {
+      ok: true,
+      journal: `the goal as arbitration ${action.arbitrationId} leaves it`,
+      main: `your goal is now ${JSON.stringify(result.mission.charter.goal.slice(0, 300))}`,
+    });
+    store.appendJournal(action.missionId, { kind: "charter", by: "owner", text: applied.journal, ref: decision.id });
+    await tellMain(action.missionId, decision.id, applied.sentence, deps);
   } catch (error) {
     deps.log(`[paseo-bm] applying ${decision.id} failed: ${errorText(error)}`);
   }

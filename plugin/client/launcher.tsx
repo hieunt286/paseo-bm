@@ -30,6 +30,7 @@ import { insightsProjects } from "./insights-model";
 import { inboxTab } from "./inbox-model";
 import { WorkScreen } from "./work";
 import { projectWorkspacesOf } from "./work-model";
+import { missionProjectsOf, projectIndexOf, type ListedWorkspaceEntry } from "./mission-projects";
 import {
   SURFACE_HOME_VIEW,
   SURFACE_SECTIONS,
@@ -62,7 +63,8 @@ import {
 import { errorMessageOf } from "./errors";
 import { useUpdateStatus } from "./update-status";
 
-interface WorkspaceRow {
+/** A listed workspace: its row on Projects, and its project's facts for the missions' project list. */
+interface WorkspaceRow extends ListedWorkspaceEntry {
   id: string;
   label: string;
   detail: string;
@@ -281,13 +283,20 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
           label: workspace.title || workspace.name,
           detail: workspace.projectDisplayName,
           screenTitle: screenTitleOf(workspace.title || workspace.name, workspace.projectDisplayName),
+          projectId: workspace.projectId,
+          projectDisplayName: workspace.projectDisplayName,
+          projectCustomName: workspace.projectCustomName ?? null,
+          projectRootPath: workspace.projectRootPath,
+          ...(workspace.workspaceDirectory === undefined ? {} : { workspaceDirectory: workspace.workspaceDirectory }),
+          workspaceKind: workspace.workspaceKind,
+          activityAt: workspace.activityAt,
         }));
     },
   });
 
   // Every project list leaves the plugin's own homes out (missions design §3.1).
   const projectWorkspaces = useMemo(() => projectWorkspacesOf(workspaces.data, stored.data, stored.isError), [workspaces.data, stored.data, stored.isError]);
-  // Missions, Settings and Tools name a project by its own name, as the mockup does (change-014, missions design §10.1).
+  // Settings and Tools name a project by its own name, as the mockup does (change-014, missions design §10.1).
   const projectNames = useMemo(() => (projectWorkspaces ?? []).map((workspace) => ({ id: workspace.id, name: workspace.label, screenTitle: workspace.label })), [projectWorkspaces]);
   // A project page opened from elsewhere (the Inbox, the Command Center) shows beside the Projects list:
   // each opening is one request to the list, numbered so the same project can be asked for again.
@@ -300,6 +309,14 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   // The missions name the Inbox's mission cards (an `m:` card's workspace is its mission, missions design §4.1).
   // Names change seldom: read at most once a minute while the Inbox shows; the Missions screen polls the same entry itself.
   const missions = useQuery({ queryKey: MISSIONS_QUERY_KEYS.list, queryFn: () => listMissions({}), staleTime: MISSION_NAMES_STALE_MS, refetchInterval: view === "inbox" ? MISSION_NAMES_STALE_MS : false });
+  // Missions choose Paseo projects, not workspaces (`mission-projects.html`): one row per project, its root
+  // workspace the one a mission already uses, and every workspace's repository named by its project.
+  const missionRepos = useMemo(() => new Set((missions.data?.missions ?? []).flatMap((mission) => mission.repos.map((repo) => repo.workspaceId))), [missions.data]);
+  const missionProjects = useMemo(
+    () => missionProjectsOf(workspaces.data, stored.data, stored.isError, missionRepos) ?? [],
+    [workspaces.data, stored.data, stored.isError, missionRepos],
+  );
+  const repoIndex = useMemo(() => projectIndexOf(workspaces.data), [workspaces.data]);
   // A project's name for the Inbox: open workspaces first, then the history of closed ones, then the missions.
   const projectOf = useMemo(() => {
     const names = new Map<string, string>();
@@ -407,9 +424,9 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
   }
 
   if (view === "missions") {
-    // Missions (missions design §10): the projects as Projects lists them, plugin homes left out.
+    // Missions (missions design §10): one row per Paseo project (`mission-projects.html`), plugin homes left out.
     return framed(
-      <MissionsScreen {...props} projects={projectNames} status={status} onOpenInbox={() => setView("inbox")} />,
+      <MissionsScreen {...props} projects={missionProjects} repoIndex={repoIndex} status={status} onOpenInbox={() => setView("inbox")} />,
     );
   }
 
@@ -441,7 +458,11 @@ export function ManagerLauncherSurface(props: PluginSurfaceProps) {
       }))}
       workspacesError={workspaces.isError ? errorMessageOf(workspaces.error) : null}
       overview={overviewById}
-      closed={closedWorkspaces(stored.data?.workspaces ?? [], projectWorkspaces?.map((workspace) => workspace.id) ?? [])}
+      closed={closedWorkspaces(
+        // A placement's history nests under its repo (delivery line design §3.1): it is no closed project.
+        (stored.data?.workspaces ?? []).filter((entry) => entry.repoKey === undefined),
+        projectWorkspaces?.map((workspace) => workspace.id) ?? [],
+      )}
       status={status}
       footer={`paseo-bm ${PLUGIN_VERSION}`}
       // The list and the chosen project's page side by side (change-014, the mockup's Projects).

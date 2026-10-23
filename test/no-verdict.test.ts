@@ -123,6 +123,41 @@ describe("a missing verdict (design §16.10)", () => {
     expect(fake.sends).toEqual([]);
   });
 
+  it("to a Worker waiting by structure: a no-verdict that meets its wait goes at once; one that does not is held, which is not withheld (delivery line design §6.4)", async () => {
+    const met = setup();
+    met.registry.setWaiting(WS, REQ, { since: iso(1), reportRecordId: "out-0000000000ff", wakeOn: "all", items: [{ kind: "batch", id: "b1", settled: false }] });
+    expect(await met.check(reviewerTurn())).toBe("sent");
+    expect(noVerdicts(met.home)).toMatchObject([{ state: "delivered" }]);
+    expect(met.fake.sends).toHaveLength(1);
+
+    const notMet = setup();
+    notMet.registry.setWaiting(WS, REQ, { since: iso(1), reportRecordId: "out-0000000000ff", wakeOn: "all", items: [{ kind: "batch", id: "b1", settled: false }, { kind: "question", id: `q:${REQ}:Q1`, settled: false }] });
+    await notMet.check(reviewerTurn());
+    expect(noVerdicts(notMet.home)).toMatchObject([{ state: "held", outcomeAt: null }]);
+    expect(notMet.fake.sends).toEqual([]);
+    // Held is open: the verdict is still owed to the Worker.
+    expect(batchesAwaitingVerdict(notMet.registry.get(WS, REQ), createOutbox(notMet.home).list(WS), notMet.clock())).toEqual(["b1"]);
+  });
+
+  it("after a handoff, goes to the request's current Worker, not to the replaced one that opened the batch (delivery line design §6.4)", async () => {
+    const { home, fake, check, registry } = setup();
+    const SUCCESSOR = "agent-worker-successor";
+    fake.byId(WORKER)!.labels = { ...fake.byId(WORKER)!.labels, "bm.replacedBy": SUCCESSOR };
+    fake.agents.push({ id: SUCCESSOR, provider: "bm-worker/claude-opus-5", status: "idle", workspaceId: WS, labels: { "bm.role": "worker", "bm.requestId": REQ, "bm.handoffFrom": WORKER } });
+    registry.addWorker(WS, REQ, SUCCESSOR);
+    expect(await check(reviewerTurn())).toBe("sent");
+    expect(noVerdicts(home)).toMatchObject([{ to: SUCCESSOR, state: "delivered" }]);
+    expect(fake.sends.map((send) => send.id)).toEqual([SUCCESSOR]);
+  });
+
+  it("a canceled turn's no-verdict to a waiting Worker stays withheld, never held or released", async () => {
+    const { home, fake, check, registry } = setup();
+    registry.setWaiting(WS, REQ, { since: iso(1), reportRecordId: "out-0000000000ff", wakeOn: "all", items: [{ kind: "batch", id: "b1", settled: false }, { kind: "question", id: `q:${REQ}:Q1`, settled: false }] });
+    expect(await check(reviewerTurn("canceled"))).toBe("withheld");
+    expect(noVerdicts(home)).toMatchObject([{ state: "withheld" }]);
+    expect(fake.sends).toEqual([]);
+  });
+
   it("a failed turn with no fallback incident sends one; one the fallback classified, or of another outcome, sends none", async () => {
     const failed = setup();
     expect(await failed.check(reviewerTurn("interrupted"))).toBe("outcome");
@@ -232,6 +267,44 @@ describe("a plugin-created Reviewer that ended up unbound (design §16.10)", () 
     const { check, fake } = unboundSetup();
     expect(await check({ ...piTurn(""), agent: { ...piTurn("").agent, id: "agent-other-reviewer" } })).toBe("not-bound-reviewer");
     expect(fake.sends).toEqual([]);
+  });
+});
+
+describe("the batch's results (delivery line design §5.2)", () => {
+  const results = (registry: ReturnType<typeof setup>["registry"], batchId = "b1") =>
+    registry.get(WS, REQ)!.reviews.batches.find((batch) => batch.batchId === batchId)!.results!.map((entry) => [entry.verdict, entry.blocking]);
+
+  it("a no-verdict, sent or withheld, is a result with an unknown blocking count", async () => {
+    const sent = setup();
+    expect(await sent.check(reviewerTurn())).toBe("sent");
+    expect(results(sent.registry)).toEqual([["no-verdict", null]]);
+    expect(sent.registry.get(WS, REQ)!.reviews.batches[0]!.results![0]!.recordId).toBe(noVerdicts(sent.home)[0]!.id);
+    // Once per record: the same call ending again adds nothing.
+    expect(await sent.check(reviewerTurn())).toBe("already-sent");
+    expect(results(sent.registry)).toHaveLength(1);
+
+    const canceled = setup();
+    expect(await canceled.check(reviewerTurn("canceled"))).toBe("withheld");
+    expect(results(canceled.registry)).toEqual([["no-verdict", null]]);
+  });
+
+  it("an unbound Reviewer's final BM-REVIEW is a result with its verdict and blocking count", async () => {
+    const base = setup();
+    const PI = "agent-pi-reviewer";
+    const CALL = "out-000000000b01";
+    base.registry.addReviewCall(WS, REQ, "b2", { callId: CALL, kind: "create", reviewerId: "", at: iso(1) }, "Review batch b2.");
+    base.registry.noteReviewer(WS, REQ, "b2", PI, CALL);
+    const turnOf = {
+      agent: { id: PI, provider: "bm-reviewer-fallback-1/pi-model", workspaceId: WS, parentAgentId: WORKER, cwd: "/repo", title: null },
+      turnId: "t",
+      outcome: { kind: "completed" },
+      timeline: [
+        { type: "user_message", text: `${reviewerBriefLineOf(REQ, "b2", CALL)}\nReview batch b2.` },
+        { type: "assistant_message", text: `BM-REVIEW\nrequestId: ${REQ}\nbatchId: b2\nverdict: changes-required\nfindings:\n- severity: blocking\n  location: a.ts:1\n- severity: blocking\n  location: b.ts:2` },
+      ],
+    };
+    expect(await base.check(turnOf)).toBe("review-delivered");
+    expect(results(base.registry, "b2")).toEqual([["changes-required", 2]]);
   });
 });
 

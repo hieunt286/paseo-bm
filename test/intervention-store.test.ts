@@ -628,6 +628,20 @@ describe("the outcome check, one kind at a time (design §G.3)", () => {
       expect(check(T0 + 10 * MIN)).toEqual([]);
       expect(check(T0 + 32 * MIN).map((entry) => entry.outcome)).toEqual(["unknown"]);
     });
+
+    it("counts a family from when its figures went under (delivery line design §8.4): its reset comes a quiet window later", () => {
+      // Under from minutes 10 and 20, so not reset yet when the window ends: pending, not missed.
+      createGovernorStore(home).put(MISSION, { mess: { ...family(2), underSince: iso(T0 + 10 * MIN) }, drift: { ...family(1), underSince: iso(T0 + 20 * MIN) } });
+      expect(check(T0 + 32 * MIN)).toEqual([]);
+      // Reset after the quiet, each from a time inside the window: met.
+      createGovernorStore(home).put(MISSION, { mess: { ...reset(40), underSince: iso(T0 + 10 * MIN) }, drift: { ...reset(50), underSince: iso(T0 + 20 * MIN) } });
+      expect(check(T0 + 52 * MIN).map((entry) => entry.outcome)).toEqual(["met"]);
+    });
+
+    it("missed: a family under only after the window, or one that crossed again", () => {
+      createGovernorStore(home).put(MISSION, { mess: { ...family(2), underSince: iso(T0 + 31 * MIN) }, drift: reset(10) });
+      expect(check(T0 + 32 * MIN).map((entry) => entry.outcome)).toEqual(["missed"]);
+    });
   });
 
   it("compact and handoff are checked from Phase 3: pending in their window, unknown after it", () => {

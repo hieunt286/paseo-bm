@@ -29,10 +29,12 @@ import { stopAllInWorkspace, type StopPaseo } from "./stop-propagation";
 import { fallbackCountsOf, incidentsIn, reviewerReplacementIds } from "./fallback-state";
 import { agentFactsOf, bmAgentsOf, directoryIn, listedWorkspaces, workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
 import { workspaceTracesOf } from "./request-trace";
+import { placementIndexIn } from "./placements";
 import { isPluginHomeIn } from "./plugin-homes";
 import { dataHome, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
 import { createOrchestratorStore } from "./orchestrator-store";
 import { createDecisionStore } from "./decision-store";
+import { chainPositionOf, createRequestRegistry } from "./request-registry";
 import type { AgentFacts, ReconstructedTrace } from "./traces";
 import { agentTokenFiguresOf } from "./trace-usage";
 import { detail, paginate, summariseSegments } from "./trace-views";
@@ -241,6 +243,27 @@ export async function readTraceContext(
   };
 }
 
+/**
+ * The chain fields of a `traces.list` row (delivery line design §2.7), read
+ * from the workspace's request registry: the rows of a request the registry
+ * does not hold, or that is not in a chain, are returned as they are.
+ */
+function withChains(home: string, workspaceId: string, rows: TraceSummary[]): TraceSummary[] {
+  if (!rows.some((row) => row.requestId !== null)) return rows;
+  const registered = new Map(createRequestRegistry(home).list(workspaceId).map((request) => [request.requestId, request]));
+  return rows.map((row) => {
+    const request = row.requestId === null ? undefined : registered.get(row.requestId);
+    if (request === undefined || (request.continuationOf === undefined && request.continuedBy === undefined)) return row;
+    const position = chainPositionOf(request.continuationOf, (requestId) => registered.get(requestId)?.continuationOf);
+    return {
+      ...row,
+      ...(request.continuationOf === undefined ? {} : { continuationOf: request.continuationOf, chainRootId: request.chainRootId ?? request.continuationOf }),
+      ...(request.continuedBy === undefined ? {} : { continuedBy: request.continuedBy }),
+      ...(position === null ? {} : { chainPosition: position }),
+    };
+  });
+}
+
 /** `traces.list` handler (REQ-041). Read-only. */
 export async function handleTracesList(
   input: { workspaceId: string; limit?: number; cursor?: string },
@@ -264,17 +287,18 @@ export async function handleTracesList(
     undefined,
     context.directory ?? undefined,
   );
+  const rows = page.flatMap((trace) =>
+    summariseSegments(trace, {
+      agents: context.agents,
+      workspaceState: context.workspaceState,
+      reassignedFrom: reassignedFromOf(trace, input.workspaceId),
+      priceUsage: (usage) => priceUsage(usage, listed),
+      fallbacksOf: (requestId) => (requestId === null ? 0 : (context.fallbackCounts.get(requestId) ?? 0)),
+      workspaceDirectory: context.evidenceDirectory,
+    }),
+  );
   return {
-    traces: page.flatMap((trace) =>
-      summariseSegments(trace, {
-        agents: context.agents,
-        workspaceState: context.workspaceState,
-        reassignedFrom: reassignedFromOf(trace, input.workspaceId),
-        priceUsage: (usage) => priceUsage(usage, listed),
-        fallbacksOf: (requestId) => (requestId === null ? 0 : (context.fallbackCounts.get(requestId) ?? 0)),
-        workspaceDirectory: context.evidenceDirectory,
-      }),
-    ),
+    traces: withChains(requireDataHome(deps, "open the trace store"), input.workspaceId, rows),
     nextCursor,
     truncated,
     store: context.store,
@@ -395,25 +419,31 @@ export async function handleTracesReassign(
  * `traces.workspaces`: stored workspaces with their current state, for the
  * launcher. The plugin's own homes are not projects (missions design §3.1):
  * they are left out, and `homes` names the listed ones so the launcher leaves
- * them out of its own `workspaces.list` too.
+ * them out of its own `workspaces.list` too. A mission placement is no
+ * project either (delivery line design §3.1): its entry names its `repoKey`,
+ * and `placements` maps each to its repo so the launcher nests it there.
  */
 export async function handleTracesWorkspaces(
   paseo: DashboardPaseo,
   deps: { homedir?: () => string } = {},
 ): Promise<{
-  workspaces: Array<WorkspaceClassification & { lastSeenAt: string | null; bytes: number }>;
+  workspaces: Array<WorkspaceClassification & { lastSeenAt: string | null; bytes: number; repoKey?: string }>;
   homes: string[];
+  placements?: Record<string, string>;
 }> {
   const { home, location } = await requireInstallHome(paseo, deps);
   const listed = await listedWorkspaces(paseo);
   const classified = classifyWorkspaces(location, listed).filter((entry) => !isPluginHomeIn(entry.workspaceId, listed, home));
+  const placements = Object.fromEntries(Object.entries(placementIndexIn(home)).map(([placement, { repo }]) => [placement, repo]));
   return {
     homes: (listed ?? []).filter((entry) => entry.id !== "" && isPluginHomeIn(entry.id, listed, home)).map((entry) => entry.id),
     workspaces: classified.map((entry) => ({
       ...entry,
       lastSeenAt: readWorkspaceMeta(location, entry.workspaceId)?.lastSeenAt ?? null,
       bytes: measureStore(location, entry.workspaceId).workspaceBytes,
+      ...(placements[entry.workspaceId] === undefined ? {} : { repoKey: placements[entry.workspaceId]! }),
     })),
+    ...(Object.keys(placements).length === 0 ? {} : { placements }),
   };
 }
 

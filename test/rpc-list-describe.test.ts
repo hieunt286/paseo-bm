@@ -306,6 +306,8 @@ describe("plugin server entry — agents.list and roles.describe", () => {
       "mission.change",
       "mission.ensure",
       "mission.get",
+      "mission.integration.ask",
+      "mission.integration.revoke",
       "missions.create",
       "missions.list",
       "orchestrator.open",

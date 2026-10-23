@@ -7,7 +7,8 @@
  * 0. **The start** (`turnRecorded`): a recorded turn of the newest Worker of
  *    an unfinished request whose tokens read since it started, or since its
  *    last handoff, reach `handoff.requestTokens` (`handoffCrossingOf`) starts
- *    one, while handoff is on, the request is below `handoff.maxPerRequest`,
+ *    one, while handoff is on, the request is below `handoff.maxPerRequest`
+ *    (its handoffs so far and its `no-safe-point` drops, `handoffTriesOf`),
  *    none of it is pending, its Manager — a request of a mission: the
  *    mission's current Main (`missionManagerOf`), else the Worker's parent —
  *    is live, and its commands are below the loop guard. It is logged as a
@@ -15,9 +16,16 @@
  * 1. **The safe point.** The outgoing Worker's turn that just ended (the
  *    collector's `onRecorded`, the start's own included) closed a bead with evidence (a successful `br close`, or a report naming
  *    closed beads), reported `beads-done` or `bead-implemented`, or came
- *    after a review verdict of its own Reviewer (`handoffSafePointIn`). At its
- *    idle moment — nothing else queued for it — the plugin asks for its note.
- *    At most `HANDOFF_SAFE_POINT_WAIT_MS`.
+ *    after a review verdict of its own Reviewer (`handoffSafePointIn`), or it
+ *    waits by structure (delivery line design §6.6: its last turn sent a
+ *    report; what is held for it is outside the queue). At its idle moment —
+ *    nothing else queued for it — the plugin asks for its note. At most
+ *    `HANDOFF_SAFE_POINT_WAIT_MS`. **The maintenance ceiling** (§6.6): once
+ *    the request's tokens read are at least `maintenance.ceilingFactor` ×
+ *    `handoff.requestTokens`, or the handoff has waited
+ *    `MAINTENANCE_WAIT_MS.handoff`, the note is asked at the Worker's next
+ *    recorded turn end without the safe-point and quiet-queue checks, ahead of
+ *    what is queued (`first`).
  * 2. **The note** (`BM-HANDOFF`, `noteRequestOf`): `bm_report` with
  *    `handoffNote`. A bound Worker calls it and the
  *    tool stores and delivers the report (its outbox record, which the
@@ -98,7 +106,8 @@
 import { join } from "node:path";
 import { parseReports } from "../shared/bm-report";
 import type { ParsedReport, TraceRecord } from "../shared/contracts";
-import { handoffCrossingOf, mainCompactionOnFor, mainContextHardOf, type CoordinationSettings, type ThresholdCrossing } from "../shared/coordination";
+import { atMaintenanceCeiling, handoffCrossingOf, mainCompactionOnFor, mainContextHardOf, type CoordinationSettings, type ThresholdCrossing } from "../shared/coordination";
+import { MAINTENANCE_WAIT_MS } from "../shared/interventions";
 import { turnTokensOf } from "../shared/eval-metrics/tokens";
 import { HANDOFF_BRIEF_MARKER, holdsHandoffBrief, requestFinishedOf, requestTokensReadOf } from "../shared/handoff";
 import {
@@ -126,7 +135,7 @@ import {
   NOTE_WAIT_MS,
   createHandoffStore,
   endedHandoff,
-  handoffsDoneOf,
+  handoffTriesOf,
   isPendingHandoffState,
   lastHandoffAtOf,
   pendingHandoffOf,
@@ -137,8 +146,10 @@ import {
 import { HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, briefLineOf } from "./notices";
 import { recordIntervention } from "./intervention-store";
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff } from "./manager";
-import { createMissionRoster, missionManagerOf } from "./mission-roster";
+import { createMissionRoster, missionManagerOf, requestIndexOf } from "./mission-roster";
 import { createMissionStore } from "./mission-store";
+import { moveRequestToPlacement, successorPlacementOf } from "./placement-create";
+import { placementBlockOf } from "./placements";
 import { handOverMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
 import { createRequestRegistry } from "./request-registry";
 import { directoryIn, listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
@@ -150,6 +161,7 @@ import { GIT_READ_ONLY_PREFIX, runGit, type GitRunner } from "./repo-tool";
 import { asRecord, nonEmpty } from "./role-choices";
 import { errorText } from "./rpc-kit";
 import { readRecords, readWorkspaceMeta, type TraceStoreLocation } from "./trace-store";
+import { gatedWaitOf } from "./wake-gate";
 
 /** The label the Manager gives the successor: the outgoing Worker's id (change-008 C3). */
 export const HANDOFF_FROM_LABEL = "bm.handoffFrom";
@@ -752,22 +764,27 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     },
   };
 
-  /** At the idle moment, synchronously: still waiting, handoff still on, and not held past its safe moment. */
+  /**
+   * At the idle moment, synchronously: still waiting, handoff still on, and
+   * not held past its safe moment — none at the maintenance ceiling
+   * (delivery line design §6.6): queued behind a notice sent at that turn end,
+   * it goes at the Worker's next one.
+   */
   const currentAt =
-    (id: string, enqueuedAt: number) =>
+    (id: string, enqueuedAt: number, ceiling: boolean) =>
     (): boolean => {
       const home = homeOf();
       if (home === null) return false;
       const entry = storeOf(home).get(id);
       if (entry === null || entry.state !== "waiting") return false;
       if (!readCoordinationSettings({ home, log }).handoff.enabled) return false;
-      return now().getTime() - enqueuedAt <= NOTE_SEND_MS;
+      return ceiling || now().getTime() - enqueuedAt <= NOTE_SEND_MS;
     };
 
-  async function askNote(entry: HandoffEntry, paseo: unknown): Promise<void> {
+  async function askNote(entry: HandoffEntry, paseo: unknown, first = false): Promise<void> {
     const home = homeOf();
     const bound = home !== null && isBound(home, entry.workerId);
-    const item: BatchItem = { key: entry.id, line: noteRequestOf(entry, { bound }), isCurrent: currentAt(entry.id, now().getTime()) };
+    const item: BatchItem = { key: entry.id, line: noteRequestOf(entry, { bound }), isCurrent: currentAt(entry.id, now().getTime(), first), ...(first ? { first } : {}) };
     await queue.enqueueBatch(entry.workerId, noteBatch, [item], paseo as NoticePaseo | undefined);
   }
 
@@ -923,6 +940,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         { labels: { [HANDOFF_FROM_LABEL]: entry.workerId }, includeArchived: false },
       );
       const taken = new Set(storeOf(home).list().map((candidate) => candidate.successorId));
+      // Delivery line design §4.8 step 5: a successor may work in the placement the request moved into.
+      const places = new Set([entry.workspaceId, requestIndexOf(home, entry.requestId)?.workspaceId ?? entry.workspaceId]);
       const found = agents
         .map((agent) => asRecord(agent))
         .find((agent) => {
@@ -936,13 +955,13 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
             nonEmpty(agent["archivedAt"]) === null &&
             nonEmpty(labels[HANDOFF_FROM_LABEL]) === entry.workerId &&
             parentOf(agent) === entry.managerId &&
-            (nonEmpty(agent["workspaceId"]) ?? entry.workspaceId) === entry.workspaceId
+            places.has(nonEmpty(agent["workspaceId"]) ?? entry.workspaceId)
           );
         });
       const successorId = nonEmpty(found?.["id"]);
       if (successorId === null) return null;
       log(`[paseo-bm] handoff ${entry.id}: Worker ${successorId} is the successor the plugin was creating; it completes the handoff.`);
-      return await finishCreated(home, entry, successorId, paseo);
+      return await finishCreated(home, { ...entry, workspaceId: nonEmpty(found?.["workspaceId"]) ?? entry.workspaceId }, successorId, paseo);
     } catch (error) {
       log(`[paseo-bm] could not look for the successor of handoff ${entry.id}: ${errorText(error)}`);
       return null;
@@ -974,7 +993,15 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     if (await agentToolsOff(paseo)) return refuse(AGENT_TOOLS_OFF_SWITCH_MESSAGE);
     const profile = await workerProfileOf(paseo, log);
     if (profile === null) return refuse('there is no "bm-worker" profile');
-    const cwd = await folderOf(paseo, entry.workerId, locationOf(home), entry.workspaceId);
+    // Delivery line design §3.3, §3.6: the successor works in the request's placement, unless no agent may start there.
+    const blocked = placementBlockOf(home, entry.workspaceId);
+    if (blocked !== null) return refuse(blocked);
+    // Delivery line design §4.8 step 5: a request from before the cut-over moves into its mission's placement
+    // (registry and roster) once a checkpoint holds all of the root's work; otherwise it finishes in place.
+    const placed = await successorPlacementOf(home, paseo, entry, { log, ...(deps.git === undefined ? {} : { git: deps.git }), now });
+    const moved = placed !== null && entry.missionId !== null && moveRequestToPlacement(home, { requestId: entry.requestId, missionId: entry.missionId, from: entry.workspaceId, to: placed.workspaceId }, { log, now });
+    const where: HandoffEntry = moved ? { ...entry, workspaceId: placed!.workspaceId } : entry;
+    const cwd = moved ? placed!.directory : await folderOf(paseo, entry.workerId, locationOf(home), entry.workspaceId);
     if (cwd === null) return refuse(`the folder of Worker ${entry.workerId} cannot be read`);
 
     creating.add(entry.workerId);
@@ -984,7 +1011,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         ({ workerId: successorId } = await createPluginWorker(
           paseo as WorkerCreationPaseo,
           {
-            workspaceId: entry.workspaceId,
+            workspaceId: where.workspaceId,
             requestId: entry.requestId,
             managerId: entry.managerId,
             cwd,
@@ -1007,7 +1034,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         return refuse(`Paseo refused to create it: ${errorText(error)}`);
       }
       // Checked above, so the Manager's information counts and is not refused now.
-      await finishCreated(home, entry, successorId, paseo);
+      await finishCreated(home, where, successorId, paseo);
     } finally {
       creating.delete(entry.workerId);
     }
@@ -1026,7 +1053,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     const entries = store.list();
     // A Worker already handed over is no longer its request's.
     if (pendingHandoffOf(entries, requestId, now()) !== null || entries.some((entry) => entry.workerId === record.agentId && entry.successorId !== null)) return;
-    if (handoffsDoneOf(entries, requestId).length >= settings.handoff.maxPerRequest) return;
+    // Delivery line design §6.6: a no-safe-point drop counts too, so a handoff never re-arms without end.
+    if (handoffTriesOf(entries, requestId) >= settings.handoff.maxPerRequest) return;
     const records = recordsOf(home, workspaceId);
     if (requestFinishedOf(records, requestId)) return;
     const crossing = handoffCrossingOf(requestTokensReadOf(records, requestId, lastHandoffAtOf(entries, requestId)), settings);
@@ -1037,6 +1065,23 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
     if (loopGuardFull(home, workspaceId, requestId, now(), deps.store)) return;
     const intervention = recordIntervention(home, { kind: "handoff", workspaceId, requestId, targetAgentId: record.agentId, trigger: "threshold.crossed" }, { now, log });
     store.add({ workspaceId, requestId, workerId: record.agentId, managerId, interventionId: intervention?.id ?? null, reason: shorten(crossingWordsOf(crossing), MAX_HANDOFF_REASON_CHARS) });
+  }
+
+  /**
+   * Delivery line design §6.6: the request's tokens read since it started, or
+   * since its last handoff, are at least `maintenance.ceilingFactor` ×
+   * `handoff.requestTokens`, or the handoff has waited `MAINTENANCE_WAIT_MS.handoff`.
+   * Both only grow while it waits, so once reached the ceiling holds until it runs.
+   */
+  function atCeiling(store: HandoffStore, entry: HandoffEntry, records: readonly TraceRecord[], settings: CoordinationSettings, at: number): boolean {
+    if (at - (timeOrNull(entry.requestedAt) ?? at) >= MAINTENANCE_WAIT_MS.handoff) return true;
+    const read = requestTokensReadOf(records, entry.requestId, lastHandoffAtOf(store.list(), entry.requestId));
+    return atMaintenanceCeiling(handoffCrossingOf(read, settings), settings);
+  }
+
+  /** §6.6: the outgoing Worker waits by structure — a natural safe point. */
+  function waitsByStructure(home: string, entry: HandoffEntry): boolean {
+    return gatedWaitOf(home, entry.workerId, { workspaceId: entry.workspaceId, requestId: entry.requestId }) !== null;
   }
 
   /** Mains this run began to hand over: each once. */
@@ -1106,7 +1151,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
         // `commanded` waits for the Manager's successor, `creating` for the plugin's own: neither is advanced here.
         const pending = store.list().filter((entry) => isPendingHandoffState(entry.state) && entry.state !== "commanded" && entry.state !== "creating");
         if (pending.length === 0) return;
-        const enabled = readCoordinationSettings({ home, log }).handoff.enabled;
+        const settings = readCoordinationSettings({ home, log });
+        const enabled = settings.handoff.enabled;
         const timeline = (event as { timeline?: unknown } | null | undefined)?.timeline;
         const items = Array.isArray(timeline) ? timeline : [];
         const at = now().getTime();
@@ -1124,7 +1170,9 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
               end(store, entry, "finished");
               continue;
             }
-            if (handoffSafePointIn(own, items, records) && !othersQueued(queue, entry.workerId)) await askNote(entry, paseo);
+            // Delivery line design §6.6: at the maintenance ceiling, at this turn end, ahead of what is queued.
+            if (atCeiling(store, entry, records, settings, at)) await askNote(entry, paseo, true);
+            else if ((handoffSafePointIn(own, items, records) || waitsByStructure(home, entry)) && !othersQueued(queue, entry.workerId)) await askNote(entry, paseo);
             continue;
           }
           let current: HandoffEntry | null = entry;
@@ -1171,7 +1219,8 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
               candidate.successorId === null &&
               // `creating`: the plugin's own creation, which a reload (or Paseo's late error) left unsettled.
               (candidate.state === "commanded" || candidate.state === "creating" || (candidate.state === "failed" && candidate.ending === "no-successor")) &&
-              candidate.workspaceId === workspaceId &&
+              // Delivery line design §4.8 step 5: or the placement its request moved into.
+              (candidate.workspaceId === workspaceId || (workspaceId !== null && requestIndexOf(home, candidate.requestId)?.workspaceId === workspaceId)) &&
               candidate.managerId === parent &&
               (requestLabel === null || requestLabel === candidate.requestId),
           )
@@ -1180,7 +1229,7 @@ export function createHandoffRunner(deps: HandoffRunnerDeps = {}): HandoffRunner
           log(`[paseo-bm] Worker ${agent.id} carries ${HANDOFF_FROM_LABEL}=${from}, but no handoff of that Worker by its Manager waits for it.`);
           return null;
         }
-        if (entry.state === "creating") return await finishCreated(home, entry, agent.id, paseo);
+        if (entry.state === "creating") return await finishCreated(home, { ...entry, workspaceId: workspaceId ?? entry.workspaceId }, agent.id, paseo);
         return await complete(store, entry, agent.id, paseo);
       } catch (error) {
         log(`[paseo-bm] linking the successor Worker ${agent.id} failed: ${errorText(error)}`);

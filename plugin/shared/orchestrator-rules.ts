@@ -14,7 +14,7 @@
  * than staying silent (REQ-072d); it never turns missing data into a pass.
  *
  * This module is `shared/`: it imports no server code. What only the server
- * knows comes in `RuleFacts` — the review budget (`server/review-budget.ts`).
+ * knows comes in `RuleFacts` — the owner's review settings, for the cap.
  * It also keeps `isProcessDocumentPath`, which the live Worker watch and the
  * replay share.
  */
@@ -49,8 +49,8 @@ export interface Flag {
 }
 
 export interface RuleFacts {
-  /** The owner's review budget per tier (Settings → Coordination, §G.7; `readReviewBudget`), 2 / 2 / 4 by default. */
-  reviewBudget: Readonly<Record<Tier, number>>;
+  /** The owner's review settings (Settings → Coordination): `review.callsPerBatch`, 3 by default (delivery line design §5.3). */
+  review: { readonly callsPerBatch: number };
 }
 
 /** One line, whitespace collapsed, cut to `EXCERPT_MAX_CHARS` characters with an ellipsis. */
@@ -97,23 +97,31 @@ export function isProcessDocumentPath(path: string): boolean {
 
 // ── review.over-budget ──────────────────────────────────────────────────────
 
+/** Mmax: the milestone batches a request of each tier is paid for (delivery line design §5.3). */
+export const REVIEW_MILESTONES_MAX: Readonly<Record<Tier, number>> = { Small: 1, Medium: 2, Large: 4 };
+
 /**
- * A request's review ceiling (design §16.8): the owner's budget for its tier
- * plus the calls the request's review-budget grants added.
+ * A request's review cap (delivery line design §5.3): `callsPerBatch` ×
+ * min(M, Mmax[tier]), where M is its milestone batches — the one being opened
+ * included — and never fewer than one: a request that makes a review call has
+ * a batch. At the defaults at most 3 / 6 / 12 calls, pooled across the
+ * request's batches. The one function the review tools, this rule, the stall
+ * reason, the Manager's notice (`overrunOf`) and the governor use; the owner's
+ * granted calls (`grantedCallsOf`) are added to it by each.
  */
-export function reviewCeilingOf(budget: number, granted: number): number {
-  return budget + granted;
+export function reviewCapOf(tier: Tier, milestones: number, settings: { readonly callsPerBatch: number }): number {
+  return settings.callsPerBatch * Math.min(Math.max(1, milestones), REVIEW_MILESTONES_MAX[tier]);
 }
 
 /**
- * True when `calls` review calls are past the ceiling once the `exempt` ones
- * are left out — the calls of every batch an `{ untilClean }` grant covers,
- * live or spent (design §16.8; `ruleReviewGrantOf` in `server/review-tools.ts`). The one
- * comparison the review tools (of the calls after one more), this rule and
- * the Manager's budget notice (`overrunOf`) all make.
+ * True when `calls` review calls are past `ceiling` (the cap plus the granted
+ * calls). No call is exempt: an older build's `{ untilClean }` grant no longer
+ * leaves any out (delivery line design §5.6). The one comparison the review
+ * tools (of the calls after one more), this rule and the Manager's notice all
+ * make.
  */
-export function overReviewCeiling(calls: number, exempt: number, ceiling: number): boolean {
-  return calls - exempt > ceiling;
+export function overReviewCap(calls: number, ceiling: number): boolean {
+  return calls > ceiling;
 }
 
 /** A message a Reviewer received that is not a review call (`reviewCallsOf` in `server/traces.ts`). */
@@ -125,25 +133,25 @@ function overBudget(input: RuleInput, facts: RuleFacts): Flag | null {
   const evidence: FlagEvidence[] = input.inbound
     .filter((message) => message.role === "reviewer" && !isPluginNotice(message.text) && !REVIEW_BLOCK.test(message.text))
     .map((message) => ({ agentId: message.agentId, at: message.at, kind: "sent", excerpt: message.text }));
-  const why = "Review calls past the tier's budget cost time and tokens the size of the request does not justify.";
-  // Design §16.8: the request's grants raise its ceiling, and the calls of a live untilClean batch are left out.
+  const why = "Review calls past the request's review cap cost time and tokens the size of the request does not justify.";
+  // Design §16.8: the request's grants raise its ceiling; delivery line design §5.6: no call is exempt.
   const granted = input.reviewGrant?.calls ?? 0;
-  const exempt = input.reviewGrant?.exempt ?? 0;
+  const milestones = input.reviewGrant?.milestones ?? 1;
   if (input.tier === null) {
-    const smallest = Math.min(...Object.values(facts.reviewBudget));
-    if (!overReviewCeiling(calls, exempt, reviewCeilingOf(smallest, granted))) return null;
+    // The smallest cap of any tier at these milestones: Small's.
+    if (!overReviewCap(calls, reviewCapOf("Small", milestones, facts.review) + granted)) return null;
     return flag(
       "review.over-budget",
       "warning",
       "unknown",
-      `The request made ${plural(calls, "review call")}, but no report gave its tier, so its budget is not known.`,
+      `The request made ${plural(calls, "review call")}, but no report gave its tier, so its review cap is not known.`,
       why,
       evidence,
     );
   }
-  const budget = facts.reviewBudget[input.tier];
-  if (!overReviewCeiling(calls, exempt, reviewCeilingOf(budget, granted))) return null;
-  const over = granted > 0 ? `over its budget of ${budget} plus ${granted} granted` : `over its budget of ${budget}`;
+  const cap = reviewCapOf(input.tier, milestones, facts.review);
+  if (!overReviewCap(calls, cap + granted)) return null;
+  const over = granted > 0 ? `over its review cap of ${cap} plus ${granted} granted` : `over its review cap of ${cap}`;
   return flag(
     "review.over-budget",
     "warning",

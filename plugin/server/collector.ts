@@ -42,6 +42,7 @@ import { parseReports, parseReviews, requestIdFromText } from "./bm-report";
 import { pluginSentMatcher } from "./compaction-store";
 import { isPluginNotice } from "./notices";
 import { originOf } from "../shared/message-origin";
+import { turnTriggerOf } from "../shared/eval-metrics/mains";
 import { stripNewRequestMarker } from "../shared/new-request";
 import { resolveDataHome } from "./data-home";
 import { roleOfProvider, type BmRole } from "./agent-role";
@@ -64,6 +65,7 @@ import {
   type TraceMessage,
   type TraceRecord,
   type TraceRuntime,
+  type TurnTrigger,
   type Usage,
 } from "../shared/contracts";
 import { TELL_WORKER_FACE } from "../shared/bm-tools";
@@ -639,6 +641,8 @@ export async function buildRecord(
   const reviews: ParsedReview[] = [];
   const evidence: Evidence[] = [];
   let relayRequestId: string | null = null;
+  /** What started the turn (delivery line design §8.4): its first inbound message, by `turnTriggerOf`. */
+  let trigger: TurnTrigger | null = null;
   const compaction = compactionTracker(event.agent.id);
   const pluginSent = deps.pluginSent ?? pluginSentBeside(deps.location);
 
@@ -668,6 +672,7 @@ export async function buildRecord(
       );
       notice = origin === "plugin-notice";
       message.origin = origin === "owner" ? "user" : "agent";
+      if (sent.length === 0) trigger = turnTriggerOf(safe, origin);
       sent.push(message);
     } else {
       received.push(message);
@@ -743,6 +748,7 @@ export async function buildRecord(
     runtime,
     pluginVersion: PLUGIN_VERSION,
     toolCalls: toolCallsOf(timed, items, cut),
+    trigger,
   };
 
   const cwd = typeof event.agent.cwd === "string" && event.agent.cwd !== "" ? event.agent.cwd : null;

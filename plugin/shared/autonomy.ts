@@ -5,12 +5,9 @@ import {
   decisionClassSchema,
   decisionKindOf,
   DECISION_CLASSES,
-  MIN_POLICY_REVIEW_GRANT_CALLS,
   notOpenRefusalOf,
   ownerOnlyRefusalText,
-  policyMayGrant,
   preparedChangeRefusalText,
-  REVIEW_BUDGET_SUBJECT,
   type Decision,
   type DecisionClass,
   type DecisionOption,
@@ -326,14 +323,13 @@ export function unverifiedFinishRefusalOf(decision: Pick<Decision, "id" | "reque
  * is `delegate` in its project — any class (ADR-025). An `owner` or `shadow`
  * cell stays the owner's. Pure: the event bus asks by it (`decision.opened`,
  * `asks: "decision"`), and `bm_decide` answers by it — with `choice`, the
- * option it chose, whether the decision's request stands finished-unverified
- * (design §C.6, change-008 C4: `unverifiedFinishRefusalOf`) and the review
- * calls the policy may grant for its request (`grantCap`, §7.17.8 a).
+ * option it chose and whether the decision's request stands finished-unverified
+ * (design §C.6, change-008 C4: `unverifiedFinishRefusalOf`).
  */
 export function decideRefusalOf(
   policy: AutonomyPolicy,
   decision: Decision,
-  choice?: { optionKey: string; finishedUnverified?: boolean; grantCap?: number },
+  choice?: { optionKey: string; finishedUnverified?: boolean },
 ): string | null {
   // Autonomy design §B.7: an override is the owner's correction of an answer made for them.
   if (decisionKindOf(decision.id) === "override") return overrideIsTheOwners(decision.id);
@@ -358,26 +354,7 @@ export function decideRefusalOf(
     return `${decisionClass} is not delegated to you in project ${decision.workspaceId}; the owner decides it, so leave it to the owner`;
   }
   if (choice === undefined) return null;
-  return reviewGrantRefusalOf(decision, choice.optionKey, choice.grantCap) ?? unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified === true);
-}
-
-/**
- * Why the owner's policy may not choose `optionKey` of a `review-budget`
- * question (design §16.8, §7.17.8 a), or null when it may: an option granting
- * more than `{ calls: cap }` — what the policy may still grant the request
- * (`server/review-tools.ts` `policyGrantCapAt`: its tier's budget less the
- * policy's earlier grants), the floor when not given — or `{ untilClean }`,
- * is the owner's; the question then waits for them. Pure.
- */
-export function reviewGrantRefusalOf(
-  decision: Pick<Decision, "id" | "subject" | "options">,
-  optionKey: string,
-  cap: number = MIN_POLICY_REVIEW_GRANT_CALLS,
-): string | null {
-  if (decision.subject !== REVIEW_BUDGET_SUBJECT) return null;
-  const option = decision.options.find((entry) => entry.key === optionKey);
-  if (option === undefined || policyMayGrant(option.grant, cap)) return null;
-  return `option ${optionKey} of ${decision.id} grants more review calls than the owner's policy may (at most { calls: ${cap} } now: the request tier's budget, less the calls the policy already granted this request; never untilClean); choose a smaller grant or none, or leave decision ${decision.id} to the owner`;
+  return unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified === true);
 }
 
 /**

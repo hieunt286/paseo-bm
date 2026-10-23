@@ -36,6 +36,13 @@ export interface ListedWorkspace {
   id: string;
   archived: boolean;
   directory: string | null;
+  /** Present only when Paseo lists them (delivery line design §3.3): the project, the kind, the checkout's branch and the worktree slug. */
+  projectId?: string;
+  kind?: string;
+  branch?: string;
+  worktreeSlug?: string;
+  /** The project's name as Paseo's sidebar shows it (`projectCustomName`, else `projectDisplayName`); present only when Paseo lists one. */
+  projectName?: string;
 }
 
 /**
@@ -62,10 +69,22 @@ export async function listedWorkspaces(paseo: DashboardPaseo): Promise<ListedWor
     const directory = keys
       .map((key) => workspace[key])
       .find((value): value is string => typeof value === "string" && value !== "");
+    // Spike S1: the checkout's branch is reliable in `project.checkout`; `gitRuntime` only with a subscription.
+    const text = (value: unknown): string | null => (typeof value === "string" && value !== "" ? value : null);
+    const record = (value: unknown): Record<string, unknown> => (value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {});
+    const branch = text(record(record(workspace["project"])["checkout"])["currentBranch"]) ?? text(record(workspace["gitRuntime"])["currentBranch"]);
+    const projectId = text(workspace["projectId"]);
+    const slug = text(workspace["worktreeSlug"]);
+    const projectName = text(typeof workspace["projectCustomName"] === "string" ? workspace["projectCustomName"].trim() : null) ?? text(workspace["projectDisplayName"]);
     return {
       id: String(workspace["id"] ?? ""),
       archived: typeof archivingAt === "string" && archivingAt !== "",
       directory: directory ?? null,
+      ...(projectId === null ? {} : { projectId }),
+      ...(typeof kind === "string" ? { kind } : {}),
+      ...(branch === null ? {} : { branch }),
+      ...(slug === null ? {} : { worktreeSlug: slug }),
+      ...(projectName === null ? {} : { projectName }),
     };
   });
 }
@@ -75,8 +94,15 @@ export function directoryIn(listed: readonly ListedWorkspace[] | null, workspace
   return listed?.find((entry) => entry.id === workspaceId)?.directory ?? null;
 }
 
-/** A project's title: the last part of its directory in `listed`, else its workspace id. */
+/** The project name Paseo lists for `workspaceId` (`mission-projects.html`: named as in Paseo's sidebar), or null. */
+export function projectNameIn(listed: readonly ListedWorkspace[] | null, workspaceId: string): string | null {
+  return listed?.find((entry) => entry.id === workspaceId)?.projectName ?? null;
+}
+
+/** A project's title: its project name in `listed`, else the last part of its directory there, else its workspace id. */
 export function titleIn(listed: readonly ListedWorkspace[] | null, workspaceId: string): string {
+  const named = projectNameIn(listed, workspaceId);
+  if (named !== null) return named;
   const directory = directoryIn(listed, workspaceId);
   return directory === null ? workspaceId : basename(directory);
 }

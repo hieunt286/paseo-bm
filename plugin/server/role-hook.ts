@@ -29,6 +29,7 @@ import {
   HAND_PATH_HEADING,
   OWNER_PRECEDENTS_HEADING,
   RUNTIME_FACTS_HEADING,
+  UNKNOWN_CREATION_PROJECT,
   creationProjectOf,
   fullInstructions,
   runtimeFactsOf,
@@ -491,7 +492,7 @@ async function prepare(
   const projectLookup =
     role === "manager" || role === "worker" || role === "reviewer"
       ? creationProjectOf(cwd, { workspaceOf: (folder) => workspaceOfFolder(paseo, folder) })
-      : Promise.resolve({ workspaceId: null, boundary: "unknown" as const });
+      : Promise.resolve(UNKNOWN_CREATION_PROJECT);
   // The Worker's, Reviewer's or Orchestrator's own profile: its mode (bm-msy), and its
   // thinking and features (delta 20260921 §4.1.1). One read, whether or not
   // the mode needs a lookup: a Worker created WITH a mode still gets the

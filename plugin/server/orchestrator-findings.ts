@@ -14,7 +14,7 @@
  * | `agreement` — a predictor's agreement with the owner in a class that is not delegated (a figure, no threshold) | the agreement ledger (§B.3) | `autonomy.set` |
  * | `intervention-below-target` — an intervention kind below A-12's 80 % | the intervention log (§G.3) | `coordination.set` for `advice`, else none |
  * | `blocked-rounds` — rounds blocked on the owner, and how long the owner took | the metric module | — |
- * | `reviews` — review batches and blocking findings, per tier, with the tier's review budget | the metric module, per tier; Settings → Coordination | `coordination.set` on the tier's `review.*Budget` (§G.4's `review.budget`) |
+ * | `reviews` — review batches and blocking findings, the first-round and re-review pass shares and the batches the convergence rule stopped, per tier, with the tier's cap (delivery line design §5.6) | the metric module and the Reviewers' reviews, per tier; Settings → Coordination | `coordination.set` on `review.callsPerBatch` or `review.maxRereviews` |
  * | `stalls` — stall reasons and the Worker alerts | the Inbox alerts | — |
  * | `heavy-request` — the heaviest requests, the Worker's share | the metric module (§G.2) | — (Phase 3) |
  * | `compaction-candidates`, `handoff-candidates` — estimates | the metric module (§G.2) | — (Phase 3) |
@@ -27,7 +27,7 @@
  * only (`eval-store.ts` `readStore`), and nothing is written or sent.
  */
 import { redactText } from "./collector";
-import { currentPolicy } from "./autonomy-store";
+import { effectivePolicy } from "./placements";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { createAlertStore } from "./alert-store";
 import { createDecisionStore } from "./decision-store";
@@ -41,7 +41,10 @@ import { challengerOf, modeOf, type AutonomyPolicy } from "../shared/autonomy";
 import { agreementLedger, agreementRateOf, type AgreementCell } from "../shared/autonomy-ledger";
 import { FINDINGS_MAX_CHARS, FINDINGS_WINDOW_DAYS } from "../shared/bm-tools";
 import type { Tier, TraceRecord } from "../shared/contracts";
-import { REVIEW_BUDGET_KEYS, reviewBudgetOf, type CoordinationSettings } from "../shared/coordination";
+import type { CoordinationSettings } from "../shared/coordination";
+import { ownReviewsOf } from "../shared/bm-report";
+import { REVIEW_MILESTONES_MAX, reviewCapOf } from "../shared/orchestrator-rules";
+import { CONVERGENCE_STOP_TAIL, convergenceRefusalOf, isPassVerdict } from "./review-tools";
 import { DECISION_CLASSES, decisionKindOf, type Decision } from "../shared/decisions";
 import { computeEvalMetrics, type EvalMetrics, type EvalWindow } from "../shared/eval-metrics";
 import { A12_TARGET, INTERVENTION_KINDS } from "../shared/interventions";
@@ -69,8 +72,12 @@ export interface FindingsFacts {
   window: EvalWindow;
   /** The metrics of the project's records and Orchestrator entries over the window. */
   metrics: EvalMetrics;
-  /** The same metrics' review figures over each tier's requests (a request's last reported tier), for the tiers that have any. */
-  reviewsByTier: Partial<Record<Tier, { requests: number; reviews: EvalMetrics["supplementary"]["reviews"] }>>;
+  /**
+   * The same metrics' review figures over each tier's requests (a request's
+   * last reported tier), for the tiers that have any, with how their batches
+   * converged (`reviewConvergenceOf`).
+   */
+  reviewsByTier: Partial<Record<Tier, { requests: number; reviews: EvalMetrics["supplementary"]["reviews"]; convergence?: ReviewConvergence }>>;
   /** The project's stored decisions. */
   decisions: readonly Decision[];
   /** The active precedents that hold in the project. */
@@ -202,16 +209,71 @@ function blockedOf(facts: FindingsFacts): Finding[] {
   ];
 }
 
+/** How one tier's review batches converged (delivery line design §5.2), over the batches with a verdict. */
+export interface ReviewConvergence {
+  /** Batches with at least one verdict. */
+  batches: number;
+  /** Of them, those whose first review passed. */
+  firstRoundPassed: number;
+  /** Re-reviews with a verdict, and those that passed. */
+  rereviews: number;
+  rereviewsPassed: number;
+  /** Batches the convergence rule stopped: re-reviews spent, or the blocking count not falling. */
+  unconverged: number;
+}
+
+/** One review as `reviewConvergenceOf` reads it: its request, batch, time, verdict and blocking count. */
+export type ConvergenceReview = { requestId: string; batchId: string | null; at: string; verdict: string | null; blockingCount: number | null };
+
 /**
- * Review batches and blocking findings per tier, for the tiers with a batch,
- * with the tier's review budget and the setting that changes it (§G.4's
- * `review.budget`: a `coordination.set` on that key, change-008 C6).
+ * How the batches of `reviews` converged against `maxRereviews` (delivery
+ * line design §5.2): each batch's reviews with a verdict in time order, the
+ * first being its first round and every later one a re-review; a batch is
+ * unconverged when the rule would refuse its next re-review for its counts. A
+ * review without a batch or a verdict is left out. Pure.
+ */
+export function reviewConvergenceOf(reviews: readonly ConvergenceReview[], maxRereviews: number): ReviewConvergence {
+  const batches = new Map<string, ConvergenceReview[]>();
+  for (const review of reviews) {
+    if (review.batchId === null || review.verdict === null) continue;
+    const key = `${review.requestId}\u0000${review.batchId}`;
+    batches.set(key, [...(batches.get(key) ?? []), review]);
+  }
+  const figures: ReviewConvergence = { batches: batches.size, firstRoundPassed: 0, rereviews: 0, rereviewsPassed: 0, unconverged: 0 };
+  for (const batch of batches.values()) {
+    const ordered = [...batch].sort((a, b) => timeOrZero(a.at) - timeOrZero(b.at));
+    if (isPassVerdict(ordered[0]!.verdict)) figures.firstRoundPassed += 1;
+    figures.rereviews += ordered.length - 1;
+    figures.rereviewsPassed += ordered.slice(1).filter((review) => isPassVerdict(review.verdict)).length;
+    const refusal = convergenceRefusalOf({
+      batchId: ordered[0]!.batchId!,
+      results: ordered.map((review) => ({ at: review.at, recordId: "", verdict: review.verdict!, blocking: review.blockingCount })),
+      calls: ordered.map((review, index) => ({ callId: String(index), kind: index === 0 ? ("create" as const) : ("rereview" as const), reviewerId: "", at: review.at })),
+      maxRereviews,
+    });
+    if (refusal !== null && refusal.endsWith(CONVERGENCE_STOP_TAIL)) figures.unconverged += 1;
+  }
+  return figures;
+}
+
+/** `part` of `whole` to two decimals; null with none. */
+function shareOf(part: number, whole: number): number | null {
+  return whole === 0 ? null : share(part / whole);
+}
+
+/**
+ * Review batches and blocking findings per tier, for the tiers with a batch
+ * (delivery line design §5.6): how often a first round and a re-review pass,
+ * the batches the convergence rule stopped, and the tier's cap at its most
+ * milestone batches, against the two settings that change them —
+ * `review.callsPerBatch` and `review.maxRereviews`, each a `coordination.set`.
  */
 function reviewsOf(facts: FindingsFacts): Finding[] {
-  const budget = reviewBudgetOf(facts.settings);
+  const { callsPerBatch, maxRereviews } = facts.settings.review;
   return TIERS.flatMap((tier) => {
     const figures = facts.reviewsByTier[tier];
     if (figures === undefined || figures.reviews.batches === 0) return [];
+    const convergence = figures.convergence ?? { batches: 0, firstRoundPassed: 0, rereviews: 0, rereviewsPassed: 0, unconverged: 0 };
     return [
       {
         finding: "reviews",
@@ -221,8 +283,13 @@ function reviewsOf(facts: FindingsFacts): Finding[] {
         reviewsPerBatch: share(figures.reviews.perBatch),
         blockingFindings: figures.reviews.blockingFindings,
         blockingPerBatch: share(figures.reviews.blockingPerBatch),
-        budget: budget[tier],
-        key: REVIEW_BUDGET_KEYS[tier],
+        firstRoundPassShare: shareOf(convergence.firstRoundPassed, convergence.batches),
+        rereviews: convergence.rereviews,
+        rereviewPassShare: shareOf(convergence.rereviewsPassed, convergence.rereviews),
+        unconvergedBatches: convergence.unconverged,
+        cap: reviewCapOf(tier, REVIEW_MILESTONES_MAX[tier], { callsPerBatch }),
+        "review.callsPerBatch": callsPerBatch,
+        "review.maxRereviews": maxRereviews,
         act: "coordination.set" as const,
       },
     ];
@@ -341,6 +408,26 @@ function tiersOf(records: readonly TraceRecord[]): Map<string, Tier> {
   return new Map([...latest].map(([requestId, entry]) => [requestId, entry.tier]));
 }
 
+/**
+ * The Reviewers' own reviews of `records` (a quoted block is not one,
+ * `ownReviewsOf`) from `since`, each once, as the metric module keys them.
+ */
+function windowReviewsOf(records: readonly TraceRecord[], since: string | null): ConvergenceReview[] {
+  const from = since === null ? 0 : timeOrZero(since);
+  const seen = new Set<string>();
+  const reviews: ConvergenceReview[] = [];
+  for (const record of records) {
+    if (record.requestId === null) continue;
+    for (const review of ownReviewsOf(record)) {
+      const key = `${review.agentId}|${review.batchId ?? ""}|${review.verdict ?? ""}|${review.at}`;
+      if (seen.has(key) || timeOrZero(review.at) < from) continue;
+      seen.add(key);
+      reviews.push({ requestId: record.requestId, batchId: review.batchId, at: review.at, verdict: review.verdict, blockingCount: review.blockingCount });
+    }
+  }
+  return reviews;
+}
+
 /** A store read that falls back: `fallback` when it throws, with one log line. */
 function readOrNone<T>(what: string, fallback: T, read: () => T, log: (message: string) => void): T {
   try {
@@ -358,14 +445,16 @@ export function findingsFactsOf(workspaceId: string, home: string, now: Date, lo
   const selection = selectWorkspaces(store, new Set([workspaceId]));
   const metrics = computeEvalMetrics({ ...evalInputsOf(selection), window, workspaceDirectories: workspaceDirectoriesOf(store) });
   const tiers = tiersOf(selection.records);
+  const settings = readCoordinationSettings({ home, log });
   const reviewsByTier: FindingsFacts["reviewsByTier"] = {};
   for (const tier of TIERS) {
     const records = selection.records.filter((record) => record.requestId !== null && tiers.get(record.requestId) === tier);
     if (records.length === 0) continue;
     const perTier = computeEvalMetrics({ records, window });
-    reviewsByTier[tier] = { requests: perTier.requests.inWindow, reviews: perTier.supplementary.reviews };
+    const convergence = reviewConvergenceOf(windowReviewsOf(records, window.since), settings.review.maxRereviews);
+    reviewsByTier[tier] = { requests: perTier.requests.inWindow, reviews: perTier.supplementary.reviews, convergence };
   }
-  const policy = currentPolicy(home, (reason) => log(`[paseo-bm] bm_findings could not read the autonomy policy: ${reason}`));
+  const policy = effectivePolicy(home, (reason) => log(`[paseo-bm] bm_findings could not read the autonomy policy: ${reason}`));
   return {
     workspaceId,
     now,
@@ -376,7 +465,7 @@ export function findingsFactsOf(workspaceId: string, home: string, now: Date, lo
     precedents: readOrNone("the precedents", [], () => createPrecedentStore(home).active(now, workspaceId), log),
     alerts: readOrNone("the Inbox alerts", [], () => createAlertStore(home).list({ workspaceId }), log),
     policy,
-    settings: readCoordinationSettings({ home, log }),
+    settings,
   };
 }
 

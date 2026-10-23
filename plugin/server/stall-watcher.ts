@@ -20,8 +20,8 @@
  *   shared by every request of its workspace): `idle-unfinished` — the last
  *   report is not `finished`, the request waits on no decision of the owner,
  *   and nothing happened for 5 minutes; `review-over-budget` —
- *   `review.over-budget` is raised, against the owner's review budget per tier
- *   (Settings → Coordination, §G.7), and the last report is not `finished`.
+ *   `review.over-budget` is raised, against the request's review cap
+ *   (`reviewCapOf`, delivery line design §5.3), and the last report is not `finished`.
  *   **Waiting on the owner is read from the decision store, never from what an
  *   agent says** (ADR-024): a request with an unsettled decision (`q:`, `o:`,
  *   `h:`, `f:`) is not stalled — it waits in the Inbox; a `blocked` report
@@ -41,10 +41,22 @@
  *   (`unansweredOf`); it clears when none is left (taken, answered, closed or
  *   answered on), and an asking request whose newest report is `finished` or
  *   `stopped` has none (it waits on nobody). No event: the Inbox shows it.
+ * - **Waits by structure** (delivery line design §6.5): a request whose
+ *   structured wait (`waiting`, design §6.2) has every unsettled item live —
+ *   an open question, a running Reviewer or a call younger than the pending
+ *   window, an active request with a live Worker, a link under its ceiling —
+ *   waits (`structuralWaitOf`): no `idle-unfinished`, no event, no re-wake.
+ *   Before it looks at any request, each pass settles the **dead** items as
+ *   facts — a Reviewer gone with no verdict, an awaited request stopped,
+ *   finished or with no live Worker left, a link answered, closed or past its
+ *   ceiling (`settleDeadWaitItems`, `waits.ts`) — and hands the waits it
+ *   changed to `onWaitsSettled`, the release that wakes the Worker once
+ *   (design §6.4). An item settles once, so it wakes once.
  * - **Once per stall.** The alert is raised once while it holds and cleared
- *   when it no longer does (an agent runs, a new report arrives, the request
- *   leaves the 24-hour window or its trace is deleted); raised afresh after
- *   that. Only the pass that raises it publishes the event, and the event is
+ *   on progress (`progressSinceOf`, delivery line design §8.4: a report, a
+ *   review result, a bead closed), once the request waits on the owner or
+ *   another project, or when it leaves the 24-hour window or its trace is
+ *   deleted — never because one of its agents ran; raised afresh after that. Only the pass that raises it publishes the event, and the event is
  *   dropped if the alert is cleared before the Orchestrator is idle.
  * - **The live watch of running Workers** (design §6B.3, `worker-watch.ts`)
  *   rides on the same timer: every second tick (2 minutes) a Worker pass of
@@ -61,7 +73,7 @@
  * pass tries again.
  */
 import { join } from "node:path";
-import { readReviewBudget } from "./coordination-rpc";
+import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
 import type { DashboardPaseo } from "./paseo-directory";
 import { createAlertStore } from "./alert-store";
@@ -71,6 +83,7 @@ import { createEventBus, eventScopeOf, type BmEvent, type EventBus, type StallRe
 import { agentsOf, type OrchestratorStatePaseo } from "./orchestrator-state";
 import { lastActivityOf, recentWorkspacesOf, requestKeyOf, ruleInputOf, waitedLinksOf, workspaceTracesOf } from "./request-trace";
 import { createPeerLinkStore, isLiveLink, type PeerLink } from "./peer-links";
+import { repoKeysIn } from "./placements";
 import { ruleReviewGrantOf } from "./review-tools";
 import type { TraceStoreLocation } from "./trace-store";
 import type { AgentFacts, ReconstructedTrace } from "./traces";
@@ -79,8 +92,14 @@ import { roleOfProvider } from "./agent-role";
 import { isPluginHome } from "./plugin-homes";
 import { WORKER_PASS_MS, clearWorkerTurnSignals, runWorkerPass, workerPassResult, type PermissionFirstSeen, type WorkerPassResult } from "./worker-watch";
 import { errorText } from "./rpc-kit";
+import { settleDeadWaitItems, waitFactsOf, type DeadWaitFacts, type SettledWait } from "./waits";
+import { structuralWaitOf, type WaitQuestionFact } from "../shared/structural-wait";
+import { createRequestRegistry } from "./request-registry";
+import { PENDING_TTL_MS } from "./agent-bindings";
 import type { ChannelQueue } from "./main-channel";
 import { timeOrZero } from "../shared/time";
+import { alertKeyOf } from "../shared/alerts";
+import { andChainOf, brActions, shellSucceeded } from "../shared/shell";
 
 /** How often a pass runs (design §6). */
 export const STALL_PASS_MS = 60_000;
@@ -111,7 +130,9 @@ export interface HeldStall {
  * is whether the request has an unsettled decision in the decision store;
  * `null` when the store could not be read, and then a `blocked` report counts
  * as waiting on the owner (ADR-024). `waitsOnPeer`: the request waits on a
- * link within its ceiling (design §7.17.5). Pure.
+ * link within its ceiling (design §7.17.5). `waitsByStructure`: its
+ * structured wait holds on live items (`structuralWaitOf`, delivery line
+ * design §6.5). Pure.
  */
 export function stallReasonsOf(
   trace: ReconstructedTrace,
@@ -120,6 +141,7 @@ export function stallReasonsOf(
   now: Date,
   waitsOnOwner: boolean | null = null,
   waitsOnPeer = false,
+  waitsByStructure = false,
 ): HeldStall[] {
   if ([...trace.workerIds, ...trace.reviewerIds].some((id) => agents.get(id)?.status === "running")) return [];
   // No Worker and no report: the Manager answered itself; nothing was handed over to stall.
@@ -128,7 +150,7 @@ export function stallReasonsOf(
   const phase = trace.reports.at(-1)?.phase ?? null;
   const lastActivityAt = lastActivityOf(trace);
   const held: HeldStall[] = [];
-  const waiting = (waitsOnOwner ?? phase === "blocked") || waitsOnPeer;
+  const waiting = (waitsOnOwner ?? phase === "blocked") || waitsOnPeer || waitsByStructure;
   if (phase !== "finished" && !waiting && now.getTime() - timeOrZero(lastActivityAt) >= IDLE_UNFINISHED_MS) {
     held.push({ reason: "idle-unfinished", since: lastActivityAt });
   }
@@ -136,6 +158,28 @@ export function stallReasonsOf(
     held.push({ reason: "review-over-budget", since: lastActivityAt });
   }
   return held;
+}
+
+/**
+ * Whether the request made progress after `since` (delivery line design §8.4):
+ * a report, a review result, or a bead closed (a successful `br close`, or a
+ * report naming closed beads). A turn that only ran is none. Pure.
+ */
+export function progressSinceOf(trace: Pick<ReconstructedTrace, "records" | "reports" | "reviews">, since: string): boolean {
+  const after = (at: string | null): boolean => timeOrZero(at) > timeOrZero(since);
+  if (trace.reports.some((report) => after(report.at))) return true;
+  if (trace.reviews.some((review) => review.verdict !== null && after(review.at))) return true;
+  return trace.records.some(
+    (record) =>
+      after(record.endedAt) &&
+      record.evidence.some(
+        (evidence) =>
+          evidence.kind === "shell" &&
+          shellSucceeded(evidence.status ?? null, evidence.exitCode ?? null) &&
+          andChainOf(evidence.detail) !== null &&
+          brActions(evidence.detail).some((action) => action.verb === "close" && action.ids.length > 0),
+      ),
+  );
 }
 
 /**
@@ -176,6 +220,24 @@ function unsettledRequestsOf(home: string, workspaceId: string, log: (message: s
   }
 }
 
+/**
+ * What a question of a structured wait is now (delivery line design §6.5):
+ * `open` while answerable, `closed` once settled, null when the decision
+ * store does not hold it or cannot be read. The store is opened once.
+ */
+function questionStateOf(home: string, log: (message: string) => void): (decisionId: string) => WaitQuestionFact | null {
+  let store: ReturnType<typeof createDecisionStore> | null = null;
+  return (decisionId) => {
+    try {
+      store ??= createDecisionStore(home, { log });
+      const decision = store.get(decisionId);
+      return decision === null ? null : isAnswerable(decision) ? "open" : "closed";
+    } catch {
+      return null;
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The watcher.
 // ---------------------------------------------------------------------------
@@ -209,6 +271,13 @@ export interface StallWatcherDeps extends DataHomeDeps {
   beforeWorkerPass?: (handle: StallWatcherPaseo) => Promise<unknown>;
   /** Runs with the handle before each pass (design §7.17.7: the hook bindings' recovery). A failure is logged; the pass goes on. */
   beforePass?: (handle: StallWatcherPaseo) => Promise<unknown>;
+  /**
+   * The release (delivery line design §6.4, §6.5): the waits this pass
+   * settled dead items in, each with whether it is now met, so the Worker is
+   * woken once with their facts. Called only when some wait changed; absent:
+   * the items are settled and nobody is woken here. A failure is logged.
+   */
+  onWaitsSettled?: (settled: SettledWait[], handle: StallWatcherPaseo) => Promise<unknown> | unknown;
 }
 
 /** What one pass did, for the tests and the log. */
@@ -306,20 +375,43 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     const snapshot = await agentsOf(handle);
     if (!live()) return result("off");
     const since = at.getTime() - STALL_WINDOW_MS;
-    // The owner's budget, read once per pass (an unreadable store reads 2 / 2 / 4).
-    const facts = { reviewBudget: readReviewBudget({ home, log }) };
+    // The owner's review settings for the cap (delivery line design §5.3), read once per pass (an unreadable store reads the defaults).
+    const facts = { review: readCoordinationSettings({ home, log }).review };
     const examined = new Set<string>();
     /** Workspaces whose open alerts stay as they are: unreadable ones. */
     const untouched = new Set<string>();
     // The link store, read once per pass (design §7.17.5), and the live agents of each request.
     const peerLinks = createPeerLinkStore(home).list();
+    // A link's `to` is a repo key (delivery line design §3.1): a request is found by its repo.
+    const keyOf = repoKeysIn(home);
     const liveAgents = new Set(
       snapshot.bm
         .filter(({ facts }) => !facts.archived && facts.status !== "closed" && (facts.replacedBy ?? null) === null)
-        .flatMap(({ workspaceId, facts }) => [facts.id, ...(facts.requestIdLabel === null || facts.role === "manager" ? [] : [`${workspaceId}::${facts.requestIdLabel}`])]),
+        .flatMap(({ workspaceId, facts }) => [facts.id, ...(facts.requestIdLabel === null || facts.role === "manager" ? [] : [`${workspaceId === null ? null : keyOf(workspaceId)}::${facts.requestIdLabel}`])]),
     );
     const answering = (link: PeerLink): boolean =>
-      (link.to.workerId !== null && liveAgents.has(link.to.workerId)) || liveAgents.has(`${link.to.workspaceId}::${link.to.requestId}`);
+      (link.to.workerId !== null && liveAgents.has(link.to.workerId)) || liveAgents.has(`${keyOf(link.to.workspaceId)}::${link.to.requestId}`);
+    const running = new Set(snapshot.bm.filter(({ facts }) => facts.status === "running").map(({ facts }) => facts.id));
+    const deadWaitFacts: DeadWaitFacts = {
+      links: peerLinks,
+      ceilingOf: (link) => peerCeilingOf(link, at, answering),
+      isLive: (agentId) => liveAgents.has(agentId),
+      isRunning: (agentId) => running.has(agentId),
+      question: questionStateOf(home, log),
+      pendingMs: PENDING_TTL_MS,
+    };
+
+    // Delivery line design §6.5: dead wait items settle as facts first, so a wait is judged on what is left; the release wakes the Worker once.
+    const settled = settleDeadWaitItems(home, deadWaitFacts, at.toISOString(), log);
+    if (settled.length > 0 && deps.onWaitsSettled !== undefined) {
+      try {
+        await deps.onWaitsSettled(settled, handle);
+      } catch (error) {
+        log(`[paseo-bm] the stall pass could not release the waits it settled: ${errorText(error)}`);
+      }
+    }
+    if (!live()) return result("off");
+    const waitFacts = waitFactsOf(home, deadWaitFacts, at.toISOString(), createRequestRegistry(home, { log }));
     /** `peer-unanswered` per asking request: `<workspaceId>::<requestId>` → why, per link. */
     const unanswered = new Map<string, { workspaceId: string; requestId: string; why: Map<string, string> }>();
     /** The requests whose newest report is `finished` or `stopped`: `<workspaceId>::<requestId>`; they raise no `peer-unanswered`. */
@@ -354,7 +446,7 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
           const requestKey = requestKeyOf(trace);
           examined.add(`${workspaceId}::${requestKey}`);
           const waitsOnOwner = waitingRequests === null ? null : trace.requestId !== null && waitingRequests.has(trace.requestId);
-          // Design §16.8: the request's review-budget grants, read as the review tools enforce them.
+          // Design §16.8, delivery line design §5.3: the request's grants and milestone batches, read as the review tools enforce them.
           const request = trace.requestId === null ? undefined : registered.find((entry) => entry.requestId === trace.requestId);
           const grant = request === undefined ? undefined : ruleReviewGrantOf(request);
           // Design §7.17.5: a wait on another project, until each waited link passes its ceiling.
@@ -365,9 +457,19 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
             if (ceiling === null) withinCeiling += 1;
             else noteUnanswered(link, ceiling);
           }
-          const held = stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace, grant), facts), at, waitsOnOwner, withinCeiling > 0);
+          // Delivery line design §6.5: a structured wait whose every unsettled item is live.
+          const byStructure = request !== undefined && structuralWaitOf(request, waitFacts).holds;
+          // Delivery line design §2.7: a continued request stalls nothing; its work goes on as its continuation.
+          const continued = request?.continuedBy !== undefined;
+          const held = continued ? [] : stallReasonsOf(trace, agents, flagsOf(ruleInputOf(trace, grant), facts), at, waitsOnOwner, withinCeiling > 0, byStructure);
           if (held.length === 0) {
-            done.cleared.push(...alerts.clearWhere((alert) => alert.kind === "request-stalled" && alert.workspaceId === workspaceId && alert.subject === requestKey));
+            // Delivery line design §8.4: an open alert clears only on progress, or once the request waits on the owner,
+            // another project or live items by structure (§6.5) — never because one of its agents ran (a blocked request woken again and again).
+            const phase = trace.reports.at(-1)?.phase ?? null;
+            const waits = (waitsOnOwner ?? phase === "blocked") || withinCeiling > 0 || byStructure;
+            const open = alerts.get(alertKeyOf("request-stalled", workspaceId, requestKey));
+            const keep = open !== null && open.clearedAt === null && phase !== "finished" && !continued && !waits && !progressSinceOf(trace, open.since);
+            if (!keep) done.cleared.push(...alerts.clearWhere((alert) => alert.kind === "request-stalled" && alert.workspaceId === workspaceId && alert.subject === requestKey));
             continue;
           }
           const raised = alerts.raise({

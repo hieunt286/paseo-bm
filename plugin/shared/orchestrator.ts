@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { MAX_ASK_OWNER_LABEL_CHARS, MAX_ASK_OWNER_OPTIONS, MAX_ASK_OWNER_RECOMMENDATION_CHARS, MAX_DECISION_TEXT_CHARS } from "./decisions";
-import { MAX_COMMAND_BLOCK_CHARS } from "./orchestrator-command";
+import { GOVERNOR_STEPS, MAX_COMMAND_BLOCK_CHARS } from "./orchestrator-command";
 
 /**
  * Shapes the Orchestrator keeps in `<data folder>/orchestrator/` (Orchestrator
@@ -101,6 +101,13 @@ export type CommandTarget = z.infer<typeof commandTargetSchema>;
  * reason within 300 characters; a decision may name no Manager, its question
  * is at most 1,000 characters and its recommendation 500.
  */
+/** The governor's command pools (delivery line design §8.1), each counted per mission per 24 hours (`server/command-send.ts`). */
+export const GOVERNOR_POOLS = ["codeNudge", "replan", "arbitrate", "other"] as const;
+export type GovernorPool = (typeof GOVERNOR_POOLS)[number];
+/** Who wrote a governor command: code (the ladder's nudge) or the model (`bm_govern`, `bm_arbitrate`). */
+export const GOVERNOR_BY = ["code", "model"] as const;
+export type GovernorBy = (typeof GOVERNOR_BY)[number];
+
 export const proposalSchema = z
   .object({
     id: z.string().min(1),
@@ -135,6 +142,13 @@ export const proposalSchema = z
     workerId: z.string().min(1).optional(),
     /** The mission a governor command went to (missions design §9.4): its loop guard counts per mission. Additive; absent on every other command. */
     missionId: z.string().min(1).optional(),
+    /**
+     * A governor command's step and who wrote it (delivery line design §8.1),
+     * from its `governor:<step>` authority at the send: the pool it is counted
+     * in. Additive; an entry without them counts in `other`.
+     */
+    governorStep: z.enum(GOVERNOR_STEPS).optional(),
+    by: z.enum(GOVERNOR_BY).optional(),
   })
   .superRefine((entry, context) => {
     if (entry.kind === "command") {
@@ -251,6 +265,13 @@ export const wakeUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative(),
   cachedInputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
+  /**
+   * True when the provider's `inputTokens` already include the cached ones
+   * (Codex: `inputIncludesCached`, `shared/eval-metrics/helpers.ts`), so the
+   * tokens read are the input alone. Absent: reported apart (Claude,
+   * OpenCode, and every wake recorded before 2026-10-23).
+   */
+  includesCached: z.literal(true).optional(),
 });
 export type WakeUsage = z.infer<typeof wakeUsageSchema>;
 

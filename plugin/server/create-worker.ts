@@ -29,7 +29,13 @@
  * that repo with the mission, added to the roster, with the mission, the plan
  * step, the contracts touching the repo and the repo's memory in its brief.
  * Without `staffing` delegated, the mission keeps one live Worker per repo and
- * at most its budget's Workers. A Manager of no mission keeps the path above.
+ * at most its budget's Workers. From the cut-over (delivery line design §3.3),
+ * the Worker works in the mission's placement of the repo — its worktree,
+ * made at the first Worker (`placement-create.ts`) — with the placement's
+ * lines in its brief (§3.4). While a mission from before the cut-over waits
+ * for its repo's checkpoint (§4.8), its Worker works in the repo's root as
+ * before, with `ROOT_WAIT_BRIEF_LINE` in its brief and no integration lines.
+ * A Manager of no mission keeps the path above.
  *
  * The caller's identity, workspace and folder come from its binding and its
  * own snapshot, never from what the agent typed. A refusal is one line per
@@ -45,6 +51,8 @@ import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
 import { directoryIn, listedWorkspaces, titleIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { createPeerLinkStore, routeOf, type PeerLink } from "./peer-links";
+import { inCharter, placementBlockOf, repoKeyOf } from "./placements";
+import { ROOT_WAIT_BRIEF_LINE, ensurePlacement, placementBriefLines, placementModeOn, type PlacementDeps } from "./placement-create";
 import { peerBriefOf } from "./peer-tools";
 import { createMemoryStore, type MemoryEntry } from "./memory-store";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
@@ -52,7 +60,7 @@ import { createMissionRoster, runningRequestsOf } from "./mission-roster";
 import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { missionOfMain } from "./mission-tools";
 import { isMissionsHome } from "./missions-home";
-import { createRequestRegistry } from "./request-registry";
+import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
 import { creationProjectOf, modeFactsOf } from "./role-instructions";
 import { profileOf } from "./role-mode";
@@ -129,6 +137,8 @@ export function workerBriefOf(input: {
   context: readonly ContextFact[];
   peer?: readonly string[];
   mission?: readonly string[];
+  /** Delivery line design §2.5: a continuation's block, after the Manager's line. */
+  continuation?: readonly string[];
 }): string {
   const quoted = input.request
     .replace(/\r\n/g, "\n")
@@ -145,6 +155,7 @@ export function workerBriefOf(input: {
     `repository: ${repository} (beads in ${repository}/.beads/)`,
     SCOPE_LINE,
     `managerAgentId: ${input.managerId}`,
+    ...(input.continuation ?? []),
     ...(input.mission ?? []),
     ...(input.peer ?? []),
     "Context:",
@@ -306,7 +317,7 @@ export function openLinkOf(home: string, linkId: string, workspaceId: string, mi
   const link = createPeerLinkStore(home).get(linkId);
   const route = link === null ? null : routeOf(link);
   const ours = route === "project" || (route === "ask-main" && missionId !== null && link!.missionId === missionId);
-  return link !== null && ours && link.state === "open" && link.to.workspaceId === workspaceId
+  return link !== null && ours && link.state === "open" && repoKeyOf(home, link.to.workspaceId) === repoKeyOf(home, workspaceId)
     ? link
     : `link ${linkId} is not an open ask of this project (bm_peers lists them).`;
 }
@@ -339,13 +350,17 @@ export function missionRepoOf(
   if (repos.length === 0) return [`mission ${code} has no repo yet: add one with bm_mission_update repos`];
   const names = repos.map((workspaceId) => `${workspaceId} (${titleIn(listed, workspaceId)})`).join(", ");
   if (project === undefined && repos.length > 1) return [`input.project: mission ${code} works in ${repos.length} repos — ${names}; name the one the Worker works in`];
+  // Delivery line design §3.1: a placement of a charter repo is in the charter; a repo named by its key is that repo.
   const workspaceId = project ?? repos[0]!;
-  if (!repos.includes(workspaceId)) return [`project ${workspaceId} is outside mission ${code}'s scope (${names}); add it with bm_mission_update repos first`];
+  if (!inCharter(home, mission, workspaceId)) return [`project ${workspaceId} is outside mission ${code}'s scope (${names}); add it with bm_mission_update repos first`];
   if (listed === null) return ["paseo-bm could not read Paseo's workspaces; try again in a moment"];
   const entry = listed.find((candidate) => candidate.id === workspaceId);
   if (entry === undefined || entry.archived) return [`project ${workspaceId} is archived or no longer listed in Paseo`];
   if (isMissionsHome(workspaceId, home) || (entry.directory !== null && inDataFolder(home, entry.directory))) return [`project ${workspaceId} is a paseo-bm home, not a repo`];
   if (entry.directory === null) return [`paseo-bm could not read the folder of project ${workspaceId} from Paseo; try again in a moment`];
+  // Delivery line design §3.6: a retired, archived or failed placement takes no new agent.
+  const blocked = placementBlockOf(home, workspaceId);
+  if (blocked !== null) return [blocked];
   return { workspaceId, directory: entry.directory };
 }
 
@@ -360,12 +375,129 @@ export async function staffingReasons(home: string, paseo: DashboardPaseo, missi
   if (createMissionAutonomyStore(home).isDelegated(mission.missionId, "staffing")) return [];
   const running = await runningRequestsOf(home, paseo, mission.missionId);
   const reasons: string[] = [];
-  const here = running.find((entry) => entry.workspaceId === workspaceId);
+  // Delivery line design §3.7: one live Worker per placement, counted per repo as before.
+  const repo = repoKeyOf(home, workspaceId);
+  const here = running.find((entry) => repoKeyOf(home, entry.workspaceId) === repo);
   const ask = "staffing is not delegated in this mission, so ask the owner first";
   if (here !== undefined) reasons.push(`mission ${mission.code} already has a live Worker in ${titleIn(listed, workspaceId)} (request ${here.requestId}): give it the work with bm_tell_worker, or ${ask}`);
   const cap = mission.charter.budget?.workers ?? null;
   if (cap !== null && running.length >= cap) reasons.push(`mission ${mission.code} has ${running.length} live Workers and its budget allows ${cap}: ${ask}`);
   return reasons;
+}
+
+/**
+ * The `peer` lines of a brief for the open link `linkId` a new Worker takes
+ * (§7.17.3), or why it cannot take it: the link is no open ask of
+ * `workspaceId`, or the Worker would be unbound. Never throws.
+ */
+export async function peerLinesFor(home: string, paseo: unknown, linkId: string, workspaceId: string, missionId: string | null, binder: AgentBinder): Promise<string[] | string> {
+  const link = openLinkOf(home, linkId, workspaceId, missionId);
+  if (typeof link === "string") return link;
+  const base = (await aliasBases(paseo))[WORKER_PROFILE_ID] ?? null;
+  if (binder === NO_BINDER || base === null || !TOOL_PROVIDERS.includes(base)) return unboundPeerReason(linkId);
+  return peerBriefOf(link, titleIn(await listedWorkspaces(paseo as DashboardPaseo), link.from.workspaceId));
+}
+
+/** The new request takes link `linkId`; why it could not, or null. Never throws. */
+export function takeLinkQuietly(home: string, linkId: string, by: { workspaceId: string; requestId: string; workerId: string; managerId: string }, log: (message: string) => void): string | null {
+  let reasons: string[] = [];
+  try {
+    const result = createPeerLinkStore(home).takeLink(linkId, by);
+    if (!result.ok) reasons = result.reasons;
+  } catch (error) {
+    reasons = [reasonOf(error)];
+  }
+  if (reasons.length === 0) return null;
+  log(`[paseo-bm] request ${by.requestId} could not take link ${linkId}: ${reasons.join("; ")}`);
+  return reasons.join("; ");
+}
+
+/** What `createRequestWorker` makes: a new request and its Worker. */
+export interface RequestWorkerSpec {
+  /** The tool it runs for, in its log lines. */
+  tool: string;
+  workspaceId: string;
+  managerId: string;
+  cwd: string;
+  request: string;
+  context: readonly ContextFact[];
+  model: string | null;
+  mission: Mission | null;
+  missionLines?: readonly string[];
+  peer?: readonly string[];
+  /** Delivery line design §2.4: the request a continuation continues, and its brief block (§2.5). */
+  continuation?: { of: Pick<RegisteredRequest, "requestId" | "chainRootId">; lines: readonly string[] };
+}
+
+/**
+ * The one creation path of a request and its Worker (design §16.6; delivery
+ * line design §2.4): a fresh id registered first — never reused, even when
+ * Paseo then refuses the Worker — the `BM-BRIEF` (`workerBriefOf`), the
+ * Worker (`createPluginWorker`), then the registry's Worker and, for a
+ * mission, the roster entry and the journal's `worker` line. The refusal, or
+ * the ids. Never throws.
+ */
+export async function createRequestWorker(
+  home: string,
+  paseo: unknown,
+  spec: RequestWorkerSpec,
+  deps: { binder?: AgentBinder; log: (message: string) => void },
+): Promise<{ requestId: string; workerId: string } | ServerToolAnswer> {
+  const { log } = deps;
+  const { workspaceId, managerId, cwd, request, mission, continuation } = spec;
+  const chain = continuation === undefined ? {} : { continuationOf: continuation.of.requestId, chainRootId: continuation.of.chainRootId ?? continuation.of.requestId };
+  // The request id, registered before anything is created: once generated, it is never reused.
+  let requestId: string;
+  try {
+    requestId = createRequestRegistry(home, { log }).generate(workspaceId, { managerId, ...(mission === null ? {} : { missionId: mission.missionId }), ...chain }).requestId;
+  } catch (error) {
+    return refused(`paseo-bm could not write its request registry (${reasonOf(error)}); nothing was created. Tell the owner in one line.`);
+  }
+
+  let workerId: string;
+  try {
+    const prompt = workerBriefOf({
+      requestId,
+      request,
+      cwd,
+      managerId,
+      context: spec.context,
+      ...(spec.peer === undefined ? {} : { peer: spec.peer }),
+      ...(spec.missionLines === undefined ? {} : { mission: spec.missionLines }),
+      ...(continuation === undefined ? {} : { continuation: continuation.lines }),
+    });
+    ({ workerId } = await createPluginWorker(
+      paseo as WorkerCreationPaseo,
+      { workspaceId, requestId, managerId, cwd, prompt, title: workerTitleOf(request), model: spec.model, ...(mission === null ? {} : { missionId: mission.missionId }) },
+      { ...(deps.binder === undefined ? {} : { binder: deps.binder }), log },
+    ));
+  } catch (error) {
+    // Paseo's refusal, verbatim but for a token path (design §16.5: a token never reaches an agent or a log).
+    // The registry keeps the request with no Worker, so its id is never reused.
+    const reason = withoutTokenPaths(reasonOf(error));
+    log(`[paseo-bm] ${spec.tool} could not create the Worker of request ${requestId} for Manager ${managerId}: ${reason}`);
+    return refused(`Paseo refused to create the Worker: ${reason}`);
+  }
+
+  try {
+    createRequestRegistry(home, { log }).addWorker(workspaceId, requestId, workerId);
+  } catch (error) {
+    log(`[paseo-bm] could not add Worker ${workerId} to request ${requestId}: ${reasonOf(error)}`);
+  }
+  if (mission !== null) {
+    // The roster is the mission's membership (§2.3); the journal says what happened.
+    const topic = workerTitleOf(request);
+    try {
+      if (createMissionRoster(home).add(mission.missionId, { requestId, workspaceId, topic, workerId, ...(chain.continuationOf === undefined ? {} : { continuationOf: chain.continuationOf }) }) === null) {
+        log(`[paseo-bm] request ${requestId} is held by another mission's roster`);
+      }
+    } catch (error) {
+      log(`[paseo-bm] could not add request ${requestId} to mission ${mission.missionId}: ${reasonOf(error)}`);
+    }
+    const continues = chain.continuationOf === undefined ? "" : ` (continues ${chain.continuationOf})`;
+    journalQuietly(createMissionStore(home), mission.missionId, { kind: "worker", by: managerId, text: `Worker ${workerId} for request ${requestId} in ${workspaceId}${continues}: ${topic}`, ref: requestId }, log);
+  }
+  return { requestId, workerId };
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +512,8 @@ export interface WorkerCreationToolDeps {
   /** The data folder (the endpoint's: it serves no tools without one). */
   home: () => string;
   log?: (message: string) => void;
+  /** How a placement reads git and clones dependencies (delivery line design §3.3, §3.5); the real ones by default. */
+  placements?: Pick<PlacementDeps, "git" | "clone">;
 }
 
 /**
@@ -417,6 +551,8 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     let workspaceId = caller.workspaceId;
     let cwd: string | null;
     let missionLines: string[] | undefined;
+    /** Why the Worker works in the shared checkout, not the mission's worktree (§4.8); told to the Main in the answer. */
+    let notYet: string | null = null;
     if (mission === null) {
       // The Manager's own folder, read from Paseo — never a folder the agent typed.
       cwd = await folderOfAgent(paseo, managerId, caller.workspaceId);
@@ -424,77 +560,53 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     } else {
       // The repo's folder as Paseo lists it, and the mission's rules for staffing it.
       const listed = await listedWorkspaces(paseo as DashboardPaseo);
-      const repo = missionRepoOf(home, mission, project, listed);
+      // Delivery line design §3.3: from the cut-over, the Worker works in the mission's placement of the repo.
+      const placed = placementModeOn(home);
+      const repo = missionRepoOf(home, mission, placed && project !== undefined ? repoKeyOf(home, project) : project, listed);
       const reasons = Array.isArray(repo) ? repo : await staffingReasons(home, paseo as DashboardPaseo, mission, repo.workspaceId, listed);
       if (reasons.length > 0 || Array.isArray(repo)) return refused([...reasons, "Nothing was created."].join("\n"));
       ({ workspaceId, directory: cwd } = repo);
-      missionLines = missionBriefLines({
-        mission,
-        workspaceId,
-        ...(planStep === undefined ? {} : { planStep }),
-        memory: createMemoryStore(home).active(workspaceId),
-        titleOf: (id) => titleIn(listed, id),
-      });
+      const repoKey = repoKeyOf(home, workspaceId);
+      let placementLines: string[] = [];
+      if (placed) {
+        const placement = await ensurePlacement(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log });
+        if (placement.ok) {
+          workspaceId = placement.placement.workspaceId!;
+          cwd = placement.placement.directory!;
+          placementLines = placementBriefLines(placement.placement);
+        } else if (placement.inRoot === true && workspaceId === repoKey) {
+          // Delivery line design §4.8: no usable checkpoint yet, so the root, exactly as before the cut-over.
+          log(`[paseo-bm] mission ${mission.code}'s Worker works in the shared checkout ${repoKey}: ${placement.reasons.join("; ")}`);
+          placementLines = [ROOT_WAIT_BRIEF_LINE];
+          notYet = `not yet: it works in the shared checkout ${titleIn(listed, repoKey)} because ${placement.reasons.join("; ")}`;
+        } else return refused([...placement.reasons, "Nothing was created."].join("\n"));
+      }
+      missionLines = [
+        ...missionBriefLines({
+          mission,
+          workspaceId: repoKey,
+          ...(planStep === undefined ? {} : { planStep }),
+          memory: createMemoryStore(home).active(repoKey),
+          titleOf: (id) => titleIn(listed, id),
+        }),
+        ...placementLines,
+      ];
     }
     // A link is taken only by a Worker that will be bound: it alone reports forPeer and answers the link.
-    let peer: string[] | undefined;
-    if (peerLink !== undefined) {
-      const link = openLinkOf(home, peerLink, workspaceId, mission?.missionId ?? null);
-      if (typeof link === "string") return refused(`${link} Nothing was created.`);
-      const base = (await aliasBases(paseo))[WORKER_PROFILE_ID] ?? null;
-      if ((deps.binder?.() ?? NO_BINDER) === NO_BINDER || base === null || !TOOL_PROVIDERS.includes(base)) return refused(`${unboundPeerReason(peerLink)} Nothing was created.`);
-      peer = peerBriefOf(link, titleIn(await listedWorkspaces(paseo as DashboardPaseo), link.from.workspaceId));
-    }
-
-    // The request id, registered before anything is created: once generated, it is never reused.
-    let requestId: string;
-    try {
-      requestId = createRequestRegistry(home, { log }).generate(workspaceId, { managerId, ...(mission === null ? {} : { missionId: mission.missionId }) }).requestId;
-    } catch (error) {
-      return refused(`paseo-bm could not write its request registry (${reasonOf(error)}); nothing was created. Tell the owner in one line.`);
-    }
-
-    let workerId: string;
-    try {
-      const prompt = workerBriefOf({ requestId, request, cwd, managerId, context, ...(peer === undefined ? {} : { peer }), ...(missionLines === undefined ? {} : { mission: missionLines }) });
-      ({ workerId } = await createPluginWorker(
-        paseo as WorkerCreationPaseo,
-        { workspaceId, requestId, managerId, cwd, prompt, title: workerTitleOf(request), model: profile.model, ...(mission === null ? {} : { missionId: mission.missionId }) },
-        { binder: deps.binder?.(), log },
-      ));
-    } catch (error) {
-      // Paseo's refusal, verbatim but for a token path (design §16.5: a token never reaches an agent or a log).
-      // The registry keeps the request with no Worker, so its id is never reused.
-      const reason = withoutTokenPaths(reasonOf(error));
-      log(`[paseo-bm] ${CREATE_WORKER_TOOL} could not create the Worker of request ${requestId} for Manager ${managerId}: ${reason}`);
-      return refused(`Paseo refused to create the Worker: ${reason}`);
-    }
-
-    try {
-      createRequestRegistry(home, { log }).addWorker(workspaceId, requestId, workerId);
-    } catch (error) {
-      log(`[paseo-bm] could not add Worker ${workerId} to request ${requestId}: ${reasonOf(error)}`);
-    }
-    if (mission !== null) {
-      // The roster is the mission's membership (§2.3); the journal says what happened.
-      const topic = workerTitleOf(request);
-      try {
-        if (createMissionRoster(home).add(mission.missionId, { requestId, workspaceId, topic, workerId }) === null) log(`[paseo-bm] request ${requestId} is held by another mission's roster`);
-      } catch (error) {
-        log(`[paseo-bm] could not add request ${requestId} to mission ${mission.missionId}: ${reasonOf(error)}`);
-      }
-      journalQuietly(createMissionStore(home), mission.missionId, { kind: "worker", by: managerId, text: `Worker ${workerId} for request ${requestId} in ${workspaceId}: ${topic}`, ref: requestId }, log);
-    }
-    if (peerLink === undefined) return { ok: true, text: JSON.stringify({ workerId, requestId }) };
-    let taken: string[] = [];
-    try {
-      const result = createPeerLinkStore(home).takeLink(peerLink, { workspaceId, requestId, workerId, managerId });
-      if (!result.ok) taken = result.reasons;
-    } catch (error) {
-      taken = [reasonOf(error)];
-    }
-    if (taken.length > 0) log(`[paseo-bm] request ${requestId} could not take link ${peerLink}: ${taken.join("; ")}`);
-    return { ok: true, text: JSON.stringify({ workerId, requestId, ...(taken.length > 0 ? { peerLinkNotTaken: taken.join("; ") } : {}) }) };
+    const peer = peerLink === undefined ? undefined : await peerLinesFor(home, paseo, peerLink, workspaceId, mission?.missionId ?? null, deps.binder?.() ?? NO_BINDER);
+    if (typeof peer === "string") return refused(`${peer} Nothing was created.`);
+    const made = await createRequestWorker(
+      home,
+      paseo,
+      { tool: CREATE_WORKER_TOOL, workspaceId, managerId, cwd, request, context, model: profile.model, mission, ...(missionLines === undefined ? {} : { missionLines }), ...(peer === undefined ? {} : { peer }) },
+      { binder: deps.binder?.(), log },
+    );
+    if ("ok" in made) return made;
+    const { workerId, requestId } = made;
+    const where = notYet === null ? {} : { worktree: notYet };
+    if (peerLink === undefined) return { ok: true, text: JSON.stringify({ workerId, requestId, ...where }) };
+    const taken = takeLinkQuietly(home, peerLink, { workspaceId, requestId, workerId, managerId }, log);
+    return { ok: true, text: JSON.stringify({ workerId, requestId, ...where, ...(taken === null ? {} : { peerLinkNotTaken: taken }) }) };
   };
 
   return actingTools(faces, { [CREATE_WORKER_TOOL]: run }, "Nothing was created");

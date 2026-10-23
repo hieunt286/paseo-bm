@@ -8,7 +8,7 @@
  */
 import { decisionKindOf, policyPredictorOf } from "../decisions";
 import { INTERVENTION_KINDS, a12ShareOf, interventionEntrySchema, type InterventionKind } from "../interventions";
-import { dangerEntrySchema, stallEntrySchema, type WakeEntry } from "../orchestrator";
+import { dangerEntrySchema, stallEntrySchema, type WakeEntry, type WakeUsage } from "../orchestrator";
 import { compareText, median, ratio, within, workspaceOfStallKey, type Bounds } from "./helpers";
 import { isOrchestratorCommand, type EvalStores } from "./scope";
 import type { EvalInput, EvalMetrics, EvalNote, EvalUnknowns, InterventionCounts } from "./types";
@@ -126,6 +126,9 @@ export function a7Of(input: Pick<EvalInput, "notes" | "stalls" | "wakes" | "inte
   };
 }
 
+/** A wake's tokens read: its input alone when the cached tokens are part of it (`includesCached`, Codex), else input + cached. */
+const wakeTokensReadOf = (usage: WakeUsage): number => (usage.includesCached === true ? usage.inputTokens : usage.inputTokens + usage.cachedInputTokens);
+
 /**
  * A-8 (change-007 C6): the Orchestrator's tokens, from the wakes in the window whose closing turn's usage was
  * recorded. `wakeRecordsIncluded` is false when no wake records were supplied.
@@ -145,7 +148,7 @@ export function orchestratorTokensOf(
     orchestratorWakes += 1;
     if (wake.usage === undefined || wake.usage === null) continue;
     orchestratorWakesWithUsage += 1;
-    orchestratorTokens += wake.usage.inputTokens + wake.usage.cachedInputTokens + wake.usage.outputTokens;
+    orchestratorTokens += wakeTokensReadOf(wake.usage) + wake.usage.outputTokens;
   }
   const orchestratorKnown = wakeRecordsIncluded && (orchestratorWakes === 0 || orchestratorWakesWithUsage > 0);
   return {
@@ -218,7 +221,7 @@ export function a13Of(
       wakesWithOffMissionKnown += 1;
       offMissionActs += wake.offMission;
     }
-    if (wake.usage !== undefined && wake.usage !== null) tokens.push(wake.usage.inputTokens + wake.usage.cachedInputTokens);
+    if (wake.usage !== undefined && wake.usage !== null) tokens.push(wakeTokensReadOf(wake.usage));
   }
   const dangers = { raised: 0, ended: 0, mainTold: 0, mainToldWithinMinute: 0, backupNeeded: 0 };
   const toEnd: number[] = [];

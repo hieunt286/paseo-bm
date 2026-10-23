@@ -12,7 +12,7 @@ import {
   missionSetLevelInputSchema,
 } from "../autonomy";
 import { agreementLedgerSchema } from "../autonomy-ledger";
-import { precedentSaveInputSchema, precedentSchema } from "../precedents";
+import { listedPrecedentSchema, precedentSaveInputSchema, precedentSchema } from "../precedents";
 import { workspaceIdSchema } from "./persisted";
 
 /**
@@ -199,12 +199,17 @@ export type AutonomyMissionOutput = z.infer<typeof autonomySetMissionLevelRpc.ou
  * `precedents.list` — reads only. The ACTIVE precedents (not expired, ended or
  * superseded), newest first: every one, or with `workspaceId` that project's
  * and the global ones. No usable data folder, or a store that cannot be read,
- * reads as none.
+ * reads as none. One on a subject no precedent answers (delivery line design
+ * §7.4, `precedentEligibility`) is listed with `inert`: why it answers nothing.
  */
 export const precedentsListRpc = defineRpc({
   name: "precedents.list",
   input: z.object({ workspaceId: workspaceIdSchema.optional() }),
-  output: z.object({ precedents: z.array(precedentSchema) }),
+  output: z.object({
+    precedents: z.array(listedPrecedentSchema),
+    /** The repo key of a `workspaceId` that is a mission placement (delivery line design §3.1): its precedents are that repo's; absent otherwise. */
+    repoKey: workspaceIdSchema.optional(),
+  }),
 });
 
 /**
@@ -214,8 +219,9 @@ export const precedentsListRpc = defineRpc({
  * owner's words); `scope` is `all` or that decision's workspace. Without it:
  * `scope` (`all` or a workspace id), `subject` and `text`. An active precedent
  * of the same scope and subject is superseded (`superseded` names it).
- * Refusals: an input that is not a precedent, or a decision not answered by
- * the owner or without a subject → `E_PRECEDENT_INVALID`; an unknown decision
+ * Refusals: an input that is not a precedent, a decision not answered by
+ * the owner or without a subject, or a subject or decision no precedent
+ * answers (`precedentEligibility`) → `E_PRECEDENT_INVALID`; an unknown decision
  * → `E_DECISION_NOT_FOUND`; no usable data folder → `E_DATA_HOME_UNAVAILABLE`;
  * a store written by a newer paseo-bm, or one that cannot be written →
  * `E_PRECEDENT_WRITE_FAILED`. Nothing is written on any refusal.

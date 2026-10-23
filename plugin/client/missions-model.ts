@@ -10,10 +10,10 @@
  *
  * Pure: no React, no React Native, no `server/` import.
  */
-import type { MemoryListOutput, MissionFigure, MissionGetOutput, MissionRow, MissionSignal, MissionSummary, MissionsCreateInput } from "../shared/contracts";
+import type { MemoryListOutput, MissionFigure, MissionGetOutput, MissionPlacement, MissionRow, MissionSignal, MissionSummary, MissionsCreateInput } from "../shared/contracts";
 import { MISSION_CLASSES, DEFAULT_MISSION_LEVEL, type MissionClass, type MissionLevel } from "../shared/autonomy";
 import { MISSION_CHANGE_CODE_PATTERN } from "../shared/mission-change";
-import { ago, clockText, localTimeText, shortSpan } from "./format";
+import { ago, clockText, localTimeText, ordinal, shortRequestOf, shortSpan } from "./format";
 import type { Badge, Tone } from "./tone";
 import type { ConfirmDialog } from "./ui-types";
 
@@ -183,6 +183,10 @@ export const FIGURE_WORDS: Readonly<Record<string, FigureWords>> = {
     short: (figure) => `${figure.value} dropped`,
     long: (figure) => `${figure.value} ${figure.value === 1 ? "delivery or command" : "deliveries or commands"} dropped`,
   },
+  uncommittedHours: {
+    short: () => "uncommitted work left",
+    long: (figure, nameOf) => `work left uncommitted${of(namesOf(figure.detail, nameOf), " in ")} for ${figure.value} h with no Worker`,
+  },
   processDocsPerCriterion: {
     short: (figure) => `${figure.value} documents per criterion`,
     long: (figure) => `${figure.value} process documents per done criterion`,
@@ -195,9 +199,13 @@ export const FIGURE_WORDS: Readonly<Record<string, FigureWords>> = {
     short: (figure) => count(figure.value, "tier raise"),
     long: (figure) => `${count(figure.value, "request")} raised their tier after received`,
   },
-  reviewBudgetExhausted: {
-    short: (figure) => `${count(figure.value, "review budget")} spent`,
-    long: (figure) => `${count(figure.value, "request")} ran out of review budget`,
+  reviewCapReached: {
+    short: (figure) => `${count(figure.value, "review cap")} reached`,
+    long: (figure) => `${count(figure.value, "request")} reached their review cap`,
+  },
+  unconvergedBatches: {
+    short: (figure) => `${count(figure.value, "batch", "batches")} not converging`,
+    long: (figure) => `${count(figure.value, "review batch", "review batches")} stopped converging in 24 h`,
   },
   openApprovals: {
     short: (figure) => `${count(figure.value, "approval")} waiting`,
@@ -215,6 +223,10 @@ export const FIGURE_WORDS: Readonly<Record<string, FigureWords>> = {
     short: (figure) => `${figure.value} outside the charter`,
     long: (figure, nameOf) => `${figure.value} ${figure.value === 1 ? "request or link" : "requests or links"} outside the charter${of(namesOf(figure.detail, nameOf), ": ")}`,
   },
+  behindIntegration: {
+    short: (figure) => `${count(figure.value, "commit")} behind`,
+    long: (figure, nameOf) => `the mission branch${of(namesOf(figure.detail, nameOf), " of ")} is ${count(figure.value, "commit")} behind its integration branch`,
+  },
   stalled: {
     short: (figure) => `${figure.value} stalled`,
     long: (figure) => `${count(figure.value, "request")} stalled${of(figure.detail, ": ")}`,
@@ -226,6 +238,18 @@ export const FIGURE_WORDS: Readonly<Record<string, FigureWords>> = {
   oldCards: {
     short: (figure) => `${count(figure.value, "old card")}`,
     long: (figure) => `${count(figure.value, "card")} waiting on you for over a day${of(figure.detail, ": ")}`,
+  },
+  unpushedNoMr: {
+    short: () => "no merge request",
+    long: (figure, nameOf) => `the mission branch${of(namesOf(figure.detail, nameOf), " of ")} has had commits with no merge request for ${figure.value} h`,
+  },
+  ciRed: {
+    short: () => "CI red",
+    long: (figure, nameOf) => `CI red${of(namesOf(figure.detail, nameOf), " in ")} for ${figure.value} min`,
+  },
+  mrConflicting: {
+    short: (figure) => `${count(figure.value, "merge request")} conflicting`,
+    long: (figure, nameOf) => `${count(figure.value, "merge request")} cannot merge for conflicts${of(namesOf(figure.detail, nameOf), ": ")}`,
   },
   requestsBudget: budget("requests"),
   workersBudget: budget("Workers"),
@@ -456,6 +480,50 @@ export interface MissionPageView {
   mains: MainHistoryView | null;
   /** The In flight card (mission runtime design §7); null from an older server. */
   inFlight: InFlightView | null;
+  /** The Repositories card (delivery line design §4.9, artboards I and J); null when no repo has a worktree of the mission. */
+  repositories: RepositoriesView | null;
+}
+
+/** Push and merge request of one repo (delivery line design §4.3): what the row says and the action beside it. */
+export interface RepoPushView {
+  /** "allowed since 10:42", "waiting for you", "not now", "revoked 12:10", "—". */
+  text: string;
+  tone: Tone;
+  /** The phone's line: "Push & MR allowed", "Push & MR: waiting for you"; null before any card. */
+  phone: string | null;
+  /** Revoke beside a grant, Answer beside the open card, "Ask me again" after not now or a revoke (§4.3); null otherwise. */
+  action: "revoke" | "answer" | "ask" | null;
+  /** The integration card's id, for Answer. */
+  decisionId: string | null;
+}
+
+/** One row of the Repositories card (artboards I and J). */
+export interface RepoRowView {
+  workspaceId: string;
+  name: string;
+  branch: string;
+  target: string;
+  /** The phone's branch: "m/INO/…" for a mission branch. */
+  shortBranch: string;
+  /** "↑4 ↓0"; "not read yet" before paseo-bm's first read of the line. */
+  counts: string;
+  /** "● uncommitted" (warning) or "clean"; null when unknown. */
+  dirty: Badge | null;
+  /** "last commit 11:52"; null when unknown. */
+  lastCommit: string | null;
+  /** "!42 open" with its link; the phone shows `short` ("!42"). Null without a merge request. */
+  mr: { text: string; short: string; tone: Tone; url: string } | null;
+  /** "CI passed", "CI failed", "CI running", "CI not run"; null when unknown, and always while `integration.ci` is off. */
+  ci: Badge | null;
+  push: RepoPushView;
+}
+
+export interface RepositoriesView {
+  /** "each mission writes on its own branch · read 12:40". */
+  meta: string;
+  /** The merge request column's header: "Merge request · CI"; "Merge request" while `integration.ci` is off (ADR-036). */
+  mrHeader: string;
+  rows: RepoRowView[];
 }
 
 /** One Main of the mission, newest first (artboard G). */
@@ -490,7 +558,19 @@ export interface InFlightRequestView {
   /** The phone's words: another request named by its topic. */
   phoneState: string;
   lastReport: string;
+  /** The commit's first 7 within `lastReport` ("committed a1b2c3d"), drawn in mono; null when none. */
+  commit: string | null;
   active: boolean;
+  /**
+   * Delivery line design §2.7 (artboard I): "continues req-…105259Z · 3rd of
+   * its chain" under the topic of a request that continues another and is not
+   * continued itself; null otherwise.
+   */
+  chain: { request: string; position: string | null } | null;
+  /** The phone's line (artboard J): "continues Review and propose the feature · 3rd"; null without a chain. */
+  phoneChain: string | null;
+  /** "→ req-…124012Z" after "finished" when another request continues it (artboard I); null otherwise. */
+  next: string | null;
 }
 
 export interface InFlightQuestionView {
@@ -525,11 +605,6 @@ export const JOURNAL_DESKTOP = 5;
 export const JOURNAL_PHONE = 20;
 
 const PHASE_TONES: Readonly<Record<MissionRow["phase"], Tone>> = { working: "info", finished: "success", stopped: "muted", blocked: "warning" };
-
-/** "req-…042844Z": the request id's last 7. */
-function shortRequestOf(requestId: string): string {
-  return requestId.length <= 11 ? requestId : `req-…${requestId.slice(-7)}`;
-}
 
 /** One row of "Workers by repository". */
 function workerRowOf(row: MissionRow): WorkerRowView {
@@ -609,6 +684,11 @@ export function inFlightOf(state: MissionState | undefined, now: Date): InFlight
             ? `waiting for ${waitingOn.replace(REQUEST_ID_IN_TEXT, (id) => shortRequestOf(id))}`
             : request.state;
     const phone = request.state === "waiting-other" ? `waiting for ${waitingOn.replace(REQUEST_ID_IN_TEXT, (id) => topicOf.get(id) ?? shortRequestOf(id))}` : words;
+    // Delivery line design §2.7: the chain is told on its newest request; the one it continues points on with "→".
+    const continuedBy = request.continuedBy ?? null;
+    const continuationOf = continuedBy === null ? (request.continuationOf ?? null) : null;
+    const position = request.chainPosition ?? null;
+    const nth = position !== null && position >= 3 ? ordinal(position) : null;
     return {
       requestId: request.requestId,
       request: shortRequestOf(request.requestId),
@@ -618,8 +698,16 @@ export function inFlightOf(state: MissionState | undefined, now: Date): InFlight
       workerId: request.workerId,
       state: { text: words, tone: REQUEST_STATE_TONES[request.state] },
       phoneState: phone,
-      lastReport: request.lastReport === null ? "—" : `${request.lastReport.phase} · ${timeOrDate(request.lastReport.at, now)}`,
+      // Delivery line design §4.6 (artboard I): "finished · committed a1b2c3d · 11:58".
+      lastReport:
+        request.lastReport === null
+          ? "—"
+          : [request.lastReport.phase, ...(request.committed === true ? [`committed${request.commit == null ? "" : ` ${request.commit.slice(0, 7)}`}`] : []), timeOrDate(request.lastReport.at, now)].join(" · "),
+      commit: request.lastReport !== null && request.committed === true && request.commit != null ? request.commit.slice(0, 7) : null,
       active: request.state !== "finished" && request.state !== "stopped",
+      chain: continuationOf === null ? null : { request: shortRequestOf(continuationOf), position: nth === null ? null : `${nth} of its chain` },
+      phoneChain: continuationOf === null ? null : [`continues ${topicOf.get(continuationOf) || shortRequestOf(continuationOf)}`, ...(nth === null ? [] : [nth])].join(" · "),
+      next: request.state === "finished" && continuedBy !== null ? `→ ${shortRequestOf(continuedBy)}` : null,
     };
   });
   const finished = requests.filter((request) => request.state.text === "finished").length;
@@ -651,6 +739,97 @@ export function inFlightOf(state: MissionState | undefined, now: Date): InFlight
     text: `${link.partner} · ${link.gist}`,
   }));
   return { meta: `what the Main knows · read ${clockText(new Date(state.at)) || "—"}`, requests, restLine: rest.length === 0 ? null : `+ ${rest.join(" · ")}`, questions, asks, links };
+}
+
+/** The merge request's number as the forge writes it: "!42" (GitLab), "#42" (GitHub), else "MR". Pure. */
+export function mrNumberOf(url: string): string {
+  const gitlab = /\/merge_requests\/(\d+)/.exec(url);
+  if (gitlab !== null) return `!${gitlab[1]}`;
+  const github = /\/pull\/(\d+)/.exec(url);
+  return github === null ? "MR" : `#${github[1]}`;
+}
+
+/** The merge request's state in the mockup's words: open, merged, conflicting (and closed). */
+function mrStateOf(mr: NonNullable<MissionPlacement["mr"]>): Badge {
+  const state = (mr.state ?? "").toLowerCase();
+  if (state === "merged") return { text: "merged", tone: "success" };
+  if (state === "closed") return { text: "closed", tone: "muted" };
+  return mr.mergeable === false ? { text: "conflicting", tone: "danger" } : { text: "open", tone: "info" };
+}
+
+const CI_WORDS: Readonly<Record<string, Badge>> = {
+  success: { text: "CI passed", tone: "success" },
+  failure: { text: "CI failed", tone: "danger" },
+  pending: { text: "CI running", tone: "plain" },
+  "not-run": { text: "CI not run", tone: "muted" },
+};
+
+/** Push and merge request in the mockup's words (delivery line design §4.3). */
+function pushOf(integration: MissionPlacement["integration"], now: Date): RepoPushView {
+  const id = integration.decisionId;
+  switch (integration.state) {
+    case "allowed":
+      return { text: `allowed since ${integration.at === null ? "—" : timeOrDate(integration.at, now)}`, tone: "plain", phone: "Push & MR allowed", action: "revoke", decisionId: id };
+    case "waiting":
+      return { text: "waiting for you", tone: "warning", phone: "Push & MR: waiting for you", action: "answer", decisionId: id };
+    case "not-now":
+      return { text: "not now", tone: "muted", phone: "Push & MR: not now", action: "ask", decisionId: id };
+    case "revoked":
+      return { text: `revoked${integration.at === null ? "" : ` ${timeOrDate(integration.at, now)}`}`, tone: "muted", phone: "Push & MR: revoked", action: "ask", decisionId: id };
+    default:
+      return { text: "—", tone: "muted", phone: null, action: null, decisionId: id };
+  }
+}
+
+/**
+ * The Repositories card from `mission.get`'s summary (delivery line design
+ * §4.9, artboards I and J); null when no repo has a placement. With
+ * `integration.ci` off (§17.1) the merge request shows without CI.
+ */
+export function repositoriesOf(summary: Pick<MissionSummary, "code" | "repos" | "ci">, now: Date): RepositoriesView | null {
+  const placed = summary.repos.flatMap((repo) => (repo.placement === undefined ? [] : [{ repo, placement: repo.placement }]));
+  if (placed.length === 0) return null;
+  const ciShown = summary.ci !== "off";
+  const prefix = `m/${summary.code}/`;
+  const rows = placed.map(({ repo, placement }): RepoRowView => {
+    const read = placement.readAt !== null;
+    return {
+      workspaceId: repo.workspaceId,
+      name: repo.name,
+      branch: placement.branch,
+      target: placement.target,
+      shortBranch: placement.branch.startsWith(prefix) ? `${prefix}…` : placement.branch,
+      counts: read ? `↑${placement.ahead ?? "?"} ↓${placement.behind ?? "?"}` : "not read yet",
+      dirty: !read || placement.dirty === null ? null : placement.dirty ? { text: "● uncommitted", tone: "warning" } : { text: "clean", tone: "plain" },
+      lastCommit: placement.lastCommitAt === null ? null : `last commit ${timeOrDate(placement.lastCommitAt, now)}`,
+      mr: placement.mr === null ? null : (() => {
+        const state = mrStateOf(placement.mr);
+        const number = mrNumberOf(placement.mr.url);
+        return { text: `${number} ${state.text}`, short: number, tone: state.tone, url: placement.mr.url };
+      })(),
+      ci: !ciShown || placement.ci === null ? null : (CI_WORDS[placement.ci] ?? null),
+      push: pushOf(placement.integration, now),
+    };
+  });
+  const newest = placed.reduce<string | null>((latest, { placement }) => (placement.readAt !== null && (latest === null || placement.readAt > latest) ? placement.readAt : latest), null);
+  return {
+    meta: ["each mission writes on its own branch", ...(newest === null ? [] : [`read ${clockText(new Date(newest)) || "—"}`])].join(" · "),
+    mrHeader: ciShown ? "Merge request · CI" : "Merge request",
+    rows,
+  };
+}
+
+/** The in-place confirmation of Revoke (delivery line design §4.3). */
+export function revokeIntegrationDialog(code: string, row: Pick<RepoRowView, "name" | "branch" | "target">): ConfirmDialog {
+  return {
+    title: `Revoke push and merge request for ${row.name}?`,
+    body: `${code}'s Workers stop pushing ${row.branch} and updating its merge request into ${row.target}; they go on committing on the branch. The merge request stays as it is.`,
+    bodyTone: "plain",
+    confirmLabel: "Revoke",
+    confirmKind: "danger",
+    cancelLabel: "Cancel",
+    defaultAction: "cancel",
+  };
 }
 
 /** A mission's page from `mission.get`. */
@@ -715,12 +894,23 @@ export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf 
     },
     mains: mainHistoryOf(page.mainHistory, now),
     inFlight: inFlightOf(page.inFlight, now),
+    repositories: repositoriesOf(summary, now),
   };
 }
 
-/** The projects "+ Add" offers: listed projects not in the charter yet. */
-export function addableReposOf(projects: ReadonlyArray<{ id: string; name: string }>, repos: ReadonlyArray<{ workspaceId: string }>): Array<{ id: string; name: string }> {
-  return projects.filter((project) => !repos.some((repo) => repo.workspaceId === project.id));
+/**
+ * The projects "+ Add" offers (`mission-projects.html`, artboard N): listed
+ * projects not in the charter yet — by workspace, and by project when
+ * `projectOf` knows the charter's workspaces (a repo chosen through another
+ * workspace of the same project is in the mission).
+ */
+export function addableReposOf<T extends { id: string; name: string; projectId?: string }>(
+  projects: readonly T[],
+  repos: ReadonlyArray<{ workspaceId: string }>,
+  projectOf: (workspaceId: string) => string | null = () => null,
+): T[] {
+  const inMission = new Set(repos.map((repo) => projectOf(repo.workspaceId)).filter((id): id is string => id !== null));
+  return projects.filter((project) => !repos.some((repo) => repo.workspaceId === project.id) && (project.projectId === undefined || !inMission.has(project.projectId)));
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +949,7 @@ export function missionDraftErrors(draft: MissionDraft): string[] {
   return [
     ...nameAndCodeErrors(draft.name, draft.code),
     ...(draft.goal.length > MAX_MISSION_GOAL ? [`Goal: at most ${MAX_MISSION_GOAL.toLocaleString("en-US")} characters.`] : []),
-    ...(draft.repos.length === 0 ? ["Repositories: choose at least one."] : []),
+    ...(draft.repos.length === 0 ? ["Projects: choose at least one."] : []),
   ];
 }
 
@@ -769,7 +959,7 @@ export function createInputOf(draft: MissionDraft): MissionsCreateInput {
   return { name: draft.name.trim(), code: draft.code, repos: [...draft.repos], ...(goal === "" ? {} : { goal }) };
 }
 
-/** A repository chip toggled in the draft. */
+/** A project toggled in the draft (its row's checkbox). */
 export function toggleRepo(draft: MissionDraft, workspaceId: string): MissionDraft {
   return { ...draft, repos: draft.repos.includes(workspaceId) ? draft.repos.filter((id) => id !== workspaceId) : [...draft.repos, workspaceId] };
 }

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { clearRequestIndexCache, createMissionRoster, noteFollowUp, noteRosterReport, reportSummaryOf } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
+import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 
 /**
  * The writes that make the mission state complete (mission runtime design
@@ -34,6 +35,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearRequestIndexCache();
+  clearRequestRegistryCache();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -94,6 +96,30 @@ describe("follow-ups and report phases (design §2.3)", () => {
     ]);
     // A request of no mission is left alone.
     noteFollowUp(home, "req-20261010T999999Z", "x", NOW.toISOString());
+  });
+
+  it("a bound request that is finished or stopped never reopens: no follow-up, no later report (delivery line design §2.3)", () => {
+    // REQ_A as bm_create_worker registers it: source tool.
+    createRequestRegistry(home, { backfill: () => [] }).register("wks_front", REQ_A, { source: "tool", managerId: "main-a", workerId: "w-front" });
+    for (const terminal of ["finished", "stopped"] as const) {
+      noteRosterReport(home, REQ_A, terminal, () => {}, `BM-REPORT\nphase: ${terminal}\ntier: Small — done`);
+      noteFollowUp(home, REQ_A, "Lời owner: làm tiếp", NOW.toISOString());
+      expect(createMissionRoster(home).get(ASKER, REQ_A), terminal).toMatchObject({ state: terminal });
+      expect(createMissionRoster(home).get(ASKER, REQ_A)).not.toHaveProperty("followUpAt");
+      for (const phase of ["received", "beads-done", "blocked"]) noteRosterReport(home, REQ_A, phase);
+      expect(createMissionRoster(home).get(ASKER, REQ_A)?.state, terminal).toBe(terminal);
+    }
+    // stopped → finished is no reopening: a bound request may still finish.
+    noteRosterReport(home, REQ_A, "finished");
+    expect(createMissionRoster(home).get(ASKER, REQ_A)?.state).toBe("finished");
+    expect(linesOf(ASKER, "worker").filter((line) => line.startsWith("Follow-up"))).toEqual([]);
+  });
+
+  it("a roster entry keeps the request it continues; an entry without it still reads (delivery line design §2.2)", () => {
+    const REQ_NEXT = "req-20261010T040000Z";
+    expect(createMissionRoster(home).add(ASKER, { requestId: REQ_NEXT, workspaceId: "wks_front", topic: "G14, more", workerId: "w-front-2", continuationOf: REQ_A })).toMatchObject({ continuationOf: REQ_A, state: "active" });
+    expect(createMissionRoster(home).get(ASKER, REQ_NEXT)?.continuationOf).toBe(REQ_A);
+    expect(createMissionRoster(home).get(ASKER, REQ_A)).not.toHaveProperty("continuationOf");
   });
 
   it("reportSummaryOf reads the tier line's summary, else the blockers", () => {

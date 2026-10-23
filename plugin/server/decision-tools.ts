@@ -77,6 +77,9 @@ function actionLineOf(action: PreparedAction | undefined): string | null {
       return `the plugin merges mission ${action.from} into mission ${action.missionId}, only when the owner chooses it`;
     case "mission-transfer":
       return `the plugin moves the requests ${action.requestIds.join(", ")} from mission ${action.missionId} to mission ${action.to}, only when the owner chooses it`;
+    case "integration.grant":
+      // Delivery line design §4.3: the owner's one grant per mission and repo.
+      return `the plugin allows pushing mission ${action.missionId}'s branch of ${action.repo} and its merge request, only when the owner chooses it`;
     default:
       // Autonomy design §G.4: a change of the owner's settings, applied only on the owner's own answer.
       return `${action.kind}: the plugin ${preparedChangeTextOf(action)}, only when the owner chooses it`;

@@ -1,11 +1,12 @@
 /**
- * Settings → Coordination's compaction and handoff cards (autonomy design
- * §G.7; bead `7gxw.9`) and the review budget card (bead `7gxw.12`):
- * hook-free, drawn from `mechanismCardView` and `reviewBudgetCardView`
+ * Settings → Coordination's compaction, handoff and rollover cards (autonomy
+ * design §G.7; bead `7gxw.9`; delivery line design §12 item 4) and the review
+ * card (delivery line design §5.6):
+ * hook-free, drawn from `mechanismCardView` and `reviewCardView`
  * (`settings-coordination-model.ts`); the group that holds their state is in
  * `settings-section.tsx`. On a phone (`narrow`, the approved phone mockup)
  * every field is a row of its own — the label, then an 84px field —, the
- * review budget's tiers too, and Save takes the card's width.
+ * review settings too, and Save takes the card's width.
  *
  * Client rules: React Native primitives only, colours from the theme, no Node
  * import, no `server/` import.
@@ -17,7 +18,7 @@ import {
   type CoordinationInputs,
   type CoordinationNumberKey,
   type MechanismCardView,
-  type ReviewBudgetCardView,
+  type ReviewCardView,
   type StepButton,
 } from "./settings-coordination-model";
 import { SquareSwitch } from "./settings-blocks";
@@ -144,8 +145,8 @@ function GridCell({ index, count, narrow, label, children, theme }: {
 }
 
 /**
- * One of Compact and Handoff (the approved mockup): the title, what it does,
- * how often it helped and its square switch; the turn-on confirmation while
+ * One of Compact, Handoff and Rollover (the approved mockup): the title, what
+ * it does, how often it helped (not for Rollover) and its square switch; the turn-on confirmation while
  * it is asked (Cancel first); a switch-off by paseo-bm in the warning colour;
  * then its thresholds in a two-column grid of number fields, and Save at the
  * foot while a field changed. Hook-free.
@@ -186,9 +187,9 @@ export function MechanismCard({ view, inputs, dialog, busy, error, narrow = fals
         <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
           <Text style={{ color: colors.foreground, fontSize: 14, fontWeight: "600" }}>{view.title}</Text>
           <Text style={{ color: colors.foregroundMuted, fontSize: narrow ? 12 : 13 }}>{view.meaning}</Text>
-          {narrow ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.helped}</Text> : null}
+          {narrow && view.helped !== null ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.helped}</Text> : null}
         </View>
-        {narrow ? null : <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.helped}</Text>}
+        {narrow || view.helped === null ? null : <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.helped}</Text>}
         <SquareSwitch
           on={!view.toggle.turnsOn}
           disabled={!view.toggle.enabled || dialog !== null}
@@ -241,13 +242,15 @@ export function MechanismCard({ view, inputs, dialog, busy, error, narrow = fals
 }
 
 /**
- * The review budget per tier (the approved mockup): its title, three joined
- * cells — Small, Medium, Large — each a mono number field, what the budget
- * means, and Save at the foot while a tier changed. On a phone (`narrow`) the
- * tiers stack, each a row — its name, then an 84px field. Hook-free.
+ * The review settings (delivery line design §5.6; the review budget card's
+ * controls): its title, two joined cells — re-reviews per batch, calls per
+ * milestone batch — each a mono number field, the cap per request they make
+ * (read-only), what they mean, and Save at the foot while one changed. On a
+ * phone (`narrow`) the settings stack, each a row — its name, then an 84px
+ * field. Hook-free.
  */
-export function ReviewBudgetCard({ view, inputs, busy, error, narrow = false, onInput, onSave, styles, theme }: {
-  view: ReviewBudgetCardView;
+export function ReviewCard({ view, inputs, busy, error, narrow = false, onInput, onSave, styles, theme }: {
+  view: ReviewCardView;
   narrow?: boolean;
   inputs: CoordinationInputs;
   busy: boolean;
@@ -291,6 +294,7 @@ export function ReviewBudgetCard({ view, inputs, busy, error, narrow = false, on
             />
           </View>
         ))}
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12, paddingVertical: 10, paddingHorizontal: 14, borderTopWidth: 1, borderTopColor: colors.border }}>{view.caps}</Text>
         {footerShown(view.save, refusals, error) ? (
           <View style={{ padding: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
             <CardFooter save={view.save} refusals={refusals} error={error} narrow onSave={onSave} styles={styles} theme={theme} />
@@ -323,6 +327,7 @@ export function ReviewBudgetCard({ view, inputs, busy, error, narrow = false, on
           );
         })}
       </View>
+      <Text style={{ color: colors.foreground, fontSize: 13 }}>{view.caps}</Text>
       <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{view.meaning}</Text>
       <CardFooter save={view.save} refusals={refusals} error={error} onSave={onSave} styles={styles} theme={theme} />
     </View>

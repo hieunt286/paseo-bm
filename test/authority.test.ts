@@ -1,23 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { deciderOf, grantWithin, type AuthorityFacts } from "../plugin/shared/authority";
-import type { Decision } from "../plugin/shared/decisions";
+import { deciderOf, type AuthorityFacts } from "../plugin/shared/authority";
+import type { Decision, DecisionOption } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
 
 /**
  * The authority resolver (mission runtime design §4.1, ADR-033 decision 3,
- * REQ-204): each rule, in order, and the review caps of §4.3. Pure.
+ * REQ-204): each rule, in order. The review rules are retired (delivery line
+ * design §5.6). Pure.
  */
 
 const MISSION = "mis-0123456789";
 const REQ = "req-20260929T073348Z";
 
-function facts(over: Partial<{ repo: Record<string, string>; mission: string[]; inMission: boolean; caps: { codeLeft: number; mainLeft: number } | null }> = {}): AuthorityFacts {
+function facts(over: Partial<{ repo: Record<string, string>; mission: string[]; inMission: boolean; unverified: boolean }> = {}): AuthorityFacts {
   const repo = over.repo ?? {};
   return {
     modeOf: (_workspaceId, decisionClass) => (repo[decisionClass] ?? repo["*"] ?? "owner") as never,
     missionOf: (requestId) => (over.inMission === false || requestId === null ? null : MISSION),
     missionDelegates: (_missionId, cell) => (over.mission ?? []).includes(cell),
-    reviewCaps: () => (over.caps === undefined ? { codeLeft: 2, mainLeft: 2 } : over.caps),
+    ...(over.unverified === undefined ? {} : { finishedUnverified: () => over.unverified! }),
   };
 }
 
@@ -41,40 +42,55 @@ describe("deciderOf (design §4.1)", () => {
     expect(deciderOf(incident, facts()).decider).toBe("owner");
   });
 
-  it("rule 3: a review budget within the code cap, cost delegated by the repo or the mission, is code's — untilClean too, while any cap is left", () => {
-    expect(deciderOf(budget({ calls: 2 }), facts({ repo: { cost: "delegate" } }))).toMatchObject({ decider: "code", rule: "review-budget-code" });
-    expect(deciderOf(budget({ untilClean: "b2" }), facts({ mission: ["answer-effects"] })).decider).toBe("code");
-    // The XAI case: Full auto, untilClean recommended — no longer the owner's.
-    expect(deciderOf(budget({ untilClean: "b2" }), facts({ repo: { "*": "delegate" } })).decider).toBe("code");
+  it("rule 2 (delivery line design §7.1, case 2): an f: incident whose every acting option the unverified-finish rule refuses is the owner's", () => {
+    const commit = { kind: "command", to: "worker", agentId: "w-1", intent: "continue", body: "commit it", effects: ["commit"] } as never;
+    const resend = { kind: "fallback", action: "resend", target: "fallback-1" } as never;
+    const finishing = question({ id: "f:fallback-1", class: "environment", options: [{ key: "a", label: "Commit", recommended: true, effects: ["none"], action: commit }, { key: "b", label: "Wait", recommended: false, effects: ["none"] }] });
+    expect(deciderOf(finishing, facts({ repo: { environment: "delegate" }, unverified: true }))).toMatchObject({ decider: "owner", rule: "owner" });
+    // Verified, or an acting option the rule leaves (a fallback action): the Orchestrator's.
+    expect(deciderOf(finishing, facts({ repo: { environment: "delegate" }, unverified: false })).decider).toBe("orchestrator");
+    expect(deciderOf(finishing, facts({ repo: { environment: "delegate" } })).decider).toBe("orchestrator");
+    const mixed = question({ id: "f:fallback-1", class: "environment", options: [{ key: "a", label: "Commit", recommended: true, effects: ["none"], action: commit }, { key: "b", label: "Resend", recommended: false, effects: ["none"], action: resend }] });
+    expect(deciderOf(mixed, facts({ repo: { environment: "delegate" }, unverified: true })).decider).toBe("orchestrator");
   });
 
-  it("rule 4 for a review budget: past the code cap, the Main within its own; past both, the owner", () => {
-    expect(deciderOf(budget({ calls: 3 }), facts({ repo: { cost: "delegate" }, caps: { codeLeft: 2, mainLeft: 3 } })).decider).toBe("main");
-    expect(deciderOf(budget({ untilClean: "b1" }), facts({ repo: { cost: "delegate" }, caps: { codeLeft: 0, mainLeft: 1 } })).decider).toBe("main");
-    // Option b grants nothing: the Main may always choose not to review more.
-    expect(deciderOf(budget({ calls: 9 }), facts({ repo: { cost: "delegate" }, caps: { codeLeft: 0, mainLeft: 0 } })).decider).toBe("main");
+  it("no review rule (delivery line design §5.6): a legacy review-budget question is decided as any question of its class", () => {
+    // Cost delegated by the repo or the mission: the Main, as any delegated class — never code, whatever its grants.
+    expect(deciderOf(budget({ calls: 2 }), facts({ repo: { cost: "delegate" } }))).toMatchObject({ decider: "main", rule: "delegated-main" });
+    expect(deciderOf(budget({ untilClean: "b2" }), facts({ mission: ["answer-effects"] }))).toMatchObject({ decider: "main", rule: "delegated-main" });
+    // Not delegated, or outside a mission: the owner.
     expect(deciderOf(budget({ calls: 2 }), facts()).decider).toBe("owner");
-    expect(deciderOf(budget({ calls: 2 }), facts({ repo: { cost: "delegate" }, inMission: false, caps: { codeLeft: 0, mainLeft: 2 } })).decider).toBe("owner");
+    expect(deciderOf(budget({ calls: 9 }), facts({ repo: { cost: "delegate" }, inMission: false })).decider).toBe("owner");
   });
 
-  it("rule 4: a question of a mission request whose class the repo or the mission delegates is the Main's — any class, effects included", () => {
+  it("the review cap's question is ownerOnly: the owner's at every level (rule 1)", () => {
+    const capQuestion = question({ class: "cost", subject: "review-cap", ownerOnly: true, options: [{ key: "a", label: "One more round", recommended: true, effects: ["cost"], grant: { calls: 3 } }, { key: "b", label: "Finish", recommended: false, effects: ["none"] }] });
+    expect(deciderOf(capQuestion, facts({ repo: { "*": "delegate" }, mission: ["answer-technical", "answer-effects"] }))).toMatchObject({ decider: "owner", rule: "owner-only" });
+  });
+
+  it("rule 3: a question of a mission request whose class the repo or the mission delegates is the Main's", () => {
     expect(deciderOf(question(), facts({ repo: { scope: "delegate" } }))).toMatchObject({ decider: "main", rule: "delegated-main" });
     expect(deciderOf(question(), facts({ mission: ["answer-technical"] })).decider).toBe("main");
-    expect(deciderOf(question({ class: "release", options: [{ key: "a", label: "Push", recommended: true, effects: ["push"] }] }), facts({ mission: ["answer-effects"] })).decider).toBe("main");
     // Outside a mission, the policy has no Main to name.
     expect(deciderOf(question(), facts({ repo: { scope: "delegate" }, inMission: false })).decider).toBe("owner");
   });
 
-  it("rule 5: a shadow cell — the owner decides, the Main recommends; rule 6: anything else is the owner's", () => {
-    expect(deciderOf(question(), facts({ repo: { scope: "shadow" } }))).toMatchObject({ decider: "owner", rule: "shadow-main", recommend: true });
-    expect(deciderOf(question(), facts())).toMatchObject({ decider: "owner", rule: "owner", recommend: false });
+  it("rule 3 (delivery line design §7.1, case 1): delegated by the mission only, the Main is named only when an option leaves no effect", () => {
+    const push: DecisionOption = { key: "a", label: "Push", recommended: true, effects: ["push"] };
+    const pushOnly = question({ class: "release", options: [{ ...push }, { key: "b", label: "Publish", recommended: false, effects: ["publish"] }] });
+    // The Main's answer covers no effect: the owner decides, the Main recommending.
+    expect(deciderOf(pushOnly, facts({ mission: ["answer-effects"] }))).toMatchObject({ decider: "owner", rule: "mission-effects", recommend: true });
+    // A command approving an effect leaves it too.
+    const commanded = question({ class: "release", options: [{ key: "a", label: "Push", recommended: true, effects: ["none"], action: { kind: "command", to: "worker", agentId: "w-1", intent: "release", body: "push", effects: ["push"] } as never }, { ...push, key: "b", recommended: false }] });
+    expect(deciderOf(commanded, facts({ mission: ["answer-effects"] })).rule).toBe("mission-effects");
+    // One option with no effect: the Main settles it.
+    expect(deciderOf(question({ class: "release", options: [{ ...push }, { key: "b", label: "Wait", recommended: false, effects: ["none"] }] }), facts({ mission: ["answer-effects"] }))).toMatchObject({ decider: "main", rule: "delegated-main" });
+    // The repo cell delegates the class: the policy covers the effects, so the Main decides.
+    expect(deciderOf(pushOnly, facts({ repo: { release: "delegate" } }))).toMatchObject({ decider: "main", rule: "delegated-main" });
   });
 
-  it("grantWithin: calls up to what is left; untilClean while anything is left", () => {
-    expect(grantWithin(undefined, 0)).toBe(true);
-    expect(grantWithin({ calls: 2 }, 2)).toBe(true);
-    expect(grantWithin({ calls: 3 }, 2)).toBe(false);
-    expect(grantWithin({ untilClean: "b1" }, 1)).toBe(true);
-    expect(grantWithin({ untilClean: "b1" }, 0)).toBe(false);
+  it("rule 4: a shadow cell — the owner decides, the Main recommends; rule 5: anything else is the owner's", () => {
+    expect(deciderOf(question(), facts({ repo: { scope: "shadow" } }))).toMatchObject({ decider: "owner", rule: "shadow-main", recommend: true });
+    expect(deciderOf(question(), facts())).toMatchObject({ decider: "owner", rule: "owner", recommend: false });
   });
 });

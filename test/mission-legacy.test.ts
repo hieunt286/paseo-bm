@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
 import { createAlertStore } from "../plugin/server/alert-store";
+import { addCheckpointOffer, writeCutOver } from "../plugin/server/checkpoint";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
 import { adoptComposerManager, createLegacyMigration, handleManagerEnsure, legacyCodeOf, migrateWorkspace } from "../plugin/server/mission-legacy";
@@ -227,6 +228,24 @@ describe("manager.ensure opens the mission's Main (§3.6)", () => {
     store.update("mis-0000000002", (mission) => ({ ...mission, createdAt: "2026-10-02T00:00:00.000Z" }));
     const result = await handleManagerEnsure({ workspaceId: REPO }, fake.paseo, { home, cli: fakeCli().cli, bindings: () => bindings, readInstructions, log: () => {} });
     expect(result).toMatchObject({ agentId: "main-web", created: false });
+    expect(fake.creates).toEqual([]);
+  });
+
+  it("forNewRequest also answers the Main's mission and where its new Worker appears (/bm-worker-new); without it, nothing more", async () => {
+    const fake = daemon([manager("main-web", "2026-10-02T00:00:00.000Z", { "bm.missionId": "mis-0000000001" }, { workspaceId: "wks-own" })]);
+    const store = createMissionStore(home, { newId: () => "mis-0000000001", now: () => new Date("2026-10-02T00:00:00.000Z") });
+    store.create({ code: "WEB", name: "Website", goal: "", repos: [REPO], createdBy: "owner", mainId: "main-web" });
+    const deps = { home, cli: fakeCli().cli, bindings: () => bindings, readInstructions, log: () => {} };
+    expect(await handleManagerEnsure({ workspaceId: REPO }, fake.paseo, deps)).not.toHaveProperty("mission");
+    const mission = { missionId: "mis-0000000001", code: "WEB", name: "Website" };
+    // Before the cut-over: the repo's own workspace.
+    expect((await handleManagerEnsure({ workspaceId: REPO, forNewRequest: true }, fake.paseo, deps)).mission).toEqual({ ...mission, workerIn: "here", worktreeTitle: null });
+    // After it, the mission's worktree (made at the first Worker) ...
+    writeCutOver(home, new Date("2026-10-21T00:00:00.000Z"), () => {});
+    expect((await handleManagerEnsure({ workspaceId: REPO, forNewRequest: true }, fake.paseo, deps)).mission).toEqual({ ...mission, workerIn: "worktree", worktreeTitle: "WEB · api" });
+    // ... unless this mission from before it waits for its repo's checkpoint: the shared checkout, this workspace.
+    addCheckpointOffer(home, { repo: REPO, directory: "/repo/api", name: "api", card: "m:mis-0000000001:1", missionIds: ["mis-0000000001"], openedAt: "2026-10-21T01:00:00.000Z", parent: null, busy: true, outcome: { at: "2026-10-21T02:00:00.000Z", kind: "later" } });
+    expect((await handleManagerEnsure({ workspaceId: REPO, forNewRequest: true }, fake.paseo, deps)).mission).toEqual({ ...mission, workerIn: "shared-checkout", worktreeTitle: null });
     expect(fake.creates).toEqual([]);
   });
 

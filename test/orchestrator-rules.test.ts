@@ -47,8 +47,9 @@ describe("the retired rules (autonomy design §B.9)", () => {
   it("leaves review.over-budget alone in the catalogue", () => {
     expect(RULE_IDS).toEqual(["review.over-budget"]);
     // Their helpers went with them; the process-document test stays for the Worker watch and the replay.
-    // reviewCeilingOf and overReviewCeiling: the one ceiling the review tools, this rule and the Manager's notice share (design §16.8).
-    expect(Object.keys(rules).sort()).toEqual(["EXCERPT_MAX_CHARS", "excerptOf", "flagsOf", "isProcessDocumentPath", "overReviewCeiling", "reviewCeilingOf"]);
+    // reviewCapOf, REVIEW_MILESTONES_MAX and overReviewCap: the one cap the review tools, this rule, the stall reason,
+    // the Manager's notice and the governor share (delivery line design §5.3).
+    expect(Object.keys(rules).sort()).toEqual(["EXCERPT_MAX_CHARS", "REVIEW_MILESTONES_MAX", "excerptOf", "flagsOf", "isProcessDocumentPath", "overReviewCap", "reviewCapOf"]);
   });
 
   it("raises nothing for the 2026-09-26 slips they used to flag", () => {
@@ -59,65 +60,82 @@ describe("the retired rules (autonomy design §B.9)", () => {
 
   it("reads only the tier, the review calls and the inbound messages of a request", () => {
     expect(Object.keys(clean().input).sort()).toEqual(["inbound", "requestId", "reviewCalls", "tier", "traceId"]);
-    expect(Object.keys(factsWith())).toEqual(["reviewBudget"]);
+    expect(Object.keys(factsWith())).toEqual(["review"]);
   });
 });
 
 describe("review.over-budget", () => {
-  it("raised: more review calls than REVIEW_BUDGET[tier], with the review calls as evidence", () => {
-    const medium = cleanWith({ reviewCalls: 3 });
+  it("raised: more review calls than the request's cap, with the review calls as evidence", () => {
+    // No registry facts: one milestone batch, so a cap of review.callsPerBatch (3) at every tier.
+    const medium = cleanWith({ reviewCalls: 4 });
     const flag = only(medium.input, medium.facts, "review.over-budget");
     expect(flag).toMatchObject({ state: "raised", severity: "warning" });
-    expect(flag?.observed).toBe("The Medium request made 3 review calls, over its budget of 2.");
+    expect(flag?.observed).toBe("The Medium request made 4 review calls, over its review cap of 3.");
     expect(flag?.evidence.map((entry) => [entry.agentId, entry.kind])).toEqual([[REVIEWER, "sent"]]);
-    const large = cleanWith({ tier: "Large", reviewCalls: 5 });
+    const large = cleanWith({ tier: "Large", reviewCalls: 4 });
     expect(only(large.input, large.facts, "review.over-budget")?.state).toBe("raised");
   });
 
-  it("not raised: at the budget, or no review call count", () => {
+  it("not raised: at the cap, or no review call count", () => {
     expect(only(clean().input, clean().facts, "review.over-budget")).toBeUndefined();
-    const atBudget = cleanWith({ tier: "Large", reviewCalls: 4 });
-    expect(only(atBudget.input, atBudget.facts, "review.over-budget")).toBeUndefined();
-    const small = cleanWith({ tier: "Small", reviewCalls: 2 });
+    const atCap = cleanWith({ tier: "Large", reviewCalls: 3 });
+    expect(only(atCap.input, atCap.facts, "review.over-budget")).toBeUndefined();
+    const small = cleanWith({ tier: "Small", reviewCalls: 3 });
     expect(only(small.input, small.facts, "review.over-budget")).toBeUndefined();
     const unknownCalls = cleanWith({ reviewCalls: null });
     expect(only(unknownCalls.input, unknownCalls.facts, "review.over-budget")).toBeUndefined();
   });
 
-  it("a granted request is not over budget: its grants raise the ceiling, a live untilClean batch's calls are left out (design §16.8)", () => {
-    // Medium budget 2, 4 calls: raised without a grant.
-    const { input, facts } = cleanWith({ reviewCalls: 4 });
-    expect(only(input, facts, "review.over-budget")?.state).toBe("raised");
-    expect(only({ ...input, reviewGrant: { calls: 2, exempt: 0 } }, facts, "review.over-budget")).toBeUndefined();
-    const past = only({ ...input, reviewCalls: 5, reviewGrant: { calls: 2, exempt: 0 } }, facts, "review.over-budget");
-    expect(past?.observed).toBe("The Medium request made 5 review calls, over its budget of 2 plus 2 granted.");
-    // 9 calls, 7 of them in a live untilClean batch: within; one more outside it, past.
-    expect(only({ ...input, reviewCalls: 9, reviewGrant: { calls: 0, exempt: 7 } }, facts, "review.over-budget")).toBeUndefined();
-    expect(only({ ...input, reviewCalls: 10, reviewGrant: { calls: 0, exempt: 7 } }, facts, "review.over-budget")?.state).toBe("raised");
-    // The same comparison the review tools and the Manager's notice make: calls − exempt > budget + granted.
-    expect(rules.reviewCeilingOf(2, 2)).toBe(4);
-    expect(rules.overReviewCeiling(4, 0, 4)).toBe(false);
-    expect(rules.overReviewCeiling(5, 0, 4)).toBe(true);
-    expect(rules.overReviewCeiling(5, 1, 4)).toBe(false);
+  it("reviewCapOf: callsPerBatch × min(M, Mmax[tier]), Mmax Small 1, Medium 2, Large 4; never fewer than one batch (delivery line design §5.3)", () => {
+    const review = { callsPerBatch: 3 };
+    expect(rules.REVIEW_MILESTONES_MAX).toEqual({ Small: 1, Medium: 2, Large: 4 });
+    expect([0, 1, 2, 3].map((m) => rules.reviewCapOf("Small", m, review))).toEqual([3, 3, 3, 3]);
+    expect([0, 1, 2, 3].map((m) => rules.reviewCapOf("Medium", m, review))).toEqual([3, 3, 6, 6]);
+    expect([1, 2, 3, 4, 5].map((m) => rules.reviewCapOf("Large", m, review))).toEqual([3, 6, 9, 12, 12]);
+    // The defaults give at most 3 / 6 / 12, never below the old 2 / 2 / 4; the owner's callsPerBatch scales them.
+    expect(rules.reviewCapOf("Large", 4, { callsPerBatch: 2 })).toBe(8);
+    expect(rules.reviewCapOf("Medium", 2, { callsPerBatch: 6 })).toBe(12);
   });
 
-  it("reads the budget from facts, not from server code", () => {
-    const { input, facts } = cleanWith({ reviewCalls: 2 });
-    expect(only(input, { ...facts, reviewBudget: { Small: 1, Medium: 1, Large: 1 } }, "review.over-budget")?.state).toBe(
-      "raised",
+  it("the cap counts the request's milestone batches, pooled: 12 calls of a Large request in 4 batches are within, 13 are not", () => {
+    const { input, facts } = cleanWith({ tier: "Large", reviewCalls: 12 });
+    expect(only(input, facts, "review.over-budget")?.state).toBe("raised");
+    expect(only({ ...input, reviewGrant: { calls: 0, milestones: 4 } }, facts, "review.over-budget")).toBeUndefined();
+    // Past Mmax the cap stops growing.
+    expect(only({ ...input, reviewCalls: 13, reviewGrant: { calls: 0, milestones: 6 } }, facts, "review.over-budget")?.observed).toBe(
+      "The Large request made 13 review calls, over its review cap of 12.",
     );
   });
 
-  it("unknown: more calls than the smallest budget, but no tier", () => {
-    const { input, facts } = cleanWith({ tier: null, reviewCalls: 3 });
+  it("a granted request is not over its cap: its grants raise the ceiling, and no call is exempt (design §16.8; delivery line design §5.6)", () => {
+    // Medium, one batch: a cap of 3; 4 calls are raised without a grant.
+    const { input, facts } = cleanWith({ reviewCalls: 4 });
+    expect(only(input, facts, "review.over-budget")?.state).toBe("raised");
+    expect(only({ ...input, reviewGrant: { calls: 2 } }, facts, "review.over-budget")).toBeUndefined();
+    const past = only({ ...input, reviewCalls: 6, reviewGrant: { calls: 2 } }, facts, "review.over-budget");
+    expect(past?.observed).toBe("The Medium request made 6 review calls, over its review cap of 3 plus 2 granted.");
+    // The same comparison the review tools, the stall reason and the Manager's notice make: calls > cap + granted.
+    expect(rules.overReviewCap(4, 4)).toBe(false);
+    expect(rules.overReviewCap(5, 4)).toBe(true);
+  });
+
+  it("reads the owner's callsPerBatch from facts, not from server code", () => {
+    const { input, facts } = cleanWith({ reviewCalls: 3 });
+    expect(only(input, facts, "review.over-budget")).toBeUndefined();
+    expect(only(input, { ...facts, review: { callsPerBatch: 2 } }, "review.over-budget")?.state).toBe("raised");
+  });
+
+  it("unknown: more calls than the smallest cap, but no tier", () => {
+    const { input, facts } = cleanWith({ tier: null, reviewCalls: 4 });
     expect(only(input, facts, "review.over-budget")?.state).toBe("unknown");
-    const withinEvery = cleanWith({ tier: null, reviewCalls: 2 });
+    expect(only(input, facts, "review.over-budget")?.observed).toBe("The request made 4 review calls, but no report gave its tier, so its review cap is not known.");
+    const withinEvery = cleanWith({ tier: null, reviewCalls: 3 });
     expect(only(withinEvery.input, withinEvery.facts, "review.over-budget")).toBeUndefined();
   });
 
   it("leaves a review block and a plugin notice out of its evidence", () => {
     const { input, facts } = cleanWith({
-      reviewCalls: 3,
+      reviewCalls: 4,
       inbound: [
         message({ agentId: REVIEWER, role: "reviewer", at: at(4), text: "Review batch b2, stage implementation." }),
         message({ agentId: REVIEWER, role: "reviewer", at: at(4, 30), text: "BM-REVIEW\nrequestId: r\nbatchId: b2\nverdict: approved" }),
@@ -132,7 +150,7 @@ describe("the flag", () => {
   it("carries excerpts of at most 160 characters, one English sentence for observed and why, and names no agent to nudge", () => {
     expect(EXCERPT_MAX_CHARS).toBe(160);
     const { input, facts } = cleanWith({
-      reviewCalls: 3,
+      reviewCalls: 4,
       inbound: [message({ agentId: REVIEWER, role: "reviewer", at: at(1), text: `Review ${"x".repeat(400)}`, origin: "agent" })],
     });
     const [flag] = flagsOf(input, facts);
@@ -151,7 +169,7 @@ describe("the flag", () => {
   });
 
   it("is deterministic, leaves its arguments untouched, and a rebuilt fixture gives the same flags", () => {
-    const { input, facts } = cleanWith({ reviewCalls: 3 });
+    const { input, facts } = cleanWith({ reviewCalls: 4 });
     const before = JSON.stringify([input, facts]);
     expect(flagsOf(input, facts)).toEqual(flagsOf(input, facts));
     expect(JSON.stringify([input, facts])).toBe(before);

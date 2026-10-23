@@ -47,11 +47,14 @@ import {
   type TransitionRefusal,
 } from "../shared/decisions";
 import { createDecisionStore, type DecisionMutation, type DecisionStore } from "./decision-store";
+import { grantEffect } from "./effects";
 import { createMissionDecisionStore, isMissionDecisionId } from "./mission-decisions";
 import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
 import { applyMissionDecision, missionAnswerRefusalsOf } from "./mission-tools";
 import { applyGovernorDecision, governorAnswerRefusalsOf, isGovernorCard, type GovernorMissionDeps } from "./governor-tools";
 import { applyOwnershipDecision, isOwnershipCard, ownershipAnswerRefusalsOf } from "./mission-ownership";
+import { applyIntegrationDecision, integrationAnswerRefusalsOf, isIntegrationCard } from "./integration-grant";
+import { applyCheckpointDecision, isCheckpointCard, prepareCheckpointAnswer } from "./checkpoint-card";
 import type { PaseoCliDeps } from "./paseo-cli";
 import { handleDecisionsOverride, ownerViewsOf } from "./decision-override";
 import { supersedePrecedentsBy } from "./precedent-resolve";
@@ -190,11 +193,23 @@ async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown
   // mission runtime design §5.2, §5.3: so does a merge or a transfer of requests.
   const governed = isGovernorCard(current);
   const owned = !governed && isOwnershipCard(current);
-  const refusals = governed
-    ? await governorAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home, at)
-    : owned
-      ? await ownershipAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home)
-      : await missionAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home);
+  // Delivery line design §4.3: the owner's integration card writes the placement's grant.
+  const integration = !governed && !owned && isIntegrationCard(current);
+  // Delivery line design §4.8: the owner's tap on the checkpoint card makes the checkpoint before the answer is stored.
+  const checkpoint =
+    !governed && !owned && !integration && isCheckpointCard(home, current)
+      ? await prepareCheckpointAnswer(home, current, { via: input.via ?? "inbox", optionKey: input.optionKey ?? null, words: input.words ?? null, at: at.toISOString() })
+      : null;
+  const refusals =
+    checkpoint !== null
+      ? checkpoint.refusals
+      : governed
+        ? await governorAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home, at)
+        : owned
+          ? await ownershipAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home)
+          : integration
+            ? integrationAnswerRefusalsOf(current, input.optionKey ?? null, home)
+            : await missionAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home);
   if (refusals.length > 0) throw new DashboardError("E_MISSION_INVALID", refusals.join("; "));
   const mutation = writing("answer the decision", () =>
     store.transition(input.id, (decision) =>
@@ -207,7 +222,9 @@ async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown
   else if (owned) {
     const bindings = deps.missions?.bindings?.() ?? undefined;
     await applyOwnershipDecision(settled, { ...applyDeps, ...(bindings ? { bindings } : {}) });
-  } else await applyMissionDecision(settled, applyDeps);
+  } else if (integration) await applyIntegrationDecision(settled, applyDeps);
+  else if (checkpoint !== null) await applyCheckpointDecision(settled, checkpoint.made, applyDeps);
+  else await applyMissionDecision(settled, applyDeps);
   return { decision: store.get(settled.id) ?? settled };
 }
 
@@ -278,7 +295,8 @@ export async function handleDecisionsAnswer(
       at,
     });
     // Checked on a valid answer only, so a settled or malformed answer keeps its own code.
-    const granted = result.ok ? (result.decision.grant?.effects ?? []) : [];
+    // Delivery line design §7.3: the effects this answer's grant would carry, as `answerDecision` wrote it.
+    const granted = result.ok ? (grantEffect(result.decision).applied?.effects ?? []) : [];
     if (input.confirmed !== true && needsOwnerConfirmation(granted)) {
       throw new DashboardError(
         "E_DECISION_NOT_CONFIRMED",

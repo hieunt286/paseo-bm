@@ -3,14 +3,21 @@
  *
  * - `missions.list {}` → every mission's summary, open first (newest
  *   `createdAt` first), then closed (newest `closedAt` first).
- * - `mission.get { missionId }` → one mission's page: its summary, charter,
- *   every governor family, one row per roster request, its contracts, the
- *   newest `MISSION_PAGE_JOURNAL` journal lines (newest first) and its plan.
+ * - `mission.get { missionId }` → one mission's page: its summary (each repo
+ *   with a worktree carrying its `placement`, delivery line design §4.9),
+ *   charter, every governor family, one row per roster request, its
+ *   contracts, the newest `MISSION_PAGE_JOURNAL` journal lines (newest first)
+ *   and its plan.
  * - `mission.change { missionId, name?, code?, addRepos?, close? }` → the
  *   owner's own change, applied at once on the `m:` card's path
  *   (`mission-tools.ts`): the card's checks (`missionChangeRefusalsOf`),
  *   `applyMissionChange`, a `charter` journal line by `owner`, the Main told
  *   (`tellMain`), retitled and relabelled (`syncMainAfterChange`).
+ * - `mission.integration.revoke { missionId, repo }` → the owner's revoke of
+ *   the mission's integration grant for a repo (delivery line design §4.3,
+ *   `integration-grant.ts`).
+ * - `mission.integration.ask { missionId, repo }` → the owner's "Ask me
+ *   again": a fresh integration card for the repo (§4.3).
  * - `memory.list { workspaceId }` → one repository's active project memory,
  *   newest first, at most `MEMORY_LIST_LIMIT`.
  *
@@ -24,8 +31,9 @@
  * closed mission's families read as quiet. Repositories are named as the
  * Orchestrator names projects (`workspaceLabelOf`).
  *
- * Every handler only reads, except `mission.change`, and none creates or
- * messages an agent but through `tellMain`. A refusal, and an unknown
+ * Every handler only reads, except `mission.change`,
+ * `mission.integration.revoke` and `mission.integration.ask`, and none creates or messages an agent but
+ * through `tellMain` and the revoke's `BM-SETTINGS`. A refusal, and an unknown
  * mission, is `E_MISSION_INVALID` with its reasons; any other failure is a
  * coded error, never a bare one.
  */
@@ -36,21 +44,29 @@ import {
   memoryListRpc,
   missionChangeRpc,
   missionGetRpc,
+  missionIntegrationAskRpc,
+  missionIntegrationRevokeRpc,
   missionsListRpc,
   type MemoryListOutput,
   type MissionChangeInput,
   type MissionChangeOutput,
   type MissionGetOutput,
+  type MissionIntegrationAskInput,
+  type MissionIntegrationAskOutput,
+  type MissionIntegrationRevokeInput,
+  type MissionIntegrationRevokeOutput,
+  type MissionPlacement,
   type MissionRow,
   type MissionSignal,
   type MissionSummary,
   type MissionsListOutput,
 } from "../shared/contracts";
 import type { CoordinationSettings } from "../shared/coordination";
-import { UNSETTLED_STATUSES } from "../shared/decisions";
+import { UNSETTLED_STATUSES, type Decision } from "../shared/decisions";
 import { isEmptyMissionChange, missionChangeLinesOf, type MissionChange } from "../shared/mission-change";
 import { timeOrZero } from "../shared/time";
 import { readCoordinationSettings } from "./coordination-rpc";
+import { askIntegrationAgain, isIntegrationCard, revokeIntegration } from "./integration-grant";
 import { TRACES_DIR_NAME } from "./data-home";
 import { createDecisionStore } from "./decision-store";
 import { GOVERNOR_FAMILIES, governorFiguresOf, liveWorkersOf, readGovernorSnapshot, type GovernorFigure, type ListedAgent } from "./governor-figures";
@@ -62,9 +78,10 @@ import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-
 import { createMissionDecisionStore } from "./mission-decisions";
 import { createMissionRoster, stopActiveRequests, type RosterEntry } from "./mission-roster";
 import { offerMerges } from "./mission-ownership";
-import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission, type Placement } from "./mission-store";
 import { missionStateOf } from "./mission-state";
 import type { MissionState } from "../shared/mission-state";
+import { openArchiveCards, retitlePlacements } from "./placement-create";
 import { applyMissionChange, missionChangeRefusalsOf, syncMainAfterChange, tellMain } from "./mission-tools";
 import { missionInvalid } from "./missions-home";
 import { workspaceLabelOf } from "./orchestrator-state";
@@ -72,6 +89,7 @@ import { newestReportRecordOf, reportPhaseOf } from "./outbox";
 import type { PaseoCliDeps } from "./paseo-cli";
 import { bmAgentsOf, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { createPeerLinkStore, isLiveLink } from "./peer-links";
+import { repoKeyOf } from "./placements";
 import { isPluginHomeIn } from "./plugin-homes";
 import { firstLine } from "./request-trace";
 import { READ_FAILED, coded, dataHome, errorText, logOf, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
@@ -283,7 +301,7 @@ function rowsOf(context: ReadContext, view: MissionView): MissionRow[] {
     const partners = new Map<string, number>();
     for (const link of links) {
       const asked = link.from.workspaceId === entry.workspaceId && link.from.requestId === entry.requestId;
-      const took = link.to.workspaceId === entry.workspaceId && link.to.requestId === entry.requestId;
+      const took = repoKeyOf(context.home, link.to.workspaceId) === repoKeyOf(context.home, entry.workspaceId) && link.to.requestId === entry.requestId;
       if (!asked && !took) continue;
       const partner = asked ? link.to.workspaceId : link.from.workspaceId;
       if (isPluginHomeIn(partner, context.listed, context.home)) continue;
@@ -339,8 +357,9 @@ export async function handleMissionGet(input: { missionId: string }, paseo: unkn
     const context = await readContextOf(paseo, home, deps);
     const view = missionViewOf(context, mission);
     const { charter } = mission;
+    const flight = inFlightOf(home, mission.missionId);
     return {
-      summary: view.summary,
+      summary: { ...view.summary, repos: withPlacements(home, mission, view.summary.repos, flight.inFlight), ci: context.settings.integration.ci },
       charter: {
         goal: charter.goal,
         nonGoals: charter.nonGoals,
@@ -364,7 +383,7 @@ export async function handleMissionGet(input: { missionId: string }, paseo: unkn
         .map((line) => ({ at: line.at, kind: line.kind, by: line.by, text: line.text })),
       plan: { text: mission.plan.text, updatedAt: mission.plan.updatedAt },
       // Mission runtime design §7: the page's In flight and Main history read the one mission state.
-      ...inFlightOf(home, mission.missionId),
+      ...flight,
       mainHistory: mission.mainHistory.map((entry) => ({ agentId: entry.agentId, from: entry.from, to: entry.to, reason: entry.reason })),
     };
   });
@@ -378,6 +397,48 @@ function inFlightOf(home: string, missionId: string): { inFlight?: MissionState 
   } catch {
     return {};
   }
+}
+
+/**
+ * Push and merge request of a placement (delivery line design §4.3, §4.9):
+ * allowed while its grant is `granted`, revoked once the owner revoked it,
+ * else from its integration card — waiting while open, not now once the
+ * owner answered other than its "Yes" — and none before any card. Pure.
+ */
+export function integrationStateOf(placement: Pick<Placement, "repo" | "integration">, cards: readonly Decision[]): MissionPlacement["integration"] {
+  const grant = placement.integration;
+  if (grant?.state === "granted") return { state: "allowed", at: grant.grantedAt, decisionId: grant.decisionId };
+  if (grant?.state === "revoked") return { state: "revoked", at: grant.revokedAt, decisionId: grant.decisionId };
+  const card = cards.filter((decision) => isIntegrationCard(decision) && decision.options.some((option) => option.action?.kind === "integration.grant" && option.action.repo === placement.repo)).at(-1);
+  if (card === undefined) return { state: "none", at: null, decisionId: null };
+  if (UNSETTLED_STATUSES.includes(card.status)) return { state: "waiting", at: null, decisionId: card.id };
+  const answered = card.status === "answered" && card.answer !== null && card.answer.optionKey !== "a";
+  return { state: answered ? "not-now" : "none", at: null, decisionId: card.id };
+}
+
+/**
+ * The summary's repos, each with a worktree carrying its `placement`
+ * (delivery line design §4.9): its line as the mission state read it (no
+ * git here) and push and merge request (`integrationStateOf`). Never throws:
+ * unreadable cards read as none.
+ */
+function withPlacements(home: string, mission: Mission, repos: MissionSummary["repos"], state: MissionState | undefined): MissionSummary["repos"] {
+  const lines = state?.placements ?? [];
+  if (lines.length === 0) return repos;
+  let cards: Decision[] = [];
+  try {
+    cards = createMissionDecisionStore(home).list(mission.missionId);
+  } catch {
+    cards = [];
+  }
+  const stored = new Map((mission.placements ?? []).map((placement) => [placement.repo, placement]));
+  return repos.map((repo) => {
+    const line = lines.find((entry) => entry.repo === repo.workspaceId);
+    const placement = stored.get(repo.workspaceId);
+    if (line === undefined || placement === undefined) return repo;
+    const { branch, target, state: lineState, dirty, ahead, behind, lastCommitAt, pushed, mr, ci, readAt } = line;
+    return { ...repo, placement: { branch, target, state: lineState, dirty, ahead, behind, lastCommitAt, pushed, mr, ci, readAt, integration: integrationStateOf(placement, cards) } };
+  });
 }
 
 /**
@@ -419,6 +480,9 @@ export async function handleMissionChange(input: MissionChangeInput, paseo: unkn
   if (!result.ok) throw missionInvalid(result.reasons);
   if (change.close === true) stopActiveRequests(home, mission.missionId, log);
   if ((change.addRepos ?? []).length > 0) offerMerges(home, mission.missionId, { now, log });
+  // Delivery line design §3.6: the owner's removal or close retires placements and offers their archive card now; a new code retitles them.
+  if (change.close === true || (change.removeRepos ?? []).length > 0) await openArchiveCards(home, mission.missionId, { log, now: () => now }).catch(() => null);
+  if (change.code !== undefined) await retitlePlacements(paseo, result.mission, log).catch(() => undefined);
   const lines = missionChangeLinesOf(change).join("; ");
   journalQuietly(store, mission.missionId, { kind: "charter", by: "owner", text: `The owner changed the mission from the Missions screen: ${lines}.` }, log);
   await tellMain(mission.missionId, mission.missionId, `The owner changed your mission from the Missions screen: ${lines}.`, {
@@ -465,10 +529,38 @@ export async function handleMemoryList(input: { workspaceId: string }, paseo: un
   });
 }
 
-/** Registers `missions.list`, `mission.get`, `mission.change` and `memory.list`. */
+/**
+ * `mission.integration.revoke` (delivery line design §4.3): the owner's
+ * revoke of the mission's integration grant for `repo`, through
+ * `revokeIntegration`. A refusal writes nothing.
+ */
+export async function handleMissionIntegrationRevoke(input: MissionIntegrationRevokeInput, paseo: unknown, deps: MissionsRpcDeps = {}): Promise<MissionIntegrationRevokeOutput> {
+  const home = requireDataHome(deps, "revoke the integration grant");
+  const mission = coded(READ_FAILED, "read the mission", () => createMissionStore(home).get(input.missionId));
+  if (mission === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
+  const revoked = await revokeIntegration(mission.missionId, input.repo, { home, now: deps.now?.() ?? new Date(), log: logOf(deps), paseo });
+  if (!revoked.ok) throw missionInvalid(revoked.reasons);
+  return { revokedAt: revoked.placement.integration?.revokedAt ?? "", notified: revoked.notified };
+}
+
+/**
+ * `mission.integration.ask` (delivery line design §4.3): the owner's "Ask me
+ * again" from the mission page, through `askIntegrationAgain`. A refusal
+ * writes nothing.
+ */
+export async function handleMissionIntegrationAsk(input: MissionIntegrationAskInput, _paseo: unknown, deps: MissionsRpcDeps = {}): Promise<MissionIntegrationAskOutput> {
+  const home = requireDataHome(deps, "ask about the integration again");
+  const asked = askIntegrationAgain(home, input.missionId, input.repo, { now: deps.now?.() ?? new Date(), log: logOf(deps) });
+  if (!asked.ok) throw missionInvalid(asked.reasons);
+  return { decisionId: asked.decisionId };
+}
+
+/** Registers `missions.list`, `mission.get`, `mission.change`, `mission.integration.revoke`, `mission.integration.ask` and `memory.list`. */
 export function registerMissionsRpcs(server: Pick<PluginServerContext, "handle">, deps: MissionsRpcDeps = {}): void {
   server.handle(missionsListRpc, (_input, context) => handleMissionsList(context?.paseo, deps));
   server.handle(missionGetRpc, (input, context) => handleMissionGet(input, context?.paseo, deps));
   server.handle(missionChangeRpc, (input, context) => handleMissionChange(input, context?.paseo, deps));
+  server.handle(missionIntegrationRevokeRpc, (input, context) => handleMissionIntegrationRevoke(input, context?.paseo, deps));
+  server.handle(missionIntegrationAskRpc, (input, context) => handleMissionIntegrationAsk(input, context?.paseo, deps));
   server.handle(memoryListRpc, (input, context) => handleMemoryList(input, context?.paseo, deps));
 }

@@ -115,7 +115,7 @@ The Orchestrator reads work through its bounded tools, not rule flags, so one ru
 
 | ID | Severity | When it is raised | Evidence |
 |---|---|---|---|
-| `review.over-budget` | warning | `reviewCalls > REVIEW_BUDGET[tier]` (Small 2 · Medium 2 · Large 4, `review-budget.ts`); no tier and more calls than the smallest budget → `unknown` | the review call turns |
+| `review.over-budget` | warning | `overReviewCap(reviewCalls, ceiling)`: the request's review cap (`reviewCapOf`, delivery line design §5.3) plus owner-granted calls; no tier → the Small cap, `unknown` | the review call turns |
 
 It feeds the stall pass (§6). The six other rules of the first design are measured across requests by the replay (`shared/eval-metrics.ts` `supplementary.process`, computed by `eval-metrics/requests.ts` `processOf`, evaluation design §4): `process.small-heavy` → `smallHeavy` (unknown: `processWeightWithoutTier`); `process.no-review` → `unreviewed` (a Reviewer linked with no recorded turn counts as unreviewed; unknown: `unreviewedWithoutTier`); `agent.failed-first-turn` → `failedFirstTurns { worker, reviewer }` (the "in error with no recorded turn" case is dropped: it needs Paseo's live agent list); `report.malformed` → `reportFormat` (already measured) and `finishedWithoutReceived`; `manager.language-mismatch` → `languageMismatch` (unknown: `languageOrderUnknown`; requests with a request id only); `agent.model-corrected` → dropped (the replay does not read `model-corrections.json`). `bm_projects` returns no per-request `signals` and `bm_request` no flags section.
 
@@ -193,7 +193,12 @@ Autopilot (ADR-015) is **retired**, replaced by the owner's autonomy policy (aut
   - A stop (`bm_direct_worker`) needs the project's default class delegated, the owner's own latest inbound message in its chat (`isOwnerWord`), or an answered decision (`stopAuthorityOf`).
   - An answer to an `o:` decision grants nothing; its prepared command goes to a Main with `approved: none`.
   - Every command of the Orchestrator is `via: chat`.
-- **Loop guard** (`server/command-send.ts`): at most **12** delivered commands within the last **24 hours**, counted from the command log (§5.4). `bm_govern` and `bm_arbitrate` count per mission (missions design §9.4); `bm_direct_worker` counts per request. Once full, the tool is refused with a pointer to `bm_ask_owner`, and nothing is sent or recorded. The prepared command of the owner's own answer is counted but never refused.
+- **Loop guard** (`server/command-send.ts`), counted from the command log (§5.4) over the last **24 hours**:
+  - `bm_govern` and `bm_arbitrate` count per mission, in four pools (code nudges, re-plans, arbitrations, others; missions design §9.4, delivery line design §8.1).
+  - `bm_direct_worker` counts per request, at most **12**.
+  - A full pool refuses with "This mission's <pool> commands are spent until <time>; paseo-bm puts the figures in the Main's daily digest. Nothing was sent." Nothing is sent or recorded.
+  - The prepared command of the owner's own answer is counted but never refused.
+  - `bm_ask_owner` about a mission's process passes only from ladder step 4, unless the owner wrote to the Orchestrator in the last 2 hours or the ask is about a goal change or a split (delivery line design §8.3).
 - **Tools** (Orchestrator endpoint):
 
 | Tool | Behaviour |
@@ -332,6 +337,12 @@ Decided in implementing (bead ouuu.3, `dayOldReasonOf`; `loadReasonOf` since ADR
 
 The replacement is `orchestrator.open`'s creation, shared with any in flight, and only while the old one is still the newest (`retire`), so two wake-ups, or one holding an older list, create one agent. The log line gives the reason ("has governed N missions", "has carried N wakes", "is more than a day old"). The old one is never archived or messaged.
 
+**Older Orchestrators are retired** (delivery line design §8.5, `retireOlderOrchestrators`). When more than one agent carries `bm.orchestrator=main`, every older one is relabelled `bm.orchestrator=retired` and retitled "Beads Orchestrator (retired)". The title is set first, so a failed relabel retries both at the next pass. This runs:
+- at the first Paseo handle of a run;
+- at `agent.created` of a `bm-orchestrator` agent, counted even before the list shows it.
+
+It is idempotent. Nothing is archived, stopped or messaged (ADR-005). The owner's 2-hour rule reads `newestOwnerWordOf`, which `ownerWroteRecently` also uses for the step-4 gate (§6A).
+
 ### 6B.7 A project's facts in `orchestrator.state`
 
 `orchestrator.state` returns `{ agent, previousCount, toolsStale, outdated, projects }` (§8); what the retired screen alone read is gone (autonomy design §A.14). The Projects rows read `projects` (autonomy design §A.12): per project `state`, `health: "ok" | "waiting" | "risk" | "idle"`, `stage: "idle" | "received" | "implementing" | "reviewing" | "waiting-user" | "finished"`, `workPhase` (the phase of the newest request's last report that names a stage, `blocked` skipped, or null; `workPhaseOf`), `agents { manager, workers: [], reviewers: [] }` with statuses, `lastProgressAt`, `currentRequest { requestId, title }`, `openSignals: [{ signal, workerId, since }]`, `notes` and `lastAction`. The per-project fields past the first design's are optional, so an older reader or server still parses. There is no `autopilot`, `allow` or `assessment` field (retired, §6A, §5.5); the owner's policy is read with `autonomy.policy`.
@@ -422,3 +433,4 @@ Rows up to 2026-10-02 are archived in [paseo-bm-orchestrator-revision-history-to
 | 2026-10-09 | Claude (owner's delegation) | §6B.3: the danger signal's here-document reading and the role file's peer-link and review-budget lines (ADR-028) |
 | 2026-10-10 | Claude (owner's decision) | `bm_predict` retired (missions design §19): a note where this document first names it |
 | 2026-10-10 | Claude (owner's request: every recommendation of the assessment) | ADR-032 and the governor's present shape: §2 banner, diagram and modules; §3.2 the governor's file; §3.3 the README and first prompt; §6A rewritten (governor events, a mission per wake, `effects: none` authority, the loop guard per mission, retired tools); §6B.1 `bm_govern`/`bm_arbitrate` row; §6B.3 a mission Worker's `danger` to its Main first, the danger log; §6B.4 `bm_direct_worker` stop only; §6B.5 the gate's tools; §6B.6 a fresh Orchestrator after 4 missions, 10 wakes or a day; §7 no grant (ADR-031) |
+| 2026-10-20 | Claude (as built, ADR-035 Phase 6) | §6A loop guard: four pools per mission, the spent-pool text, the step-4 gate on `bm_ask_owner`; §6B.6 older Orchestrators relabelled `retired` (delivery line design §8) |

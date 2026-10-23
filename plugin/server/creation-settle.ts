@@ -50,7 +50,7 @@ import { createAlertStore } from "./alert-store";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { VERSION_LABEL } from "./manager";
 import { unboundManagerAlertOf } from "./outdated-agents";
-import { REQUEST_ID_LABEL, createRequestRegistry, sightRequestId } from "./request-registry";
+import { REQUEST_ID_LABEL, createRequestRegistry, isEmptyCreateCall, sightRequestId } from "./request-registry";
 import { pluginCreationsSettled } from "./review-tools";
 import { asRecord, nonEmpty, reasonOf } from "./role-choices";
 
@@ -121,7 +121,7 @@ export async function settleCreatedAgent(agent: SettledAgent, paseo: unknown, de
     if (batch.reviewerIds.includes(agent.id)) return;
     // The label alone is not trusted: the binding settled here, or the request's own Worker as its parent.
     if (settledHere === null && !request.workerIds.includes(parentId)) return;
-    const call = batch.calls.find((entry) => entry.kind === "create" && entry.reviewerId === "");
+    const call = batch.calls.find(isEmptyCreateCall);
     if (call === undefined) return;
     registry.noteReviewer(workspaceId, forRequest, forBatch, agent.id, call.callId);
     log(`[paseo-bm] Reviewer ${agent.id} is the one the review call ${call.callId} of batch ${forBatch} created; the registry now names it.`);

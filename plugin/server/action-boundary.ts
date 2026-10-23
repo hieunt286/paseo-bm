@@ -25,7 +25,11 @@
  *   classes are `shared/effectful-actions.ts`'s.
  * - **Allow or hold.** No held effect: allowed at once. Each held effect
  *   covered by a live grant of the request — the owner's answered `q:` or
- *   `o:` — allowed, each grant spent (`useGrant`). The rest covered by a
+ *   `o:` — allowed, each grant spent (`useGrant`). In a mission's placement,
+ *   git and the forge CLIs are read against its branch (delivery line design
+ *   §4.2), and a request that only pushes the mission branch, opens or
+ *   updates its merge request or reads the forge is allowed under the
+ *   owner's standing integration grant (§4.3), journalled. The rest covered by a
  *   `delegate` cell of the class its effects imply (any class, security
  *   included at Full auto; ADR-025): allowed, and stored as an `h:` decision
  *   answered at open `by: policy`. Otherwise held: the decision
@@ -98,7 +102,8 @@ import { listAllAgents, parentOf, roleOfProvider } from "./agent-role";
 import { actionBoundaryOfPrompt } from "./role-instructions";
 import { BOUNDARY_LABEL, BOUNDARY_PROVIDERS } from "./role-mode";
 import { aliasBases } from "./alias-bases";
-import { currentPolicy } from "./autonomy-store";
+import { effectivePolicy } from "./placements";
+import { integrationCoverOf, journalIntegrationUse, missionBranchOf } from "./integration-grant";
 import { redactText } from "./collector";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import type { OnDecisionsSettled } from "./decision-rpc";
@@ -524,6 +529,8 @@ export type RequestOutcome =
   | "allowed"
   /** Held effects covered by live grants of the request, now spent. */
   | "allowed-grant"
+  /** Held effects all a push or merge request of the mission branch, or a forge read, under the owner's integration grant (delivery line design §4.3). */
+  | "allowed-integration"
   /** Held effects covered by the owner's policy: an `h:` decision answered `by: policy`. */
   | "allowed-policy"
   /** Held: an open `h:` decision, the request left pending. */
@@ -647,14 +654,16 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
   async function decide(event: { agent: BoundaryAgent; request: BoundaryRequest }, paseo: BoundaryPaseo, known: BoundaryAgentSnapshot | null): Promise<RequestOutcome> {
     const { agent, request } = event;
     const key = `${agent.id}|${request.id}`;
-    const reading = await readingOf(request, agent, paseo, context);
+    const home = homeOf();
+    // Delivery line design §4.2: git and the forge CLIs are read against the request's placement.
+    const placed = missionBranchOf(home, text(agent.workspaceId) ?? text(known?.workspaceId));
+    const reading = await readingOf(request, agent, paseo, placed === null ? context : { ...context, mission: placed.mission });
     const findings = reading.verdict.findings;
     if (findings.length === 0) {
       await respond(paseo, agent.id, request.id, { behavior: "allow" });
       remember(key);
       return "allowed";
     }
-    const home = homeOf();
     const snapshot = known ?? (await snapshotOf(paseo, agent.id));
     if (snapshot?.labels?.[REPLACED_BY_LABEL] !== undefined) {
       await respond(paseo, agent.id, request.id, { behavior: "deny", message: REPLACED_MESSAGE });
@@ -682,6 +691,14 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
       return "allowed-grant";
     }
 
+    // Delivery line design §4.3: the owner's standing integration grant, before the policy; journalled, nothing spent.
+    if (placed !== null && integrationCoverOf(findings, placed.placement)) {
+      await respond(paseo, agent.id, request.id, { behavior: "allow" });
+      remember(key);
+      journalIntegrationUse(home, placed.missionId, placed.placement, { agentId: agent.id, requestId, what: findings.map((finding) => finding.what) }, log);
+      return "allowed-integration";
+    }
+
     const role = roleOfProvider(agent.provider) === "reviewer" ? "reviewer" : "worker";
     const decision = heldDecisionOf({
       agentId: agent.id,
@@ -694,7 +711,8 @@ export function createActionBoundary(deps: ActionBoundaryDeps = {}): ActionBound
     });
 
     // A `delegate` cell (§D.4): allowed, and the `h:` decision stored answered by the policy.
-    const policy = currentPolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy; held requests stay the owner's: ${reason}`));
+    // Delivery line design §3.1: a placement's request is held or allowed by its repo's cells.
+    const policy = effectivePolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy; held requests stay the owner's: ${reason}`));
     const covered = policyCoverOf(findings, (decisionClass) => modeOf(policy, workspaceId, decisionClass));
     if (covered !== null) {
       const decisionClass = decision.class!;

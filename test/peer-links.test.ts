@@ -9,6 +9,7 @@ import {
   MAX_PEER_MESSAGES,
   PEERS_DIR_NAME,
   PEER_LINK_ID_PATTERN,
+  actOf,
   capPeerLinks,
   chainFor,
   createPeerLinkStore,
@@ -277,6 +278,24 @@ describe("messages (design §7.17.1)", () => {
     expect(messages[0]!.gist).toBe("m6");
     expect(messages.at(-1)!.gist).toBe(`m${MAX_PEER_MESSAGES + 5}`);
     expect(messages[0]!.phase).toBeNull();
+  });
+
+  it("keeps a message's act and refs (delivery line design §9.1, §11); an older message without them reads as an answer naming nothing", () => {
+    const home = dataFolder();
+    const links = store(home);
+    const made = created(links.createLink(ask()));
+    links.appendMessage(made.linkId, { recordId: "out-000000000001", workspaceId: B, side: "answerer", agentId: "wrk-b", kind: "peer-message", text: "Agreed.", act: "agree", refs: { contracts: ["C2@v3"] } });
+    links.appendMessage(made.linkId, { recordId: "out-000000000002", workspaceId: A, side: "asker", agentId: "wrk-a", kind: "peer-message", text: "Thanks.", refs: {} });
+    const [typed, plain] = links.get(made.linkId)!.messages;
+    expect(typed).toMatchObject({ act: "agree", refs: { contracts: ["C2@v3"] } });
+    expect(plain!.act).toBeUndefined();
+    expect(plain!.refs).toBeUndefined();
+    expect(actOf(plain!)).toBe("answer");
+    // A file written before Phase 9 parses as it is.
+    const older = { ...made, messages: [{ recordId: "out-000000000003", workspaceId: B, side: "answerer", agentId: "wrk-b", at: T0.toISOString(), kind: "peer-message", phase: null, gist: "old" }] };
+    clearJsonFileCache();
+    writeFileSync(join(home, PEERS_DIR_NAME, "links.json"), JSON.stringify({ schemaVersion: 1, links: [older] }), { mode: 0o600 });
+    expect(actOf(store(home).get(made.linkId)!.messages[0]!)).toBe("answer");
   });
 
   it("refuses a message on a closed link", () => {

@@ -2,7 +2,7 @@
  * Project memory (missions design §2.5, §7; ADR-029): what a repo has
  * decided, learnt and agreed, for the Mains and Workers that come after.
  *
- * `<data folder>/memory/<workspaceId>.json` =
+ * `<data folder>/memory/<repo key>.json` (delivery line design §3.1) =
  * `{ schemaVersion: 1, entries: [{ id, kind, text, source, by, at, supersedes, state }] }`.
  *
  * - **Masking:** `text` (≤ `MAX_MEMORY_TEXT`) and `source`
@@ -22,6 +22,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { redactText } from "./collector";
 import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
+import { repoKeyOf } from "./placements";
 import { WORKSPACE_ID_PATTERN } from "./trace-store";
 import { timeOrZero } from "../shared/time";
 
@@ -112,12 +113,14 @@ export function createMemoryStore(home: string, deps: MemoryStoreDeps = {}): Mem
   const newId = deps.newId ?? newMemoryId;
   const env = deps.env ?? process.env;
 
+  // Delivery line design §3.1: a placement reads and adds to its repo's memory.
   const fileOf = (workspaceId: string): JsonFileStore<{ entries: MemoryEntry[] }> => {
-    if (!isUsableWorkspaceId(workspaceId)) throw new Error(`workspace id is not usable as a file name: ${JSON.stringify(workspaceId)}`);
+    const repo = repoKeyOf(home, workspaceId);
+    if (!isUsableWorkspaceId(repo)) throw new Error(`workspace id is not usable as a file name: ${JSON.stringify(repo)}`);
     return createJsonFileStore<{ entries: MemoryEntry[] }>({
       home,
       dir: MEMORY_DIR_NAME,
-      file: `${workspaceId}.json`,
+      file: `${repo}.json`,
       version: MEMORY_VERSION,
       versionKey: "schemaVersion",
       parse: (body) => ({ entries: entriesOf(entrySchema, body["entries"]) }),

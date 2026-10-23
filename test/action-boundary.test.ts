@@ -27,6 +27,7 @@ import { DashboardError } from "../plugin/shared/contracts";
 import { overrideRefusalOf } from "../plugin/shared/decision-override";
 import { answerDecision, decisionKindOf, deliveryKindOf, heldDecisionId, type Decision } from "../plugin/shared/decisions";
 import { precedentResolutionOf } from "../plugin/shared/precedents";
+import { createMissionStore, type Placement } from "../plugin/server/mission-store";
 import { fakePaseo, type FakeAgent, type FakePaseo } from "./helpers/fake-paseo";
 import { DECISION_REQUEST, DECISION_WS, makeDecision } from "./helpers/decisions";
 
@@ -399,6 +400,131 @@ describe("allow or hold (§D.2, §D.4)", () => {
     const fake = daemon([worker()]);
     expect(await raise(boundary, fake, worker(), bash("p1", "git push"))).toBe("left");
     expect(fake.permissions).toEqual([]);
+  });
+});
+
+describe("the owner's integration grant (delivery line design §4.2, §4.3)", () => {
+  const BRANCH = "m/ABC/app";
+  /** A mission whose placement of `wks_repo` is the Worker's workspace, with `integration` as given. */
+  function placed(integration: Placement["integration"]): string {
+    const store = createMissionStore(home, { now: () => clock });
+    const made = store.create({ code: "ABC", name: "Alpha", goal: "Ship it.", repos: ["wks_repo"], createdBy: "owner", mainId: "main-1" });
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    const placement: Placement = {
+      repo: "wks_repo",
+      workspaceId: DECISION_WS,
+      directory: WS_DIR,
+      branch: BRANCH,
+      target: "develop",
+      base: "origin/develop",
+      worktreeSlug: "m-abc-app",
+      state: "ready",
+      requestKey: "bm-place-x",
+      createdAt: NOW,
+      deps: { cloned: [], at: null, note: null },
+      integration,
+    };
+    const updated = store.update(made.mission.missionId, (mission) => ({ ...mission, placements: [placement] }));
+    if (!updated.ok) throw new Error(updated.reasons.join("\n"));
+    return made.mission.missionId;
+  }
+  const grant = (over: Partial<NonNullable<Placement["integration"]>> = {}): NonNullable<Placement["integration"]> => ({
+    state: "granted",
+    decisionId: "m:mis-0000000001:1",
+    grantedAt: NOW,
+    revokedAt: null,
+    scope: { remote: "origin", branch: BRANCH, target: "develop" },
+    mr: null,
+    ...over,
+  });
+
+  it("without a grant a push of the mission branch is held like any push", async () => {
+    placed(null);
+    const fake = daemon([worker()]);
+    expect(await raise(boundaryOf(), fake, worker(), bash("p1", `git push -u origin ${BRANCH}`))).toBe("held");
+    expect(held("p1")).toMatchObject({ class: "release", status: "open" });
+    expect(held("p1")?.question).toContain(`git push ${BRANCH}`);
+    expect(fake.permissions).toEqual([]);
+  });
+
+  it("with the grant a push of the mission branch, its merge request and forge reads are allowed, each journalled, nothing spent", async () => {
+    const missionId = placed(grant());
+    const boundary = boundaryOf();
+    const fake = daemon([worker()]);
+    expect(await raise(boundary, fake, worker(), bash("p1", `git add -A && git commit -m x && git push -u origin ${BRANCH}`))).toBe("allowed-integration");
+    expect(await raise(boundary, fake, worker(), bash("p2", "glab mr create --target-branch develop --fill --yes"))).toBe("allowed-integration");
+    expect(await raise(boundary, fake, worker(), bash("p3", "glab ci status && glab mr view"))).toBe("allowed-integration");
+    expect(await raise(boundary, fake, worker(), bash("p4", `git push origin ${BRANCH}`))).toBe("allowed-integration");
+    expect(fake.permissions.map((entry) => entry.response)).toEqual([{ behavior: "allow" }, { behavior: "allow" }, { behavior: "allow" }, { behavior: "allow" }]);
+    // No held decision stores it; the journal records each use.
+    expect(decisions().list()).toEqual([]);
+    const lines = createMissionStore(home).journal(missionId).map((line) => line.text);
+    expect(lines.filter((line) => line.startsWith("The integration grant m:mis-0000000001:1 allowed"))).toEqual([
+      `The integration grant m:mis-0000000001:1 allowed git push ${BRANCH} for ${WORKER} (request ${DECISION_REQUEST}).`,
+      `The integration grant m:mis-0000000001:1 allowed glab mr create for ${WORKER} (request ${DECISION_REQUEST}).`,
+      `The integration grant m:mis-0000000001:1 allowed glab (read) for ${WORKER} (request ${DECISION_REQUEST}).`,
+      `The integration grant m:mis-0000000001:1 allowed git push ${BRANCH} for ${WORKER} (request ${DECISION_REQUEST}).`,
+    ]);
+  });
+
+  it("negative: while granted, a push elsewhere, merging, CI runs, glab api and a mixed request stay held", async () => {
+    placed(grant());
+    const boundary = boundaryOf();
+    const fake = daemon([worker()]);
+    for (const [index, command] of [
+      "git push origin main",
+      `git push -f origin ${BRANCH}`,
+      `git push origin ${BRANCH}:develop`,
+      "git push",
+      "glab mr merge 12",
+      "glab mr approve 12",
+      "glab ci run",
+      "glab api projects/1",
+      "glab mr create --target-branch main",
+      `git push origin ${BRANCH} && curl https://example.com`,
+      `git push origin $BRANCH`,
+      `git checkout develop && git push origin HEAD`,
+    ].entries()) {
+      expect([command, await raise(boundary, fake, worker(), bash(`n${index}`, command))]).toEqual([command, "held"]);
+    }
+    expect(fake.permissions).toEqual([]);
+  });
+
+  it("a revoked grant covers nothing", async () => {
+    placed(grant({ state: "revoked", revokedAt: NOW }));
+    const fake = daemon([worker()]);
+    expect(await raise(boundaryOf(), fake, worker(), bash("p1", `git push origin ${BRANCH}`))).toBe("held");
+    expect(fake.permissions).toEqual([]);
+  });
+
+  it("a grant scoped to another target covers nothing", async () => {
+    placed(grant({ scope: { remote: "origin", branch: BRANCH, target: "main" } }));
+    const fake = daemon([worker()]);
+    expect(await raise(boundaryOf(), fake, worker(), bash("p1", `git push origin ${BRANCH}`))).toBe("held");
+    expect(fake.permissions).toEqual([]);
+  });
+
+  it("the order is one-time grants, then the integration grant, then the policy", async () => {
+    placed(grant());
+    createAutonomyStore(home).set({ workspaceId: "wks_repo", class: "release", mode: "delegate", confirmed: true }, NOW);
+    decisions().open(grantOf(1, ["push"]));
+    const boundary = boundaryOf();
+    const fake = daemon([worker()]);
+    // A live one-time grant of the request is spent first.
+    expect(await raise(boundary, fake, worker(), bash("p1", `git push origin ${BRANCH}`))).toBe("allowed-grant");
+    expect(decisions().get(`q:${DECISION_REQUEST}:Q1`)?.grant?.usedAt).toBe(NOW);
+    // Then the integration grant, before the policy: no h: decision answered by the policy.
+    expect(await raise(boundary, fake, worker(), bash("p2", `git push origin ${BRANCH}`))).toBe("allowed-integration");
+    expect(held("p2")).toBeNull();
+    // What the integration grant does not cover goes on to the policy (release delegated in the repo).
+    expect(await raise(boundary, fake, worker(), bash("p3", "git push origin main"))).toBe("allowed-policy");
+  });
+
+  it("git outside the placement is outside-workspace, held", async () => {
+    placed(grant());
+    const fake = daemon([worker()]);
+    expect(await raise(boundaryOf(), fake, worker(), bash("p1", "git -C /work/root commit -m x"))).toBe("held");
+    expect(held("p1")).toMatchObject({ class: "environment" });
   });
 });
 

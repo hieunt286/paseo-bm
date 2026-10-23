@@ -5,9 +5,10 @@
  * - **Autonomy**, open — one level per project, Hands-on to Full auto, and
  *   the project's action boundary under it (ADR-025;
  *   `settings-autonomy.tsx`).
- * - **Coordination**, open — compaction and handoff, each switched on its
- *   own with its thresholds as number fields, the review budget per tier and
- *   how often the Orchestrator advises (autonomy design §G.7;
+ * - **Coordination**, open — compaction, handoff and rollover (delivery line
+ *   design §2.6, §6.6: with the maintenance ceiling), each switched on its
+ *   own with its thresholds as number fields, CI's switch (ADR-036), the review settings with the
+ *   cap per request they make (delivery line design §5.6; autonomy design §G.7;
  *   `settings-coordination.tsx`), then one reset to the defaults. A field
  *   saves with its card's Save, which shows once something changed.
  * - **More**, three joined rows, each "Title · what it holds" with its state
@@ -51,7 +52,6 @@ import {
   type CoordinationSettingsOutput,
 } from "../shared/contracts";
 import { levelsOf } from "../shared/autonomy";
-import { COORDINATION_MECHANISMS, REVIEW_BUDGET_KEYS, type CoordinationMechanism } from "../shared/coordination";
 import { DEFAULT_WARN_ABOVE_BYTES, dashboardSettings } from "../shared/settings";
 import { PLUGIN_VERSION } from "../shared/version";
 import { TraceActions } from "./dashboard-actions";
@@ -61,21 +61,26 @@ import { errorMessageOf } from "./errors";
 import type { InsightsProject } from "./insights-model";
 import { AutonomyGroup } from "./settings-autonomy";
 import { AUTONOMY_MEANING, AUTONOMY_POLICY_KEY, PRECEDENTS_QUERY_KEY, autonomyProjects } from "./settings-autonomy-model";
-import { MechanismCard, ReviewBudgetCard } from "./settings-coordination";
+import { MechanismCard, ReviewCard } from "./settings-coordination";
 import {
+  COORDINATION_CARDS,
   COORDINATION_MEANING,
   MECHANISM_THRESHOLDS,
-  changedReviewBudget,
+  changedReview,
   coordinationDefaultsDraft,
   coordinationResetView,
   changedThresholds,
+  ciCardView,
+  ciToggleChange,
   mechanismCardView,
   parseCoordinationInput,
-  reviewBudgetCardView,
+  REVIEW_KEYS,
+  reviewCardView,
   turnOnDialog,
+  type CoordinationCard,
   type CoordinationInputs,
   type CoordinationNumberKey,
-  type ReviewBudgetDraft,
+  type ReviewDraft,
   type ThresholdDraft,
 } from "./settings-coordination-model";
 import {
@@ -363,13 +368,14 @@ export function StorageRowView({ row, open, onToggle, styles, children }: {
 }
 
 /**
- * One of compaction and handoff (autonomy design §G.7): its switch saves at
- * once (turning on after a confirmation), its thresholds stay a draft (held
+ * One of compaction, handoff and rollover (autonomy design §G.7; delivery
+ * line design §12 item 4): its switch saves at once (turning compaction or
+ * handoff on after a confirmation), its thresholds stay a draft (held
  * by the group, so its reset can fill them) until Save, which sends one
  * `coordination.set` per changed setting.
  */
 function MechanismGroup({ mechanism, data, draft, inputs, onInput, clearInputs, narrow, setDraft, onSaved, styles, theme }: {
-  mechanism: CoordinationMechanism;
+  mechanism: CoordinationCard;
   data: CoordinationSettingsOutput;
   draft: ThresholdDraft;
   inputs: CoordinationInputs;
@@ -391,7 +397,7 @@ function MechanismGroup({ mechanism, data, draft, inputs, onInput, clearInputs, 
     run(
       async () => {
         setError(null);
-        const output = await save(mechanism === "compact" ? { key: "compact.enabled", value } : { key: "handoff.enabled", value });
+        const output = await save({ key: `${mechanism}.enabled`, value });
         onSaved(output.settings);
         setAsking(false);
       },
@@ -401,14 +407,15 @@ function MechanismGroup({ mechanism, data, draft, inputs, onInput, clearInputs, 
     <MechanismCard
       view={view}
       inputs={inputs}
-      dialog={asking ? turnOnDialog(mechanism, settings) : null}
+      dialog={asking && mechanism !== "rollover" ? turnOnDialog(mechanism, settings) : null}
       busy={busy}
       error={error}
       narrow={narrow}
       onToggle={() => {
         setError(null);
-        if (view.toggle.turnsOn) setAsking(true);
-        else setSwitch(false);
+        // Rollover lets nothing act without the owner: it turns on at once, as it turns off.
+        if (view.toggle.turnsOn && mechanism !== "rollover") setAsking(true);
+        else setSwitch(view.toggle.turnsOn);
       }}
       onConfirm={() => setSwitch(true)}
       onCancel={() => setAsking(false)}
@@ -437,19 +444,12 @@ function MechanismGroup({ mechanism, data, draft, inputs, onInput, clearInputs, 
 }
 
 /**
- * The review budget per tier (autonomy design §C.4, §G.7; bead `7gxw.12`):
- * each tier's review calls stay a draft (held by the group) until Save, which
- * sends one `coordination.set` per changed tier. Only a Worker created
- * afterwards gets the new budget.
+ * The CI card (ADR-036, delivery line design §17.1): `integration.ci`, drawn
+ * as a mechanism card with no figures; its switch saves at once both ways.
  */
-function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, narrow, setDraft, onSaved, styles, theme }: {
+function CiGroup({ data, narrow, onSaved, styles, theme }: {
   data: CoordinationSettingsOutput;
   narrow: boolean;
-  draft: ReviewBudgetDraft;
-  inputs: CoordinationInputs;
-  onInput: (key: CoordinationNumberKey, text: string) => void;
-  clearInputs: (keys: readonly CoordinationNumberKey[]) => void;
-  setDraft: (change: (current: ReviewBudgetDraft) => ReviewBudgetDraft) => void;
   onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
   styles: Styles;
   theme: Theme;
@@ -459,8 +459,57 @@ function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, narrow, 
   const [error, setError] = useState<string | null>(null);
   const settings = data.settings;
   return (
-    <ReviewBudgetCard
-      view={reviewBudgetCardView({ settings, defaults: data.defaults, draft, saving: busy })}
+    <MechanismCard
+      view={ciCardView(settings, busy)}
+      inputs={{}}
+      dialog={null}
+      busy={busy}
+      error={error}
+      narrow={narrow}
+      onToggle={() =>
+        run(
+          async () => {
+            setError(null);
+            onSaved((await save(ciToggleChange(settings))).settings);
+          },
+          (failure) => setError(errorMessageOf(failure)),
+        )
+      }
+      onConfirm={() => {}}
+      onCancel={() => {}}
+      onInput={() => {}}
+      onSave={() => {}}
+      styles={styles}
+      theme={theme}
+    />
+  );
+}
+
+/**
+ * The review settings (delivery line design §5.6): `review.maxRereviews` and
+ * `review.callsPerBatch` stay a draft (held by the group) until Save, which
+ * sends one `coordination.set` per changed setting; the cap per request they
+ * make is shown read-only.
+ */
+function ReviewGroup({ data, draft, inputs, onInput, clearInputs, narrow, setDraft, onSaved, styles, theme }: {
+  data: CoordinationSettingsOutput;
+  narrow: boolean;
+  draft: ReviewDraft;
+  inputs: CoordinationInputs;
+  onInput: (key: CoordinationNumberKey, text: string) => void;
+  clearInputs: (keys: readonly CoordinationNumberKey[]) => void;
+  setDraft: (change: (current: ReviewDraft) => ReviewDraft) => void;
+  onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const save = useRpc(coordinationSetRpc);
+  const { busy, run } = useBusyAction();
+  const [error, setError] = useState<string | null>(null);
+  const settings = data.settings;
+  return (
+    <ReviewCard
+      view={reviewCardView({ settings, defaults: data.defaults, draft, saving: busy })}
       inputs={inputs}
       busy={busy}
       error={error}
@@ -473,12 +522,12 @@ function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, narrow, 
         run(
           async () => {
             setError(null);
-            for (const change of changedReviewBudget(settings, draft)) {
+            for (const change of changedReview(settings, draft)) {
               const output = await save(change);
               onSaved(output.settings);
-              setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== change.key)) as ReviewBudgetDraft);
+              setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== change.key)) as ReviewDraft);
             }
-            clearInputs(Object.values(REVIEW_BUDGET_KEYS));
+            clearInputs(REVIEW_KEYS);
           },
           (failure) => setError(errorMessageOf(failure)),
         )
@@ -491,8 +540,8 @@ function ReviewBudgetGroup({ data, draft, inputs, onInput, clearInputs, narrow, 
 
 /**
  * Settings → Coordination (autonomy design §G.7; change-014 outcome 5),
- * open on the screen: compaction and handoff, each a card of its own, the
- * review budget, then **Reset coordination to defaults**, which fills every
+ * open on the screen: compaction, handoff and rollover, each a card of its
+ * own, CI (ADR-036), the review settings, then **Reset coordination to defaults**, which fills every
  * card's draft with the defaults. An edit stays a draft until its card's Save.
  * The advice cadence's card is retired (ADR-029 decision 9).
  */
@@ -504,7 +553,7 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
   theme: Theme;
 }) {
   const [thresholds, setThresholds] = useState<ThresholdDraft>({});
-  const [review, setReview] = useState<ReviewBudgetDraft>({});
+  const [review, setReview] = useState<ReviewDraft>({});
   // The text of the fields being typed in; a valid one is also in its draft.
   const [inputs, setInputs] = useState<CoordinationInputs>({});
   const reset = coordinationResetView(false);
@@ -519,7 +568,7 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
     setInputs((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !keys.includes(key as CoordinationNumberKey))));
   return (
     <View style={{ gap: narrow ? 12 : 14 }}>
-      {COORDINATION_MECHANISMS.map((mechanism) => (
+      {COORDINATION_CARDS.map((mechanism) => (
         <MechanismGroup
           key={mechanism}
           mechanism={mechanism}
@@ -535,9 +584,10 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
           theme={theme}
         />
       ))}
-      {/* The review budget alone in its row, as wide as the mechanism cards above (its wide card is `flex: 1`). */}
+      <CiGroup data={data} narrow={narrow} onSaved={onSaved} styles={styles} theme={theme} />
+      {/* The review settings alone in their row, as wide as the mechanism cards above (the wide card is `flex: 1`). */}
       <View style={{ flexDirection: narrow ? "column" : "row", alignItems: "stretch" }}>
-        <ReviewBudgetGroup
+        <ReviewGroup
           data={data}
           narrow={narrow}
           draft={review}

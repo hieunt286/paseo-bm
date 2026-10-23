@@ -51,7 +51,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { listAllAgents, roleOfAgent, type BmRole } from "./agent-role";
 import { createAlertStore, type AlertInput, type AlertStore } from "./alert-store";
-import { currentPolicy } from "./autonomy-store";
+import { effectivePolicy } from "./placements";
 import { boundaryConfigOf, detectBoundaryOff } from "./boundary-off";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
@@ -336,7 +336,7 @@ export function createOutdatedAgentsPass(deps: OutdatedAgentsDeps = {}): Outdate
           await detectOutdatedAgents(paseo, store, at, agents, openMissionsOf(home));
           // The action boundary's alert (§D.2): only with the config read; an unreadable one changes nothing.
           const config = await boundaryConfigOf(paseo);
-          if (config !== null) detectBoundaryOff(agents, store, currentPolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy: ${reason}`)), config);
+          if (config !== null) detectBoundaryOff(agents, store, effectivePolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy: ${reason}`)), config);
         } catch (error) {
           log(`[paseo-bm] could not check the agents for older instructions: ${errorText(error)}`);
         } finally {

@@ -11,6 +11,7 @@ import {
   median,
   percentile,
   recordStart,
+  sameQuestionText,
   tokenProviderOf,
   turnTokensOf,
   type EvalInput,
@@ -44,6 +45,7 @@ import type { Proposal, WakeEntry } from "../plugin/shared/orchestrator";
 import { INTERVENTION_KINDS, type InterventionEntry } from "../plugin/shared/interventions";
 import { makeDecision, storedOrchestratorAnswer } from "./helpers/decisions";
 import { heldDecisionOf } from "../plugin/server/action-boundary";
+import { sameQuestionText as materialiserSameQuestionText } from "../plugin/server/decision-materialiser";
 import {
   MANAGER,
   REVIEWER,
@@ -441,6 +443,12 @@ describe("A-6 effectful actions", () => {
 
   it("lists every action of the Worker-watch list", () => {
     expect(Object.keys(metrics([]).a6.byAction)).toEqual([...EFFECTFUL_ACTIONS]);
+  });
+
+  it("counts a merge request and a merge as effectful actions (delivery line design §4.2)", () => {
+    const m = metrics([workerGot(at(7), "Open it.", "agent", { evidence: [shell("glab mr create --target-branch develop --fill", at(7)), shell("gh pr merge 3", at(7, 5))] })]);
+    expect(m.a6.byAction["glab mr create/update"]).toEqual({ authorised: 0, notShownAuthorised: 1 });
+    expect(m.a6.byAction["gh pr merge"]).toEqual({ authorised: 0, notShownAuthorised: 1 });
   });
 
   // Autonomy design §D.2 (change-009 C6): a held request the owner allowed is their grant to its request.
@@ -1606,6 +1614,120 @@ describe("A-14 the Mains' turns by what started them (mission runtime design §1
   });
 });
 
+describe("M-39 and M-41 the owner's cards: about review, and not product decisions (delivery line design §13)", () => {
+  const MISSION = "mis-00000000a1";
+  const LONE = "mis-00000000b2";
+  const owner = (minute: number, optionKey = "c") => ({
+    status: "answered" as const,
+    settledAt: at(minute),
+    answer: { by: "owner" as const, via: "inbox" as const, optionKey, words: null, at: at(minute) },
+  });
+  const byPolicy = (minute: number) => ({
+    status: "answered" as const,
+    settledAt: at(minute),
+    answer: { by: "policy" as const, via: "inbox" as const, optionKey: "c", words: null, at: at(minute) },
+  });
+  const noEffects = [
+    { key: "a", label: "Go on", recommended: true, effects: ["none" as const] },
+    { key: "b", label: "Stop", recommended: false, effects: ["none" as const] },
+  ];
+  const question = (requestId: string, n: number, extra: Partial<Decision> = {}): Decision =>
+    makeDecision({ id: `q:${requestId}:Q${n}`, requestId, workspaceId: WORKSPACE_ID, askedAt: at(1), ...extra });
+  const orchestratorCard = (id: string, extra: Partial<Decision> = {}): Decision =>
+    makeDecision({ id, requestId: R, workspaceId: WORKSPACE_ID, askedBy: { role: "orchestrator", agentId: ORCHESTRATOR }, round: null, subject: null, options: noEffects, ...extra });
+  const missionCard = (missionId: string, n: number, extra: Partial<Decision> = {}): Decision =>
+    makeDecision({ id: `m:${missionId}:${n}`, requestId: null, workspaceId: missionId, askedBy: { role: "plugin", agentId: "agent-main" }, round: null, subject: null, options: noEffects, ...extra });
+
+  const decisions: Decision[] = [
+    // M-39: the retired question below the cap (the owner answered it), the one at the cap (still open), and the cap of another request.
+    question(R, 1, { subject: "review-budget", ...owner(3) }),
+    question(R, 2, { subject: "review-cap", askedAt: at(4) }),
+    question(R2, 3, { subject: "review-cap", askedAt: at(4), ...owner(6) }),
+    // Not cards: the policy answered it; an override is the owner's own act.
+    question(R2, 4, { subject: "review-budget", ...byPolicy(2) }),
+    makeDecision({ id: "r:override-1", requestId: R, workspaceId: WORKSPACE_ID, askedBy: { role: "plugin", agentId: null }, subject: null, ...owner(9) }),
+    // A product question of R2, open from minute 1 to minute 20.
+    question(R2, 1, { question: "Which export format should the invoice use?", subject: "export-format", ...owner(20) }),
+    // The Main repeats it while it is open: a duplicate (other case and punctuation); after it closed: a product card.
+    missionCard(MISSION, 1, { question: "which EXPORT format, should the invoice use", askedAt: at(10), ...owner(12, "a") }),
+    missionCard(MISSION, 2, { question: "Which export format should the invoice use?", askedAt: at(30) }),
+    // An equal subject is a duplicate too.
+    missionCard(MISSION, 3, { question: "Another wording entirely", subject: "export-format", askedAt: at(15) }),
+    // A mission whose requests were not read: never judged.
+    missionCard(LONE, 1, { question: "Which export format should the invoice use?", askedAt: at(10) }),
+    // The governor: a process-class card counts; a goal change, a mission action and a riskier class do not.
+    orchestratorCard("o:process-1", { class: "scope", subject: "slow-progress" }),
+    orchestratorCard("o:process-2", { class: "preference" }),
+    orchestratorCard("o:goal-1", { class: "scope", subject: "mission-goal" }),
+    orchestratorCard("o:change-1", {
+      class: "scope",
+      options: [
+        { key: "a", label: "Change", recommended: true, effects: ["none"], action: { kind: "mission-change", missionId: MISSION, change: { goal: "New goal" } } },
+        { key: "b", label: "Keep", recommended: false, effects: ["none"] },
+      ],
+    }),
+    orchestratorCard("o:security-1", { class: "security" }),
+    // Answered by the Orchestrator: never reached the owner.
+    orchestratorCard("o:process-3", { class: "scope", status: "answered", settledAt: at(5), answer: { by: "orchestrator", via: "autopilot", optionKey: "a", words: null, at: at(5) } }),
+  ];
+  const input = (extra: Partial<EvalInput> = {}): Partial<EvalInput> => ({
+    decisions: decisions.filter((decision) => !decision.id.startsWith("m:")),
+    missionDecisions: [...decisions.filter((decision) => decision.id.startsWith("m:")), { id: "m:not-a-decision" }],
+    missionRequests: { [MISSION]: [R2] },
+    ...extra,
+  });
+
+  it("M-39: the owner's cards about review per request, the retired ones below the cap apart", () => {
+    const m = metrics([], input());
+    expect(m.m39).toEqual({ decisionsIncluded: true, cards: 3, reviewCap: 2, belowCap: 1, requests: 2, maxPerRequest: 2, meanPerRequest: 1.5, requestsOverOne: 1, withoutRequest: 0 });
+    expect(m.unknowns.invalidMissionDecisions).toBe(1);
+    // Without a decision store nothing is counted, and it says so.
+    expect(metrics([]).m39).toMatchObject({ decisionsIncluded: false, cards: 0, maxPerRequest: null, meanPerRequest: null });
+  });
+
+  it("M-41: each card in one kind — review, a duplicate of an open q:, the governor's process — and the share of all cards", () => {
+    const m = metrics([], input());
+    // Cards: 3 review + the product q: + 4 m: + 5 o: (one answered by the Orchestrator is not) = 13.
+    expect(m.m41).toEqual({
+      decisionsIncluded: true,
+      missionDecisionsIncluded: true,
+      cards: 13,
+      notProduct: 7,
+      share: 7 / 13,
+      byKind: { duplicate: 2, governorProcess: 2, review: 3 },
+      missionCardsWithoutRequests: 1,
+    });
+  });
+
+  it("M-41 without the missions' decisions or their requests: no duplicate is counted, and it says so", () => {
+    const withoutMissions = metrics([], { decisions: input().decisions! });
+    expect(withoutMissions.m41).toMatchObject({ missionDecisionsIncluded: false, cards: 9, byKind: { duplicate: 0, governorProcess: 2, review: 3 }, missionCardsWithoutRequests: 0 });
+    const withoutRosters = metrics([], input({ missionRequests: {} }));
+    expect(withoutRosters.m41).toMatchObject({ cards: 13, byKind: { duplicate: 0, governorProcess: 2, review: 3 }, missionCardsWithoutRequests: 4 });
+    expect(metrics([]).m41).toMatchObject({ decisionsIncluded: false, cards: 0, share: null });
+  });
+
+  it("counts a card as A-4 does: its request in the window, else asked in it", () => {
+    const records = [turn({ requestId: R, at: at(1), turnId: "m-1" })];
+    // R's earliest activity is minute 1: in a window from minute 2 its cards are out; R2 has no record, so its cards count by their own time.
+    const m = metrics(records, { ...input(), window: { since: at(2), until: null } });
+    expect(m.m39).toMatchObject({ cards: 1, reviewCap: 1, belowCap: 0, requests: 1 });
+    // Out: R's two review cards and its five o: cards; the R2 question asked at minute 1. The m: cards and R2's review-cap stay.
+    expect(m.m41).toMatchObject({ cards: 5, byKind: { duplicate: 2, governorProcess: 0, review: 1 } });
+  });
+
+  it("compares question text as the materialiser does", () => {
+    for (const [a, b] of [
+      ["Which export format?", "which   EXPORT format"],
+      ["Ｆｕｌｌ width", "full width"],
+      ["Keep it", "Drop it"],
+      ["?!", "..."],
+    ] as const) {
+      expect(sameQuestionText(a, b)).toBe(materialiserSameQuestionText(a, b));
+    }
+  });
+});
+
 describe("A-13 the governor's scale (missions design §20, ADR-032 decision 6)", () => {
   const A = "mis-000000000a";
   const B = "mis-000000000b";
@@ -1925,7 +2047,12 @@ describe("a 0.4.1 store is read as before", () => {
       a7: { ...withEmpty.a7, approximate: true, wakeRecordsIncluded: false },
       a8: { ...withEmpty.a8, orchestrator: STORE_METRICS.a8.orchestrator },
       a13: { ...withEmpty.a13, wakeRecordsIncluded: STORE_METRICS.a13.wakeRecordsIncluded },
+      // An empty decision store is read: M-39 and M-41 say so, and count nothing.
+      m39: { ...withEmpty.m39, decisionsIncluded: false },
+      m41: { ...withEmpty.m41, decisionsIncluded: false },
+      m40: { ...withEmpty.m40, decisionsIncluded: false },
     }).toEqual(STORE_METRICS);
+    expect([withEmpty.m39.decisionsIncluded, withEmpty.m41.decisionsIncluded, withEmpty.m40.decisionsIncluded]).toEqual([true, true, true]);
   });
 });
 
@@ -2092,6 +2219,46 @@ const STORE_METRICS: EvalMetrics = {
     reopen: { offMission: null, dangerBackup: null, noAction: null, tokens: null },
   },
   a14: { homeKnown: false, turns: 0, byTrigger: { owner: 0, report: 0, message: 0, peer: 0, command: 0, state: 0, other: 0 }, ownerShare: null, batched: 0 },
+  m39: { decisionsIncluded: false, cards: 0, reviewCap: 0, belowCap: 0, requests: 0, maxPerRequest: null, meanPerRequest: null, requestsOverOne: 0, withoutRequest: 0 },
+  m41: { decisionsIncluded: false, missionDecisionsIncluded: false, cards: 0, notProduct: 0, share: null, byKind: { duplicate: 0, governorProcess: 0, review: 0 }, missionCardsWithoutRequests: 0 },
+  // Medium 4,400 and Small 1,150 tokens read, at the default ceiling of 2 × 50 million; no registry, so each is its own chain.
+  m36: {
+    registryIncluded: false,
+    settingsIncluded: false,
+    ceilingTokens: 100_000_000,
+    requests: 2,
+    largest: { requestId: R, workspaceId: WORKSPACE_ID, tokensRead: 4400 },
+    p50: 1150,
+    p95: 4400,
+    overCeiling: 0,
+    chains: 0,
+    largestChain: { rootId: R, requests: 1, tokensRead: 4400 },
+  },
+  // No mission roster and no placement: no request is a mission's, and the Main's turns carry the reports naming files.
+  m37: { missionsIncluded: false, placementsIncluded: false, requests: 0, requestsWithoutMission: 0, files: 0, inPlacements: 0, pairs: [] },
+  m38: { missionsIncluded: false, finished: 0, changedFiles: 0, uncommitted: 0, committedBy: { line: 0, report: 0 }, verified: 0, verifiedBy: { ci: 0, check: 0 }, ciRed: 0, verifiedShare: null },
+  // The blocked reports name no id, and the Main's turns carry them: no Worker turn ends with a report of its own that is blocked.
+  m40: {
+    registryIncluded: false,
+    decisionsIncluded: false,
+    workerTurns: 5,
+    afterBlocked: 0,
+    startedWhileWaiting: 0,
+    notJudged: 0,
+    tokensReadWhileWaiting: 0,
+    byMarker: {},
+    workerTokensRead: 4600,
+    blockedEndTurns: 0,
+    blockedEndTokensRead: 0,
+    blockedEndShare: 0,
+  },
+  m42: {
+    compactionsIncluded: false,
+    handoffsIncluded: false,
+    ceilingMs: { compact: 1_800_000, handoff: 1_800_000 },
+    compactions: { entries: 0, dropped: 0, afterCeiling: 0 },
+    handoffs: { entries: 0, dropped: 0, afterCeiling: 0 },
+  },
   // No model id: every turn's provider is unknown, read as input + cached; no context and no tool calls recorded.
   context: {
     turns: { withUsage: 12, byProvider: { claude: 0, codex: 0, opencode: 0, unknown: 12 }, repeated: 0, withToolCalls: 0 },
@@ -2172,12 +2339,15 @@ const STORE_METRICS: EvalMetrics = {
     decisionsWithoutRequest: 0,
     invalidProposals: 0,
     invalidDecisions: 0,
+    invalidMissionDecisions: 0,
     invalidStallEntries: 0,
     invalidWakes: 0,
     wakesWithoutTime: 0,
     wakesWithoutEnd: 0,
     invalidInterventions: 0,
     invalidDangerEntries: 0,
+    invalidRequestEntries: 0,
+    invalidMaintenanceEntries: 0,
     effectfulWithoutTime: 0,
     rmTargetsNotJudged: 0,
     processWeightWithoutTier: 0,

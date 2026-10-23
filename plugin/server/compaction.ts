@@ -17,7 +17,15 @@
  *    the target (`turnRecorded`, the collector's `onRecorded`), the start's
  *    own included; never inside a running
  *    turn — the command goes through the notice queue, which sends only to an
- *    idle agent. It waits at most `SAFE_POINT_WAIT_MS`.
+ *    idle agent. It waits at most `SAFE_POINT_WAIT_MS`. A Worker waiting by
+ *    structure is at a safe point too: its last turn sent a report, and what
+ *    is held for it is outside the queue (delivery line design §6.6).
+ *    **The maintenance ceiling** (§6.6): once this turn's figure is at least
+ *    `maintenance.ceilingFactor` × its threshold, or the compaction has
+ *    waited `MAINTENANCE_WAIT_MS.compact`, it goes at this turn end without
+ *    the safe-point and quiet-queue checks, ahead of what is queued (`first`).
+ *    Reached once, the ceiling holds until it runs (`ceilingAt`): a later
+ *    turn's lower figure does not take it back.
  * 2. **The command** (`compactCommandOf`), recorded in the send log just
  *    before it goes (`logSend`): Claude gets `/compact` with a fixed focus,
  *    `COMPACT_FOCUS`, which it honours; Codex and OpenCode a bare `/compact`,
@@ -26,8 +34,10 @@
  *    `onSent` marks the entry `compacting` at the moment it went out, and its
  *    `isCurrent` drops it when compaction was turned off meanwhile or it was
  *    held past its moment (`SAFE_SEND_MS`: the target turned busy between the
- *    look and the send) — the next safe point sends it again. No provider
- *    falls back to a handoff.
+ *    look and the send) — the next safe point sends it again. One queued at
+ *    its ceiling has no such moment: queued behind a notice sent at that
+ *    turn end, it goes at the target's next one. No provider falls back to a
+ *    handoff.
  * 3. **The compaction.** The target's next recorded turn with a completed
  *    `compaction` item (the collector's `compaction` evidence) at or after the
  *    send; at most `COMPACTION_WAIT_MS`, else the entry fails.
@@ -36,7 +46,8 @@
  *    the latest report's plan, beads, open findings, files and checks; for a
  *    Manager its recent requests and the owner's newest words — masked with
  *    `redactText`, at most `STATE_BRIEF_MAX_CHARS`. Recorded in the send log
- *    too, then handed to the notice queue; the entry is `done`.
+ *    too, then handed to the notice queue ahead of what is queued (`first`,
+ *    §6.6); the entry is `done`.
  *
  * The threshold check reads the context at the target's NEXT turn end after a
  * compaction: the figure right after it understates the real one (spike run
@@ -46,7 +57,17 @@
  */
 import { isMissionMain } from "./main-channel";
 import { join } from "node:path";
-import { compactCrossingOf, compactionOnFor, mainCompactionOnFor, mainContextCrossingOf, type CoordinationRole, type CoordinationSettings, type ThresholdCrossing } from "../shared/coordination";
+import {
+  atMaintenanceCeiling,
+  compactCrossingOf,
+  compactionOnFor,
+  mainCompactionOnFor,
+  mainContextCrossingOf,
+  type CoordinationRole,
+  type CoordinationSettings,
+  type ThresholdCrossing,
+} from "../shared/coordination";
+import { MAINTENANCE_WAIT_MS } from "../shared/interventions";
 import type { ParsedReport, TraceMessage, TraceRecord } from "../shared/contracts";
 import { BRIEF_CHARACTERS, turnTokensOf } from "../shared/eval-metrics/tokens";
 import { STATE_NOTICE_MARKER } from "../shared/notices";
@@ -72,8 +93,9 @@ import { readRecords } from "./trace-store";
 import { reconstructTraces, type ReconstructedTrace } from "./traces";
 import { errorText } from "./rpc-kit";
 import { createMissionStore } from "./mission-store";
-import { missionStateOf } from "./mission-state";
-import { renderMissionState } from "../shared/mission-state";
+import { missionStateOf, requestLinksAndContractsOf } from "./mission-state";
+import { gatedWaitOf } from "./wake-gate";
+import { contractLineOf, linkLineOf, renderMissionState } from "../shared/mission-state";
 
 /**
  * What Claude is told to keep (design §G.5 step 2): the request and the
@@ -246,8 +268,31 @@ function reportLines(reports: readonly ParsedReport[], env: NodeJS.ProcessEnv): 
 const BRIEF_INTRO =
   "From the paseo-bm plugin, not the owner: your context was just compacted, as it crossed the owner's threshold. Below is what the plugin's stores hold, so what matters comes from the records rather than from the summary alone; keep it as your working memory. Nothing is asked of you: reply `noted` in one line and end this turn.";
 
-/** The Worker's brief: its request, the owner's words, the decisions and its reports. */
-function workerBrief(entry: CompactionEntry, trace: ReconstructedTrace | undefined, decisions: readonly Decision[], env: NodeJS.ProcessEnv): string[] {
+/** The most characters a Worker's brief gives its links and contracts (delivery line design §9.3): the rest of the 6,000 is its request and reports. */
+export const WORKER_LINKS_BLOCK_MAX_CHARS = 2_400;
+
+/**
+ * A Worker's links and the contracts touching its repo (delivery line design
+ * §9.3), in the Main's `BM-STATE` line formats (`linkLineOf`,
+ * `contractLineOf`): nothing when it has neither. Past
+ * `WORKER_LINKS_BLOCK_MAX_CHARS`, contracts drop first (from the end), then
+ * the oldest links, as the Main's state drops Contracts before Links.
+ */
+export function workerLinkLines(home: string, entry: Pick<CompactionEntry, "workspaceId" | "requestId">, env: NodeJS.ProcessEnv, now: Date = new Date()): string[] {
+  if (entry.requestId === null) return [];
+  const { links, contracts } = requestLinksAndContractsOf(home, { workspaceId: entry.workspaceId, requestId: entry.requestId }, { env, now: () => now });
+  const linkLines = links.map((link) => linkLineOf(link, now.getTime()));
+  const contractLines = contracts.map(contractLineOf);
+  const block = (): string[] => [...(linkLines.length === 0 ? [] : ["links:", ...linkLines]), ...(contractLines.length === 0 ? [] : ["contracts:", ...contractLines])];
+  while (block().join("\n").length > WORKER_LINKS_BLOCK_MAX_CHARS && (contractLines.length > 0 || linkLines.length > 0)) {
+    if (contractLines.length > 0) contractLines.pop();
+    else linkLines.shift();
+  }
+  return block();
+}
+
+/** The Worker's brief: its request, the owner's words, the decisions, its links and contracts (delivery line design §9.3) and its reports. */
+function workerBrief(entry: CompactionEntry, trace: ReconstructedTrace | undefined, decisions: readonly Decision[], env: NodeJS.ProcessEnv, home: string): string[] {
   const owner = trace === undefined ? [] : ownerMessagesOf(trace);
   const first = owner[0]?.text ?? trace?.requestText ?? null;
   const later = owner.slice(1).slice(-3);
@@ -259,6 +304,7 @@ function workerBrief(entry: CompactionEntry, trace: ReconstructedTrace | undefin
     ...(decisions.length === 0
       ? ["decisions: none"]
       : ["decisions:", ...decisions.slice(-8).map((decision) => `- ${decision.id} (${answerText(decision, env)}): ${shorten(redactText(decision.question.split("\n")[0] ?? "", env), 200)}`)]),
+    ...workerLinkLines(home, entry, env),
     ...reportLines(trace?.reports ?? [], env),
   ];
 }
@@ -341,7 +387,7 @@ export function stateBriefOf(entry: CompactionEntry, home: string, env: NodeJS.P
   }
   const body =
     entry.role === "worker"
-      ? workerBrief(entry, traces.find((trace) => trace.requestId !== null && trace.requestId === entry.requestId), decisions, env)
+      ? workerBrief(entry, traces.find((trace) => trace.requestId !== null && trace.requestId === entry.requestId), decisions, env, home)
       : (mainStateLines(entry, home, env) ?? managerBrief(entry, traces, decisions, records, env));
   const text = [STATE_NOTICE_MARKER, BRIEF_INTRO, ...body].join("\n");
   return text.length <= STATE_BRIEF_MAX_CHARS ? text : `${text.slice(0, STATE_BRIEF_MAX_CHARS - 2).trimEnd()}\n…`;
@@ -413,9 +459,9 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
     return entry.role === "manager" && isMissionMain(home, entry.agentId) ? mainCompactionOnFor(settings, entry.provider) : compactionOnFor(settings, entry.provider);
   };
 
-  /** At the idle moment, synchronously: still waiting, compaction still on, and not held past its safe moment. */
+  /** At the idle moment, synchronously: still waiting, compaction still on, and not held past its safe moment (none at its ceiling). */
   const currentAt =
-    (id: string, enqueuedAt: number) =>
+    (id: string, enqueuedAt: number, ceiling: boolean) =>
     (): boolean => {
       const home = homeOf();
       if (home === null) return false;
@@ -426,14 +472,14 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
         store.update(id, (current) => endedEntry(current, "off", now().toISOString()));
         return false;
       }
-      return now().getTime() - enqueuedAt <= SAFE_SEND_MS;
+      return ceiling || now().getTime() - enqueuedAt <= SAFE_SEND_MS;
     };
 
-  async function sendCompact(home: string, entry: CompactionEntry, paseo: unknown): Promise<"sent" | "queued" | "waiting"> {
+  async function sendCompact(home: string, entry: CompactionEntry, paseo: unknown, first: boolean): Promise<"sent" | "queued" | "waiting"> {
     const text = compactCommandOf(entry.provider);
     // Before the send: the collector must find it when the compaction's turn is recorded.
     storeOf(home).logSend(entry.agentId, text, entry.id);
-    const item: BatchItem = { key: entry.id, line: text, isCurrent: currentAt(entry.id, now().getTime()) };
+    const item: BatchItem = { key: entry.id, line: text, isCurrent: currentAt(entry.id, now().getTime(), first), ...(first ? { first } : {}) };
     const [outcome] = await queue.enqueueBatch(entry.agentId, batch, [item], paseo as NoticePaseo | undefined);
     return outcome === "sent" || outcome === "queued" ? outcome : "waiting";
   }
@@ -444,7 +490,8 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
     store.logSend(entry.agentId, brief, entry.id);
     const at = now().toISOString();
     store.update(entry.id, (current) => ({ ...current, state: "done", compactedAt, briefAt: at, endedAt: at }));
-    const outcome = await queue.enqueue(entry.agentId, STATE_NOTICE_MARKER, brief, paseo as NoticePaseo | undefined);
+    // Delivery line design §6.6: the brief goes before anything queued meanwhile.
+    const outcome = await queue.enqueue(entry.agentId, STATE_NOTICE_MARKER, brief, paseo as NoticePaseo | undefined, undefined, { first: true });
     if (outcome === "dropped") log(`[paseo-bm] the BM-STATE brief of compaction ${entry.id} could not be delivered to ${entry.agentId}.`);
   }
 
@@ -494,6 +541,27 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
     });
   }
 
+  /**
+   * Delivery line design §6.6: this turn's figure is at least
+   * `maintenance.ceilingFactor` × its threshold — a Main's by its real context,
+   * any other agent's by its role's figure — or the compaction has waited
+   * `MAINTENANCE_WAIT_MS.compact`; or it reached its ceiling at an earlier turn
+   * end (`ceilingAt`), which holds until it runs.
+   */
+  function atCeiling(home: string, entry: CompactionEntry, record: TraceRecord): boolean {
+    if (entry.ceilingAt !== undefined) return true;
+    if (now().getTime() - (timeOrNull(entry.requestedAt) ?? now().getTime()) >= MAINTENANCE_WAIT_MS.compact) return true;
+    const settings = readCoordinationSettings({ home, log });
+    const crossing = entry.role === "manager" && isMissionMain(home, entry.agentId) ? mainCrossingOf(record, settings) : contextCrossingOf(record, settings);
+    return atMaintenanceCeiling(crossing, settings);
+  }
+
+  /** §6.6: a Worker waiting by structure is at a safe point — its last turn sent a report; what is held for it is outside the queue. */
+  function waitsByStructure(home: string, entry: CompactionEntry): boolean {
+    if (entry.role !== "worker") return false;
+    return gatedWaitOf(home, entry.agentId, entry.requestId === null ? null : { workspaceId: entry.workspaceId, requestId: entry.requestId }) !== null;
+  }
+
   return {
     queue,
 
@@ -515,10 +583,17 @@ export function createCompactionRunner(deps: CompactionRunnerDeps = {}): Compact
           store.update(entry.id, (current) => endedEntry(current, "off", now().toISOString()));
           return;
         }
-        const timeline = (event as { timeline?: unknown } | null | undefined)?.timeline;
-        const safe = entry.role === "manager" || record.reports.length > 0 || reportedIn(Array.isArray(timeline) ? timeline : []);
-        if (!safe || othersQueued(queue, entry.agentId)) return;
-        await sendCompact(home, entry, paseo);
+        const ceiling = atCeiling(home, entry, record);
+        if (ceiling && entry.ceilingAt === undefined) {
+          const at = now().toISOString();
+          store.update(entry.id, (current) => (current.state === "waiting" && current.ceilingAt === undefined ? { ...current, ceilingAt: at } : current));
+        }
+        if (!ceiling) {
+          const timeline = (event as { timeline?: unknown } | null | undefined)?.timeline;
+          const safe = entry.role === "manager" || record.reports.length > 0 || reportedIn(Array.isArray(timeline) ? timeline : []) || waitsByStructure(home, entry);
+          if (!safe || othersQueued(queue, entry.agentId)) return;
+        }
+        await sendCompact(home, entry, paseo, ceiling);
       } catch (error) {
         log(`[paseo-bm] could not advance a compaction after a turn of ${record?.agentId ?? "an agent"}: ${errorText(error)}`);
       }

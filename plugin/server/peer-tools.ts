@@ -7,7 +7,7 @@
  * |---|---|
  * | `bm_peers` | reads the other projects (each with its live Manager) and this workspace's links both ways, newest first, at most `PEERS_LINKS_SHOWN` |
  * | `bm_ask_project` | a Worker only: resolves the project and its bound Manager (opening one when it has none), writes the link `open`, stores a `peer` record in the asker's outbox and delivers it |
- * | `bm_peer_reply` | a party of the link stores a `peer-message` record in its own outbox and delivers it to the other side; `close: true` closes the link after it |
+ * | `bm_peer_reply` | a party of the link stores a `peer-message` record in its own outbox and delivers it to the other side; its `act` and `refs` head it (delivery line design §9.1); `ack` and `close` (`close: true`) start no turn; `close` closes the link after it; `agree` records the agreement to a contract (§9.2) |
  * | `bm_link_workers` | a Main opens a `worker` link between two live Workers of its mission (an open `ask-main` of one of them becomes it) and tells each the other and the topic |
  * | `bm_ask_mission` | a Main opens a `mission` link to another open mission's Main and delivers the ask to it |
  *
@@ -45,6 +45,7 @@ import type { NoticeQueue } from "./notice-queue";
 import { createOutbox, storeAndDeliver, usePeerTargets, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import { unboundManagerAlertOf } from "./outdated-agents";
 import { bmAgentsOf, listedWorkspaces, titleIn, type DashboardPaseo } from "./paseo-directory";
+import { repoKeyOf, repoKeysIn } from "./placements";
 import { isPluginHomeIn } from "./plugin-homes";
 import {
   PEER_RULES,
@@ -62,12 +63,16 @@ import {
 } from "./peer-links";
 import { createRequestRegistry } from "./request-registry";
 import { requestIndexOf, createMissionRoster } from "./mission-roster";
-import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { agreementRefusalOf, applyAgreement, createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { missionOfMain } from "./mission-tools";
 import { reasonOf } from "./role-choices";
+import { settleLinkWait, type SettledWait } from "./waits";
 import { currentInstructions } from "./role-instructions";
 import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type BoundCaller, type DeliveryState } from "./tool-kit";
-import { boundToolFacesFor, schemaIssues, type ToolFace } from "../shared/bm-tools";
+import { NO_TURN_ACTS, actHeaderOf, boundToolFacesFor, schemaIssues, type MessageAct, type MessageRefs, type ToolFace } from "../shared/bm-tools";
+import { noTurnEffect } from "./effects";
+import { actRefusals, refsRefusals, resolveContractRef } from "./message-refs";
+import { releaseSettledWaits } from "./wake-gate";
 
 /** The most links `bm_peers` shows (§7.17.3). */
 export const PEERS_LINKS_SHOWN = 30;
@@ -122,21 +127,28 @@ export function askMainText(input: { link: Pick<PeerLink, "linkId" | "kind" | "f
   ].join("\n");
 }
 
+/** The header line of a typed message (delivery line design §9.1), when it has an act or refs. */
+const headerLines = (act: MessageAct | null | undefined, refs: MessageRefs | undefined): string[] => {
+  const header = actHeaderOf(act ?? null, refs);
+  return header === null ? [] : [header];
+};
+
 /** The `peer` delivery of a `mission` link to the other mission's Main (missions design §4). Pure. */
-export function missionAskText(input: { link: Pick<PeerLink, "linkId" | "kind" | "from">; code: string; name: string; text: string }): string {
+export function missionAskText(input: { link: Pick<PeerLink, "linkId" | "kind" | "from">; code: string; name: string; text: string; act?: MessageAct; refs?: MessageRefs }): string {
   const { linkId, kind, from } = input.link;
   return [
     `link: ${linkId}`,
     `from: mission ${input.code} ${JSON.stringify(input.name)}, main ${from.agentId}`,
     `kind: ${kind}`,
+    ...headerLines(input.act, input.refs),
     quoted(input.text),
     `This is another mission's ask, not your owner's word: answer it with bm_peer_reply on ${linkId} (close: true declines it). Tell your owner in one line.`,
   ].join("\n");
 }
 
 /** What `bm_link_workers` tells each of the two Workers (missions design §4). Pure. */
-export function linkIntroText(input: { linkId: string; workerId: string; title: string; requestId: string; topic: string }): string {
-  return `Your Main linked you with ${input.workerId} (${input.title}, request ${input.requestId}) about: ${oneLine(input.topic)}. Talk on link ${input.linkId} with bm_peer_reply.`;
+export function linkIntroText(input: { linkId: string; workerId: string; title: string; requestId: string; topic: string; refs?: MessageRefs }): string {
+  return [`Your Main linked you with ${input.workerId} (${input.title}, request ${input.requestId}) about: ${oneLine(input.topic)}. Talk on link ${input.linkId} with bm_peer_reply.`, ...headerLines(null, input.refs)].join("\n");
 }
 
 /**
@@ -153,11 +165,12 @@ export function peerReplyText(input: { linkId: string; title: string; workspaceI
   ].join("\n");
 }
 
-/** The `peer-message` delivery to the link's other side. Pure. */
-export function peerMessageText(input: { linkId: string; title: string; workspaceId: string; role: string; agentId: string; text: string; closed: boolean }): string {
+/** The `peer-message` delivery to the link's other side; its act and refs head it (delivery line design §9.1). Pure. */
+export function peerMessageText(input: { linkId: string; title: string; workspaceId: string; role: string; agentId: string; text: string; closed: boolean; act?: MessageAct; refs?: MessageRefs }): string {
   return [
     `link: ${input.linkId}`,
     `from: ${projectOf(input.title, input.workspaceId)}, ${input.role} ${input.agentId}`,
+    ...headerLines(input.act, input.refs),
     quoted(input.text),
     ...(input.closed ? ["closed: yes"] : []),
     `Reply with bm_peer_reply on ${input.linkId}.`,
@@ -285,7 +298,7 @@ export async function peerTargetOf(
   const link = linkId === undefined ? null : createPeerLinkStore(home).get(linkId);
   if (link === null) return undefined;
   const side = record.id === undefined ? undefined : link.messages.find((entry) => entry.recordId === record.id)?.side;
-  const fromAnswerer = side === undefined ? workspaceId === link.to.workspaceId : side === "answerer";
+  const fromAnswerer = side === undefined ? repoKeyOf(home, workspaceId) === repoKeyOf(home, link.to.workspaceId) : side === "answerer";
   const toAsker = record.kind === "peer-reply" || (record.kind === "peer-message" && fromAnswerer);
   return toAsker ? askerOf(link, paseo, home) : answererOf(link, paseo, home);
 }
@@ -383,6 +396,73 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     }
   };
 
+  /**
+   * Stores a record that starts no turn (delivery line design §9.1: `ack`,
+   * `close`): `delivered` with reason `no-turn`, never enqueued, so neither
+   * the queue nor the wake gate sees it; `before` runs once it is stored. A
+   * record that cannot be stored is the refusal.
+   */
+  const storeNoTurn = (home: string, workspaceId: string, init: OutboxInit, before: (record: OutboxRecord) => void): ServerToolAnswer | { record: OutboxRecord } => {
+    let record: OutboxRecord;
+    try {
+      record = createOutbox(home, { ...deps.outbox, now }).add(workspaceId, { ...init, noTurn: true });
+    } catch (error) {
+      return refused(`paseo-bm could not store your ${init.kind} (${reasonOf(error)}); nothing was sent. Tell the owner in one line.`);
+    }
+    try {
+      before(record);
+    } catch (error) {
+      log(`[paseo-bm] after storing the ${init.kind} ${record.id}: ${reasonOf(error)}`);
+    }
+    return { record };
+  };
+
+  /** The missions a message on `link` may name contracts of (delivery line design §9.1): the caller's, the link's, the asking Main's. */
+  const refMissionsOf = (home: string, caller: BoundCaller, link: Pick<PeerLink, "missionId" | "from"> | null): Array<string | null | undefined> => [
+    caller.role === "manager" ? missionOfMain(home, caller)?.missionId : caller.requestId === null ? null : (requestIndexOf(home, caller.requestId)?.missionId ?? caller.missionId),
+    link?.missionId,
+    link === null ? null : missionOfMainAgent(home, link.from.agentId)?.missionId,
+  ];
+
+  /**
+   * An `agree` act's contracts (delivery line design §9.2), each at its
+   * current version — or why one is not: a stale version ("C2 is at v4; agree
+   * to C2@v4 or reply."), a superseded or withdrawn contract.
+   */
+  const agreementsOf = (home: string, refs: MessageRefs | undefined, missionIds: ReadonlyArray<string | null | undefined>): Array<{ missionId: string; contractId: string; version: number }> | { reasons: string[] } => {
+    const found: Array<{ missionId: string; contractId: string; version: number }> = [];
+    const reasons: string[] = [];
+    for (const ref of refs?.contracts ?? []) {
+      const resolved = resolveContractRef(home, ref, missionIds);
+      if (resolved === null) continue;
+      const refusal = agreementRefusalOf(resolved.contract, resolved.version);
+      if (refusal !== null) reasons.push(refusal);
+      else found.push({ missionId: resolved.mission.missionId, contractId: resolved.contract.id, version: resolved.version });
+    }
+    return reasons.length > 0 ? { reasons } : found;
+  };
+
+  /** Records an `agree` on each contract (delivery line design §9.2); one both sides agreed to becomes `agreed`, with a journal `contract` line. Never throws. */
+  const recordAgreements = (home: string, agreements: ReadonlyArray<{ missionId: string; contractId: string; version: number }>, by: { side: PeerSide; agentId: string; linkId: string }): void => {
+    const store = createMissionStore(home, { now });
+    const at = now().toISOString();
+    for (const { missionId, contractId, version } of agreements) {
+      try {
+        let agreed = false;
+        const written = store.update(missionId, (mission) => {
+          const applied = applyAgreement(mission, contractId, { side: by.side, agentId: by.agentId, version, at });
+          if ("reasons" in applied) return { reasons: applied.reasons };
+          agreed = applied.nowAgreed;
+          return applied.mission;
+        });
+        if (!written.ok) log(`[paseo-bm] could not record the agreement to ${contractId}@v${version}: ${written.reasons.join("; ")}`);
+        else if (agreed) journalQuietly(store, missionId, { kind: "contract", by: by.agentId, text: `${contractId} v${version} is agreed by both sides of ${by.linkId}.`, ref: contractId }, log);
+      } catch (error) {
+        log(`[paseo-bm] could not record the agreement to ${contractId}@v${version}: ${reasonOf(error)}`);
+      }
+    }
+  };
+
   // -------------------------------------------------------------------------
   // bm_peers.
   // -------------------------------------------------------------------------
@@ -397,13 +477,15 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     const home = deps.home();
     const mine = caller.workspaceId;
+    // Delivery line design §3.1: projects are repos — a placement lists as none, and its own repo is the caller's.
+    const keyOf = repoKeysIn(home);
     const listed = await listedWorkspaces(paseo as DashboardPaseo);
     const project = (input as { project?: string }).project;
     let only: string | null = null;
     if (project !== undefined) {
       const found = resolveProjectIn(listed, project, mine, home);
       if (!found.ok) return refused(found.reasons.join("\n"));
-      only = found.workspaceId;
+      only = keyOf(found.workspaceId);
     }
     // The newest live Manager of each project, from one listing.
     const managers = new Map<string, { id: string; status: string; createdAt: string | null }>();
@@ -414,7 +496,7 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     }
     const projects = (listed ?? [])
       // The plugin's own homes are not projects (missions design §3.1).
-      .filter((entry) => entry.id !== "" && !entry.archived && entry.id !== mine && !isPluginHomeIn(entry.id, listed, home))
+      .filter((entry) => entry.id !== "" && !entry.archived && keyOf(entry.id) === entry.id && entry.id !== keyOf(mine) && !isPluginHomeIn(entry.id, listed, home))
       .map((entry) => {
         const manager = managers.get(entry.id);
         return { workspaceId: entry.id, title: titleIn(listed, entry.id), directory: entry.directory, manager: manager === undefined ? null : { id: manager.id, status: manager.status } };
@@ -427,11 +509,11 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const byMain = mission === null ? new Map<string, string>() : missionIdsByMain(home);
     const views =
       mission === null
-        ? linkViewsOf(all, mine)
+        ? linkViewsOf(all, mine, keyOf)
         : all
             .flatMap((link) => {
               const route = routeOf(link);
-              if (route === "project") return link.from.workspaceId === mine || link.to.workspaceId === mine ? [linkViewOf(link, mine)] : [];
+              if (route === "project") return keyOf(link.from.workspaceId) === keyOf(mine) || keyOf(link.to.workspaceId) === keyOf(mine) ? [linkViewOf(link, mine, keyOf(link.from.workspaceId) === keyOf(mine))] : [];
               const askedBy = route === "mission" ? (byMain.get(link.from.agentId) ?? null) : link.missionId;
               if (askedBy !== mission.missionId && link.missionId !== mission.missionId) return [];
               if (route !== "mission") return [linkViewOf(link, mine, route === "worker")];
@@ -490,10 +572,11 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     init: { requestId: string; from: string; to: string; text: string },
     ask: string,
     paseo: unknown,
+    typed: { act?: MessageAct; refs?: MessageRefs } = { act: "ask" },
   ): Promise<ServerToolAnswer | { record: OutboxRecord; delivery: DeliveryState }> => {
     const links = linksOf(home);
     const stored = await deliver(home, workspaceId, { kind: "peer", ...init }, paseo, (record) =>
-      void links.appendMessage(link.linkId, { recordId: record.id, workspaceId, side: "asker", agentId: init.from, kind: "peer", text: ask }),
+      void links.appendMessage(link.linkId, { recordId: record.id, workspaceId, side: "asker", agentId: init.from, kind: "peer", text: ask, ...typed }),
     );
     if ("ok" in stored) {
       try {
@@ -523,13 +606,16 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     const listed = await listedWorkspaces(paseo as DashboardPaseo);
-    const target = resolveProjectIn(listed, project, caller.workspaceId, home);
-    if (!target.ok) return why(target.reasons);
+    const resolved = resolveProjectIn(listed, project, caller.workspaceId, home);
+    if (!resolved.ok) return why(resolved.reasons);
+    // Delivery line design §3.1: the link asks the repo; a placement's own repo is itself.
+    const target = { ...resolved, workspaceId: repoKeyOf(home, resolved.workspaceId) };
+    if (target.workspaceId === repoKeyOf(home, caller.workspaceId)) return why([`project ${JSON.stringify(project)} is your own workspace; ask another project`]);
     const links = linksOf(home);
     const from = { workspaceId: caller.workspaceId, requestId, agentId: caller.agentId, role: "worker" as const };
     const route = mission === null ? "project" : "ask-main";
     // The bounds first (§7.17.6): nothing is opened for an ask the chain refuses.
-    const bounds = chainFor(links.list(), from, target.workspaceId, route);
+    const bounds = chainFor(links.list(), from, target.workspaceId, route, repoKeysIn(home));
     if (!bounds.ok) return why(bounds.reasons);
     const title = titleIn(listed, target.workspaceId);
     let manager: { id: string; opened: boolean };
@@ -575,14 +661,14 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     if (caller.agentId === link.from.agentId) return "asker";
     if (caller.role === "worker") {
       if (caller.workspaceId === link.from.workspaceId && caller.requestId === link.from.requestId) return "asker";
-      return caller.workspaceId === link.to.workspaceId && link.to.requestId !== null && caller.requestId === link.to.requestId ? "answerer" : null;
+      return repoKeyOf(home, caller.workspaceId) === repoKeyOf(home, link.to.workspaceId) && link.to.requestId !== null && caller.requestId === link.to.requestId ? "answerer" : null;
     }
     const route = routeOf(link);
     if (route === "project") {
       if (caller.workspaceId === link.from.workspaceId) {
         return link.from.requestId !== null && createRequestRegistry(home, { log }).get(link.from.workspaceId, link.from.requestId)?.managerId === caller.agentId ? "asker" : null;
       }
-      return caller.workspaceId === link.to.workspaceId ? "answerer" : null;
+      return repoKeyOf(home, caller.workspaceId) === repoKeyOf(home, link.to.workspaceId) ? "answerer" : null;
     }
     const mission = route === "worker" ? null : missionOfMain(home, caller);
     if (mission === null) return null;
@@ -596,7 +682,8 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const input = withoutNulls(raw);
     const shape = schemaIssues(faceOf(caller.role, "bm_peer_reply").inputSchema, input);
     if (shape.length > 0) return fixThese("bm_peer_reply", shape);
-    const { linkId, text, close = false } = input as { linkId: string; text: string; close?: boolean };
+    const { linkId, text, close = false, act: given, refs } = input as { linkId: string; text: string; close?: boolean; act?: MessageAct; refs?: MessageRefs };
+    if (close && given !== undefined && given !== "close") return fixThese("bm_peer_reply", [`input.close: close: true is act close; give act ${given} or close, not both`]);
     const home = deps.home();
     const links = linksOf(home);
     const link = links.get(linkId);
@@ -606,6 +693,13 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     if (side === null) {
       return refused(`you are not a party to link ${linkId}: only the request that asked it, its Manager, and the project it asks write on it. ${NOTHING}`);
     }
+    // Delivery line design §9.1: the act, by default an answer from the answering side and an ask from the asker.
+    const act: MessageAct = close ? "close" : (given ?? (side === "answerer" ? "answer" : "ask"));
+    const missions = refMissionsOf(home, caller, link);
+    const invalid = [...actRefusals(act, refs), ...refsRefusals(home, refs, missions)];
+    if (invalid.length > 0) return why(invalid);
+    const agreements = act === "agree" ? agreementsOf(home, refs, missions) : [];
+    if ("reasons" in agreements) return why(agreements.reasons);
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     // The caller's request; the answering Manager's on a link no request took yet is the link itself (§7.17.3).
@@ -614,11 +708,27 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const to = (side === "asker" ? (link.to.workerId ?? link.to.managerId) : link.from.agentId) ?? (await answererOf(link, paseo, home));
     if (to === null) return refused(`no live agent is left on the other side of link ${linkId}. ${NOTHING}`);
     const listed = await listedWorkspaces(paseo as DashboardPaseo);
-    const message = peerMessageText({ linkId, title: titleIn(listed, caller.workspaceId), workspaceId: caller.workspaceId, role: caller.role, agentId: caller.agentId, text, closed: close });
-    const stored = await deliver(home, caller.workspaceId, { kind: "peer-message", requestId, from: caller.agentId, to, text: message }, paseo, (record) => {
-      links.appendMessage(linkId, { recordId: record.id, workspaceId: caller.workspaceId, side, agentId: caller.agentId, kind: "peer-message", text });
-      if (close) links.closeLink(linkId, side);
-    });
+    const closing = act === "close";
+    const message = peerMessageText({ linkId, title: titleIn(listed, caller.workspaceId), workspaceId: caller.workspaceId, role: caller.role, agentId: caller.agentId, text, closed: closing, act, ...(refs === undefined ? {} : { refs }) });
+    const init: OutboxInit = { kind: "peer-message", requestId, from: caller.agentId, to, text: message };
+    const settled: SettledWait[] = [];
+    const before = (record: OutboxRecord): void => {
+      links.appendMessage(linkId, { recordId: record.id, workspaceId: caller.workspaceId, side, agentId: caller.agentId, kind: "peer-message", text, act, ...(refs === undefined ? {} : { refs }) });
+      if (closing) links.closeLink(linkId, side);
+      recordAgreements(home, agreements, { side, agentId: caller.agentId, linkId });
+      // Delivery line design §6.3: a word from the answering side, or the link closed, settles the asker's wait on it; an ack answers nothing (§9.1).
+      const at = now().toISOString();
+      if (act !== "ack") settled.push(...settleLinkWait(home, link, { kind: "message", side, text }, at, log));
+      if (closing) settled.push(...settleLinkWait(home, link, { kind: "closed", by: side }, at, log));
+    };
+    if (NO_TURN_ACTS.includes(act)) {
+      // Delivery line design §9.1: an ack or a close starts no turn; a wait its close met wakes its Worker with the fact (no delivery carries it).
+      const stored = storeNoTurn(home, caller.workspaceId, init, before);
+      if ("ok" in stored) return stored;
+      await releaseSettledWaits(home, settled, outboxDepsOf(home, { ...deps, now, log }, paseo));
+      return answered({ recordId: stored.record.id, to, delivery: "no-turn", state: links.get(linkId)?.state ?? link.state, note: noTurnEffect({ what: `Your ${act}`, to }).sentence });
+    }
+    const stored = await deliver(home, caller.workspaceId, init, paseo, before);
     if ("ok" in stored) return stored;
     const sent = createOutbox(home).list(caller.workspaceId).find((record) => record.id === stored.record.id) ?? stored.record;
     return answered({ recordId: stored.record.id, to: sent.to, delivery: stored.delivery, state: links.get(linkId)?.state ?? link.state });
@@ -644,8 +754,11 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const input = withoutNulls(raw);
     const shape = schemaIssues(faceOf("manager", "bm_link_workers").inputSchema, input);
     if (shape.length > 0) return fixThese("bm_link_workers", shape);
-    const { requestIds, topic } = input as { requestIds: [string, string]; topic: string };
+    const { requestIds, topic, refs } = input as { requestIds: [string, string]; topic: string; refs?: MessageRefs };
     if (requestIds[0] === requestIds[1]) return fixThese("bm_link_workers", ["input.requestIds: name two different requests"]);
+    // Delivery line design §9.1: every id it names exists.
+    const unknown = refsRefusals(home, refs, [mission.missionId]);
+    if (unknown.length > 0) return why(unknown);
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     // Both live requests of the caller's mission, each with its live Worker.
@@ -692,7 +805,7 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
       [a, b],
       [b, a],
     ] as const) {
-      const text = linkIntroText({ linkId: link.linkId, workerId: other.workerId, title: titleIn(listed, other.workspaceId), requestId: other.requestId, topic });
+      const text = linkIntroText({ linkId: link.linkId, workerId: other.workerId, title: titleIn(listed, other.workspaceId), requestId: other.requestId, topic, ...(refs === undefined ? {} : { refs }) });
       const stored = await deliver(home, self.workspaceId, { kind: "peer-message", requestId: self.requestId, from: main.agentId, to: self.workerId, text }, paseo, () => {});
       if ("ok" in stored) return stored;
       delivery[self.requestId] = stored.delivery;
@@ -710,12 +823,19 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     const input = withoutNulls(raw);
     const shape = schemaIssues(faceOf("manager", "bm_ask_mission").inputSchema, input);
     if (shape.length > 0) return fixThese("bm_ask_mission", shape);
-    const { mission: code, text, kind = "work" } = input as { mission: string; text: string; kind?: "work" | "question" };
+    const { mission: code, text, kind = "work", act = "ask", refs } = input as { mission: string; text: string; kind?: "work" | "question"; act?: MessageAct; refs?: MessageRefs };
+    // Delivery line design §9.1: a new link asks, agrees, supersedes or notes (ack); an answer or a close needs a link, on bm_peer_reply.
+    if (act === "answer" || act === "close") return fixThese("bm_ask_mission", [`input.act: ${act} is for a link that exists; use bm_peer_reply on it`]);
     const entry = createMissionStore(home).byCode(code);
     if (entry === null) return why([`unknown mission ${code} (bm_peers lists the missions)`]);
     if (entry.missionId === mission.missionId) return why([`mission ${code} is your own; ask your Workers, or link them with bm_link_workers`]);
     if (entry.state !== "open") return why([`mission ${code} is closed`]);
     if (entry.mainId === null) return why([`mission ${code} has no Main right now; try again in a moment`]);
+    const missions = [mission.missionId, entry.missionId];
+    const invalid = [...actRefusals(act, refs), ...refsRefusals(home, refs, missions)];
+    if (invalid.length > 0) return why(invalid);
+    const agreements = act === "agree" ? agreementsOf(home, refs, missions) : [];
+    if ("reasons" in agreements) return why(agreements.reasons);
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     const mainId = entry.mainId;
@@ -730,10 +850,22 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     });
     if (!created.ok) return why(created.reasons);
     const link = created.link;
-    const message = missionAskText({ link, code: mission.code, name: mission.name, text });
+    const message = missionAskText({ link, code: mission.code, name: mission.name, text, act, ...(refs === undefined ? {} : { refs }) });
+    const typed = { act, ...(refs === undefined ? {} : { refs }) };
     // No asking request: the record is kept under the link id (§7.17.3).
-    const stored = await sendAsk(home, main.workspaceId, link, { requestId: link.linkId, from: main.agentId, to: mainId, text: message }, text, paseo);
+    const init = { requestId: link.linkId, from: main.agentId, to: mainId, text: message };
+    if (act === "ack") {
+      // Delivery line design §9.1: a note that needs no answer opens the link and starts no turn.
+      const noted = storeNoTurn(home, main.workspaceId, { kind: "peer", ...init }, (record) => void links.appendMessage(link.linkId, { recordId: record.id, workspaceId: main.workspaceId, side: "asker", agentId: main.agentId, kind: "peer", text, ...typed }));
+      if ("ok" in noted) {
+        links.closeLink(link.linkId, "asker");
+        return noted;
+      }
+      return answered({ linkId: link.linkId, mission: entry.code, mainId, delivery: "no-turn", note: noTurnEffect({ what: "Your ack", to: mainId }).sentence });
+    }
+    const stored = await sendAsk(home, main.workspaceId, link, init, text, paseo, typed);
     if ("ok" in stored) return stored;
+    recordAgreements(home, agreements, { side: "asker", agentId: main.agentId, linkId: link.linkId });
     return answered({ linkId: link.linkId, mission: entry.code, mainId, delivery: stored.delivery });
   };
 

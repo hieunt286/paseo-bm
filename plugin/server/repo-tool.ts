@@ -67,7 +67,7 @@ export interface RepoInput {
 }
 
 /** The environment git runs in: no prompt, no optional lock, no lazy fetch, and no repository named by the plugin's own environment. */
-function gitEnv(): NodeJS.ProcessEnv {
+export function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE"]) {
     delete env[name];

@@ -14,6 +14,7 @@ import { materialiseTurn } from "../plugin/server/decision-materialiser";
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
+import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { parseAnswers } from "../plugin/shared/bm-questions";
 import { answerDecision, confirmDecision, markNeedsConfirmation, type AnswerVia, type Decision } from "../plugin/shared/decisions";
 import { msg, turn } from "./fixtures/orchestrator-traces";
@@ -131,6 +132,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearRequestRegistryCache();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -292,6 +294,66 @@ describe("delivering at the Worker's next idle moment", () => {
   });
 });
 
+describe("a Worker waiting by structure (delivery line design §6.4)", () => {
+  /** The request is bound and its Worker reported blocked on these questions. */
+  const waitOn = (ns: number[], wakeOn: "all" | "any" = "all") => {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE, REQUEST, { source: "tool", managerId: "mgr-1", workerId: WORKER });
+    registry.setWaiting(WORKSPACE, REQUEST, { since: NOW.toISOString(), reportRecordId: "out-0000000000ff", wakeOn, items: ns.map((n) => ({ kind: "question" as const, id: idOf(n), settled: false })) });
+  };
+
+  it("holds each answer that does not meet the wait; the last one releases every held answer as one block", async () => {
+    waitOn([1, 2, 3]);
+    const w = world();
+    const deliver = delivery(w.queue);
+    await deliver.onSettled([answer(1)], { paseo: w.paseo });
+    await deliver.onSettled([answer(2, { words: "Use Postgres" })], { paseo: w.paseo });
+    expect(w.sends).toEqual([]);
+    expect([get(1).delivery, get(2).delivery]).toEqual([
+      { to: WORKER, kind: answersKindOf(REQUEST), at: NOW.toISOString(), outcome: "held" },
+      { to: WORKER, kind: answersKindOf(REQUEST), at: NOW.toISOString(), outcome: "held" },
+    ]);
+    await deliver.onSettled([answer(3)], { paseo: w.paseo });
+    expect(w.sends).toEqual([{ id: WORKER, text: answersMessageOf(REQUEST, [get(1), get(2), get(3)]) }]);
+    expect([1, 2, 3].map((n) => get(n).delivery?.outcome)).toEqual(["sent", "sent", "sent"]);
+    expect(createRequestRegistry(home).get(WORKSPACE, REQUEST)?.waiting).toBeUndefined();
+  });
+
+  it("an answer queued while the Worker ran is held at that turn's end when its blocked report set a wait, then released with it", async () => {
+    waitOn([]);
+    const w = world({ [WORKER]: { status: "running" } });
+    const deliver = delivery(w.queue);
+    await deliver.onSettled([answer(1)], { paseo: w.paseo });
+    expect(get(1).delivery?.outcome).toBe("queued");
+    // The running turn reports `blocked` on Q2.
+    createRequestRegistry(home).setWaiting(WORKSPACE, REQUEST, { since: NOW.toISOString(), reportRecordId: "out-0000000000fe", wakeOn: "all", items: [{ kind: "question", id: idOf(2), settled: false }] });
+    await w.turnEnds();
+    expect(w.sends).toEqual([]);
+    expect(get(1).delivery).toEqual({ to: WORKER, kind: answersKindOf(REQUEST), at: NOW.toISOString(), outcome: "held" });
+    await deliver.onSettled([answer(2)], { paseo: w.paseo });
+    expect(w.sends).toEqual([{ id: WORKER, text: answersMessageOf(REQUEST, [get(1), get(2)]) }]);
+    expect([1, 2].map((n) => get(n).delivery?.outcome)).toEqual(["sent", "sent"]);
+  });
+
+  it("held answers are gated again after a reload, and stay held while the wait is not met", async () => {
+    waitOn([1, 2]);
+    const w = world();
+    await delivery(w.queue).onSettled([answer(1)], { paseo: w.paseo });
+    expect(get(1).delivery?.outcome).toBe("held");
+    await delivery(w.queue).resume(w.paseo);
+    expect(w.sends).toEqual([]);
+    expect(get(1).delivery?.outcome).toBe("held");
+  });
+
+  it("wakeOn any: the first answer goes at once", async () => {
+    waitOn([1, 2], "any");
+    const w = world();
+    await delivery(w.queue).onSettled([answer(1)], { paseo: w.paseo });
+    expect(w.sends).toEqual([{ id: WORKER, text: answersMessageOf(REQUEST, [get(1)]) }]);
+    expect(get(1).delivery?.outcome).toBe("sent");
+  });
+});
+
 describe("a question that expired (autonomy design §A.3)", () => {
   it("is never delivered: the request's finished report expires the open ones, and only the answered one goes", async () => {
     const w = world();
@@ -360,6 +422,26 @@ describe("a Worker that cannot be reached", () => {
     expect(await soleWorkerOfRequest(input, paseoWith([snapshot("w1"), snapshot("w2", { "bm.replacedBy": "w3" })]))).toBe("w1");
     expect(await soleWorkerOfRequest(input, paseoWith([snapshot("w1"), snapshot("w2")]))).toBeNull();
     expect(await soleWorkerOfRequest(input, paseoWith([snapshot("w1", {}, { workspaceId: "other" })]))).toBeNull();
+  });
+});
+
+describe("a continued request (delivery line design §2.7)", () => {
+  it("an answer to a question of request A reaches the Worker of its continuation B: chainHeadOf resolves A to B", async () => {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE, REQUEST, { source: "tool", managerId: "mgr-1", workerId: WORKER });
+    registry.noteReport(WORKSPACE, REQUEST, { tier: "Small", phase: "finished", at: "2026-09-29T07:45:00.000Z" });
+    const next = registry.generate(WORKSPACE, { managerId: "mgr-1", continuationOf: REQUEST }).requestId;
+    registry.addWorker(WORKSPACE, next, "wrk-2");
+    registry.noteContinuedBy(WORKSPACE, REQUEST, next, { reason: "follow-up", figure: "a follow-up after finished", at: "2026-09-29T07:46:00.000Z" });
+    const w = world({ [WORKER]: { status: "idle" }, "wrk-2": { status: "idle" } });
+    const entry = (id: string, requestId: string) => ({ id, provider: "bm-worker", status: "idle", archivedAt: null, workspaceId: WORKSPACE, labels: { "bm.role": "worker", "bm.requestId": requestId } });
+    const paseo = { agents: { list: async () => ({ entries: [entry(WORKER, REQUEST), entry("wrk-2", next)] }), ref: w.paseo.agents.ref } };
+    // The old Worker is still live, yet the request's work goes on as B.
+    expect(await soleWorkerOfRequest({ workspaceId: WORKSPACE, requestId: REQUEST, home }, paseo as never)).toBe("wrk-2");
+    await delivery(w.queue, { workerOf: undefined }).onSettled([answer(1)], { paseo });
+    expect(w.sends.map((send) => send.id)).toEqual(["wrk-2"]);
+    expect(parseAnswers(w.sends[0]!.text)).toEqual({ requestId: REQUEST, answers: [{ id: "Q1", text: "a — Option A of 1" }] });
+    expect(get(1).delivery).toMatchObject({ to: "wrk-2", outcome: "sent" });
   });
 });
 

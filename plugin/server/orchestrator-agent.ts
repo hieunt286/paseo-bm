@@ -28,6 +28,10 @@
  *   has not written to it for 2 hours (design §6B.6; missions design §20). The
  *   newest labelled agent is the Orchestrator, so the new one takes over and
  *   the old one stays in the user's list.
+ * - Each older agent still labelled `main` is relabelled
+ *   `bm.orchestrator=retired` and retitled "Beads Orchestrator (retired)", at
+ *   `agent.created` of a new Orchestrator and once at start
+ *   (`createOrchestratorRetirement`, delivery line design §8.5).
  *
  * The plugin never archives, stops or deletes the Orchestrator (ADR-005): the
  * user asked for it and owns it.
@@ -43,7 +47,7 @@ import {
   type OrchestratorOpenPreviewOutput,
 } from "../shared/contracts";
 import { PLUGIN_VERSION } from "../shared/version";
-import { listAllAgents } from "./agent-role";
+import { listAllAgents, roleOfProvider } from "./agent-role";
 import { aliasBases } from "./alias-bases";
 import { availableProviders } from "./role-choices";
 import { capabilityOf, chooseModeId, featuresFor, modesFor, profileOf, runPostureOf } from "./role-mode";
@@ -54,6 +58,7 @@ import { originOf } from "../shared/message-origin";
 import { ORCHESTRATOR_INSTRUCTIONS } from "./orchestrator-instructions";
 import { INSTRUCTIONS_LABEL, instructionsHashOf } from "./instructions-label";
 import { createOrchestratorStore, orchestratorDirOf } from "./orchestrator-store";
+import { setAgentLabels, setAgentTitle, type CliResult } from "./paseo-cli";
 import { coded, errorText, requireDataHome } from "./rpc-kit";
 import { ensureStoreDir, writeStoreFileAtomically } from "./trace-store";
 
@@ -65,6 +70,9 @@ export const ORCHESTRATOR_ROLE_LABEL = "bm.role";
 export const ORCHESTRATOR_ROLE_VALUE = "orchestrator";
 export const ORCHESTRATOR_MAIN_LABEL = "bm.orchestrator";
 export const ORCHESTRATOR_MAIN_VALUE = "main";
+/** The `bm.orchestrator` value of an older Orchestrator, and its title (delivery line design §8.5). */
+export const ORCHESTRATOR_RETIRED_VALUE = "retired";
+export const ORCHESTRATOR_RETIRED_TITLE = "Beads Orchestrator (retired)";
 
 /**
  * The label that says which instructions an Orchestrator was created with
@@ -298,17 +306,124 @@ function newestFirst(a: OrchestratorAgentSnapshot, b: OrchestratorAgentSnapshot)
  * that ignores the filter cannot make another agent the Orchestrator.
  */
 export async function findOrchestratorAgent(paseo: OrchestratorAgentPaseo): Promise<OrchestratorAgentSnapshot | null> {
+  return (await mainOrchestrators(paseo))[0] ?? null;
+}
+
+/** True when a snapshot is a non-archived agent with both Orchestrator labels. */
+function isMainOrchestrator(agent: OrchestratorAgentSnapshot): boolean {
+  return (
+    !agent.archivedAt &&
+    agent.labels?.[ORCHESTRATOR_ROLE_LABEL] === ORCHESTRATOR_ROLE_VALUE &&
+    agent.labels?.[ORCHESTRATOR_MAIN_LABEL] === ORCHESTRATOR_MAIN_VALUE
+  );
+}
+
+/** Every non-archived agent with both labels, newest first. */
+async function mainOrchestrators(paseo: OrchestratorAgentPaseo): Promise<OrchestratorAgentSnapshot[]> {
   const labels = { [ORCHESTRATOR_ROLE_LABEL]: ORCHESTRATOR_ROLE_VALUE, [ORCHESTRATOR_MAIN_LABEL]: ORCHESTRATOR_MAIN_VALUE };
   const all = await listAllAgents((options) => paseo.agents.list(options), { labels, includeArchived: false });
-  const found = all
-    .filter(
-      (agent) =>
-        !agent.archivedAt &&
-        agent.labels?.[ORCHESTRATOR_ROLE_LABEL] === ORCHESTRATOR_ROLE_VALUE &&
-        agent.labels?.[ORCHESTRATOR_MAIN_LABEL] === ORCHESTRATOR_MAIN_VALUE,
-    )
-    .sort(newestFirst);
-  return found[0] ?? null;
+  return all.filter(isMainOrchestrator).sort(newestFirst);
+}
+
+/** What retiring an older Orchestrator uses; the Paseo CLI by default (`paseo agent update`). */
+export interface OrchestratorRetirementDeps {
+  setLabels?: (agentId: string, labels: Readonly<Record<string, string>>) => Promise<CliResult>;
+  setTitle?: (agentId: string, title: string) => Promise<CliResult>;
+  log?: (message: string) => void;
+  /** The time a just-created agent counts as created at when its snapshot gives none. */
+  now?: () => Date;
+}
+
+/** A just-created agent's snapshot through `agents.ref(id).refresh()`, or null when the host cannot give one. */
+async function createdSnapshotOf(paseo: unknown, agentId: string): Promise<OrchestratorAgentSnapshot | null> {
+  try {
+    const ref = (paseo as { agents?: { ref?: (id: string) => { refresh?: () => Promise<{ agent?: unknown } | null> } } } | null)?.agents?.ref?.(agentId);
+    const agent = (await ref?.refresh?.())?.agent as Partial<OrchestratorAgentSnapshot> | undefined;
+    if (agent === undefined || agent === null || typeof agent !== "object") return null;
+    return {
+      id: agentId,
+      ...(typeof agent.createdAt === "string" ? { createdAt: agent.createdAt } : {}),
+      ...(agent.labels !== undefined && agent.labels !== null && typeof agent.labels === "object" ? { labels: agent.labels } : {}),
+      archivedAt: typeof agent.archivedAt === "string" ? agent.archivedAt : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delivery line design §8.5 (ADR-035 decision 7): when more than one agent is
+ * labelled `main`, each older one is retitled "Beads Orchestrator (retired)"
+ * and relabelled `bm.orchestrator=retired`; the newest stays the Orchestrator.
+ * `createdId` is the agent whose `agent.created` started the pass: counted
+ * even when the list does not show it yet. Idempotent, as `REPLACED_BY_LABEL`
+ * is: a retired agent is no longer listed as `main`, so a second pass finds
+ * one and changes nothing. The title goes first, so a failed relabel retries
+ * both at the next pass. Nothing is archived or stopped (ADR-005). Returns the
+ * ids relabelled.
+ */
+export async function retireOlderOrchestrators(
+  paseo: OrchestratorAgentPaseo,
+  deps: OrchestratorRetirementDeps = {},
+  createdId: string | null = null,
+): Promise<string[]> {
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  const setLabels = deps.setLabels ?? ((agentId, labels) => setAgentLabels(agentId, labels));
+  const setTitle = deps.setTitle ?? ((agentId, title) => setAgentTitle(agentId, title));
+  const mains = await mainOrchestrators(paseo);
+  if (createdId !== null && !mains.some((agent) => agent.id === createdId)) {
+    const created = await createdSnapshotOf(paseo, createdId);
+    if (created !== null && isMainOrchestrator(created)) {
+      mains.push({ ...created, createdAt: created.createdAt ?? (deps.now ?? (() => new Date()))().toISOString() });
+      mains.sort(newestFirst);
+    }
+  }
+  const retired: string[] = [];
+  for (const older of mains.slice(1)) {
+    try {
+      const titled = await setTitle(older.id, ORCHESTRATOR_RETIRED_TITLE);
+      if (!titled.ok) log(`[paseo-bm] could not retitle the older Beads Orchestrator ${older.id}: ${titled.reason}`);
+      const labelled = await setLabels(older.id, { [ORCHESTRATOR_MAIN_LABEL]: ORCHESTRATOR_RETIRED_VALUE });
+      if (labelled.ok) retired.push(older.id);
+      else log(`[paseo-bm] could not label the older Beads Orchestrator ${older.id} as retired: ${labelled.reason}`);
+    } catch (error) {
+      log(`[paseo-bm] could not retire the older Beads Orchestrator ${older.id}: ${errorText(error)}`);
+    }
+  }
+  return retired;
+}
+
+/**
+ * The two triggers of §8.5: `start` runs the pass once, at the first Paseo
+ * handle of the run (the server has none of its own); `agentCreated` runs it
+ * for each new agent on the `bm-orchestrator` provider. Passes run one after
+ * another, so two triggers at once never retire the same agent twice. Never rejects.
+ */
+export function createOrchestratorRetirement(deps: OrchestratorRetirementDeps = {}) {
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  let started = false;
+  let chain: Promise<unknown> = Promise.resolve();
+  const usable = (paseo: unknown): paseo is OrchestratorAgentPaseo =>
+    typeof (paseo as Partial<OrchestratorAgentPaseo> | null | undefined)?.agents?.list === "function";
+  const pass = (paseo: OrchestratorAgentPaseo, createdId: string | null): Promise<string[]> => {
+    const next = chain.then(() => retireOlderOrchestrators(paseo, deps, createdId)).catch((error: unknown) => {
+      log(`[paseo-bm] could not look for older Beads Orchestrators: ${errorText(error)}`);
+      return [] as string[];
+    });
+    chain = next;
+    return next;
+  };
+  return {
+    start(paseo: unknown): Promise<string[]> {
+      if (started || !usable(paseo)) return Promise.resolve([]);
+      started = true;
+      return pass(paseo, null);
+    },
+    agentCreated(agent: { id: string; provider: unknown }, paseo: unknown): Promise<string[]> {
+      if (roleOfProvider(agent.provider) !== "orchestrator" || !usable(paseo)) return Promise.resolve([]);
+      return pass(paseo, agent.id);
+    },
+  };
 }
 
 /** True when the Orchestrator was created with other instructions than this plugin's, or before they were labelled. */
@@ -361,17 +476,42 @@ async function dayOldReasonOf(paseo: OrchestratorAgentPaseo, agent: Orchestrator
   if (typeof agent.status !== "string" || agent.status === "running" || agent.status === "initializing") return null;
   const reason = loadReasonOf(agent, deps, now);
   if (reason === null) return null;
-  let newestOwner = Number.NEGATIVE_INFINITY;
-  const read = await readTimelinePages(paseo as unknown as LiveTimelinePaseo, agent.id, { pages: QUIET_PAGES, limit: QUIET_PAGE_LIMIT }, (entries) => {
+  const { read, newest } = await newestOwnerWordOf(paseo, agent.id, now);
+  if (read === 0 || now - newest <= OWNER_QUIET_MS) return null;
+  return reason;
+}
+
+/**
+ * The owner's newest message in an Orchestrator's chat (`isOwnerWord`), read
+ * over its last 5 pages of 200 entries: `read`, the entries read (0: the chat
+ * could not be read), and `newest`, its time (`-Infinity` for none; an owner's
+ * message without a time counts as `now`). Never throws.
+ */
+export async function newestOwnerWordOf(paseo: OrchestratorAgentPaseo, agentId: string, now: number): Promise<{ read: number; newest: number }> {
+  let newest = Number.NEGATIVE_INFINITY;
+  const read = await readTimelinePages(paseo as unknown as LiveTimelinePaseo, agentId, { pages: QUIET_PAGES, limit: QUIET_PAGE_LIMIT }, (entries) => {
     for (const entry of entries) {
       if (!isOwnerWord(entry.item)) continue;
       const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
       // An owner's message with no time counts as just now: it keeps the Orchestrator.
-      newestOwner = Math.max(newestOwner, Number.isNaN(at) ? now : at);
+      newest = Math.max(newest, Number.isNaN(at) ? now : at);
     }
   });
-  if (read === 0 || now - newestOwner <= OWNER_QUIET_MS) return null;
-  return reason;
+  return { read, newest };
+}
+
+/**
+ * Whether the owner wrote in this Orchestrator's chat within `OWNER_QUIET_MS`
+ * (2 hours, REQ-198 b) of `now`: the same figure that keeps the Orchestrator
+ * from being replaced. A chat that cannot be read → false. Never throws.
+ */
+export async function ownerWroteRecently(paseo: OrchestratorAgentPaseo, agentId: string, now: number): Promise<boolean> {
+  try {
+    const { read, newest } = await newestOwnerWordOf(paseo, agentId, now);
+    return read > 0 && now - newest <= OWNER_QUIET_MS;
+  } catch {
+    return false;
+  }
 }
 
 /** `<data folder>/orchestrator/home`. */

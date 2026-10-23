@@ -24,6 +24,13 @@ import { TRACE_STORE_SCHEMA_VERSION, evidenceSchema, traceRecordSchema, traceRun
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { createOutbox } from "../plugin/server/outbox";
 import { parseReports } from "../plugin/server/bm-report";
+import { mainTriggerOf, type MainTrigger } from "../plugin/shared/eval-metrics/mains";
+import type { TurnTrigger } from "../plugin/shared/contracts";
+import { freshInputTokensOf, inputIncludesCached, turnTokensOf } from "../plugin/shared/eval-metrics";
+import { orchestratorTokensOf } from "../plugin/shared/eval-metrics/orchestrator";
+import { requestTokensReadOf } from "../plugin/shared/handoff";
+import { summariseUsage } from "../plugin/server/trace-usage";
+import { closingTurnUsage } from "../plugin/server/event-bus";
 
 /**
  * WP-205: the turn collector.
@@ -1607,5 +1614,108 @@ describe("the plugin's first prompts", () => {
     expect(lookups).toEqual([]);
     const owner = await buildRecord(asEvent(turnEnded({ timeline: [typed("BM-BRIEFING notes: ship it")] })), { location: null, pluginSent });
     expect(owner?.record.sent).toMatchObject([{ origin: "user" }]);
+  });
+});
+
+/**
+ * Delivery line design §8.4: the record's `trigger`, from the turn's first
+ * inbound message — the A-14 classification (`mainTriggerOf`) folded, so the
+ * two agree on every Main turn.
+ */
+describe("what started the turn (trigger)", () => {
+  const RECORD_ID = "out-0123456789ab";
+  const typed = (text: string) => ({ type: "user_message" as const, text, messageId: "m1", clientMessageId: "c1" });
+  const relayed = (text: string) => ({ type: "user_message" as const, text, messageId: "m1" });
+  const main = { ...turnEnded().agent, id: "agent-main", provider: "bm-manager/claude-opus-5" };
+  const cases: Array<[string, ReturnType<typeof relayed> & { clientMessageId?: string }, TurnTrigger, MainTrigger]> = [
+    ["the owner's words", typed("Please plan G14."), "owner", "owner"],
+    ["a report delivery", typed(`BM-DELIVERY report ${RECORD_ID}\nBM-REPORT\nrequestId: req-20261020T090000Z\nphase: implementing`), "report", "report"],
+    ["a review delivery", typed(`BM-DELIVERY review ${RECORD_ID}\nBM-REVIEW\nverdict: pass`), "report", "report"],
+    [
+      "a BM-UPDATES message whose first item is a report",
+      typed(`BM-UPDATES 2\nFrom the paseo-bm plugin, not the owner: 2 items, oldest first. Act on each as its block says.\nBM-ITEM 1\nBM-DELIVERY report ${RECORD_ID}\nBM-REPORT\nBM-ITEM 2\nBM-SIGNAL danger`),
+      "report",
+      "report",
+    ],
+    ["a message delivery", typed(`BM-DELIVERY message ${RECORD_ID}\nContinue req-20261020T090000Z.`), "plugin", "message"],
+    ["a peer delivery", typed(`BM-DELIVERY peer-reply ${RECORD_ID}\nfrom: project "web" (wks_web)`), "plugin", "peer"],
+    ["a governor command", typed("BM-COMMAND\nfrom: orchestrator\nto: manager\nintent: redirect"), "plugin", "command"],
+    [
+      "a BM-UPDATES message whose first item is a command",
+      typed(`BM-UPDATES 2\nFrom the paseo-bm plugin, not the owner: 2 items, oldest first. Act on each as its block says.\nBM-ITEM 1\nBM-COMMAND\nfrom: orchestrator\nBM-ITEM 2\nBM-DELIVERY report ${RECORD_ID}\nBM-REPORT`),
+      "plugin",
+      "command",
+    ],
+    ["a first prompt", typed("BM-BRIEF manager requestId: none\nYou are the Main."), "plugin", "other"],
+    ["another agent's message", relayed("Worker agent-w1: progress update, tests pass."), "agent", "other"],
+  ];
+
+  it.each(cases)("%s", async (_name, item, trigger, a14) => {
+    const built = await buildRecord(asEvent(turnEnded({ agent: main, timeline: [item, assistantMessage("On it.")] })), { location: null, pluginSent: () => false });
+    expect(built?.record.trigger).toBe(trigger);
+    // The same turn as A-14 reads it from the stored record.
+    expect(mainTriggerOf(traceRecordSchema.parse(built!.record)).trigger).toBe(a14);
+  });
+
+  it("is the plugin's for what its send log says it sent, and null for a turn with no inbound message", async () => {
+    const compact = await buildRecord(asEvent(turnEnded({ agent: main, timeline: [typed("/compact")] })), { location: null, pluginSent: () => true });
+    expect(compact?.record.trigger).toBe("plugin");
+    const none = await buildRecord(asEvent(turnEnded({ agent: main, timeline: [assistantMessage("Still here.")] })), { location: null });
+    expect(none?.record.trigger).toBeNull();
+  });
+
+  it("is optional on a stored record: one written before it parses, with no trigger", async () => {
+    const built = await buildRecord(asEvent(turnEnded({ agent: main, timeline: [typed("Please plan G14.")] })), { location: null });
+    const older = JSON.parse(JSON.stringify(built!.record)) as Record<string, unknown>;
+    delete older.trigger;
+    const parsed = traceRecordSchema.parse(older);
+    expect(parsed.trigger).toBeUndefined();
+    expect(parsed.v).toBe(1);
+  });
+});
+
+describe("tokens read per provider's usage shape: Codex's input already holds its cached tokens (ADR-036 bead .3)", () => {
+  // The two shapes as the snapshots report them (field 2026-10-21 → 22): Codex's input holds the
+  // cached tokens and is the last model call's, its context equal to it; Claude's are apart and summed over the turn.
+  const CODEX = { provider: "bm-reviewer", model: "gpt-6.1-sol", lastUsage: { inputTokens: 262_000, cachedInputTokens: 250_000, outputTokens: 900, contextWindowUsedTokens: 262_000, contextWindowMaxTokens: 400_000 } };
+  const CLAUDE = { provider: "bm-worker", model: "claude-opus-5-5", lastUsage: { inputTokens: 40, cachedInputTokens: 520_000, outputTokens: 2_000, contextWindowUsedTokens: 131_000, contextWindowMaxTokens: 1_000_000 } };
+  const paseoOf = (agent: unknown) => ({ agents: { ref: () => ({ timeline: { refetch: vi.fn(async () => ({ entries: [], agent })) } }) } });
+  const recorded = async (agent: unknown, turnId: string) => {
+    const built = await buildRecord(asEvent(turnEnded({ turnId })), { location: null, paseo: paseoOf(agent) });
+    return { ...built!.record, requestId: "req-20261023T000000Z", at: `2026-10-23T00:0${turnId.slice(-1)}:00.000Z`, endedAt: `2026-10-23T00:0${turnId.slice(-1)}:00.000Z` };
+  };
+
+  it("reads a Codex turn's tokens as its input alone and a Claude turn's as input + cached, the same in every reader", async () => {
+    const codex = await recorded(CODEX, "turn-1");
+    const claude = await recorded(CLAUDE, "turn-2");
+    expect(codex.usage).toMatchObject({ inputTokens: 262_000, cachedInputTokens: 250_000, contextUsed: 262_000 });
+    expect(turnTokensOf(codex)).toMatchObject({ provider: "codex", coverage: "last-call", tokensRead: 262_000 });
+    expect(turnTokensOf(claude)).toMatchObject({ provider: "claude", coverage: "turn", tokensRead: 520_040 });
+    expect([freshInputTokensOf(codex), freshInputTokensOf(claude)]).toEqual([12_000, 40]);
+    // A request's tokens read (rollover, handoff) and a trace's sum count Codex's cache once.
+    expect(requestTokensReadOf([codex, claude], "req-20261023T000000Z", null)).toBe(262_000 + 520_040);
+    const sum = summariseUsage({ records: [codex, claude] } as never);
+    expect(sum.inputTokens + sum.cachedInputTokens).toBe(262_000 + 520_040);
+  });
+
+  it("with no provider or model known, the usage's shape decides: a context of input + output with cached tokens is Codex's, any other shape apart", async () => {
+    const shape = (inputTokens: number, cachedInputTokens: number, outputTokens: number, contextUsed?: number) =>
+      inputIncludesCached({ inputTokens, cachedInputTokens, outputTokens, ...(contextUsed === undefined ? {} : { contextUsed }) }, "unknown");
+    // Codex's shape (the run note's turn), then Claude's, then no context reported, then nothing cached.
+    expect([shape(21_573, 21_248, 5, 21_578), shape(34, 88_287, 423, 29_826), shape(21_573, 21_248, 5), shape(100, 0, 5, 105)]).toEqual([true, false, false, false]);
+    // A known provider is taken at its word, whatever the shape.
+    expect([inputIncludesCached({ inputTokens: 40, cachedInputTokens: 520_000, outputTokens: 1 }, "codex"), inputIncludesCached({ inputTokens: 9_000, cachedInputTokens: 10, outputTokens: 1, contextUsed: 9_001 }, "claude")]).toEqual([true, false]);
+    const built = await recorded({ provider: "custom", model: null, lastUsage: { inputTokens: 21_573, cachedInputTokens: 21_248, outputTokens: 5, contextWindowUsedTokens: 21_578 } }, "turn-3");
+    expect(turnTokensOf(built)).toMatchObject({ provider: "unknown", tokensRead: 21_573 });
+    expect(freshInputTokensOf(built)).toBe(325);
+  });
+
+  it("marks an Orchestrator wake's Codex usage, so A-8 counts its cache once; a Claude wake and an older one stay input + cached", async () => {
+    expect(await closingTurnUsage("orch", paseoOf(CODEX))).toEqual({ inputTokens: 262_000, cachedInputTokens: 250_000, outputTokens: 900, includesCached: true });
+    expect(await closingTurnUsage("orch", paseoOf(CLAUDE))).toEqual({ inputTokens: 40, cachedInputTokens: 520_000, outputTokens: 2_000 });
+    const wake = (usage: unknown) => ({ orchestratorId: "orch", at: "2026-10-23T00:00:00.000Z", endedAt: "2026-10-23T00:01:00.000Z", workspaceIds: ["wks_1"], events: 1, usage }) as never;
+    const tokens = (usage: unknown) => orchestratorTokensOf([wake(usage)], true, { since: null, until: null }, 0).tokens;
+    expect(tokens({ inputTokens: 262_000, cachedInputTokens: 250_000, outputTokens: 900, includesCached: true })).toBe(262_900);
+    expect(tokens({ inputTokens: 40, cachedInputTokens: 520_000, outputTokens: 2_000 })).toBe(522_040);
   });
 });

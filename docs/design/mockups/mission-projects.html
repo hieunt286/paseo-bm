@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paseo-bm — New mission: choose projects (draft for approval)</title>
+<style>
+  /* Colours stand for the theme tokens the plugin uses (no literal colours in code):
+     surface0, surface1, border, foreground, foregroundMuted, accent, accentForeground,
+     statusWarning, statusDanger, statusSuccess. Radius 2. */
+  :root { --s0:#0f1115; --s1:#161a20; --s2:#1c2129; --b:#2a303a; --fg:#e6e8eb; --mu:#8b93a1;
+          --ac:#7c93ff; --acf:#0b0d12; --wa:#e3a33b; --da:#e5534b; --ok:#3fb27f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#07080a; color:var(--fg); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  h1.page { font-size:15px; color:var(--mu); font-weight:500; margin:24px 32px 8px; }
+  .note { margin:0 32px 24px; color:var(--mu); font-size:12px; max-width:1100px; }
+  .boards { display:flex; flex-wrap:wrap; gap:32px; padding:0 32px 48px; align-items:flex-start; }
+  .board { background:var(--s0); border:1px solid var(--b); border-radius:6px; overflow:hidden; }
+  .board > .cap { font-size:11px; color:var(--mu); padding:6px 10px; border-bottom:1px solid var(--b); background:#0b0d11; }
+  .desk { width:1040px; } .phone { width:390px; }
+  .tabs { display:flex; gap:18px; padding:12px 24px 0; border-bottom:1px solid var(--b); }
+  .phone .tabs { padding:10px 12px 0; gap:12px; overflow:hidden; }
+  .tab { padding:0 0 10px; color:var(--mu); font-size:13px; }
+  .tab.on { color:var(--fg); border-bottom:2px solid var(--ac); }
+  .content { padding:24px; display:flex; flex-direction:column; gap:12px; }
+  .phone .content { padding:12px; gap:8px; }
+  .title { font-size:24px; font-weight:600; } .phone .title { font-size:18px; }
+  .row { display:flex; align-items:center; gap:10px; } .between { justify-content:space-between; }
+  .wrap { flex-wrap:wrap; }
+  .label { color:var(--mu); font-size:12px; font-weight:500; text-transform:uppercase; letter-spacing:.6px; }
+  .muted { color:var(--mu); } .small { font-size:12px; } .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  .card { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:14px; display:flex; flex-direction:column; gap:8px; position:relative; }
+  .phone .card { padding:10px; gap:6px; }
+  .bar { position:absolute; left:0; top:0; bottom:0; width:3px; }
+  .btn { padding:9px 14px; border-radius:2px; font-size:13px; border:1px solid var(--b); background:transparent; color:var(--fg); }
+  .btn.pri { background:var(--ac); color:var(--acf); border-color:var(--ac); }
+  .btn.dan { border-color:var(--da); color:var(--da); }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--fg); padding:2px 8px; border:1px solid var(--b); border-radius:2px; background:var(--s2); }
+  .sq { width:7px; height:7px; display:inline-block; }
+  .code { font-weight:700; letter-spacing:.5px; }
+  .prog { height:4px; background:var(--s2); border-radius:2px; overflow:hidden; } .prog > i { display:block; height:100%; background:var(--ac); }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .grid3 { display:grid; grid-template-columns: repeat(3,1fr); gap:10px; }
+  .stat { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:12px; }
+  .stat b { font-size:20px; display:block; } .phone .stat b { font-size:16px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:7px 8px; border-bottom:1px solid var(--b); vertical-align:top; }
+  th { color:var(--mu); font-weight:500; font-size:12px; }
+  .ok{color:var(--ok)} .wa{color:var(--wa)} .da{color:var(--da)} .ac{color:var(--ac)}
+  .crit { display:flex; gap:8px; align-items:flex-start; font-size:13px; } .box { width:14px; height:14px; border:1px solid var(--b); border-radius:2px; flex:none; margin-top:2px; }
+  .box.met { background:var(--ok); border-color:var(--ok); } .box.drop { background:var(--s2); }
+  .seg { display:flex; border:1px solid var(--b); border-radius:2px; overflow:hidden; } .seg span { padding:6px 10px; font-size:12px; color:var(--mu); border-right:1px solid var(--b); } .seg span:last-child{border-right:none} .seg span.on { background:var(--ac); color:var(--acf); }
+  .journal div { font-size:12px; color:var(--mu); padding:3px 0; border-bottom:1px dashed var(--b); } .journal b { color:var(--fg); font-weight:500; }
+  .input { border:1px solid var(--b); background:var(--s0); border-radius:2px; padding:8px 10px; color:var(--mu); font-size:13px; }
+  .new { outline:1px dashed var(--ac); outline-offset:3px; }
+  .tag { font-size:10px; color:var(--ac); border:1px solid var(--ac); border-radius:2px; padding:0 4px; margin-left:6px; text-transform:none; letter-spacing:0; }
+  .dim { opacity:.45; }
+  .q { display:flex; gap:8px; align-items:flex-start; font-size:13px; padding:6px 0; border-bottom:1px dashed var(--b); }
+  .q:last-child { border-bottom:none; }
+  .who { font-size:11px; color:var(--mu); min-width:84px; }
+
+  .plist { border:1px solid var(--b); border-radius:2px; max-height:none; }
+  .prow { display:flex; gap:10px; align-items:flex-start; padding:9px 12px; border-bottom:1px solid var(--b); }
+  .prow:last-child { border-bottom:none; }
+  .cb { width:16px; height:16px; border:1px solid var(--b); border-radius:2px; flex:none; margin-top:2px; display:flex; align-items:center; justify-content:center; font-size:11px; }
+  .cb.on { background:var(--ac); border-color:var(--ac); color:var(--acf); }
+  .pname { font-size:13px; font-weight:600; }
+  .ppath { font-size:11px; color:var(--mu); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .pop { position:relative; border:1px solid var(--b); background:var(--s2); border-radius:2px; padding:10px; box-shadow:0 8px 24px rgba(0,0,0,.4); }
+</style>
+</head>
+<body>
+<h1 class="page">paseo-bm · New mission and "+ Add" — choose projects, not workspaces — mockup for the owner's approval (2026-10-21, draft 1)</h1>
+<p class="note">Replaces the "Repositories" chips of artboard E (missions-screen.html) and the "+ Add" picker of the mission page. <b>Today</b> the chips list Paseo <i>workspaces</i> by their titles, which are often a chat's title ("Greet user and await task") and repeat one repository once per workspace ("Paseo-BM Plugin" and "Review Paseo agent workflow…" are both paseo-bm). <b>Now</b> there is one row per Paseo <b>project</b>, named as Paseo's sidebar names it (its folder name, or the name you gave the project in Paseo), with its folder underneath so two similar names are told apart. Choosing a project means its main checkout; a mission's own worktrees and paseo-bm's homes are never listed. Everywhere a mission names a repository (the charter, Repositories, Workers by repository, memory) uses the same project name. Nothing else on the form changes. New parts have a dashed outline.</p>
+
+<div class="boards">
+
+<!-- ============ L. Desktop · New mission ============ -->
+<div class="board desk" style="width:640px">
+  <div class="cap">L · Desktop — New mission: Projects</div>
+  <div class="content">
+    <span class="title" style="font-size:20px">New mission</span>
+    <div class="dim">
+      <div class="row" style="gap:12px"><div style="flex:3"><span class="small muted">Name</span><div class="input">AI Assistant ↔ xOne</div></div><div style="flex:1"><span class="small muted">Short code</span><div class="input mono">AIX</div></div></div>
+      <div style="height:10px"></div>
+      <div><span class="small muted">Goal (the Main can draft the rest of the charter with you)</span><div class="input" style="height:48px">The AI Assistant UI chats with the backend, which answers through xOne.</div></div>
+    </div>
+    <div class="new">
+      <div class="row between"><span class="small muted">Projects · the repositories this mission works in</span><span class="small ac">2 chosen</span></div>
+      <div class="input" style="margin:6px 0">Find a project…</div>
+      <div class="plist">
+        <div class="prow"><span class="cb on">✓</span><div><div class="pname">xspace-ai-assistant</div><div class="ppath">~/…/dx/frontend/xspace/xspace-ai-assistant</div></div></div>
+        <div class="prow"><span class="cb on">✓</span><div><div class="pname">ai-assistant</div><div class="ppath">~/…/dx/backends/ai-assistant</div></div></div>
+        <div class="prow"><span class="cb "></span><div><div class="pname">xspace-shell</div><div class="ppath">~/…/dx/frontend/xspace/xspace-shell</div></div></div>
+        <div class="prow"><span class="cb "></span><div><div class="pname">paseo-bm</div><div class="ppath">~/…/self/paseo-plugins/paseo-bm</div></div></div>
+        <div class="prow"><span class="cb "></span><div><div class="pname">paseo-bm-site</div><div class="ppath">~/…/self/paseo-plugins/paseo-bm-site</div></div></div>
+      </div>
+      <div class="small muted" style="margin-top:6px">Named as in Paseo's sidebar; rename a project in Paseo to change its name here. The mission works in each project's own branch and worktree.</div>
+    </div>
+    <div class="dim"><span class="small muted">Mission level</span><div class="seg" style="margin-top:4px;width:fit-content"><span>0</span><span>1</span><span class="on">2</span><span>3</span><span>4</span></div></div>
+    <div class="row" style="justify-content:flex-end"><span class="btn">Cancel</span><span class="btn pri">Create and open Main</span></div>
+  </div>
+</div>
+
+<!-- ============ M. Phone · New mission ============ -->
+<div class="board phone">
+  <div class="cap">M · Phone — New mission: Projects</div>
+  <div class="content">
+    <span class="title">New mission</span>
+    <div class="dim"><div class="small muted">Name · Short code · Goal — as approved (artboard E)</div></div>
+    <div class="new">
+      <div class="row between"><span class="small muted">Projects</span><span class="small ac">2 chosen</span></div>
+      <div class="input" style="margin:6px 0">Find a project…</div>
+      <div class="plist">
+        <div class="prow"><span class="cb on">✓</span><div><div class="pname">xspace-ai-assistant</div><div class="ppath">~/…/dx/frontend/xspace/xspace-ai-assistant</div></div></div>
+        <div class="prow"><span class="cb on">✓</span><div><div class="pname">ai-assistant</div><div class="ppath">~/…/dx/backends/ai-assistant</div></div></div>
+        <div class="prow"><span class="cb "></span><div><div class="pname">xspace-shell</div><div class="ppath">~/…/dx/frontend/xspace/xspace-shell</div></div></div>
+        <div class="prow"><span class="cb "></span><div><div class="pname">paseo-bm</div><div class="ppath">~/…/self/paseo-plugins/paseo-bm</div></div></div>
+      </div>
+      <div class="small muted" style="margin-top:4px">+ 1 more · type to find it</div>
+    </div>
+    <div class="dim"><div class="small muted">Mission level — as approved</div></div>
+    <div class="row"><span class="btn" style="flex:1;text-align:center">Cancel</span><span class="btn pri" style="flex:2;text-align:center">Create and open Main</span></div>
+  </div>
+</div>
+
+<!-- ============ N. Desktop · mission page, + Add ============ -->
+<div class="board desk" style="width:640px">
+  <div class="cap">N · Desktop — a mission's charter: "+ Add" opens the same list, only projects not in the mission</div>
+  <div class="content">
+    <div class="card"><span class="label">Charter · confirmed 2026-10-21</span>
+      <div class="small muted">Repositories</div>
+      <div class="row wrap"><span class="chip">xspace-ai-assistant</span><span class="chip">ai-assistant</span><span class="chip new" style="color:var(--ac)">+ Add</span></div>
+      <div class="pop new" style="margin-top:6px">
+        <div class="input" style="margin-bottom:6px">Find a project…</div>
+        <div class="plist">
+          <div class="prow"><span class="cb "></span><div><div class="pname">xspace-shell</div><div class="ppath">~/…/dx/frontend/xspace/xspace-shell</div></div></div>
+        <div class="prow"><span class="cb "></span><div><div class="pname">paseo-bm</div><div class="ppath">~/…/self/paseo-plugins/paseo-bm</div></div></div>
+        <div class="prow"><span class="cb "></span><div><div class="pname">paseo-bm-site</div><div class="ppath">~/…/self/paseo-plugins/paseo-bm-site</div></div></div>
+        </div>
+        <div class="row" style="justify-content:flex-end;margin-top:8px"><span class="btn">Cancel</span><span class="btn pri">Add</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+<p class="note">Rules: one row per Paseo project whose folder is a repository you work in; a project that only holds a mission's worktree, the Missions home or the Orchestrator's home is not listed. Rows are sorted by recent activity; "Find a project…" filters by name and folder and shows when more than 6 projects are listed. A project with no open workspace at its main folder is still listed; paseo-bm opens one there when the mission needs it. The folder line shortens the home folder to ~ and the middle of a long path to …</p>
+</body>
+</html>

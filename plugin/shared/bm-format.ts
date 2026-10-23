@@ -64,14 +64,18 @@ export const REPORT_FIELDS = [
   "blockers",
 ] as const;
 /**
- * The field a report may add after the template's last one: the handoff note
- * the plugin asks an outgoing Worker for (`BM-HANDOFF`, autonomy design §G.6).
+ * The fields a report may add after the template's last one: the handoff note
+ * the plugin asks an outgoing Worker for (`BM-HANDOFF`, autonomy design §G.6),
+ * and what a size rollover leaves (`remaining`, delivery line design §2.6).
  */
 const HANDOFF_NOTE_FIELD = "handoffNote";
+const REMAINING_FIELD = "remaining";
+/** The report's git fields (delivery line design §4.4), last and each optional. */
+const INTEGRATION_FIELDS = ["branch", "commit", "pushed", "mr", "ci"] as const;
 /** Every field a report may carry, in order. */
-const KNOWN_REPORT_FIELDS: readonly string[] = [...REPORT_FIELDS, HANDOFF_NOTE_FIELD];
-/** Fields a report may leave out: `decided` came later, and older Workers never write it; `handoffNote` only when asked. */
-const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided", HANDOFF_NOTE_FIELD]);
+const KNOWN_REPORT_FIELDS: readonly string[] = [...REPORT_FIELDS, HANDOFF_NOTE_FIELD, REMAINING_FIELD, ...INTEGRATION_FIELDS];
+/** Fields a report may leave out: `decided` came later, and older Workers never write it; `handoffNote`, `remaining` and the git fields only when there are some. */
+const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided", HANDOFF_NOTE_FIELD, REMAINING_FIELD, ...INTEGRATION_FIELDS]);
 /** A report's phases; `stopped` (design §16.11) is a bound Worker's report on a stop. */
 export const REPORT_PHASES = ["received", "beads-done", "blocked", "finished", "stopped"] as const;
 const TIER_SHELL = /^(?:Small|Medium|Large) \(changed: ([\s\S]+)\)$/;
@@ -97,13 +101,21 @@ export const WAITING_ON_OWNER_PREFIX = "waiting on the owner:";
 export const WAITING_FOR_PREFIX = "waiting for:";
 /** How it names the peer links it asked and waits on (`bm_report`'s `waitingOnPeers`, design §7.17.3). */
 export const WAITING_ON_PROJECT_PREFIX = "waiting on project:";
+/** How it names the other requests it waits on, by id (`bm_report`'s `waitingOnRequests`, delivery line design §6.2). */
+export const WAITING_ON_REQUESTS_PREFIX = "waiting on requests:";
+/** How it names its batches whose verdict it waits on (`bm_report`'s `waitingOnBatches`, delivery line design §6.2). */
+export const WAITING_ON_REVIEW_PREFIX = "waiting on review:";
+/** The last part of its waits when the first settled item is enough (`bm_report`'s `wakeOn: any`). */
+export const WAKE_ON_ANY_TEXT = "wake on: any";
 /**
  * The `blockers` of a blocked report that carries no `BM-QUESTIONS`: a bound
  * Worker asked with `bm_questions` before and names what it waits on instead
  * (design §16.11). Nothing else may leave its questions out. Built from the
  * prefixes `bm_report` writes (they hold no regex metacharacters).
  */
-const BLOCKERS_WAITING = new RegExp(`^(?:${WAITING_ON_OWNER_PREFIX} Q\\d+(?:, Q\\d+)*(?:\\.|$)|${WAITING_FOR_PREFIX} \\S|${WAITING_ON_PROJECT_PREFIX} \\S)`);
+const BLOCKERS_WAITING = new RegExp(
+  `^(?:${WAITING_ON_OWNER_PREFIX} Q\\d+(?:, Q\\d+)*(?:\\.|$)|${WAITING_ON_REQUESTS_PREFIX} req-|${WAITING_ON_REVIEW_PREFIX} b\\d|${WAITING_FOR_PREFIX} \\S|${WAITING_ON_PROJECT_PREFIX} \\S)`,
+);
 
 const REVIEW_FIELDS = ["requestId", "batchId", "reviewKind", "verdict", "checked", "findings", "notChecked"] as const;
 /** The free-text fields of BM-REVIEW: their value may run over several indented lines. */

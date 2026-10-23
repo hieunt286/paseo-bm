@@ -63,7 +63,7 @@ const workPath = "../plugin/client/work.tsx";
 const insightsPath = "../plugin/client/insights.tsx";
 const treePath = "../plugin/client/tree.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { StageBarRow, WorkRowItem, WorkList, RequestCard, TimelineList, EvidenceList, ProjectHeader, ProjectOverviewBody, AgentMarks, TokenFigures, AgentTokensRow, ContextBars } = (await import(
+const { StageBarRow, WorkRowItem, WorkList, RequestCard, ChainedRequests, TimelineList, EvidenceList, ProjectHeader, ProjectOverviewBody, AgentMarks, TokenFigures, AgentTokensRow, ContextBars } = (await import(
   workPath
 )) as Record<
   | "ProjectOverviewBody"
@@ -71,6 +71,7 @@ const { StageBarRow, WorkRowItem, WorkList, RequestCard, TimelineList, EvidenceL
   | "WorkRowItem"
   | "WorkList"
   | "RequestCard"
+  | "ChainedRequests"
   | "TimelineList"
   | "EvidenceList"
   | "ProjectHeader"
@@ -390,6 +391,57 @@ describe("requests: one per trace, its turns merged", () => {
   it("names agents by role, numbered only when there are several, never by id", () => {
     const one = agentNamer({ workerIds: ["w1"], reviewerIds: ["r1", "r2"] }, [{ agentId: "m1", role: "manager" }]);
     expect([one("w1"), one("r1"), one("r2"), one("m1"), one("zz"), one(null)]).toEqual(["Worker", "Reviewer 1", "Reviewer 2", "the Manager", "an agent", "an agent"]);
+  });
+});
+
+describe("a request chain in Projects › Requests (delivery line design §2.7, mockup delivery-line.html artboard K)", () => {
+  const ROOT = "req-20261020T105259Z";
+  const MID = "req-20261020T113000Z";
+  const HEAD = "req-20261020T124012Z";
+  const rows = [
+    summary({ traceId: `req:${HEAD}`, requestId: HEAD, excerpt: "Widget flows W13", tier: "Large", usage: usage({ inputTokens: 38_000_000, cachedInputTokens: 0, outputTokens: 0 }), continuationOf: MID, chainRootId: ROOT, chainPosition: 3 }),
+    summary({ traceId: "tr-other", requestId: "req-20261019T090000Z", excerpt: "Menu uses the shell's mechanism", state: "completed" }),
+    summary({ traceId: `req:${MID}`, requestId: MID, state: "completed", usage: usage({ inputTokens: 50_000_000, cachedInputTokens: 0, outputTokens: 0 }), continuationOf: ROOT, chainRootId: ROOT, continuedBy: HEAD, chainPosition: 2 }),
+    summary({ traceId: `req:${ROOT}`, requestId: ROOT, state: "completed", usage: usage({ inputTokens: 33_000_000, cachedInputTokens: 0, outputTokens: 0 }), continuedBy: MID }),
+  ];
+
+  it("puts the chain on its newest request, with the chain's tokens, and marks the earlier ones", () => {
+    const listed = requestSummaries(rows);
+    expect(listed.map((entry) => entry.traceId)).toEqual([`req:${HEAD}`, "tr-other", `req:${MID}`, `req:${ROOT}`]);
+    expect(listed[0]!.chain).toEqual({ length: 3, rootId: ROOT, tokens: 121_000_000, earlier: [`req:${MID}`, `req:${ROOT}`] });
+    expect(listed.map((entry) => entry.chainHead ?? null)).toEqual([null, null, `req:${HEAD}`, `req:${HEAD}`]);
+    expect(listed[1]).not.toHaveProperty("chain");
+    const view = requestCardView(listed[0]!, null, [], NOW);
+    expect(view.chain).toEqual({ line: "chain of 3 · started with req-…105259Z", tokens: "chain 121.0M", earlier: 2 });
+    expect(requestCardView(listed[1]!, null, [], NOW).chain).toBeNull();
+  });
+
+  it("counts a chain from its place when its earlier requests are not listed, without a chain total", () => {
+    const [head] = requestSummaries([rows[0]!]);
+    expect(head!.chain).toEqual({ length: 3, rootId: ROOT, tokens: 38_000_000, earlier: [] });
+    expect(requestCardView(head!, null, [], NOW).chain).toEqual({ line: "chain of 3 · started with req-…105259Z", tokens: null, earlier: 0 });
+  });
+
+  it("draws the chain line under the title, show the chain, and the chain's tokens beside the cost", () => {
+    const view = requestCardView(requestSummaries(rows)[0]!, null, [], NOW);
+    const onToggleChain = vi.fn();
+    const card = (chainOpen: boolean) =>
+      renderTree(RequestCard({ view, expanded: false, timeline: null, loading: false, error: null, detailsOpen: false, onToggle: noop, onToggleDetails: noop, chainOpen, onToggleChain, compact: false, styles, theme }));
+    const shown = texts(card(false));
+    expect(shown).toEqual(expect.arrayContaining(["Widget flows W13", "chain of 3 · started with req-…105259Z · show the chain", "Cost 38.0M tokens · $1.05 (estimated, prices of 2026-06-24) · chain 121.0M"]));
+    expect(shown.indexOf("Widget flows W13")).toBeLessThan(shown.indexOf("chain of 3 · started with req-…105259Z · show the chain"));
+    const link = allNodes(card(false)).find((node) => node.props.accessibilityLabel === "Show the earlier requests of this chain")!;
+    (link.props.onPress as () => void)();
+    expect(onToggleChain).toHaveBeenCalledTimes(1);
+    expect(texts(card(true))).toContain("chain of 3 · started with req-…105259Z · hide the chain");
+  });
+
+  it("lists a chain on its newest request; its earlier requests under it, once opened", () => {
+    const listed = requestSummaries(rows);
+    const leaves = (nodes: Array<RNode | string>): string[] => nodes.flatMap((node) => (typeof node === "string" ? [node] : leaves(node.children)));
+    const list = (open: string[]) => leaves(renderTree(ChainedRequests({ summaries: listed, chainsOpen: new Set(open), card: (entry: { traceId: string }) => entry.traceId, compact: false, styles })));
+    expect(list([])).toEqual([`req:${HEAD}`, "tr-other"]);
+    expect(list([`req:${HEAD}`])).toEqual([`req:${HEAD}`, `req:${MID}`, `req:${ROOT}`, "tr-other"]);
   });
 });
 

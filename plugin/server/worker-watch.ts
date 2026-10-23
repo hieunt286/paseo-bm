@@ -78,7 +78,7 @@ import { requestKeyOf, traceOfAgent, workspaceTracesOf, type WorkspaceTraces } f
 import { readWorkspaceMeta, type TraceStoreLocation } from "./trace-store";
 import { WORKER_SIGNALS, type WorkerSignal } from "../shared/orchestrator";
 import { isProcessDocumentPath } from "../shared/orchestrator-rules";
-import { ACTION_EFFECTS, effectfulCommandOf } from "../shared/effectful-actions";
+import { ACTION_EFFECTS, boundaryVerdictOfCommand, effectfulCommandOf, type MissionBranch } from "../shared/effectful-actions";
 import { decisionKindOf, type Effect } from "../shared/decisions";
 import { deniedHeldCallsOf, deniedTwinOf, isDeniedHeldCall } from "../shared/denied-calls";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
@@ -90,6 +90,7 @@ import { timeOrZero } from "../shared/time";
 import { errorText } from "./rpc-kit";
 import { missionManagerOf, requestIndexOf } from "./mission-roster";
 import { createMissionStore } from "./mission-store";
+import { integrationWindowOf, missionBranchOf } from "./integration-grant";
 import { enqueueNotice, type ChannelQueue } from "./main-channel";
 import { noticeQueue } from "./notice-queue";
 import { DANGER_BACKUP_MINUTES, SIGNAL_NOTICE_MARKER, dangerSignalNoticeOf } from "../shared/notices";
@@ -186,6 +187,13 @@ export interface WorkerSignalInput {
    * withdrawn (`isDeniedHeldCall`): it never ran, so it is never `danger`.
    */
   deniedHeld?: (command: string, at: string) => boolean;
+  /**
+   * The request's placement and when the owner's integration grant covered it
+   * (delivery line design §4.3): a push of the mission branch, or its merge
+   * request, run inside that window raises no `danger`; a push anywhere else
+   * still does. None outside a placement or without a grant.
+   */
+  integration?: { mission: MissionBranch; grantedAt: string; revokedAt: string | null } | null;
 }
 
 /** A signal that holds, since when, and its evidence (not yet redacted or capped). */
@@ -265,6 +273,21 @@ export function dangerOfCommand(command: string, cwd: string | null, workspaceDi
   return found.action === null ? null : found.name;
 }
 
+/**
+ * True when the owner's integration grant covered `command` as it ran
+ * (delivery line design §4.3): inside the grant's window, and every held
+ * finding of it, read against the placement, is a push or merge request of
+ * the mission branch or a forge read. A package script is not read here, so
+ * one stays `danger`. Pure.
+ */
+function integrationCovers(input: WorkerSignalInput, command: string, cwd: string | null, ran: number): boolean {
+  const window = input.integration;
+  if (window === null || window === undefined || timeOrZero(window.grantedAt) > ran) return false;
+  if (window.revokedAt !== null && timeOrZero(window.revokedAt) <= ran) return false;
+  const findings = boundaryVerdictOfCommand(command, { cwd: cwd ?? input.workspaceDirectory, workspaceDirectory: input.workspaceDirectory, mission: window.mission }).findings;
+  return findings.length > 0 && findings.every((finding) => !finding.unreadable && (finding.integration === true || finding.forgeRead === true));
+}
+
 /** True for a shell command that runs `br create`. */
 function isBrCreate(command: string): boolean {
   return /(?:^|[\s;&|(])br\s+create\b/.test(command);
@@ -323,6 +346,7 @@ export function workerSignalsOf(input: WorkerSignalInput): HeldSignal[] {
     const effects = ACTION_EFFECTS[found.action];
     const ran = timeOrZero(call.at);
     if ((input.grants ?? []).some((grant) => timeOrZero(grant.at) <= ran && effects.some((effect) => grant.effects.includes(effect)))) continue;
+    if (effects.includes("push") && integrationCovers(input, command, text(call.detail.cwd), ran)) continue;
     held.push({ signal: "danger", since: call.at, evidence: `${found.name}: ${command}` });
     break;
   }
@@ -629,6 +653,9 @@ export async function runWorkerPass(
       const workspaceDirectory = directoryIn(await listedOnce(), workspaceId!) ?? meta?.lastKnownDirectory ?? text(agent.cwd);
       const grants = grantsOfWorker(decisions, workspaceId!, trace?.requestId ?? null, workerId, log);
       const denied = deniedHeldOfWorker(decisions, workspaceId!, workerId);
+      // Delivery line design §4.3: the grant covers a push of the mission branch only.
+      const placed = missionBranchOf(home, workspaceId!);
+      const window = placed === null ? null : integrationWindowOf(placed.placement);
       const held = workerSignalsOf({
         now: now(),
         turnStart,
@@ -638,6 +665,7 @@ export async function runWorkerPass(
         workspaceDirectory,
         tier: trace?.tier ?? null,
         grants,
+        integration: placed === null || window === null ? null : { mission: placed.mission, ...window },
         pendingCallIds: pendingCallIdsOf(agent.pendingPermissions),
         // The question quotes the command masked: compare it masked the same way.
         deniedHeld: (command, at) => isDeniedHeldCall(denied, workerId, redactText(command, env), at),

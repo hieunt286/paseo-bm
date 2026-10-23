@@ -30,8 +30,14 @@
  * - **A reload loses the queue** (it lives in memory): once per plugin run, at
  *   the first settlement or recorded turn that brings a Paseo handle, every
  *   answered `q:` decision still undelivered (`delivery` null, or `queued`) is
- *   delivered again, a block per request. A `queued` one may therefore reach
+ *   delivered again, a block per request; a `held` one too. A `queued` one may therefore reach
  *   the Worker twice across a reload; losing an answer would be worse.
+ * - **Held while the Worker waits by structure** (delivery line design §6.4,
+ *   `wake-gate.ts`): a block that does not meet its bound Worker's wait is
+ *   recorded `held` on each decision, and joins the next block of the request
+ *   (a held answer is undelivered). The block that meets the wait goes in the
+ *   Worker's release, first; a release another delivery makes carries the held
+ *   answers too (`heldAnswersOf`). Held answers are gated again after a reload.
  * - **Each request is delivered by one run at a time**; a settlement during a
  *   run makes that run look once more. Never throws: a failure is one log line.
  */
@@ -41,13 +47,17 @@ import { decisionKindOf, type Decision, type DecisionDelivery } from "../shared/
 import { soleWorkerOf } from "../shared/sole-worker";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { answerBlockOf } from "./decision-materialiser";
+import { citedAnswerEffect } from "./effects";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import { readIncidents, replacementsOf } from "./fallback-state";
+import type { ChannelQueue } from "./main-channel";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import { DELIVERY_NOTICE_MARKER } from "../shared/notices";
 import { dataHomeOf } from "./role-instructions";
 import { errorText } from "./rpc-kit";
+import { chainHeadOf } from "./waits";
+import { holdsAtSend, isReleasing, releaseWait, useHeldSource, wakeGate, type HeldItem } from "./wake-gate";
 
 const defaultLog = (message: string): void => console.warn(message);
 
@@ -93,14 +103,9 @@ export function answersMessageOf(requestId: string, decisions: readonly Decision
     const answer = decision.answer;
     if (answer?.optionKey != null) picks[questionIdOf(decision.id)] = { key: answer.optionKey };
     else if (answer?.words != null) picks[questionIdOf(decision.id)] = { other: answer.words };
-    if (answer?.by === "precedent") {
-      const subject = decision.subject === null ? "" : ` on "${decision.subject}"`;
-      cited.push(`${questionIdOf(decision.id)} was answered by the owner's precedent ${answer.precedentId ?? ""}${subject}: it is the owner's standing answer.`);
-    }
-    // Missions design §4: the Main's answer is its own, never the owner's, and grants nothing.
-    if (answer?.by === "main") {
-      cited.push(`${questionIdOf(decision.id)} was answered by your mission's Main, not the owner${answer.reason === undefined ? "" : ` (${answer.reason})`}: it grants nothing beyond your rules.`);
-    }
+    // Missions design §4: the Main's answer is its own, never the owner's; delivery line design §7.3: its grant as stored.
+    const citation = citedAnswerEffect(decision);
+    if (citation !== null) cited.push(citation.sentence);
   }
   const citations = cited.length === 0 ? "" : `\n${cited.join("\n")}`;
   return `${DELIVERY_NOTICE_MARKER} answers\nContinue ${requestId}.${citations}\n\n${answersText(requestId, questions, picks)}`;
@@ -110,6 +115,53 @@ export function answersMessageOf(requestId: string, decisions: readonly Decision
 function isAnsweredQuestion(decision: Decision): boolean {
   return decisionKindOf(decision.id) === "question" && decision.status === "answered" && decision.answer !== null && decision.requestId !== null;
 }
+
+/** An answer still to deliver: none recorded, `queued`, or `held` by the wake gate. */
+function isUndelivered(delivery: DecisionDelivery | null): boolean {
+  return delivery === null || delivery.outcome === "queued" || delivery.outcome === "held";
+}
+
+/** Writes `delivery` on each decision; a failure is one log line. */
+function writeDeliveries(home: string, decisions: readonly Decision[], delivery: DecisionDelivery, log: (message: string) => void): void {
+  const store = createDecisionStore(home, { log });
+  for (const decision of decisions) {
+    try {
+      store.transition(decision.id, (current) => ({ ok: true, decision: { ...current, delivery } }), decision.workspaceId);
+    } catch (error) {
+      log(`[paseo-bm] could not record the delivery of decision ${decision.id}: ${errorText(error)}`);
+    }
+  }
+}
+
+/**
+ * The answers held for a waiting Worker's request (delivery line design §6.4),
+ * as one block per request for its release — those of a request it continues
+ * that were held for it too (§2.7): recorded `queued` when released, then
+ * `sent` or `failed` as the release went. Never throws.
+ */
+export function heldAnswersOf(home: string, target: { workspaceId: string; requestId: string; workerId: string }, now: () => Date = () => new Date()): HeldItem[] {
+  const log = defaultLog;
+  const byRequest = new Map<string, Decision[]>();
+  for (const decision of createDecisionStore(home, { log }).list({ statuses: ["answered"] })) {
+    if (!isAnsweredQuestion(decision) || decision.delivery?.outcome !== "held") continue;
+    if (decision.requestId !== target.requestId && decision.delivery.to !== target.workerId) continue;
+    byRequest.set(decision.requestId!, [...(byRequest.get(decision.requestId!) ?? []), decision]);
+  }
+  return [...byRequest].map(([requestId, held]) => {
+    const kind = answersKindOf(requestId);
+    const write = (outcome: DecisionDelivery["outcome"]): void => writeDeliveries(home, held, { to: target.workerId, kind, at: now().toISOString(), outcome }, log);
+    return {
+      key: kind,
+      block: answersMessageOf(requestId, held),
+      at: held.map((decision) => decision.delivery!.at).sort()[0]!,
+      release: () => write("queued"),
+      refs: held.map((decision) => ({ kind: "question" as const, id: decision.id })),
+      callbacks: { onSent: () => write("sent"), onDropped: () => write("failed"), onHeld: () => write("held") },
+    };
+  });
+}
+
+useHeldSource("answers", heldAnswersOf);
 
 /** Answered where the Worker read it already: in its own chat, or a confirmed chat answer the plugin cannot word. */
 function answeredInChat(decision: Decision): boolean {
@@ -127,8 +179,8 @@ export interface QuestionDeliveryDeps {
   home?: () => string | null;
   now?: () => Date;
   log?: (message: string) => void;
-  /** The queue the blocks go through; the plugin's shared one by default. */
-  queue?: Pick<NoticeQueue, "enqueue" | "pending">;
+  /** The queue the blocks go through; the plugin's shared one by default. A release uses its batch kind when it has one. */
+  queue?: Pick<NoticeQueue, "enqueue" | "pending"> & ChannelQueue;
   /** The request's sole live Worker; `soleWorkerOfRequest` by default. */
   workerOf?: (input: { workspaceId: string; requestId: string; home: string }, paseo: DashboardPaseo) => Promise<string | null>;
 }
@@ -150,12 +202,16 @@ export interface QuestionDelivery {
 /**
  * The request's sole live Worker in the workspace (`soleWorkerOf` over the
  * paseo-bm agents' labels, with the Workers a fallback Worker replaced left
- * out), or null.
+ * out), or null. A continued request resolves to the head of its chain
+ * first (`chainHeadOf`, delivery line design §2.7): every reader that sends
+ * to a request's Worker goes through here.
  */
 export async function soleWorkerOfRequest(
-  input: { workspaceId: string; requestId: string; home: string },
+  given: { workspaceId: string; requestId: string; home: string },
   paseo: DashboardPaseo,
 ): Promise<string | null> {
+  const head = chainHeadOf(given.home, given.requestId, given.workspaceId);
+  const input = head === null ? given : { ...given, workspaceId: head.workspaceId, requestId: head.request.requestId };
   const replacements = replacementsOf(readIncidents(input.home, () => {}).incidents);
   // The request each agent's label names, as far as the plugin trusts it (design §16.4, `knownRequestIdOf`).
   const peers = (await bmAgentsOf(paseo, { home: input.home }))
@@ -168,6 +224,23 @@ export async function soleWorkerOfRequest(
       replaced: (facts.replacedBy ?? null) !== null || replacements.has(facts.id),
     }));
   return soleWorkerOf(peers, input.requestId)?.id ?? null;
+}
+
+/**
+ * Who a review verdict or no-verdict of a batch goes to (delivery line design
+ * §6.4): the Reviewer's parent while it is still the newest Worker of its
+ * request's chain head; once a handoff (or a continuation) replaced it, the
+ * request's current Worker (`soleWorkerOfRequest`), so the verdict reaches the
+ * Worker that waits on it. The parent when none is found. Never rejects.
+ */
+export async function verdictTargetOf(given: { workspaceId: string; requestId: string; home: string }, parentId: string, paseo: unknown): Promise<string> {
+  try {
+    const head = chainHeadOf(given.home, given.requestId, given.workspaceId);
+    if (head === null || head.request.workerIds.at(-1) === parentId) return parentId;
+    return (await soleWorkerOfRequest(given, paseo as DashboardPaseo)) ?? parentId;
+  } catch {
+    return parentId;
+  }
 }
 
 export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}): QuestionDelivery {
@@ -199,12 +272,14 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
     for (const decision of store.list({ workspaceId, requestId, statuses: ["answered"] })) {
       if (!isAnsweredQuestion(decision)) continue;
       const delivery = decision.delivery;
-      if (delivery !== null && delivery.outcome !== "queued") continue;
+      if (!isUndelivered(delivery)) continue;
+      // In a Worker's release not yet sent (delivery line design §6.4): it goes with it.
+      if (delivery !== null && isReleasing(delivery.to, kind)) continue;
       if (delivery === null && answeredInChat(decision)) {
         record(store, decision, { to: decision.askedBy.agentId ?? "worker", kind, at: decision.answer!.at, outcome: "sent" });
         continue;
       }
-      if (delivery !== null) {
+      if (delivery !== null && delivery.outcome === "queued") {
         // Queued in this run and no longer in the queue: it went out at the Worker's turn end.
         const to = queuedHere.get(decision.id);
         if (to === delivery.to && !queue.pending(to).some((notice) => notice.kind === kind)) {
@@ -247,7 +322,30 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
       failAll(workerId, errorText(error));
       return;
     }
-    const outcome = await queue.enqueue(workerId, kind, text, paseo);
+    // Delivery line design §6.4: held while the Worker waits on other items; the block that meets its wait goes in its release, first.
+    const refs = pending.map((decision) => ({ kind: "question" as const, id: decision.id }));
+    const gate = wakeGate(home, workerId, "answers", refs, { workspaceId, requestId }, { now, log });
+    /** The gate held the block at the send (the Worker reported `blocked` meanwhile): `held`, for that wait's release. */
+    const heldAtSend = (): void => {
+      for (const decision of pending) queuedHere.delete(decision.id);
+      writeDeliveries(home, pending, { to: workerId, kind, at: now().toISOString(), outcome: "held" }, log);
+    };
+    if (gate.action === "hold") {
+      const at = now().toISOString();
+      for (const decision of pending) if (decision.delivery?.outcome !== "held" || decision.delivery.to !== workerId) record(store, decision, { to: workerId, kind, at, outcome: "held" });
+      return;
+    }
+    if (gate.release !== null) {
+      const write = (outcome: DecisionDelivery["outcome"]): void => writeDeliveries(home, pending, { to: workerId, kind, at: now().toISOString(), outcome }, log);
+      for (const decision of pending) queuedHere.delete(decision.id);
+      write("queued");
+      const released = await releaseWait(gate.release, { key: kind, block: text, settles: gate.settles, refs, callbacks: { onSent: () => write("sent"), onDropped: () => write("failed"), onHeld: heldAtSend } }, { home, queue, paseo, log, now });
+      if (released === "dropped") log(`[paseo-bm] the answers ${pending.map((decision) => decision.id).join(", ")} were not delivered: Worker ${workerId} is archived, closed or gone, or the send failed.`);
+      return;
+    }
+    let heldNow = false;
+    const outcome = await queue.enqueue(workerId, kind, text, paseo, { onHeld: () => ((heldNow = true), heldAtSend()) }, { isHeld: holdsAtSend(home, workerId, "answers", refs, { workspaceId, requestId }, { now, log }) });
+    if (heldNow) return;
     if (outcome === "dropped") {
       failAll(workerId, `Worker ${workerId} is archived, closed or gone, or the send failed`);
       return;
@@ -288,7 +386,7 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
     try {
       const requests = new Map<string, { workspaceId: string; requestId: string }>();
       for (const decision of createDecisionStore(home, { log }).list({ statuses: ["answered"] })) {
-        if (!isAnsweredQuestion(decision) || (decision.delivery !== null && decision.delivery.outcome !== "queued")) continue;
+        if (!isAnsweredQuestion(decision) || !isUndelivered(decision.delivery)) continue;
         requests.set(requestKey(decision.workspaceId, decision.requestId!), { workspaceId: decision.workspaceId, requestId: decision.requestId! });
       }
       for (const { workspaceId, requestId } of requests.values()) await deliverRequest(workspaceId, requestId, paseo, home);

@@ -16,6 +16,8 @@
  * - `eval-metrics/actions.ts` — A-6;
  * - `eval-metrics/orchestrator.ts` — A-7, the Orchestrator's tokens of A-8, A-12, A-13;
  * - `eval-metrics/mains.ts` — A-14, the Mains' turns by what started them;
+ * - `eval-metrics/owner-cards.ts` — M-39 and M-41, what the owner's cards were about (delivery line design §13);
+ * - `eval-metrics/delivery-line.ts` — M-36, M-37, M-38, M-40 and M-42: the tokens a request reads, files two missions wrote in one workspace, committed and verified finishes, Worker turns while a wait is unsettled, maintenance dropped after its ceiling (delivery line design §13);
  * - `eval-metrics/tokens.ts` — A-8 and the context and token figures;
  * - `eval-metrics/requests.ts` — A-11, review lift per tier and workspace (autonomy design §C.4) and the other supplementary figures;
  * - `eval-metrics/suite.ts` — A-3 and A-9, which only the suite knows;
@@ -48,7 +50,9 @@
 import { a6Of } from "./eval-metrics/actions";
 import { admissionEvidenceOf, type AdmissionEvidence } from "./eval-metrics/admission";
 import { delegationOf } from "./eval-metrics/delegation";
+import { m36Of, m37Of, m38Of, m40Of, m42Of, registryOf, tokensReadOf } from "./eval-metrics/delivery-line";
 import { a14Of } from "./eval-metrics/mains";
+import { m39Of, m41Of, missionDecisionsOf } from "./eval-metrics/owner-cards";
 import { a12Of, a13Of, a7Of, orchestratorTokensOf } from "./eval-metrics/orchestrator";
 import { a1Of, a2Of, a5Of, ownerWaitOf, questionOutcomesOf, recommendedAgreementOf } from "./eval-metrics/questions";
 import { a11Of, processOf, reportFormatOf, requestsByDayOf, reviewLiftOf, reviewsOf, roundsBlockedOf, tierMixOf, turnsByRoleOf, turnsEndedOf } from "./eval-metrics/requests";
@@ -99,7 +103,8 @@ export {
   type WorkerReadingFigures,
 } from "./eval-metrics/admission";
 export { MAIN_TRIGGERS, mainTriggerOf, type MainTrigger } from "./eval-metrics/mains";
-export { answerChoiceOf, freshInputTokensOf, median, normaliseQuestionText, percentile, recordStart, workspaceOfStallKey, type AnswerChoice } from "./eval-metrics/helpers";
+export { sameQuestionText } from "./eval-metrics/owner-cards";
+export { answerChoiceOf, freshInputTokensOf, inputIncludesCached, median, normaliseQuestionText, percentile, recordStart, workspaceOfStallKey, type AnswerChoice } from "./eval-metrics/helpers";
 export {
   BRIEF_CHARACTERS,
   BRIEF_TOKENS,
@@ -119,6 +124,7 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
   const unknowns = emptyUnknowns();
   const scope = scopeOf(input, unknowns);
   const stores = storesOf(input, unknowns);
+  const missionDecisions = missionDecisionsOf(input, unknowns);
   const deliveries = deliveriesOf(scope, unknowns);
   const conversation = conversationOf(deliveries, scope, stores, unknowns);
   const ownerTexts = ownerTextsOf(deliveries, scope, stores.proposals);
@@ -128,6 +134,8 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
   const delegation = delegationOf(scope, stores, unknowns);
   const finished = scope.finishedRequests.length;
   const a7 = a7Of(input, stores, scope.bounds, unknowns);
+  const registry = registryOf(input, unknowns);
+  const tokensRead = tokensReadOf(scope);
 
   return {
     window: { since: input.window.since, until: input.window.until },
@@ -145,6 +153,13 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
     a12: a12Of(input.interventions, scope.bounds, unknowns),
     a13: a13Of(input.dangers, stores.wakes, input.wakes !== undefined, a7.noActionShare, scope.bounds, unknowns),
     a14: a14Of(scope.scopeRecords, input.missionsWorkspaceIds),
+    m39: m39Of(scope, stores, missionDecisions, input.decisions !== undefined),
+    m41: m41Of(scope, stores, missionDecisions, input),
+    m36: m36Of(scope, registry, tokensRead, input),
+    m37: m37Of(scope, input),
+    m38: m38Of(scope, input),
+    m40: m40Of(scope, stores, registry, tokensRead, input),
+    m42: m42Of(scope, input, unknowns),
     context: contextOf(scope),
     reviewLift: reviewLiftOf(scope),
     supplementary: {

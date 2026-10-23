@@ -44,6 +44,8 @@ import { createMissionRoster, requestIndexOf } from "./mission-roster";
 import { replaceMain } from "./mission-replace";
 import { offerMerges } from "./mission-ownership";
 import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission } from "./mission-store";
+import { placementEntryOf } from "./placements";
+import { newWorkerPlaceOf, type NewWorkerPlace } from "./placement-create";
 import { ensureMissionWorkspace, ensureMissionsHome, handleMissionEnsure, labelsOf, markMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
 import { hasOutdatedInstructions } from "./instructions-label";
 import { listedWorkspaces, workspaceDirectory, type DashboardPaseo } from "./paseo-directory";
@@ -82,11 +84,18 @@ export function legacyCodeOf(name: string, taken: (code: string) => boolean): st
 /**
  * The open mission whose scope holds the workspace, or null (mission runtime
  * design §5.5): one the owner or the orchestrator created before a legacy
- * one, then the one with the newest journal line, then the newest. Never throws.
+ * one, then the one with the newest journal line, then the newest. A
+ * mission's placement is that mission's alone (delivery line design §3.1).
+ * Never throws.
  */
 export function missionOfWorkspace(home: string, workspaceId: string): Mission | null {
   try {
     const store = createMissionStore(home);
+    const placement = placementEntryOf(home, workspaceId);
+    if (placement !== null) {
+      const mission = store.get(placement.missionId);
+      return mission?.state === "open" ? mission : null;
+    }
     const lastActivity = (mission: Mission): string => store.journal(mission.missionId, 1).at(-1)?.at ?? "";
     return (
       store
@@ -148,7 +157,8 @@ export async function migrateWorkspace(
   options: { managers?: readonly ManagerAgentSnapshot[]; prefer?: string } = {},
 ): Promise<Mission | null> {
   const home = dataHome(deps);
-  if (home === null || (await isPluginHomeNow(paseo, workspaceId, home)) || missionOfWorkspace(home, workspaceId) !== null) return null;
+  // A placement is never migrated: its mission holds it, open or closed (delivery line design §3.1).
+  if (home === null || placementEntryOf(home, workspaceId) !== null || (await isPluginHomeNow(paseo, workspaceId, home)) || missionOfWorkspace(home, workspaceId) !== null) return null;
   const log = logOf(deps);
   try {
     let chosen = options.prefer ?? null;
@@ -232,12 +242,15 @@ function openMissionOfRequest(home: string, requestId: string): Mission | null {
   }
 }
 
+/** What `manager.ensure { forNewRequest }` adds: the Main's mission and where its new Worker appears (delivery line design §3.3, §4.8). */
+export type NewRequestMission = { missionId: string; code: string; name: string } & NewWorkerPlace;
+
 /** `manager.ensure` (§3.6): see the module comment. Throws as `mission.ensure` and `ensureManager` do. */
 export async function handleManagerEnsure(
-  input: { workspaceId: string; replaceOutdated?: boolean; requestId?: string },
+  input: { workspaceId: string; replaceOutdated?: boolean; requestId?: string; forNewRequest?: boolean },
   paseo: MissionsPaseo,
   deps: MissionsHomeDeps = {},
-): Promise<EnsureManagerResult> {
+): Promise<EnsureManagerResult & { mission?: NewRequestMission }> {
   const home = dataHome(deps);
   const { workspaceId } = input;
   if (home === null || (await isPluginHomeNow(paseo, workspaceId, home))) {
@@ -272,6 +285,10 @@ export async function handleManagerEnsure(
     setupNotice: await setupNoticeFor(paseo, ensured),
     // `mission.ensure` names only a labelled Main it replaced; an unlabelled one it replaced is the mission's `mainId`.
     replacedManagerId: opened.replacedMainId ?? (opened.created && unlabelled !== undefined ? unlabelled.id : null),
+    // `/bm-worker-new` tells the owner which Main got the request and where its Worker appears.
+    ...(input.forNewRequest === true
+      ? { mission: { missionId: mission.missionId, code: mission.code, name: mission.name, ...(await newWorkerPlaceOf(home, paseo, mission, workspaceId)) } }
+      : {}),
   };
 }
 

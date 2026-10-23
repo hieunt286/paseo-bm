@@ -16,6 +16,10 @@ import { hereDocumentsOf, parseShellLine, withoutHereDocuments, type ShellComman
 /** The actions, in the order A-6 reports them; each is also the name the `danger` evidence gives, but `rm -rf`, which names its target. */
 export const EFFECTFUL_ACTIONS = [
   "git push",
+  "glab mr create/update",
+  "glab mr merge",
+  "gh pr create/edit",
+  "gh pr merge",
   "npm publish",
   "pnpm publish",
   "yarn publish",
@@ -34,6 +38,11 @@ export type EffectfulAction = (typeof EFFECTFUL_ACTIONS)[number];
 /** The actions a pattern names; `DELETE FROM` without `WHERE` and `rm -rf` are read by hand below. */
 const EFFECTFUL_PATTERNS: ReadonlyArray<{ action: EffectfulAction; pattern: RegExp }> = [
   { action: "git push", pattern: /\bgit(?:\s+-{1,2}[\w-]+(?:[= ]\S+)?)*\s+push\b/ },
+  // Delivery line design §4.2: a merge request or pull request is outward-facing, like a push.
+  { action: "glab mr create/update", pattern: /\bglab\s+mr\s+(?:create|new|update)\b/ },
+  { action: "glab mr merge", pattern: /\bglab\s+mr\s+(?:merge|accept)\b/ },
+  { action: "gh pr create/edit", pattern: /\bgh\s+pr\s+(?:create|edit)\b/ },
+  { action: "gh pr merge", pattern: /\bgh\s+pr\s+merge\b/ },
   { action: "npm publish", pattern: /\bnpm(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+publish\b/ },
   { action: "pnpm publish", pattern: /\bpnpm(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+publish\b/ },
   { action: "yarn publish", pattern: /\byarn(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+(?:npm\s+)?publish\b/ },
@@ -53,6 +62,10 @@ const EFFECTFUL_PATTERNS: ReadonlyArray<{ action: EffectfulAction; pattern: RegE
  */
 export const ACTION_EFFECTS: Readonly<Record<EffectfulAction, readonly Effect[]>> = {
   "git push": ["push"],
+  "glab mr create/update": ["push"],
+  "glab mr merge": ["push"],
+  "gh pr create/edit": ["push"],
+  "gh pr merge": ["push"],
   "npm publish": ["publish"],
   "pnpm publish": ["publish"],
   "yarn publish": ["publish"],
@@ -505,6 +518,14 @@ export interface HeldFinding {
   effects: readonly Effect[];
   /** True when the request could not be read (§D.4): only the owner allows it (`security`). */
   unreadable: boolean;
+  /**
+   * A push of the mission branch to `origin`, or its merge request into the
+   * integration branch (delivery line design §4.2): what the owner's standing
+   * integration grant covers (§4.3). Absent otherwise.
+   */
+  integration?: true;
+  /** A read of the forge (`glab mr view`, `glab ci status`, …): the grant covers it too. Absent otherwise. */
+  forgeRead?: true;
 }
 
 /** What the boundary reads of one request: its held effects, and the writes that landed in the scratch area. */
@@ -522,9 +543,24 @@ export interface BoundaryContext extends PathContext {
    * is unreadable. Without it every package script is unreadable.
    */
   scriptBodyOf?: (name: string, cwd: string | null) => string | null | undefined;
+  /**
+   * The request's placement (delivery line design §4.2): its worktree, the
+   * mission branch, the integration branch and the remote. Absent outside a
+   * placement: git and the forge CLIs are read as before.
+   */
+  mission?: MissionBranch;
+}
+
+/** A placement as the boundary judges git and the forge CLIs against it (delivery line design §4.2). */
+export interface MissionBranch {
+  directory: string;
+  branch: string;
+  target: string;
+  remote: "origin";
 }
 
 const RELEASE_PUSH: readonly Effect[] = ["push"];
+const COMMIT: readonly Effect[] = ["commit"];
 const RELEASE_PUBLISH: readonly Effect[] = ["publish"];
 const RELEASE_DEPLOY: readonly Effect[] = ["deploy"];
 const DOCKER_PUSH: readonly Effect[] = ["push", "publish", "deploy"];
@@ -784,6 +820,241 @@ function judgeWrite(state: ClassifyState, word: ShellWord, cwd: string | null, v
   else if (verdict === "unjudged") unreadable(state, `${verb} ${word.value} (a path the command does not spell out)`);
 }
 
+// ---------------------------------------------------------------------------
+// Git and the forge CLIs in a placement (delivery line design §4.2): a push of
+// the mission branch and its merge request are `integration`, what the
+// owner's one grant covers; a forge read is `forgeRead`; anything whose
+// destination the text does not spell out stays held, never covered.
+// ---------------------------------------------------------------------------
+
+/** What a line's earlier git commands did: switched off the mission branch, changed a remote. */
+interface GitLine {
+  offBranch: boolean;
+  remoteChanged: boolean;
+}
+
+/** The git subcommands that write the mission branch: none in the placement on it (§4.1). */
+const GIT_WRITES: ReadonlySet<string> = new Set(["commit", "merge", "cherry-pick", "revert"]);
+/** The `git push` flags that leave its destination as written; any other flag is no mission push. */
+const PUSH_FLAGS: ReadonlySet<string> = new Set(["-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--progress", "--no-progress", "--porcelain", "-n", "--dry-run"]);
+
+/**
+ * A git call as it runs: its folder after each `-C` (null when the text does
+ * not spell it out), whether a flag or a variable rewires it (`-c`,
+ * `--git-dir`, `GIT_*=`), its subcommand (null when none or a variable) and
+ * the words after it.
+ */
+function gitCallOf(command: ShellCommand, args: readonly ShellWord[], here: string | null): { dir: string | null; rewired: boolean; sub: string | null; rest: ShellWord[] } {
+  let dir = here;
+  let rewired = command.assignments.some((assignment) => assignment.name.startsWith("GIT_"));
+  let index = 0;
+  while (index < args.length) {
+    const word = args[index]!;
+    if (word.dynamic || !word.value.startsWith("-")) break;
+    if (word.value === "-C") {
+      const target = args[index + 1];
+      dir = target === undefined || target.dynamic || target.value.startsWith("~") ? null : target.value.startsWith("/") ? resolvePosix("/", target.value) : dir === null ? null : resolvePosix(dir, target.value);
+      index += 2;
+      continue;
+    }
+    if (GIT_VALUE_FLAGS.has(word.value)) {
+      rewired = true;
+      index += 2;
+      continue;
+    }
+    if (/^--(?:git-dir|work-tree|namespace|exec-path)=|^-c./.test(word.value)) rewired = true;
+    index += 1;
+  }
+  const sub = args[index];
+  return { dir, rewired, sub: sub === undefined || sub.dynamic ? null : sub.value, rest: args.slice(index + 1) };
+}
+
+/** A refspec that names the mission branch on both sides (`HEAD` for the source); never a forced or deleting one. */
+function isMissionRef(ref: string, branch: string): boolean {
+  const local = (name: string): string => name.replace(/^refs\/heads\//, "");
+  const [source, destination, ...more] = ref.split(":");
+  if (ref.startsWith("+") || more.length > 0 || source === undefined) return false;
+  const fromBranch = source === "HEAD" || local(source) === branch;
+  return destination === undefined ? fromBranch : fromBranch && local(destination) === branch;
+}
+
+/** `git push <remote> [refspec…]` to the mission's remote, every refspec the mission branch, only flags of `PUSH_FLAGS`. */
+function isMissionPush(rest: readonly ShellWord[], mission: MissionBranch): boolean {
+  const named: string[] = [];
+  for (const word of rest) {
+    if (word.dynamic) return false;
+    if (word.value.startsWith("-")) {
+      if (!PUSH_FLAGS.has(word.value)) return false;
+      continue;
+    }
+    named.push(word.value);
+  }
+  return named[0] === mission.remote && named.slice(1).every((ref) => isMissionRef(ref, mission.branch));
+}
+
+/** True when a `git remote` or `git config` call changes where a remote points (the repository's config, shared with its root checkout). */
+function changesRemote(sub: string, rest: readonly ShellWord[]): boolean {
+  const words = rest.map((word) => word.value);
+  if (sub === "remote") return ["add", "set-url", "rename", "remove", "rm"].includes(positional(rest)[0]?.value ?? "");
+  if (sub !== "config" || words.some((word) => /^(?:--get|--list$|-l$)/.test(word))) return false;
+  return rest.some((word) => word.dynamic || /^(?:remote|url|push)\./i.test(word.value));
+}
+
+/** Whether a branch-moving git call leaves the mission branch: `yes`, `back` onto it, or `no` (files only, or nothing moves). */
+function leavesMissionBranch(sub: string, rest: readonly ShellWord[], mission: MissionBranch): "yes" | "back" | "no" {
+  const moving = ["switch", "checkout", "rebase", "reset", "branch"];
+  if (!moving.includes(sub)) return "no";
+  // What the text does not spell out stays held (§4.2).
+  if (rest.some((word) => word.dynamic)) return "yes";
+  const has = (...flags: string[]) => rest.some((word) => flags.includes(word.value) || flags.some((flag) => flag.startsWith("--") && word.value.startsWith(`${flag}=`)));
+  const named = positional(rest).map((word) => word.value);
+  switch (sub) {
+    case "switch":
+      if (has("-c", "-C", "--create", "--force-create", "--orphan", "--detach", "-d")) return "yes";
+      return named[0] === undefined ? "no" : named[0] === mission.branch ? "back" : "yes";
+    case "checkout": {
+      if (has("-b", "-B", "--orphan", "--detach")) return "yes";
+      // `git checkout -- <paths>`, or a tree-ish and paths: files only.
+      if (has("--") || named.length !== 1) return "no";
+      const target = named[0]!;
+      if (target === mission.branch) return "back";
+      const pathLike = target === "HEAD" || target === "." || target.startsWith("./") || target.startsWith("../") || target.includes("*") || /\.[A-Za-z0-9]+$/.test(target);
+      return pathLike ? "no" : "yes";
+    }
+    case "rebase":
+      return has("--abort") ? "no" : "yes";
+    case "reset":
+      return has("--hard") ? "yes" : "no";
+    default:
+      return has("--delete", "--move", "--force") || rest.some((word) => /^-[a-zA-Z]*[dDmMf]/.test(word.value)) ? "yes" : "no";
+  }
+}
+
+/** A git call of a Worker in a placement (§4.2's rows), into `state`; `gitLine` carries what earlier calls of the line did. */
+function gitInMission(state: ClassifyState, command: ShellCommand, args: readonly ShellWord[], here: string | null, mission: MissionBranch, gitLine: GitLine): void {
+  const call = gitCallOf(command, args, here);
+  if (call.sub === null) {
+    if (args.some((word) => word.dynamic)) unreadable(state, "git with a subcommand the command does not spell out");
+    return;
+  }
+  const { sub, rest } = call;
+  const inside = call.dir !== null && isInsidePosix(call.dir, mission.directory);
+  if (sub === "push") {
+    const covered = inside && !call.rewired && !gitLine.remoteChanged && !gitLine.offBranch && isMissionPush(rest, mission);
+    addFinding(state, covered ? { what: `git push ${mission.branch}`, effects: RELEASE_PUSH, unreadable: false, integration: true } : { what: "git push", effects: RELEASE_PUSH, unreadable: false });
+    return;
+  }
+  if (sub === "remote" || sub === "config") {
+    if (!changesRemote(sub, rest)) return;
+    gitLine.remoteChanged = true;
+    addFinding(state, { what: `git ${sub} ${positional(rest)[0]?.value ?? ""} (the repository's config, shared with its root checkout)`.replace("  ", " "), effects: OUTSIDE, unreadable: false });
+    return;
+  }
+  const leaves = leavesMissionBranch(sub, rest, mission);
+  if (!GIT_WRITES.has(sub) && leaves === "no") return;
+  if (call.dir === null) {
+    unreadable(state, `git ${sub} in a folder the command does not spell out`);
+    return;
+  }
+  if (!inside) {
+    addFinding(state, { what: `git ${sub} outside the mission's worktree`, effects: OUTSIDE, unreadable: false });
+    return;
+  }
+  if (leaves === "back") {
+    gitLine.offBranch = false;
+    return;
+  }
+  if (leaves === "yes" && (sub === "switch" || sub === "checkout")) gitLine.offBranch = true;
+  if (leaves === "yes" || gitLine.offBranch) addFinding(state, { what: `git ${sub} off the mission branch`, effects: COMMIT, unreadable: false });
+}
+
+/** The flags of `glab mr create/update` and `gh pr create/edit` that the boundary reads (§4.2); any other flag is no covered request. */
+const FORGE_FLAGS: Readonly<Record<"glab" | "gh", { value: ReadonlySet<string>; bool: ReadonlySet<string>; source: readonly string[]; target: readonly string[]; away: readonly string[] }>> = {
+  glab: {
+    value: new Set(["-t", "--title", "-d", "--description", "-l", "--label", "-u", "--unlabel", "-a", "--assignee", "--reviewer", "-m", "--milestone", "-i", "--related-issue"]),
+    bool: new Set(["-f", "--fill", "--fill-commit-body", "--draft", "--wip", "-r", "--ready", "--push", "-y", "--yes", "--no-editor", "-w", "--web", "--remove-source-branch", "--squash-before-merge", "--allow-collaboration", "--lock-discussion", "--unlock-discussion"]),
+    source: ["-s", "--source-branch"],
+    target: ["-b", "--target-branch"],
+    away: ["-R", "--repo", "-H", "--head"],
+  },
+  gh: {
+    value: new Set(["-t", "--title", "-b", "--body", "-F", "--body-file", "-T", "--template", "-l", "--label", "-a", "--assignee", "-r", "--reviewer", "-m", "--milestone", "-p", "--project", "--add-label", "--remove-label", "--add-assignee", "--remove-assignee", "--add-reviewer", "--remove-reviewer", "--add-project", "--remove-project"]),
+    bool: new Set(["-d", "--draft", "-f", "--fill", "--fill-first", "--fill-verbose", "--no-maintainer-edit", "--dry-run", "-w", "--web"]),
+    source: ["-H", "--head"],
+    target: ["-B", "--base"],
+    away: ["-R", "--repo"],
+  },
+};
+
+/**
+ * True for `glab mr create/update` or `gh pr create/edit` of the mission
+ * branch into the integration branch (§4.2): the source the mission branch or
+ * left out, the target the integration branch (named when creating), no
+ * other repository, every flag known. Pure.
+ */
+function forgeRequestCovered(cli: "glab" | "gh", verb: string, rest: readonly ShellWord[], mission: MissionBranch): boolean {
+  const flags = FORGE_FLAGS[cli];
+  let source: string | undefined;
+  let target: string | undefined;
+  const named: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const word = rest[index]!;
+    if (word.dynamic) return false;
+    if (!word.value.startsWith("-") || word.value === "-") {
+      named.push(word.value);
+      continue;
+    }
+    const equals = word.value.startsWith("--") ? word.value.indexOf("=") : -1;
+    const flag = equals < 0 ? word.value : word.value.slice(0, equals);
+    const takesValue = flags.value.has(flag) || [...flags.source, ...flags.target, ...flags.away].includes(flag);
+    if (!takesValue) {
+      if (flags.bool.has(flag) && equals < 0) continue;
+      return false;
+    }
+    let value = equals < 0 ? undefined : word.value.slice(equals + 1);
+    if (value === undefined) {
+      const next = rest[index + 1];
+      if (next === undefined || next.dynamic) return false;
+      value = next.value;
+      index += 1;
+    }
+    if (flags.away.includes(flag)) return false;
+    if (flags.source.includes(flag)) source = value;
+    if (flags.target.includes(flag)) target = value;
+  }
+  if (source !== undefined && source !== mission.branch) return false;
+  const creating = verb === "create" || verb === "new";
+  if (creating ? target !== mission.target : target !== undefined && target !== mission.target) return false;
+  return named.length === 0 || (!creating && named.length === 1 && named[0] === mission.branch);
+}
+
+const FORGE_READ: HeldFinding = { what: "glab (read)", effects: NETWORK, unreadable: false, forgeRead: true };
+
+/** A `glab` call (§4.2): a merge request of the mission branch is `integration`; reads are `forgeRead`; merging is `push`; anything else is `network`, never covered. */
+function glabFinding(state: ClassifyState, args: readonly ShellWord[], mission: MissionBranch | undefined): void {
+  const [group, verb] = args;
+  if (group === undefined || group.dynamic || verb?.dynamic === true) {
+    addFinding(state, { what: "glab", effects: NETWORK, unreadable: false });
+    return;
+  }
+  const action = verb?.value;
+  if (group.value === "mr") {
+    if (action === "create" || action === "new" || action === "update") {
+      const covered = mission !== undefined && forgeRequestCovered("glab", action, args.slice(2), mission);
+      addFinding(state, { what: `glab mr ${action}`, effects: RELEASE_PUSH, unreadable: false, ...(covered ? { integration: true as const } : {}) });
+    } else if (action === "merge" || action === "accept") addFinding(state, { what: "glab mr merge", effects: RELEASE_PUSH, unreadable: false });
+    else if (["view", "show", "list", "ls", "diff"].includes(action ?? "")) addFinding(state, FORGE_READ);
+    else addFinding(state, { what: `glab mr ${action ?? ""}`.trim(), effects: NETWORK, unreadable: false });
+    return;
+  }
+  if (group.value === "ci" || group.value === "pipeline" || group.value === "pipe") {
+    if (["status", "view", "list", "ls", "get", "trace"].includes(action ?? "")) addFinding(state, FORGE_READ);
+    else addFinding(state, { what: `glab ci ${action ?? ""}`.trim(), effects: NETWORK, unreadable: false });
+    return;
+  }
+  addFinding(state, { what: `glab ${group.value}`, effects: NETWORK, unreadable: false });
+}
+
 /**
  * The body of a package script, classified as a command of its own from the
  * same folder, with its `pre` and `post` scripts. No such script runs nothing.
@@ -809,6 +1080,7 @@ function classifyScript(state: ClassifyState, runner: string, name: string, cwd:
 function classifyLine(line: string, state: ClassifyState, cwd: string | null, depth: number): void {
   const into = state;
   const parsed = parseShellLine(line);
+  const gitLine: GitLine = { offBranch: false, remoteChanged: false };
   if (parsed.unbalanced) unreadable(into, "a command whose quotes or substitutions do not close");
   const variables = assignedVariables(parsed.commands);
   let here = cwd;
@@ -866,8 +1138,15 @@ function classifyLine(line: string, state: ClassifyState, cwd: string | null, de
 
     // release
     if (name === "git") {
-      const { sub } = subcommandOf(args, GIT_VALUE_FLAGS);
-      if (sub === "push") addFinding(into, { what: "git push", effects: RELEASE_PUSH, unreadable: false });
+      const mission = state.context.mission;
+      if (mission === undefined) {
+        const { sub } = subcommandOf(args, GIT_VALUE_FLAGS);
+        if (sub === "push") addFinding(into, { what: "git push", effects: RELEASE_PUSH, unreadable: false });
+      } else gitInMission(into, command, args, here, mission, gitLine);
+      continue;
+    }
+    if (name === "glab") {
+      glabFinding(into, args, state.context.mission);
       continue;
     }
     if (name === "docker" || name === "podman") {
@@ -878,7 +1157,10 @@ function classifyLine(line: string, state: ClassifyState, cwd: string | null, de
     if (name === "gh") {
       const words = args.map((word) => word.value);
       if (words[0] === "release" && ["create", "upload", "edit"].includes(words[1] ?? "")) addFinding(into, { what: `gh release ${words[1]}`, effects: RELEASE_PUBLISH, unreadable: false });
-      else if (words[0] === "pr" && ["create", "merge"].includes(words[1] ?? "")) addFinding(into, { what: `gh pr ${words[1]}`, effects: RELEASE_PUSH, unreadable: false });
+      else if (words[0] === "pr" && ["create", "edit"].includes(words[1] ?? "")) {
+        const covered = state.context.mission !== undefined && forgeRequestCovered("gh", words[1]!, args.slice(2), state.context.mission);
+        addFinding(into, { what: `gh pr ${words[1]}`, effects: RELEASE_PUSH, unreadable: false, ...(covered ? { integration: true as const } : {}) });
+      } else if (words[0] === "pr" && words[1] === "merge") addFinding(into, { what: "gh pr merge", effects: RELEASE_PUSH, unreadable: false });
       else addFinding(into, { what: "gh (GitHub over the network)", effects: NETWORK, unreadable: false });
       continue;
     }

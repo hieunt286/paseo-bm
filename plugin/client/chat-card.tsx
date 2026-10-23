@@ -315,7 +315,7 @@ export function DecisionCard({
     retry: false,
     staleTime: PRECEDENTS_STALE_MS,
   });
-  const suggestion = precedentSuggestionView(decision, precedents.data?.precedents, ui, new Date());
+  const suggestion = precedentSuggestionView(decision, precedents.data?.precedents, ui, new Date(), precedents.data?.repoKey);
 
   const keepAsPrecedent = async () => {
     const form = precedentUi.form;

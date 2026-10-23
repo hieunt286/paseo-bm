@@ -31,6 +31,25 @@
  * canceled Reviewer turn, which must not wake its stopped Worker). It raises
  * no alert and is no drop.
  *
+ * **Held** (delivery line design §6.4, `wake-gate.ts`): before its send, a
+ * record goes through the wake gate. One the gate holds — to a bound Worker
+ * waiting by structure on items it settles none of — moves to `held`, an open
+ * state: kept, sent again after a reload (and gated again then), and back to
+ * `pending` when the Worker's release carries it (`heldRecordItems`). The
+ * gate is asked again at the send (`holdsAtSend`): one queued while its
+ * Worker ran a turn that reported `blocked` moves to `held` then. One held
+ * for a Worker a handoff replaced goes to its successor's release. A
+ * record whose delivery meets the wait goes in the release, first. A record
+ * stored with `atOnce` (`bm_tell_worker`'s `now: true`) is never held.
+ * An older build skips a `held` record.
+ *
+ * **No turn** (delivery line design §9.1): an `ack` or `close` on a link is
+ * stored `delivered` with reason `no-turn` (`add` with `noTurn`) and never
+ * enqueued, so neither the queue nor the wake gate sees it. Its target reads
+ * it at the head of its next outbox delivery (`noTurnLeadOf`: every such
+ * note no delivery carried yet; `shownAt` once one was sent) and in its
+ * `BM-STATE`.
+ *
  * **Peer deliveries** (design §7.17.4): a `peer`, `peer-reply` or
  * `peer-message` record's target is resolved again at every attempt — the
  * first send and every resend — through the link's asker or answering agent
@@ -58,7 +77,8 @@
  * — a cleared conversation archives the old Main before its successor exists.
  *
  * **After a reload** (`createOutboxResend`): at the first hook or RPC with a
- * Paseo handle, every `pending` record of every workspace is enqueued again.
+ * Paseo handle, every open record of every workspace — `pending` or `held` —
+ * is enqueued again, through the wake gate.
  * One sent just before the reload, whose outcome was not written yet, reaches
  * its target twice: nothing drops the second copy (the agent reads both), and
  * the trace reconstruction counts it once, by its record id.
@@ -86,6 +106,9 @@ import { noticeQueue, type NoticeCallbacks, type NoticeOutcome, type NoticePaseo
 import { createRequestRegistry } from "./request-registry";
 import { errorText } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN } from "./trace-store";
+import { settleBatchWait } from "./waits";
+import { holdsAtSend, isReleasing, releaseWait, wakeGate, type HeldItem } from "./wake-gate";
+import type { WaitRef } from "../shared/waits";
 import { timeOrZero } from "../shared/time";
 
 /** The outbox's folder in the data folder (§16.7); the cleanup button deletes it (§7.13.7). */
@@ -96,7 +119,7 @@ export const OUTBOX_SETTLED_LIMIT = 500;
 /** How long a delivered or dropped record is kept (§16.7): 7 days. */
 export const OUTBOX_SETTLED_MS = 7 * 24 * 60 * 60 * 1000;
 
-const OUTBOX_STATES = ["pending", "delivered", "dropped", "withheld"] as const;
+const OUTBOX_STATES = ["pending", "delivered", "dropped", "withheld", "held"] as const;
 
 const recordSchema = z.object({
   id: z.string().regex(OUTBOX_RECORD_ID_PATTERN),
@@ -110,6 +133,10 @@ const recordSchema = z.object({
   state: z.enum(OUTBOX_STATES),
   outcomeAt: z.string().nullable(),
   reason: z.string().nullable(),
+  /** Delivered past the wake gate (delivery line design §6.4): `bm_tell_worker` with `now: true`. Absent otherwise. */
+  atOnce: z.literal(true).optional(),
+  /** A record that started no turn (delivery line design §9.1): when a delivery to its target carried it at its head. Absent until then. */
+  shownAt: z.string().optional(),
 });
 
 export type OutboxRecord = z.infer<typeof recordSchema>;
@@ -123,15 +150,28 @@ export interface OutboxInit {
   to: string;
   /** The block or message; masked with `redactText` before it is written. */
   text: string;
+  /** Past the wake gate (delivery line design §6.4): `bm_tell_worker` with `now: true`. */
+  atOnce?: boolean;
+  /**
+   * Starts no turn (delivery line design §9.1: an `ack` or a `close`): stored
+   * `delivered` with reason `no-turn`, never enqueued; its target reads it at
+   * the head of its next delivery (`noTurnLeadOf`).
+   */
+  noTurn?: boolean;
 }
+
+/** The reason a record that starts no turn is stored with (delivery line design §9.1). */
+export const NO_TURN_REASON = "no-turn";
+/** The most no-turn notes one delivery carries at its head; the newest are kept. */
+export const MAX_NO_TURN_NOTES = 5;
 
 interface OutboxFile {
   records: OutboxRecord[];
 }
 
-/** True for a record still to be delivered. */
+/** True for a record still to be delivered: `pending`, or `held` by the wake gate. */
 export function isOpenRecord(record: Pick<OutboxRecord, "state">): boolean {
-  return record.state === "pending";
+  return record.state === "pending" || record.state === "held";
 }
 
 function isUsableWorkspaceId(workspaceId: unknown): workspaceId is string {
@@ -169,20 +209,29 @@ export interface Outbox {
   list(workspaceId: string): OutboxRecord[];
   /**
    * Stores a new `pending` record (text masked) — or, with `withheld`, one
-   * settled `withheld` for that reason, which nothing delivers. Throws when
-   * the file cannot be written.
+   * settled `withheld` for that reason, which nothing delivers. A `review` or
+   * `no-verdict` record settles the wait on its batch (`settleBatchWait`,
+   * delivery line design §6.3). Throws when the file cannot be written.
    */
   add(workspaceId: string, init: OutboxInit, withheld?: string): OutboxRecord;
   /**
-   * Settles a `pending` record as `delivered` or `dropped` (a settled record
+   * Settles an open record as `delivered` or `dropped` (a settled record
    * never changes); returns the record as it is now, or null when there is
    * none. `reason` is kept for `dropped`. Throws when the file cannot be written.
    */
   settle(workspaceId: string, id: string, state: "delivered" | "dropped", reason?: string | null): { record: OutboxRecord; changed: boolean } | null;
   /** Writes a new target on a `pending` record (§7.17.4); returns it as it is now, or null when there is none. Throws when the file cannot be written. */
   retarget(workspaceId: string, id: string, to: string): OutboxRecord | null;
+  /**
+   * Moves an open record to `held` (`held` true) or back to `pending`
+   * (delivery line design §6.4); a settled record never changes. Returns it as
+   * it is now, or null when there is none. Throws when the file cannot be written.
+   */
+  hold(workspaceId: string, id: string, held: boolean): OutboxRecord | null;
   /** The workspaces with an outbox file. Never throws. */
   workspaces(): string[];
+  /** Notes that a delivery carried the no-turn record `id` at its head (delivery line design §9.1). Throws when the file cannot be written. */
+  markShown(workspaceId: string, id: string, at: string): void;
 }
 
 /** The outbox of the data folder `home`. Creating it touches nothing on disk. */
@@ -236,12 +285,16 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
           to: init.to,
           text: redactText(init.text, deps.env ?? process.env),
           createdAt: at,
-          state: withheld === undefined ? "pending" : "withheld",
-          outcomeAt: withheld === undefined ? null : at,
-          reason: withheld ?? null,
+          // Delivery line design §9.1: a record that starts no turn is delivered as it is stored.
+          state: withheld !== undefined ? "withheld" : init.noTurn === true ? "delivered" : "pending",
+          outcomeAt: withheld === undefined && init.noTurn !== true ? null : at,
+          reason: withheld ?? (init.noTurn === true ? NO_TURN_REASON : null),
+          ...(init.atOnce === true ? { atOnce: true } : {}),
         });
         return { records: [...current.records, made] };
       });
+      // Delivery line design §6.3: a review or no-verdict of a batch settles the wait that names it.
+      settleBatchWait(home, workspaceId, made!);
       return made!;
     },
     settle(workspaceId, id, state, reason = null) {
@@ -273,6 +326,27 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
       });
       return result;
     },
+    hold(workspaceId, id, held) {
+      requireWorkspace(workspaceId);
+      let result: OutboxRecord | null = null;
+      fileOf(workspaceId).update((current) => {
+        const index = current.records.findIndex((record) => record.id === id);
+        if (index === -1) return null;
+        const found = current.records[index]!;
+        const state = held ? "held" : "pending";
+        result = isOpenRecord(found) && found.state !== state ? { ...found, state } : found;
+        return result === found ? null : { records: current.records.map((record, at) => (at === index ? result! : record)) };
+      });
+      return result;
+    },
+    markShown(workspaceId, id, at) {
+      requireWorkspace(workspaceId);
+      fileOf(workspaceId).update((current) => {
+        const index = current.records.findIndex((record) => record.id === id);
+        if (index === -1 || current.records[index]!.shownAt !== undefined) return null;
+        return { records: current.records.map((record, place) => (place === index ? { ...record, shownAt: at } : record)) };
+      });
+    },
     workspaces() {
       try {
         return readdirSync(join(home, OUTBOX_DIR_NAME))
@@ -290,9 +364,95 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
 // Delivery.
 // ---------------------------------------------------------------------------
 
-/** What a delivery says: `BM-DELIVERY <kind> <recordId>`, then the record's text. */
-export function deliveryTextOf(record: Pick<OutboxRecord, "kind" | "id" | "text">): string {
-  return `${deliveryLineOf(record.kind, record.id)}\n${record.text}`;
+/** What a delivery says: `BM-DELIVERY <kind> <recordId>`, then `lead` when given, then the record's text. */
+export function deliveryTextOf(record: Pick<OutboxRecord, "kind" | "id" | "text">, lead: string | null = null): string {
+  return `${deliveryLineOf(record.kind, record.id)}\n${lead === null ? "" : `${lead}\n`}${record.text}`;
+}
+
+/**
+ * The line a `finished` or `stopped` report's delivery gains once its request
+ * has a continuation (delivery line design §2.7): `continued: <new> by Worker
+ * <id> (<reason>: <figure>)`; null otherwise. Never throws.
+ */
+export function continuedLineOf(home: string, workspaceId: string, record: Pick<OutboxRecord, "kind" | "requestId" | "text">): string | null {
+  if (record.kind !== "report" || !/^phase: (?:finished|stopped)$/m.test(record.text)) return null;
+  try {
+    const registry = createRequestRegistry(home, { log: () => {} });
+    const request = registry.get(workspaceId, record.requestId);
+    if (request?.continuedBy === undefined || request.rollover === undefined) return null;
+    const workerId = registry.get(workspaceId, request.continuedBy)?.workerIds[0] ?? "unknown";
+    return `continued: ${request.continuedBy} by Worker ${workerId} (${request.rollover.reason}: ${request.rollover.figure})`;
+  } catch {
+    return null;
+  }
+}
+
+/** True for a record stored as starting no turn (delivery line design §9.1). Pure. */
+export function isNoTurnRecord(record: Pick<OutboxRecord, "state" | "reason">): boolean {
+  return record.state === "delivered" && record.reason === NO_TURN_REASON;
+}
+
+/** The note a no-turn record leaves at the head of its target's next delivery: `noted: <link> from <agent> (act: ack · refs: …): <gist>`. Pure. */
+export function noTurnNoteOf(record: Pick<OutboxRecord, "from" | "text">): string {
+  const link = /^link: (\S+)$/m.exec(record.text)?.[1] ?? "a link";
+  const header = /^(act: .+)$/m.exec(record.text)?.[1] ?? "act: ack";
+  const quote = record.text
+    .split("\n")
+    .filter((line) => line.startsWith(">"))
+    .map((line) => line.replace(/^>\s?/, ""))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const gist = quote.length <= 200 ? quote : `${quote.slice(0, 199)}…`;
+  return `noted: ${link} from ${record.from} (${header})${gist === "" ? "" : `: ${gist}`}`;
+}
+
+/** The notes the next delivery to a target opens with (delivery line design §9.1), and the records they come from. */
+export interface NoTurnLead {
+  /** The note lines, oldest first, at most `MAX_NO_TURN_NOTES`. */
+  text: string;
+  /** Every record not shown yet: marked shown once the delivery is sent. */
+  records: Array<{ workspaceId: string; id: string }>;
+}
+
+/**
+ * What the next delivery to `targetId` opens with (delivery line design
+ * §9.1): one note per record that started no turn for it and no delivery
+ * carried yet, oldest first, at most `MAX_NO_TURN_NOTES` (the newest). Null
+ * when none. Never throws.
+ */
+export function noTurnLeadOf(home: string, targetId: string): NoTurnLead | null {
+  try {
+    const outbox = createOutbox(home);
+    const notes: Array<{ workspaceId: string; record: OutboxRecord }> = [];
+    for (const workspaceId of outbox.workspaces()) {
+      for (const record of outbox.list(workspaceId)) {
+        if (record.to === targetId && isNoTurnRecord(record) && record.shownAt === undefined) notes.push({ workspaceId, record });
+      }
+    }
+    if (notes.length === 0) return null;
+    notes.sort((a, b) => a.record.createdAt.localeCompare(b.record.createdAt));
+    return {
+      text: notes.slice(-MAX_NO_TURN_NOTES).map((note) => noTurnNoteOf(note.record)).join("\n"),
+      records: notes.map((note) => ({ workspaceId: note.workspaceId, id: note.record.id })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Marks the records of `lead` shown (delivery line design §9.1). A failure is one log line: the note is shown again. */
+function markLeadShown(home: string, lead: NoTurnLead | null, now: () => Date, log: (message: string) => void): void {
+  if (lead === null) return;
+  const outbox = createOutbox(home, { now });
+  const at = now().toISOString();
+  for (const { workspaceId, id } of lead.records) {
+    try {
+      outbox.markShown(workspaceId, id, at);
+    } catch (error) {
+      log(`[paseo-bm] could not note that the ${id} was shown: ${errorText(error)}`);
+    }
+  }
 }
 
 /** The notice-queue kind of a record: its own, so no record ever replaces another. */
@@ -396,47 +556,120 @@ export function clearDroppedAlert(home: string, workspaceId: string, requestId: 
 }
 
 /**
+ * Records a record's outcome (§16.7 step 3): `delivered` hands a peer record
+ * to the delivered hook and clears what it covers of the request's drops;
+ * `dropped` costs one log line and raises the `delivery-dropped` alert. A
+ * failure is one log line.
+ */
+function recordOutcome(workspaceId: string, record: OutboxRecord, state: "delivered" | "dropped", reason: string | null, deps: OutboxDeliveryDeps): void {
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  try {
+    const result = createOutbox(deps.home, deps).settle(workspaceId, record.id, state, reason);
+    if (result === null || !result.changed) return;
+    if (state === "delivered") {
+      if ((PEER_DELIVERY_KINDS as readonly string[]).includes(record.kind) && peerTargets.delivered !== null) {
+        try {
+          peerTargets.delivered(workspaceId, result.record, deps.home, deps.now ?? (() => new Date()));
+        } catch (error) {
+          log(`[paseo-bm] after delivering the ${record.kind} ${record.id}: ${errorText(error)}`);
+        }
+      }
+      try {
+        clearDroppedAlert(deps.home, workspaceId, record.requestId, result.record, deps);
+      } catch (error) {
+        log(`[paseo-bm] could not clear the delivery-dropped alert of request ${record.requestId}: ${errorText(error)}`);
+      }
+      return;
+    }
+    log(`[paseo-bm] the ${record.kind} ${record.id} of request ${record.requestId} to ${record.to} was not delivered: ${result.record.reason ?? "not delivered"}.`);
+    try {
+      createAlertStore(deps.home, deps).raise(droppedAlertOf(workspaceId, result.record));
+    } catch (error) {
+      log(`[paseo-bm] could not raise the delivery-dropped alert of ${record.id}: ${errorText(error)}`);
+    }
+  } catch (error) {
+    log(`[paseo-bm] could not record the outcome of the ${record.kind} ${record.id}: ${errorText(error)}`);
+  }
+}
+
+/** What a delivery came to: the queue's outcome, or `held` by the wake gate (delivery line design §6.4). */
+export type RecordOutcome = NoticeOutcome | "held";
+
+/** The wait items a record settles as it is delivered (delivery line design §6.3): a review's or no-verdict's batch. */
+function waitRefsOfRecord(record: OutboxRecord): WaitRef[] {
+  return (record.kind === "review" || record.kind === "no-verdict") && record.batchId !== null ? [{ kind: "batch", id: record.batchId }] : [];
+}
+
+/** The Workers a handoff or a fallback replaced on `target`'s request: every one of its `workerIds` but the newest. Never throws. */
+function replacedWorkersOf(home: string, target: { workspaceId?: string; requestId?: string; workerId: string }): Set<string> {
+  if (target.workspaceId === undefined || target.requestId === undefined) return new Set();
+  try {
+    const ids = createRequestRegistry(home).get(target.workspaceId, target.requestId)?.workerIds ?? [];
+    return new Set(ids.at(-1) === target.workerId ? ids.slice(0, -1) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * The records held for a Worker (delivery line design §6.4), in every
+ * workspace's outbox, as its release takes them: each goes back to `pending`
+ * when released, and records its outcome as any delivery does. A record of
+ * its request held for a Worker it replaced (a handoff) is its own now: it
+ * is addressed to it when released. Never throws.
+ */
+export function heldRecordItems(home: string, target: { workspaceId?: string; requestId?: string; workerId: string }, now: () => Date = () => new Date()): HeldItem[] {
+  const outbox = createOutbox(home, { now });
+  const replaced = replacedWorkersOf(home, target);
+  const out: HeldItem[] = [];
+  for (const workspaceId of outbox.workspaces()) {
+    for (const record of outbox.list(workspaceId)) {
+      if (record.state !== "held") continue;
+      const inherited = record.to !== target.workerId && record.requestId === target.requestId && replaced.has(record.to);
+      if (record.to !== target.workerId && !inherited) continue;
+      const deps: OutboxDeliveryDeps = { home, now };
+      out.push({
+        key: deliveryKindOf(record),
+        block: deliveryTextOf(record),
+        at: record.createdAt,
+        release: () => {
+          if (inherited) outbox.retarget(workspaceId, record.id, target.workerId);
+          outbox.hold(workspaceId, record.id, false);
+        },
+        refs: waitRefsOfRecord(record),
+        callbacks: {
+          onSent: () => recordOutcome(workspaceId, record, "delivered", null, deps),
+          onDropped: (_targetId, _kind, reason) => recordOutcome(workspaceId, record, "dropped", reason, deps),
+          onHeld: () => void outbox.hold(workspaceId, record.id, true),
+        },
+      });
+    }
+  }
+  return out;
+}
+
+/**
  * Hands one record to the notice queue; the queue's callbacks record its
  * outcome (§16.7 steps 2–3). A peer record the queue drops is resolved again
  * (§7.17.4, `PEER_RETARGETS`); the outcome returned is the last attempt's when
- * the drop came during the call. Never rejects: a store failure is one log
- * line, and the record stays as it was, to be sent again after a reload.
+ * the drop came during the call. Before the send, the wake gate (delivery
+ * line design §6.4): a record it holds is `held` (the outcome `held`); one
+ * that meets the Worker's wait goes in its release, first. A record handed to
+ * a release not yet sent is not sent again (`queued`). Never rejects: a
+ * store failure is one log line, and the record stays as it was, to be sent
+ * again after a reload.
  */
-export async function deliverRecord(workspaceId: string, given: OutboxRecord, deps: OutboxDeliveryDeps): Promise<NoticeOutcome> {
+export async function deliverRecord(workspaceId: string, given: OutboxRecord, deps: OutboxDeliveryDeps): Promise<RecordOutcome> {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const queue = deps.queue ?? noticeQueue;
   let record = given;
+  // Delivery line design §2.7: a report whose request goes on as a continuation names it.
+  const continuedLine = continuedLineOf(deps.home, workspaceId, given);
+  /** What the delivery opens with: the notes that started no turn for its target (§9.1), then the continuation line. */
+  let lead = continuedLine;
   const isPeer = (PEER_DELIVERY_KINDS as readonly string[]).includes(record.kind);
 
-  const settle = (state: "delivered" | "dropped", reason: string | null = null): void => {
-    try {
-      const result = createOutbox(deps.home, deps).settle(workspaceId, record.id, state, reason);
-      if (result === null || !result.changed) return;
-      if (state === "delivered") {
-        if (isPeer && peerTargets.delivered !== null) {
-          try {
-            peerTargets.delivered(workspaceId, result.record, deps.home, deps.now ?? (() => new Date()));
-          } catch (error) {
-            log(`[paseo-bm] after delivering the ${record.kind} ${record.id}: ${errorText(error)}`);
-          }
-        }
-        try {
-          clearDroppedAlert(deps.home, workspaceId, record.requestId, result.record, deps);
-        } catch (error) {
-          log(`[paseo-bm] could not clear the delivery-dropped alert of request ${record.requestId}: ${errorText(error)}`);
-        }
-        return;
-      }
-      log(`[paseo-bm] the ${record.kind} ${record.id} of request ${record.requestId} to ${record.to} was not delivered: ${result.record.reason ?? "not delivered"}.`);
-      try {
-        createAlertStore(deps.home, deps).raise(droppedAlertOf(workspaceId, result.record));
-      } catch (error) {
-        log(`[paseo-bm] could not raise the delivery-dropped alert of ${record.id}: ${errorText(error)}`);
-      }
-    } catch (error) {
-      log(`[paseo-bm] could not record the outcome of the ${record.kind} ${record.id}: ${errorText(error)}`);
-    }
-  };
+  const settle = (state: "delivered" | "dropped", reason: string | null = null): void => recordOutcome(workspaceId, record, state, reason, deps);
 
   const resolve = peerTargets.resolve;
   const paseo = deps.paseo;
@@ -460,22 +693,45 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
     return true;
   };
 
+  /** Writes `held` or `pending` on the record; false when the store cannot be written. */
+  const hold = (held: boolean): boolean => {
+    try {
+      createOutbox(deps.home, deps).hold(workspaceId, record.id, held);
+      return true;
+    } catch (error) {
+      log(`[paseo-bm] could not mark the ${record.kind} ${record.id} ${held ? "held" : "pending"}: ${errorText(error)}`);
+      return false;
+    }
+  };
+  /** The wake gate's kind for this record: a tell with `now: true` is always at once. */
+  const gateKind = record.atOnce === true ? "tell-now" : record.kind;
+  const gateDeps = { ...(deps.now === undefined ? {} : { now: deps.now }), log };
+
   /** One enqueue of the record as it is now. Never rejects. */
-  const attempt = async (retargets: number): Promise<NoticeOutcome> => {
-    const told = { any: false, again: null as Promise<NoticeOutcome> | null };
+  const attempt = async (retargets: number): Promise<RecordOutcome> => {
+    const told = { any: false, held: false, again: null as Promise<RecordOutcome> | null };
     try {
       // A mission's Main gets it on its channel (mission runtime design §6.2), with what else is pending for it.
       const callbacks: NoticeCallbacks = {
         onSent: () => {
           told.any = true;
           settle("delivered");
+          shown();
         },
         onDropped: (_targetId, _kind, reason) => {
           told.any = true;
           told.again = dropped(reason, retargets);
         },
+        // Delivery line design §6.4: the gate held it at the send (its Worker reported `blocked` meanwhile).
+        onHeld: () => {
+          told.any = true;
+          told.held = hold(true);
+          if (!told.held) log(`[paseo-bm] the ${record.kind} ${record.id} held at its send stays pending: it goes again after a reload.`);
+        },
       };
-      const outcome = await enqueueNotice({ home: deps.home, queue, targetId: record.to, kind: deliveryKindOf(record), text: deliveryTextOf(record), ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }), callbacks });
+      const isHeld = holdsAtSend(deps.home, record.to, gateKind, waitRefsOfRecord(record), { workspaceId, requestId: record.requestId }, gateDeps);
+      const outcome = await enqueueNotice({ home: deps.home, queue, targetId: record.to, kind: deliveryKindOf(record), text: deliveryTextOf(record, lead), ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }), callbacks, isHeld });
+      if (told.held) return "held";
       // A drop during this call that sent the record on: its outcome is this delivery's.
       if (told.again !== null) return await told.again;
       // An input the queue refuses outright calls no callback; `queued` and `replaced` settle later.
@@ -492,7 +748,7 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
    * most `PEER_RETARGETS` times): a different live agent gets it; else, and
    * for every other kind, it is `dropped`. Null when settled here.
    */
-  const dropped = (reason: string, retargets: number): Promise<NoticeOutcome> | null => {
+  const dropped = (reason: string, retargets: number): Promise<RecordOutcome> | null => {
     const main = mainTarget?.() ?? null;
     if (main !== null) {
       // §3.4: the mission's Main now, else held for its next Main while the mission is open.
@@ -506,7 +762,7 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
       settle("dropped", reason);
       return null;
     }
-    return (async (): Promise<NoticeOutcome> => {
+    return (async (): Promise<RecordOutcome> => {
       const to = await peerTarget();
       if (typeof to !== "string" || to === record.to) {
         settle("dropped", reason);
@@ -528,12 +784,36 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
   // §3.4: a record addressed to a Main goes to the mission's Main now.
   const main = mainTarget?.() ?? null;
   if (main !== null && main.to !== record.to) retarget(main.to);
+  // Delivery line design §9.1: what reached the target without a turn heads this delivery, and is shown once it is sent.
+  const notes = noTurnLeadOf(deps.home, record.to);
+  if (notes !== null) lead = continuedLine === null ? notes.text : `${notes.text}\n${continuedLine}`;
+  const shown = (): void => markLeadShown(deps.home, notes, deps.now ?? (() => new Date()), log);
+  // Delivery line design §6.4: the wake gate, for the target as resolved now.
+  const key = deliveryKindOf(record);
+  if (isReleasing(record.to, key)) return "queued";
+  const gate = wakeGate(deps.home, record.to, gateKind, waitRefsOfRecord(record), { workspaceId, requestId: record.requestId }, gateDeps);
+  // A record the store cannot hold is delivered.
+  if (gate.action === "hold") return hold(true) ? "held" : attempt(0);
+  if (record.state === "held") hold(false);
+  if (gate.release !== null) {
+    const callbacks: NoticeCallbacks = {
+      onSent: () => {
+        settle("delivered");
+        shown();
+      },
+      onDropped: (_targetId, _kind, reason) => settle("dropped", reason),
+      onHeld: () => void hold(true),
+    };
+    const outcome = await releaseWait(gate.release, { key, block: deliveryTextOf(record, lead), settles: gate.settles, refs: waitRefsOfRecord(record), callbacks }, deps);
+    return outcome ?? "dropped";
+  }
   return attempt(0);
 }
 
 /**
- * Stores `init` as a `pending` record, runs `before` once it is stored (a
- * throw there is one log line: the record is delivered all the same), then
+ * Stores `init` as a `pending` record, runs `before` once it is stored and
+ * waits for it (a throw there is one log line: the record is delivered all
+ * the same), then
  * delivers it (§16.7). Returns the record as stored and the queue's outcome.
  * Throws only when the record cannot be written — nothing is sent then.
  */
@@ -541,11 +821,11 @@ export async function storeAndDeliver(
   workspaceId: string,
   init: OutboxInit,
   deps: OutboxDeliveryDeps,
-  before: (record: OutboxRecord) => void = () => {},
-): Promise<{ record: OutboxRecord; outcome: NoticeOutcome }> {
+  before: (record: OutboxRecord) => void | Promise<void> = () => {},
+): Promise<{ record: OutboxRecord; outcome: RecordOutcome }> {
   const record = createOutbox(deps.home, deps).add(workspaceId, init);
   try {
-    before(record);
+    await before(record);
   } catch (error) {
     (deps.log ?? ((message: string) => console.warn(message)))(`[paseo-bm] after storing the ${record.kind} ${record.id}: ${errorText(error)}`);
   }

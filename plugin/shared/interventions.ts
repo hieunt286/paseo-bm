@@ -88,6 +88,16 @@ export const INTERVENTION_WINDOW_MS: Readonly<Record<InterventionKind, number>> 
 };
 
 /**
+ * Delivery line design §6.6: a pending compaction or handoff that has waited
+ * this long — half its window, 30 minutes — runs at its target's next turn
+ * end without the safe-point and quiet-queue checks.
+ */
+export const MAINTENANCE_WAIT_MS: Readonly<Record<"compact" | "handoff", number>> = {
+  compact: INTERVENTION_WINDOW_MS.compact / 2,
+  handoff: INTERVENTION_WINDOW_MS.handoff / 2,
+};
+
+/**
  * How long after its window an entry is judged on what the stores do NOT
  * show: a turn record is written a moment after the turn ends, so a turn that
  * ended at the window's edge has landed by then.

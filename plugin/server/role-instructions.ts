@@ -33,8 +33,12 @@ import {
 import { PRECEDENT_SCOPE_ALL, type Precedent } from "../shared/precedents";
 import { boundaryOf } from "../shared/autonomy";
 import { readActivePrecedents, readAutonomyPolicy } from "./autonomy-rpc";
-import { readReviewBudget } from "./coordination-rpc";
-import { DEFAULT_COORDINATION_SETTINGS, reviewBudgetOf, type ReviewBudget } from "../shared/coordination";
+import { placementOfWorkspace, repoKeyOf } from "./placements";
+import { dataHome } from "./rpc-kit";
+import { readCoordinationSettings } from "./coordination-rpc";
+import { DEFAULT_COORDINATION_SETTINGS } from "../shared/coordination";
+import { REVIEW_MILESTONES_MAX, reviewCapOf } from "../shared/orchestrator-rules";
+import { precedentEligibility } from "../shared/question-subjects";
 import { skillsStatus, type SkillsStatus } from "./setup-skills";
 
 export type Role = "manager" | "worker" | "reviewer" | "orchestrator";
@@ -74,11 +78,17 @@ export interface RuntimeFacts {
    */
   precedents?: readonly PrecedentFact[];
   /**
-   * The owner's review budget per tier a new Worker is given (autonomy design
-   * §C.4, §G.7; change-008 C6), read when it is created: a Worker keeps the
-   * budget it started with. Absent: no line.
+   * The owner's review settings a new Worker is given (delivery line design
+   * §5.2, §5.3, §5.6), read when it is created: the re-reviews per batch and
+   * the calls per milestone batch the request's cap is made of. Absent: no line.
    */
-  reviewBudget?: ReviewBudget;
+  reviewCap?: ReviewCapFacts;
+  /**
+   * The Worker's placement (delivery line design §3.4): its branch, the
+   * integration branch and whether the integration grant covers push and
+   * merge request. Absent: no placement, no line.
+   */
+  integration?: IntegrationFacts;
   /**
    * Whether this Worker or Reviewer runs under the action boundary, as the
    * creation hook applied it (autonomy design §D.2): the `Action boundary`
@@ -182,7 +192,7 @@ export const WORKER_HAND_PATH = [
   "",
   "Waiting on another request or Worker goes on the report's `blockers` line.",
   "",
-  `**Reviewing.** Create the Reviewer with Paseo's \`create_agent\`: profile \`bm-reviewer\`, provider \`bm-reviewer/<model of the profile>\`, labels \`bm.role\` = \`reviewer\`, \`bm.requestId\` = the request's \`req-…\`, \`bm.batchId\` = the batch id, \`bm.version\` = yours if readable; \`settings.modeId\` exactly as your \`## Runtime facts\` say (missing: report \`blocked\` with Paseo's refusal). Its first prompt carries what your role file gives \`bm_create_reviewer\`. For the re-review, ask the same Reviewer with ${PASEO_SEND_TOOL}. Count your review calls yourself: one past your budget that the owner did not ask for is a \`blocked\` report and a question.`,
+  `**Reviewing.** Create the Reviewer with Paseo's \`create_agent\`: profile \`bm-reviewer\`, provider \`bm-reviewer/<model of the profile>\`, labels \`bm.role\` = \`reviewer\`, \`bm.requestId\` = the request's \`req-…\`, \`bm.batchId\` = the batch id, \`bm.version\` = yours if readable; \`settings.modeId\` exactly as your \`## Runtime facts\` say (missing: report \`blocked\` with Paseo's refusal). Its first prompt carries what your role file gives \`bm_create_reviewer\`. For the re-review, ask the same Reviewer with ${PASEO_SEND_TOOL}, sending only the previous blocking findings and the diff of your fixes, never the whole change again. Count your review calls yourself: one past your review cap (your \`## Runtime facts\`) that the owner did not ask for is a \`blocked\` report and a question.`,
   "",
   "**Reporting.** Build each report with `bm_report`. Only without it, write the block yourself (`none` for empty fields; a `blocked` one is followed by its `BM-QUESTIONS`):",
   "",
@@ -296,9 +306,43 @@ export function precedentLine(precedent: PrecedentFact): string {
   return `- \`${precedent.subject}\` — ${precedent.text.replace(/\s+/g, " ").trim()} (${where}, until ${until})`;
 }
 
-/** The Worker's review budget line (§G.7): `Review calls per request: Small 2, Medium 2, Large 4.` */
-export function reviewBudgetLine(budget: ReviewBudget): string {
-  return `Review calls per request: Small ${budget.Small}, Medium ${budget.Medium}, Large ${budget.Large}.`;
+/** The owner's review settings a Worker's review cap line is built from (`review.maxRereviews`, `review.callsPerBatch`). */
+export interface ReviewCapFacts {
+  maxRereviews: number;
+  callsPerBatch: number;
+}
+
+/**
+ * The Worker's review cap line (delivery line design §5.6), at the defaults
+ * `Review: up to 3 re-reviews per batch while blocking findings fall; cap per
+ * request: Small 3, Medium 6, Large 12 calls.`: each tier's cap at its most
+ * milestone batches (`reviewCapOf` at `REVIEW_MILESTONES_MAX`).
+ */
+export function reviewCapLine(review: ReviewCapFacts): string {
+  const cap = (tier: keyof typeof REVIEW_MILESTONES_MAX) => reviewCapOf(tier, REVIEW_MILESTONES_MAX[tier], review);
+  return `Review: up to ${review.maxRereviews} re-reviews per batch while blocking findings fall; cap per request: Small ${cap("Small")}, Medium ${cap("Medium")}, Large ${cap("Large")} calls.`;
+}
+
+/** A Worker's placement as its Runtime facts state it (delivery line design §3.4). */
+export interface IntegrationFacts {
+  branch: string;
+  target: string;
+  push: boolean;
+}
+
+/** `Integration: m/ABC/fe → develop; commit: yes; push/MR: yes|no.` (§3.4). */
+export function integrationLine(facts: IntegrationFacts): string {
+  return `Integration: ${facts.branch} → ${facts.target}; commit: yes; push/MR: ${facts.push ? "yes" : "no"}.`;
+}
+
+/** The integration facts of a Worker created in `workspaceId`: its placement's, else none. Never throws. */
+export function integrationFactsOf(home: string | null, workspaceId: string): IntegrationFacts | null {
+  const placement = placementOfWorkspace(home, workspaceId);
+  if (placement === null) return null;
+  // The same rule as the boundary's cover (integration-grant.ts grantHolds), so the line and the BM-SETTINGS refresh agree.
+  const grant = placement.integration;
+  const push = grant !== null && grant.state === "granted" && grant.scope.remote === "origin" && grant.scope.branch === placement.branch && grant.scope.target === placement.target;
+  return { branch: placement.branch, target: placement.target, push };
 }
 
 /** The Manager's `Worker skills` line (design delta 20260924-instruction-quality §3). */
@@ -343,7 +387,8 @@ export function runtimeFactsText(role: Role, facts: RuntimeFacts = {}): string {
   if (child !== null && !bound && none) lines.push(`${child} mode: none — do not pass \`settings.modeId\` when you create a ${child}; Paseo sets it.`);
   else if (child !== null && !bound && mode !== "") lines.push(`${child} mode: \`${mode}\` — pass it as \`settings.modeId\` when you create a ${child}.`);
   if (role === "manager" && facts.workerSkillsMissing !== undefined) lines.push(workerSkillsLine(facts.workerSkillsMissing));
-  if (role === "worker" && facts.reviewBudget !== undefined) lines.push(reviewBudgetLine(facts.reviewBudget));
+  if (role === "worker" && facts.reviewCap !== undefined) lines.push(reviewCapLine(facts.reviewCap));
+  if (role === "worker" && facts.integration !== undefined) lines.push(integrationLine(facts.integration));
   // Autonomy design §D.2: whether this Worker or Reviewer runs under the action boundary.
   if ((role === "worker" || role === "reviewer") && facts.actionBoundary !== undefined) lines.push(actionBoundaryLine(facts.actionBoundary));
   // ADR-027 decision 9: the hand-written path, for an unbound agent only.
@@ -385,10 +430,11 @@ export interface PrecedentLookup {
 /**
  * What only an agent's creation reads (the `agent.create` hook,
  * `manager.ensure`): the owner's precedents, and for a new Worker the owner's
- * review budget (§G.7; `readReviewBudget` by default, 2 / 2 / 4 when unreadable).
+ * review settings (delivery line design §5.6; `readCoordinationSettings` by
+ * default, the defaults when unreadable).
  */
 export interface CreationLookup extends PrecedentLookup {
-  reviewBudget?: () => ReviewBudget;
+  reviewCap?: () => ReviewCapFacts;
   /**
    * The project's action boundary switch at this creation (§D.2), when the
    * caller already read it (the creation hook); otherwise it is read from the
@@ -397,21 +443,35 @@ export interface CreationLookup extends PrecedentLookup {
   boundary?: BoundarySwitch;
   /** Whether a project's boundary is on; the owner's policy by default (`autonomy/policy.json`). */
   boundaryOn?: (workspaceId: string) => boolean;
+  /** The repo key of a workspace (delivery line design §3.1); the data folder's placements by default. */
+  repoKeyOf?: (workspaceId: string) => string;
   /** The creation hook kept the agent's bound tool URL (design §16.5): the facts say it is bound. */
   bound?: boolean;
+  /** A workspace's integration facts (delivery line design §3.4); its placement's in the data folder by default. */
+  integrationOf?: (workspaceId: string) => IntegrationFacts | null;
 }
+
+/** A creation's project: its workspace (the placement), the repo key the owner's settings follow (delivery line design §3.1), and the boundary switch. */
+export interface CreationProject {
+  workspaceId: string | null;
+  repoKey: string | null;
+  boundary: BoundarySwitch;
+}
+
+/** The project of a creation no lookup can tell. */
+export const UNKNOWN_CREATION_PROJECT: CreationProject = { workspaceId: null, repoKey: null, boundary: "unknown" };
 
 /**
  * The project of a creation and its action boundary switch (§D.2,
  * change-010 C5): the caller's workspace, else the one whose folder is
  * `cwd` (within the lookup budget); `unknown` when none can be told, read as
- * off. Never throws.
+ * off. The switch is its repo's (delivery line design §3.1). Never throws.
  */
 export async function creationProjectOf(
   cwd: string | undefined,
   lookup: CreationLookup,
   log: (message: string) => void = (message) => console.warn(message),
-): Promise<{ workspaceId: string | null; boundary: BoundarySwitch }> {
+): Promise<CreationProject> {
   try {
     let workspaceId = lookup.workspaceId ?? null;
     if (workspaceId === null && cwd !== undefined && lookup.workspaceOf !== undefined) {
@@ -419,13 +479,14 @@ export async function creationProjectOf(
       const found = await withTimeout(Promise.resolve().then(() => workspaceOf(cwd))).catch(() => null);
       workspaceId = found === TIMED_OUT ? null : found;
     }
-    if (lookup.boundary !== undefined) return { workspaceId, boundary: lookup.boundary };
-    if (workspaceId === null) return { workspaceId, boundary: "unknown" };
-    const on = (lookup.boundaryOn ?? ((id: string) => boundaryOf(readAutonomyPolicy({ log }), id) !== null))(workspaceId);
-    return { workspaceId, boundary: on ? "on" : "off" };
+    const repoKey = workspaceId === null ? null : (lookup.repoKeyOf ?? ((id: string) => repoKeyOf(dataHome({}), id)))(workspaceId);
+    if (lookup.boundary !== undefined) return { workspaceId, repoKey, boundary: lookup.boundary };
+    if (repoKey === null) return { workspaceId, repoKey, boundary: "unknown" };
+    const on = (lookup.boundaryOn ?? ((id: string) => boundaryOf(readAutonomyPolicy({ log }), id) !== null))(repoKey);
+    return { workspaceId, repoKey, boundary: on ? "on" : "off" };
   } catch (error) {
     log(`[paseo-bm] reading the project of a new agent failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { workspaceId: null, boundary: "unknown" };
+    return UNKNOWN_CREATION_PROJECT;
   }
 }
 
@@ -437,7 +498,7 @@ export async function creationProjectOf(
  * be read — the failure is logged, and the creation attempt then fails loudly
  * with Paseo's list of modes rather than silently. With `precedents` — the
  * creation's lookup — the Manager and the Worker also get the owner's
- * precedents (`precedentFactsOf`), and the Worker the owner's review budget.
+ * precedents (`precedentFactsOf`), and the Worker the owner's review cap.
  */
 export async function runtimeFactsOf(
   role: Role,
@@ -450,29 +511,38 @@ export async function runtimeFactsOf(
   // The project and its action boundary switch, once: the child mode and the precedents both follow it (§D.2, §B.6).
   const project =
     precedents === undefined || (role !== "manager" && role !== "worker")
-      ? { workspaceId: null, boundary: "unknown" as const }
+      ? UNKNOWN_CREATION_PROJECT
       : await creationProjectOf(cwd, precedents, log);
+  // The owner's precedents follow the repo (delivery line design §3.1).
   const lookup: CreationLookup | undefined =
-    precedents === undefined ? undefined : project.workspaceId === null ? precedents : { ...precedents, workspaceId: project.workspaceId };
+    precedents === undefined ? undefined : project.repoKey === null ? precedents : { ...precedents, workspaceId: project.repoKey };
   // In parallel: each lookup has its own timeout, and a slow one must not add to the other.
   const [modes, skillFacts, precedentFacts] = await Promise.all([
     modeFactsOf(role, paseo, cwd, log, project.boundary),
     role === "manager" ? workerSkillFacts(paseo, skills, log) : Promise.resolve({}),
     lookup === undefined ? Promise.resolve({}) : precedentFactsOf(role, cwd, lookup, log),
   ]);
-  const budgetFacts = role === "worker" && precedents !== undefined ? reviewBudgetFactsOf(precedents, log) : {};
+  const budgetFacts = role === "worker" && precedents !== undefined ? reviewCapFactsOf(precedents, log) : {};
+  // Delivery line design §3.4: a Worker in a mission's placement is told its integration.
+  const integration = role === "worker" && project.workspaceId !== null ? (precedents?.integrationOf ?? ((id: string) => integrationFactsOf(dataHome({}), id)))(project.workspaceId) : null;
+  const integrationFacts: RuntimeFacts = integration === null ? {} : { integration };
   // Design §16.5: the hook says whether it kept a bound tool URL; §16.12 (step 5) reads it.
   const boundFacts: RuntimeFacts = precedents?.bound === true ? { bound: true } : {};
-  return { ...modes, ...skillFacts, ...precedentFacts, ...budgetFacts, ...boundFacts };
+  return { ...modes, ...skillFacts, ...precedentFacts, ...budgetFacts, ...integrationFacts, ...boundFacts };
 }
 
-/** A new Worker's review budget (§G.7): the owner's, else the defaults; never throws. */
-function reviewBudgetFactsOf(lookup: CreationLookup, log: (message: string) => void): RuntimeFacts {
+/** The owner's review settings in `settings`, as the review cap line reads them. */
+function reviewCapFactsIn(settings: { review: ReviewCapFacts }): ReviewCapFacts {
+  return { maxRereviews: settings.review.maxRereviews, callsPerBatch: settings.review.callsPerBatch };
+}
+
+/** A new Worker's review cap (delivery line design §5.6): the owner's settings, else the defaults; never throws. */
+function reviewCapFactsOf(lookup: CreationLookup, log: (message: string) => void): RuntimeFacts {
   try {
-    return { reviewBudget: (lookup.reviewBudget ?? (() => readReviewBudget({ log })))() };
+    return { reviewCap: (lookup.reviewCap ?? (() => reviewCapFactsIn(readCoordinationSettings({ log }))))() };
   } catch (error) {
-    log(`[paseo-bm] reading the review budget for a new Worker failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { reviewBudget: reviewBudgetOf(DEFAULT_COORDINATION_SETTINGS) };
+    log(`[paseo-bm] reading the review cap for a new Worker failed: ${error instanceof Error ? error.message : String(error)}`);
+    return { reviewCap: reviewCapFactsIn(DEFAULT_COORDINATION_SETTINGS) };
   }
 }
 
@@ -501,6 +571,8 @@ export async function precedentFactsOf(
     const read = lookup.read ?? ((id: string | undefined) => readActivePrecedents({ log }, id));
     const precedents = read(workspaceId ?? undefined)
       .filter((precedent) => precedent.scope === PRECEDENT_SCOPE_ALL || precedent.scope === workspaceId)
+      // Delivery line design §7.4: an inert precedent (a subject no precedent answers) is never given to an agent to follow.
+      .filter((precedent) => precedentEligibility(precedent.subject).eligible)
       .slice(0, MAX_INJECTED_PRECEDENTS)
       .map(({ subject, text, scope, expiresAt }) => ({ subject, text, scope, expiresAt }));
     return precedents.length === 0 ? {} : { precedents };
@@ -688,9 +760,10 @@ export async function currentInstructions(
   const facts = await runtimeFactsOf(role, paseo, deps.cwd, undefined, undefined, {
     ...(deps.workspaceId !== undefined ? { workspaceId: deps.workspaceId } : {}),
     read,
-    reviewBudget: () => readReviewBudget(home),
+    reviewCap: () => reviewCapFactsIn(readCoordinationSettings(home)),
     // The project's action boundary switch (§D.2): the Manager is told the Worker mode of its project.
     boundaryOn: (workspaceId) => boundaryOf(readAutonomyPolicy(home), workspaceId) !== null,
+    repoKeyOf: (workspaceId) => repoKeyOf(dataHome(home), workspaceId),
     ...(deps.bound === true ? { bound: true } : {}),
   });
   // Missions design §3.5: a Main's mission facts (its precedents are the global ones: the home has none).

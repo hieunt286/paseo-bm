@@ -144,16 +144,41 @@ export function tokenProviderOf(record: Pick<TraceRecord, "runtime" | "usage">):
 }
 
 /**
- * A turn's input tokens that were NOT read from cache. Codex reports its
- * cached tokens as part of `inputTokens` (run note 2026-09-30 §4), so they are
- * taken out; Claude and OpenCode report the two apart. Every sum and every
- * price adds `cachedInputTokens` beside this, never beside the raw count, or a
- * Codex turn's cache is counted twice.
+ * Whether a usage's `inputTokens` already include its `cachedInputTokens`.
+ *
+ * The rule (run note 2026-09-30 §4; checked again on the field 2026-10-21 →
+ * 22, 5,320 turns with a reported context):
+ * - **Codex** reports the cached tokens inside its input (OpenAI's usage
+ *   shape), so its tokens read are `inputTokens` alone and input + cached
+ *   would count the cache twice.
+ * - **Claude and OpenCode** report the two apart: tokens read are input +
+ *   cached.
+ * - **Unknown provider**: the usage's shape decides. Codex's reported context
+ *   is its last call's input + output exactly (2,232 of 2,262 field turns), so
+ *   cached tokens with `contextUsed === inputTokens + outputTokens` are inside
+ *   the input. No Claude turn had that shape (0 of 3,058), and any other shape
+ *   reads as apart, as before.
+ *
+ * Codex's counts are its last model call's only: the plugin sees the agent's
+ * `lastUsage` at the turn end and no per-step usage (`usage_updated` reaches
+ * no plugin hook), so a Codex turn is never summed over its steps.
+ */
+export function inputIncludesCached(usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number; contextUsed?: number }, provider: TokenProvider): boolean {
+  if (provider === "codex") return true;
+  if (provider === "claude" || provider === "opencode") return false;
+  return usage.cachedInputTokens > 0 && usage.contextUsed !== undefined && usage.contextUsed === usage.inputTokens + usage.outputTokens;
+}
+
+/**
+ * A turn's input tokens that were NOT read from cache (`inputIncludesCached`
+ * says when the cache is inside the input and is taken out). Every sum and
+ * every price adds `cachedInputTokens` beside this, never beside the raw
+ * count, or a Codex turn's cache is counted twice.
  */
 export function freshInputTokensOf(record: Pick<TraceRecord, "runtime" | "usage">): number {
   const usage = record.usage;
   if (usage === null) return 0;
-  return tokenProviderOf(record) === "codex" ? Math.max(0, usage.inputTokens - usage.cachedInputTokens) : usage.inputTokens;
+  return inputIncludesCached(usage, tokenProviderOf(record)) ? Math.max(0, usage.inputTokens - usage.cachedInputTokens) : usage.inputTokens;
 }
 
 /** A turn's tokens: fresh input + cached input + output, each counted once. */

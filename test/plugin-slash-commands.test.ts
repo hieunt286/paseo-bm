@@ -10,7 +10,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { LAUNCHER_SURFACE_ID, launchRequests } from "../plugin/client/launch-manager";
-import { launcherNotices } from "../plugin/client/surface-view";
+import { BEADS_TAB_PANEL_ID, launcherNotices } from "../plugin/client/surface-view";
+import { workerNewNotices } from "../plugin/client/worker-new";
 import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-request";
 import { agentsStopAllRpc, managerEnsureRpc } from "../plugin/shared/contracts";
 
@@ -79,7 +80,7 @@ async function commands(): Promise<Map<string, SlashCommand>> {
 }
 
 interface ContextOptions {
-  ensure?: { agentId: string; created: boolean; otherManagerIds: string[] };
+  ensure?: { agentId: string; created: boolean; otherManagerIds: string[]; mission?: { missionId: string; code: string; name: string; workerIn: string; worktreeTitle: string | null } };
   stopAll?: { workers: number; reviewers: number; skipped: number };
 }
 
@@ -93,6 +94,7 @@ function commandContext(args: string, options: ContextOptions = {}) {
   const rpcCalls: Array<{ name: string; input: unknown }> = [];
   const sent: Array<{ agentId: string; text: string }> = [];
   const openedSurfaces: string[] = [];
+  const openedPanels: string[] = [];
   const context = {
     context: "workspace" as const,
     args,
@@ -120,9 +122,11 @@ function commandContext(args: string, options: ContextOptions = {}) {
       openedSurfaces.push(id);
     },
     openSettings: () => {},
-    openPanel: () => {},
+    openPanel: (id: string) => {
+      openedPanels.push(id);
+    },
   };
-  return { context, rpcCalls, sent, openedSurfaces };
+  return { context, rpcCalls, sent, openedSurfaces, openedPanels };
 }
 
 /**
@@ -146,6 +150,7 @@ beforeEach(() => {
   // `launchRequests` is one queue per loaded bundle, so a leftover from an
   // earlier test would make the next one pass for the wrong reason.
   launchRequests.take();
+  workerNewNotices.take();
 });
 
 describe("slash command registration", () => {
@@ -166,13 +171,14 @@ describe("slash command registration", () => {
 
 describe("/bm-worker-new", () => {
   it("ensures the Manager exactly once and sends it exactly what was typed", async () => {
-    const { context, rpcCalls, sent, openedSurfaces } = commandContext("x", {
+    const { context, rpcCalls, sent, openedSurfaces, openedPanels } = commandContext("x", {
       ensure: { agentId: "agent-manager-7", created: true, otherManagerIds: [] },
     });
 
     await (await commands()).get("bm-worker-new")!.onSubmit(context);
 
-    expect(rpcCalls).toEqual([{ name: managerEnsureRpc.name, input: { workspaceId: "ws-1" } }]);
+    // `forNewRequest`: the answer also names the Main's mission and where the Worker appears.
+    expect(rpcCalls).toEqual([{ name: managerEnsureRpc.name, input: { workspaceId: "ws-1", forNewRequest: true } }]);
     // Exactly one message, to the Manager that `manager.ensure` named. Its
     // first line is the plugin's flag saying this is NEW work -- without it the
     // Manager folds the words into whatever Worker is already busy, which is
@@ -180,9 +186,37 @@ describe("/bm-worker-new", () => {
     // user's text, untouched.
     expect(sent).toEqual([{ agentId: "agent-manager-7", text: `${NEW_REQUEST_MARKER}\nx` }]);
     expect(stripNewRequestMarker(sent[0]!.text)).toBe("x");
-    // The Manager's chat opens through the launcher surface hand-off.
-    expect(openedSurfaces).toEqual([LAUNCHER_SURFACE_ID]);
-    expect(launchRequests.take()).toBe("ws-1");
+    // Field report 2026-10-21: the owner reads where it went in THIS workspace — its Beads tab opens
+    // with the notice and an action to open the agent; nothing navigates away.
+    expect(openedPanels).toEqual([BEADS_TAB_PANEL_ID]);
+    expect(openedSurfaces).toEqual([]);
+    expect(launchRequests.take()).toBeNull();
+    expect(workerNewNotices.peek()).toMatchObject({ workspaceId: "ws-1", agentId: "agent-manager-7", openLabel: "Open Manager" });
+  });
+
+  it("names the Main that got it, with Open Main, and where the new Worker appears", async () => {
+    const { context, openedPanels } = commandContext("Fix the header.", {
+      ensure: {
+        agentId: "agent-main-ino",
+        created: false,
+        otherManagerIds: [],
+        mission: { missionId: "mis-1", code: "INO", name: "Inbox overhaul", workerIn: "worktree", worktreeTitle: "INO · xspace-ai-assistant" },
+      },
+    });
+
+    await (await commands()).get("bm-worker-new")!.onSubmit(context);
+
+    expect(openedPanels).toEqual([BEADS_TAB_PANEL_ID]);
+    expect(workerNewNotices.peek()).toEqual({
+      workspaceId: "ws-1",
+      agentId: "agent-main-ino",
+      openLabel: "Open Main",
+      lines: [
+        "Sent to Main INO · Inbox overhaul.",
+        "The new Worker will appear in the workspace INO · xspace-ai-assistant, the mission's worktree.",
+        "If the Main gives it to a Worker already working, or cannot create the Worker, it says so in its chat. Open Main to follow it.",
+      ],
+    });
   });
 
   it("sends the request verbatim after the BM-NEW-REQUEST line: not reworded or truncated", async () => {
@@ -201,13 +235,16 @@ describe("/bm-worker-new", () => {
     ["no args", ""],
     ["whitespace only", "   "],
   ])("sends nothing for %s, and still opens the Manager's chat", async (_name, args) => {
-    const { context, sent, openedSurfaces } = commandContext(args);
+    const { context, sent, openedSurfaces, openedPanels } = commandContext(args);
 
     await (await commands()).get("bm-worker-new")!.onSubmit(context);
 
     expect(sent).toEqual([]);
     expect(openedSurfaces).toEqual([LAUNCHER_SURFACE_ID]);
     expect(launchRequests.take()).toBe("ws-1");
+    // Nothing was sent, so there is nothing to report.
+    expect(openedPanels).toEqual([]);
+    expect(workerNewNotices.peek()).toBeNull();
   });
 });
 

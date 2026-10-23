@@ -222,6 +222,14 @@ export function dangerSignalNoticeOf(input: { workerId: string; requestId: strin
 }
 
 /**
+ * First word of the plugin's size rollover notice to a Worker (delivery line
+ * design §2.6): `BM-ROLLOVER soft` once its request reaches a rollover
+ * figure, `BM-ROLLOVER now` at `rollover.ceilingFactor` × one
+ * (`server/rollover.ts`). Matched as a whole word.
+ */
+export const ROLLOVER_NOTICE_MARKER = "BM-ROLLOVER";
+
+/**
  * First word of the Main's channel (mission runtime design §6.2, ADR-033
  * decision 5): what is pending for a mission's Main at its idle moment goes as
  * one message, `BM-UPDATES <n>`, a line saying it is the plugin's, then each
@@ -286,10 +294,11 @@ const PREFIXES: readonly string[] = [
   ASK_NOTICE_MARKER,
   SIGNAL_NOTICE_MARKER,
   UPDATES_NOTICE_MARKER,
+  ROLLOVER_NOTICE_MARKER,
 ];
 
 /** Markers that count only as a whole word: followed by whitespace or nothing. */
-const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER, ASK_NOTICE_MARKER, SIGNAL_NOTICE_MARKER, UPDATES_NOTICE_MARKER]);
+const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER, ASK_NOTICE_MARKER, SIGNAL_NOTICE_MARKER, UPDATES_NOTICE_MARKER, ROLLOVER_NOTICE_MARKER]);
 
 function startsWithMarker(text: string, prefix: string): boolean {
   if (!text.startsWith(prefix)) return false;

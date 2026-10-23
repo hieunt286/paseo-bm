@@ -7,7 +7,7 @@ import { MANAGER_INSTRUCTIONS } from "../plugin/server/manager-instructions";
 import { WORKER_INSTRUCTIONS } from "../plugin/server/worker-instructions";
 import { REVIEWER_INSTRUCTIONS } from "../plugin/server/reviewer-instructions";
 import { ORCHESTRATOR_INSTRUCTIONS } from "../plugin/server/orchestrator-instructions";
-import { BOUND_REPORT_TOOL, QUESTIONS_FACE, questionsRules, schemaIssues, toolFacesFor, toolNamed, type QuestionsInput } from "../plugin/shared/bm-tools";
+import { BOUND_REPORT_TOOL, CONTRACT_REF_SOURCE, MESSAGE_ACTS, NO_TURN_ACTS, QUESTIONS_FACE, questionsRules, schemaIssues, toolFacesFor, toolNamed, type QuestionsInput } from "../plugin/shared/bm-tools";
 import { parseQuestions } from "../plugin/shared/bm-questions";
 import { CONFIRM_EFFECTS, DECISION_CLASSES, EFFECTS, checkedClass, type Decision } from "../plugin/shared/decisions";
 import { eventLineOf, type BmEvent } from "../plugin/server/event-bus";
@@ -22,6 +22,8 @@ import {
 } from "../plugin/server/role-instructions";
 import { BUILDER_SEND_LINES } from "../plugin/server/agent-tools";
 import { boundaryVerdictOfCommand } from "../plugin/shared/effectful-actions";
+import { rolloverNoticeOf } from "../plugin/server/rollover";
+import { integrationFactLine } from "../plugin/server/integration-grant";
 
 /**
  * What the four role files must carry — the contract of the rewrite from zero
@@ -178,6 +180,12 @@ describe("retired mechanisms stay retired (ADR-017, design §A.14)", () => {
     expect(W).not.toMatch(/Manager verified|your Manager/);
   });
 
+  it("no file teaches review budgets, untilClean or a single re-review (delivery line design §5.6)", () => {
+    for (const [name, text] of FILES) {
+      expect(flat(text), name).not.toMatch(/review budget|untilClean|review\.\*Budget|review\.(small|medium|large)Budget|one re-review/i);
+    }
+  });
+
   it("no file teaches mode selection or a self-reported guardrail", () => {
     for (const [name, text] of FILES) {
       expect(text, name).not.toMatch(/set_agent_mode|bypassPermissions|guardrail/);
@@ -251,6 +259,9 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
     keys(M, "a Context of what bears on it, precedents included", "**Context**", "`## Owner precedents`", "bears on it");
     keys(M, "context is facts, not how to do the work", "facts, never how to do the work");
     keys(M, "a collision is named in the brief", "another Worker writes the same files", "one fact names it");
+    // Delivery line design §4.1 (bead bm-delivery-line-p8-1u4q.9): the tree is a placement's, not a repo's.
+    keys(M, "a placement's Workers share its tree; another mission's work is on its own branch", "another Worker writes the same files", "a placement's Workers share its tree", "another mission's work is on its own branch", "one fact names it");
+    expect(M).not.toMatch(/one repo's Workers share/);
     // Design §16.12: the creation recipe leaves the role file; a bound Manager's text never teaches it.
     expect(M).not.toMatch(/create_agent|list_profiles|YYYYMMDDTHHMMSSZ|initialPrompt|settings\.modeId/);
     verbatim(MANAGER_HAND_PATH, "`req-` + current UTC time as `YYYYMMDDTHHMMSSZ`", "`provider` = `bm-worker/<model of the profile>`", "`bm.role` = `worker`", "`bm.requestId` = the `requestId`", "`bm.version`");
@@ -291,7 +302,9 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
   it("follows a request from what it sees, and wakes a Worker only on a fact it saw", () => {
     keys(M, "never asks a Worker for progress", "read the Worker's activity rather than ask it");
     keys(M, "finished: decided choices and suggestions", "`decided` choices", "suggestions");
-    keys(M, "wakes a waiting Worker on what it has seen, through bm_tell_worker", "SEEN it done", "`bm_tell_worker`", "its source");
+    // Delivery line design §6.4: paseo-bm wakes a Worker waiting by id; the Main tells it only what paseo-bm cannot see.
+    keys(M, "a Worker waiting by id is woken by paseo-bm; the Main tells it only what paseo-bm cannot see, as seen, with its source", "paseo-bm wakes a Worker waiting by id", "only what paseo-bm cannot see", "SEEN it", "its source");
+    keys(M, "owner words that change a Worker's wait go with now: true", "owner words that change its wait", "`now: true`");
     keys(M, "archiving is the owner's", "Archiving or deleting is the owner's");
   });
 
@@ -364,11 +377,34 @@ describe("worker.md — the action boundary and a literal scratch folder (change
 describe("worker.md — sizing, beads, proof and the four questions", () => {
   it("W1 — nothing leaves the workspace without the owner's yes, and says what a yes is", () => {
     keys(WR, "nothing leaves", "NOTHING LEAVES THIS WORKSPACE");
-    for (const thing of ["commit, push or pull request", "deploy or publish", "no network", "dependency", "migration on real data", "elevated privileges", "outside this workspace"]) {
+    // Delivery line design §4.1: outside a mission's worktree a commit, a push and a pull request still need the owner's yes.
+    keys(WR, "W1 covers a commit, a push and a pull request, by the owner's yes", "NOTHING LEAVES THIS WORKSPACE", "without the owner's yes", "no commit, push or pull request");
+    for (const thing of ["deploy or publish", "no network", "dependency", "migration on real data", "elevated privileges", "outside this workspace"]) {
       keys(WR, `W1 covers ${thing}`, thing);
     }
     keys(WR, "an option's declared effects are a yes", "option the owner chose", "`effects`");
     keys(WR, "a command's approved line is a yes", "`BM-COMMAND` whose `approved:` line");
+  });
+
+  // Delivery line design §4.1 (ADR-035 decision 2, bead bm-delivery-line-p8-1u4q.9): rule 1 reworded for a mission branch.
+  it("W1 — in a mission's worktree it commits on the mission branch at finished and at a rollover, as its Integration line says", () => {
+    // The mission branch is the exception the rule states after its no-commit line, inside the same rule 1.
+    const noCommit = WR.indexOf("no commit, push or pull request");
+    expect(noCommit, "rule 1's no-commit line").toBeGreaterThanOrEqual(0);
+    expect(WR.indexOf("**In a mission's worktree**"), "the exception after it").toBeGreaterThan(noCommit);
+    expect(WR.indexOf("**In a mission's worktree**"), "the exception inside rule 1").toBeLessThan(WR.indexOf("2. **NEVER DESTROY"));
+    keys(WR, "a mission's worktree is the one with an Integration: Runtime fact", "**In a mission's worktree**", "`Integration:` line", "`## Runtime facts`");
+    keys(WR, "commits the request's changes on the mission branch at finished and at a rollover", "commit your request's changes on the mission branch", "at `finished` and at a rollover");
+    // The rule names the Runtime facts line exactly as the plugin writes it.
+    const line = (granted: boolean) => integrationFactLine({ branch: "m/ABC/fe", target: "develop", integration: granted ? { state: "granted", decisionId: "m:ABC:1", grantedAt: "2026-10-21T10:42:00.000Z", revokedAt: null, scope: { remote: "origin", branch: "m/ABC/fe", target: "develop" }, mr: null } : null });
+    expect(line(false)).toBe("Integration: m/ABC/fe → develop; commit: yes; push/MR: no.");
+    expect(line(true)).toBe("Integration: m/ABC/fe → develop; commit: yes; push/MR: yes.");
+  });
+
+  it("W1 — it pushes the mission branch and creates or updates its merge request only on push/MR: yes, which paseo-bm asks the owner", () => {
+    keys(WR, "push and merge request only when the line says push/MR: yes", "push that branch and create or update its merge request", "only when that line says `push/MR: yes`");
+    keys(WR, "paseo-bm asks the owner for that yes itself, so the Worker never asks it", "`push/MR: yes`", "paseo-bm asks the owner itself");
+    keys(WR, "merging, force-pushing, rewriting pushed history, deleting a branch and committing elsewhere stay the owner's", "Merging, force-pushing, rewriting pushed history, deleting a branch and committing anywhere else", "the owner's");
   });
 
   it("W2–W5 — never destroys, never reads secrets, never fakes green, asks only what it cannot decide", () => {
@@ -395,11 +431,11 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     keys(W, "keeps its context small", "Keep your context small");
   });
 
-  it("sizes by risk into Small, Medium and Large, with the review budget of its Runtime facts", () => {
+  it("sizes by risk into Small, Medium and Large, with the review cap of its Runtime facts", () => {
     keys(W, "size the risk, not the diff", "Size the risk", "not the diff");
     for (const tier of ["**Large**", "**Small**", "**Medium**"]) verbatim(worker, tier);
-    // Bead 7gxw.12: the owner's budget per tier is a Runtime fact (Settings → Coordination); the tools enforce it.
-    keys(W, "the review budget is the Runtime facts' ceiling", "**Review calls per request:**", "`## Runtime facts`", "a ceiling, not a target");
+    // Delivery line design §5.3, §5.6: the review cap per request is a Runtime fact (reviewCapLine); the tools enforce it.
+    keys(W, "the review cap is the Runtime facts' ceiling", "**review cap**", "`## Runtime facts`", "a ceiling, not a target");
     expect(worker).not.toMatch(/else 2 \/ 2 \/ 4|\| \*\*Review calls per request\*\* \|/);
     keys(W, "raises the tier when it learns more", "Raise the tier", "learn more");
   });
@@ -505,16 +541,26 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     keys(W, "an open question stays open, no default, not re-asked", "stays open on its card", "never pick a default", "do not ask it again");
   });
 
-  it("creates the Reviewer through bm_create_reviewer, never create_agent, and keeps one review and one re-review per batch", () => {
-    keys(W, "bm_create_reviewer with the batch, stages, scope and checks", "**Create the Reviewer** with `bm_create_reviewer`", "`batchId`", "stages", "`scope`", "checks you ran");
+  it("creates the Reviewer through bm_create_reviewer, never create_agent, reviews by milestone and re-reviews while blocking findings fall", () => {
+    keys(W, "bm_create_reviewer with the batch, milestone, stages, scope from a commit and checks", "**Create the Reviewer** with `bm_create_reviewer`", "`batchId`", "`milestone`", "stages", "`scope`", "`since`", "checks you ran");
     keys(W, "never its criteria", "never its criteria or format");
-    keys(W, "one review, one re-review", "one review and", "one re-review");
+    // Delivery line design §5.1: no bead has a review of its own; the milestone batch is the review implementing-beads asks for.
+    keys(W, "a batch is a milestone, never a bead; it is the review implementing-beads asks for", "one milestone, never one bead", "`implementing-beads`", "the milestone batch is it");
+    keys(W, "the loop names the plan, wave and finished milestones", "milestone `plan`", "`beads-done`", "planned wave", "`wave`", "milestone `finished`");
     keys(W, "the re-review through bm_rereview", "`bm_rereview` with how each was fixed");
+    // Delivery line design §17.2 (ADR-036 decision 2): targeted checks before a re-review, the full suite once.
+    keys(W, "before bm_rereview, only the checks covering the fixed files, named in fixed", "run only the checks that cover the files", "you fixed", "`bm_rereview`", "those checks in `fixed`");
+    keys(W, "bm_rereview needs no since", "`bm_rereview`", "no `since`");
+    keys(W, "the full suite runs once, before finished", "the full suite runs once, before `finished`");
+    // Delivery line design §5.2: re-reviews while the blocking findings fall; at the stop, go on or finish with them open.
+    keys(W, "re-reviews while the blocking findings fall", "**Re-review while the blocking findings fall**");
+    keys(W, "a refused re-review goes on: the next milestone batch, or finished with reviewFindingsOpen", "refused, go on as it says", "next milestone batch", "`finished`", "open blocking findings", "`reviewFindingsOpen`");
     // Re-run finding H2 (bead bm-w6bh): a Worker deleted two functions the owner asked for on a Reviewer's scope finding.
     keys(WR, "the request's own work stays, whatever a finding says", "The request is the scope", "whatever a finding says");
     keys(W, "a finding that would remove requested work is a Scope question", "remove work the owner asked for", "**Scope** question, never a fix");
     keys(W, "non-blocking goes to suggestions", "the rest in `suggestions`");
-    keys(W, "a call refused for the budget is asked as the refusal says", "refused for the budget", "ask as the refusal says");
+    // Delivery line design §5.4: past the cap paseo-bm asks the owner itself; the Worker blocks on that question.
+    keys(W, "at the review cap paseo-bm asks the owner, and the Worker sends blocked waiting on that question", "**review cap**", "paseo-bm asks the owner itself", "`blocked`", "`waitingOn`", "its question");
     keys(W, "a provider error is not a review", "provider error is not a review");
     // Acceptance finding F3: bm_report refuses a bound Worker's finished while a review has no verdict (batchesAwaitingVerdict);
     // only the unbound Worker, whom nothing holds, is told.
@@ -527,7 +573,8 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     verbatim(WH, "provider `bm-reviewer/<model of the profile>`");
     keys(WH, "a refused creation is blocked with Paseo's refusal", "`blocked` with Paseo's refusal");
     keys(WH, "the same Reviewer re-reviews", "re-review", "same Reviewer", "`send_agent_prompt`");
-    keys(WH, "a call past the budget is asked", "past your budget", "`blocked` report and a question");
+    keys(WH, "a re-review gets only the findings and the fix diff (ADR-036)", "only the previous blocking findings and the diff of your fixes", "never the whole change again");
+    keys(WH, "a call past the review cap is asked", "past your review cap", "`blocked` report and a question");
   });
 
   it("reports only at the four phases or stopped with bm_report, and the unbound Worker keeps the fallback BM-REPORT block", () => {
@@ -597,8 +644,36 @@ describe("reviewer.md — review against the request, blocking vs not, one resul
     keys(R, "against the request", "REVIEW AGAINST THE REQUEST, NOT AGAINST PERFECTION");
     keys(R, "no guessing", "do not guess", "`changes-required` with one blocking finding");
     keys(R, "effort in proportion to risk", "effort in proportion to risk");
-    keys(R, "re-review checks only the previous blocking findings", "ONLY that the previous blocking findings are fixed");
+    // Delivery line design §5.5: an implementation reviews the milestone's scope.
+    keys(R, "implementation reviews exactly the milestone's scope", "exactly the milestone's scope", "diff since the commit your brief names", "beads closed in it", "checks reported");
     keys(R, "says when the tree changed", "`git status --porcelain` before and after");
+  });
+
+  // Delivery line design §17.2 (ADR-036 decision 2): a re-review is a fresh Reviewer on the diff of the fixes.
+  // Rewritten from the retired "re-review of the same batchId: ONLY that the previous blocking findings are
+  // fixed, in the diff since the last review, and that the fixes broke nothing".
+  describe("a re-review checks the fix diff (delivery line design §17.2)", () => {
+    it("its brief holds the previous blocking findings and the diff of the fixes, in place of a stage and scope", () => {
+      keys(R, "the re-review brief holds the findings and the fix diff", "**Re-review**", "in place of a stage and scope", "previous blocking findings", "diff of the fixes");
+      expect(R).not.toMatch(/same `batchId`|diff since the last review|a re-review arrives as a new message/);
+    });
+
+    it("checks each finding against that diff only", () => {
+      keys(R, "each finding against the fix diff only", "Check each finding against that diff only");
+    });
+
+    it("reports a new blocking finding only where this diff introduced it; an open one keeps its location and wording", () => {
+      keys(R, "a new finding only if blocking and this diff introduced it", "new finding only", "blocking and this diff introduced it");
+      keys(R, "an open one keeps its location and wording", "still open", "same location and wording");
+    });
+
+    it("runs only the checks covering the changed files", () => {
+      keys(R, "only the checks covering the changed files", "Run only the checks that cover the changed files");
+    });
+
+    it("reads nothing outside the diff unless a finding names it", () => {
+      keys(R, "nothing outside the diff unless a finding names it", "read nothing outside the diff unless a finding names it");
+    });
   });
 
   it("owns the criteria of every stage, loaded as criteria only, and tries abuse cases on sensitive batches", () => {
@@ -783,8 +858,9 @@ describe("orchestrator.md — the governor: reads the figures and the charter, a
     keys(O, "drift persisting after the re-plan: bm_ask_owner with a prepared command to the Main", "drift persists after your re-plan", "`bm_ask_owner`", "prepared command to the Main");
     // §9.6: arbitration names the owner of the area and a reason; a goal change is the losing mission's card.
     keys(O, "mission.conflict: read both, bm_arbitrate with a reason, a goal change is the owner's card", "`mission.conflict`", "read both missions", "`bm_arbitrate`", "reason both Mains read", "losing", "goal", "owner's card");
-    keys(O, "mission.scope: read, then govern or ask", "`mission.scope`", "outside the charter", "`bm_govern`", "`bm_ask_owner`");
-    keys(O, "mission.review: read against the charter, then govern, ask or note", "`mission.review`", "against its charter", "`bm_govern`", "`bm_ask_owner`", "`bm_note`");
+    // Delivery line design §8.3: on a mission's process the owner is reached from ladder step 4; a goal change at once.
+    keys(O, "mission.scope: read, then govern; from step 4, or at once on a goal change, ask", "`mission.scope`", "outside the charter", "`bm_govern`", "from step 4", "goal", "`subject`", "`bm_ask_owner`");
+    keys(O, "mission.review: read against the charter, then govern, from step 4 ask, or note", "`mission.review`", "against its charter", "`bm_govern`", "from step 4", "`bm_ask_owner`", "`bm_note`");
     // §9.1: bm_direct_worker is narrowed to a stop, on a danger signal or the governor's stop step, evidence first.
     keys(O, "reads a danger signal's evidence first", "`danger`", "read its evidence first");
     keys(O, "stops a Worker only on danger or a governor stop step, after its evidence, unless the owner asked for it", "read its evidence first", "Only a stop goes to a Worker", "`bm_direct_worker` only on a `danger` signal or a governor", "stop step", "unless the owner asked for it");
@@ -803,7 +879,8 @@ describe("orchestrator.md — the governor: reads the figures and the charter, a
   it("never briefs, corrects or answers a Worker, decides no Worker's question, and carries no words between projects or missions", () => {
     keys(O, "a Worker is its Main's", "never brief, correct or answer a Worker", "never", "decide a Worker's question", "its Main or the owner");
     keys(O, "never carries words between projects or missions", "ask each other through their own links", "never carry words between", "projects or missions", "command no agent to wait for you");
-    keys(O, "a review budget is the Worker's question", "review budget a", "request needs", "Worker's question", "never ask the owner");
+    // Delivery line design §5.4, §10: past a request's cap paseo-bm asks the owner itself.
+    keys(O, "reviews past a request's cap are paseo-bm's one question: never ask about reviews", "Reviews past a request's cap", "paseo-bm's one question", "never ask about reviews");
     // §9.1: bm_decide is for fallback incidents only; bm_predict is retired (owner, 2026-10-10): the rest is the owner's.
     keys(O, "only a fallback incident is its to decide, else the owner's", "fallback incident (`f:`", "`bm_decide`", "delegated to you", "leave it to the owner");
     expect(orchestratorFace("bm_decide").description).toContain("a Worker's question (q:…) is its Main's or the owner's");
@@ -835,8 +912,8 @@ describe("orchestrator.md — the governor: reads the figures and the charter, a
     expect(notice).toContain("Act on it now");
     // Design §G.4: advice when the owner asks — the findings, a change on an option, else a note.
     keys(O, "the owner may ask for advice anytime: findings, a change on an option, else a note", "ask for advice anytime", "`bm_findings`", "worth acting on", "change on an option");
-    // Bead 7gxw.12: §G.4's review.budget is a coordination.set on a review-budget key, not a kind of its own.
-    keys(O, "a review budget is a coordination.set on its tier's key", "review budget", "`coordination.set`", "`review.*Budget`", "key");
+    // Delivery line design §5.6: advice on reviews is a coordination.set on the two review settings; the old keys are refused.
+    keys(O, "advice on reviews is a coordination.set on review.callsPerBatch or review.maxRereviews", "on reviews", "`coordination.set`", "`review.callsPerBatch`", "`review.maxRereviews`");
     expect(orchestratorFace("bm_ask_owner").description).toContain("the plugin applies it only when the owner picks it — never on a precedent's, the policy's or your answer");
     expect(orchestratorFace("bm_findings").description).toContain("Figures and short labels only, at most 4,000 characters");
   });
@@ -874,9 +951,9 @@ describe("peer links and the owner-turn noise (design §7.17.8–9, REQ-176 c, R
     expect(W).not.toMatch(/\*\*nothing at all\*\*/);
   });
 
-  it("the Orchestrator leaves projects to their links, review budgets to the Worker, and reads a danger signal first", () => {
+  it("the Orchestrator leaves projects to their links, reviews to paseo-bm, and reads a danger signal first", () => {
     keys(O, "never carries words between projects", "ask each other through their own links", "never carry words between projects", "command no agent to wait for you");
-    keys(O, "a review budget is the Worker's question", "review budget a request needs", "Worker's question", "never ask the owner");
+    keys(O, "reviews past a request's cap are paseo-bm's one question", "Reviews past a request's cap", "paseo-bm's one question", "never ask about reviews");
     keys(O, "reads a danger signal before a stop", "`danger`", "read its evidence first", "`bm_direct_worker`");
   });
 });
@@ -905,7 +982,9 @@ describe("missions — the Main's file and the Worker's side (missions design §
   });
 
   it("gives work to Workers in the right repo, re-using the one on an area, splitting as staffing allows", () => {
-    keys(M, "more work on a held area goes to that Worker", "more work on an area a Worker holds", "`bm_tell_worker`");
+    // Delivery line design §2.4: a finished or stopped request goes on as its continuation, which paseo-bm opens.
+    keys(M, "a follow-up goes to its request through bm_tell_worker; a finished or stopped one goes on as a new request paseo-bm staffs and briefs", "A follow-up goes to its request with `bm_tell_worker`", "its Worker while it", "`finished` or `stopped`", "new request that paseo-bm staffs and briefs");
+    expect(M).not.toMatch(/area a Worker holds/);
     keys(M, "a new Worker in the repo it changes", "`bm_create_worker` in the repo it changes", "`project`");
     keys(M, "parallel parts get a Worker each, within staffing", "side by side", "a Worker each", "`staffing`");
     keys(M, "the next planned step on proceed, else one line to the owner", "next planned step", "`proceed`", "ask in one line");
@@ -921,6 +1000,9 @@ describe("missions — the Main's file and the Worker's side (missions design §
     // Mission runtime design §4.4, §4.5: the plugin names the questions that are the Main's; no time window.
     keys(M, "answers the questions the plugin names as its own through bm_answer_worker, never an ownerOnly question", "The plugin tells you each question that is", "`bm_answer_worker`", "never an `ownerOnly`", "owner's card or words");
     keys(M, "what else the owner decides goes to bm_owner_question, never only into the reply", "`bm_owner_question`, never only into your reply");
+    // Delivery line design §7.2: one card per question: the Main recommends on the Worker's card through `about`.
+    keys(M, "a Worker's questions are already the owner's cards", "questions are already the owner's decision cards");
+    keys(M, "recommends on a Worker's question it does not answer with bm_owner_question about", "Recommend on any other", "`about`", "`bm_owner_question`");
   });
 
   it("takes a BM-COMMAND on how the mission runs as process feedback", () => {
@@ -936,9 +1018,170 @@ describe("missions — the Main's file and the Worker's side (missions design §
   });
 });
 
+/**
+ * Delivery line design §2, §6, §10 (ADR-035 decisions 1 and 5, bead
+ * bm-delivery-line-p7-0iur.8): a bound request ends at `finished`; more work
+ * goes on as a continuation paseo-bm opens; a size rollover ends a request
+ * with `remaining`; a blocked Worker names its waits by id and is woken once.
+ */
+describe("bounded requests and waits by structure (delivery line design §2, §6, §10)", () => {
+  it("the Main reads a continued: line on a finished delivery as paseo-bm's", () => {
+    keys(M, "a continued: line on finished is paseo-bm's", "At `finished`", "`continued:` line", "paseo-bm's");
+  });
+
+  it("the Worker's request ends at finished, and a BM-ROLLOVER ends it with remaining, as the notice says", () => {
+    keys(W, "a request ends at finished", "**A request ends at `finished`.**");
+    keys(W, "BM-ROLLOVER soft: finish the bead in progress, review as the tier says, finished with remaining", "`BM-ROLLOVER soft`", "finish the bead in progress", "review as your tier", "`finished` with `remaining`");
+    keys(W, "BM-ROLLOVER now: at the end of this turn", "`finished` with `remaining`", "`now`", "end of this turn");
+    expect(rolloverNoticeOf("soft", "req-a", "16 beads closed")).toContain("Finish the bead in progress, review as your tier says, and report `finished` with `remaining`");
+    expect(rolloverNoticeOf("now", "req-a", "41 turns")).toContain("Report `finished` with `remaining` at the end of this turn");
+  });
+
+  it("a continues: brief carries on from its chain: its beads by feature label, its questions' answers", () => {
+    keys(W, "a continues: brief carries on from that request", "A brief with `continues:`", "carries on from that request");
+    keys(W, "updates the chain's beads by their feature labels", "update its beads", "`features:` labels");
+    keys(W, "the chain's open questions' answers come to it", "open questions' answers come", "to you");
+  });
+
+  it("at blocked the Worker names each wait by id, why in waitingFor, wakeOn any, ends the turn and acts on each block of its one wake", () => {
+    keys(W, "each wait by id", "At `blocked`, name each wait by id", "`waitingOn` (questions)", "`waitingOnPeers` (links)", "`waitingOnRequests`", "`waitingOnBatches`");
+    keys(W, "why in waitingFor, wakeOn any when one is enough", "why in `waitingFor`", "`wakeOn: \"any\"` when one is enough");
+    keys(W, "ends the turn; paseo-bm wakes it once with everything", "end the turn: paseo-bm wakes you once with everything");
+    keys(W, "one BM-UPDATES message, a BM-DELIVERY wait block of facts: act on each block", "`BM-UPDATES` message", "`BM-DELIVERY wait` block", "act on each block");
+    for (const field of ["waitingOnRequests", "waitingOnBatches", "wakeOn"]) expect(JSON.stringify(BOUND_REPORT_TOOL.inputSchema), field).toContain(`"${field}"`);
+  });
+
+  it("the Main's tell holds for a waiting Worker unless now: true, as the tool says", () => {
+    const tell = toolFacesFor("manager", true).find((face) => face.name === "bm_tell_worker");
+    expect(tell?.description).toContain("now: true delivers it at once, for owner words that change the wait");
+    expect(tell?.description).toContain("A finished or stopped request goes on as its continuation");
+  });
+});
+
+/**
+ * Delivery line design §4.1, §4.4, §4.7, §10 (ADR-035 decisions 2 and 3, bead
+ * bm-delivery-line-p8-1u4q.9): on a mission branch the Worker reports its
+ * commit, pushes and keeps the merge request through glab, and updates the
+ * branch by a merge, the beads file per line, before `br sync --rebuild`.
+ */
+describe("a branch per mission and integration (delivery line design §4, §10)", () => {
+  const field = (name: string) => (BOUND_REPORT_TOOL.inputSchema as { properties: Record<string, { required?: string[]; properties?: Record<string, unknown> }> }).properties[name];
+
+  it("reports each commit on a mission branch in bm_report's integration, the field the tool requires at finished", () => {
+    keys(W, "on a mission branch, each commit goes in bm_report's integration", "**On a mission branch**", "report each commit in `bm_report`'s `integration`");
+    expect(field("integration")?.required).toEqual(["branch", "commit", "pushed"]);
+    expect(Object.keys(field("integration")?.properties ?? {})).toEqual(["branch", "commit", "pushed", "mr", "ci"]);
+  });
+
+  it("pushes to origin and keeps the merge request with glab mr create or update into the target", () => {
+    keys(W, "the push goes to origin", "**On a mission branch**", "a push goes to `origin`");
+    keys(W, "the merge request through glab mr create or glab mr update, from the branch into the target", "its merge request", "`glab mr create` or `glab mr update`", "from the branch into `<target>`");
+  });
+
+  // Delivery line design §17.1 (ADR-036 decision 1): CI is not used. Rewritten from the retired "merge request and
+  // CI state come from glab mr view and glab ci status".
+  it("reads the merge request with glab mr view only when it needs its state", () => {
+    keys(W, "glab mr view only when needed", "`glab mr view` only when you need its", "state");
+  });
+
+  it("after a push reports and ends its turn, never reading, waiting for or polling a pipeline", () => {
+    keys(W, "after a push: report and end the turn", "**After a push, report and end your turn**");
+    keys(W, "never read, wait for or poll a pipeline: paseo-bm does not use CI", "never read, wait for or poll a pipeline", "paseo-bm does not use CI");
+  });
+
+  it("no role file mentions glab ci", () => {
+    for (const [name, text] of FILES) expect(text, name).not.toMatch(/glab ci/);
+  });
+
+  it("the Main never asks a Worker for CI or a pipeline, nor makes CI a step of the work", () => {
+    keys(M, "never asks for CI or a pipeline", "read the Worker's activity rather than ask it", "never for CI or a pipeline");
+    keys(M, "never makes CI a step of the work", "nor make CI a step of the work", "paseo-bm uses none");
+  });
+
+  it("bm_report's ci field says it is ignored while paseo-bm does not use CI, and never to poll for it", () => {
+    const ci = field("integration")?.properties?.["ci"] as { description?: string } | undefined;
+    expect(ci?.description).toContain("Ignored while paseo-bm does not use CI");
+    expect(ci?.description).toContain("never read, wait for or poll a pipeline");
+    expect(ci?.description).not.toMatch(/glab ci/);
+  });
+
+  it("updates the branch before a push and when told it is behind or conflicting, by a merge of the target, never a rebase of pushed history", () => {
+    keys(W, "when to update the branch", "**Update the branch**", "before a push", "when told it is behind or conflicting");
+    keys(W, "by git merge origin/<target>, never a rebase of pushed history", "**Update the branch**", "`git merge origin/<target>`", "never rebase pushed history");
+    keys(W, "conflicts are resolved within the request's scope", "`git merge origin/<target>`", "resolve within the request's scope");
+  });
+
+  it("resolves the beads file per line, keeps every id once, the integration branch's line for a shared id, sorted", () => {
+    keys(W, "the beads file per line, never per hunk", "`.beads/issues.jsonl` per line", "never per hunk");
+    keys(W, "every id once; the integration branch's line where both sides have it; sorted", "never per hunk", "every id once", "the integration branch's line where both sides have it", "sorted");
+  });
+
+  it("commits the merge, then br sync --rebuild, then re-applies its own bead changes with br, then runs the checks", () => {
+    // The order is the proof of test/beads-merge.test.ts: rebuilding before the merge commit deletes beads for good.
+    keys(W, "commit the merge → br sync --rebuild → re-apply with br → the checks", "commit the merge", "`br sync --rebuild`", "re-apply your own bead changes with `br`", "run the checks");
+  });
+
+  it("a conflict that needs another mission's choice is blocked with a question for the Main", () => {
+    keys(W, "another mission's choice: blocked with a question for the Main", "A conflict needing another mission's choice", "`blocked` with a question for your Main");
+  });
+});
+
+/**
+ * Delivery line design §9.1, §9.2, §9.4, §10 (ADR-035 decision 8, bead
+ * bm-delivery-line-p9-fnoe.4): the Main and the Worker write every message to
+ * another agent for a newcomer, name what they mean in `refs`, and send what
+ * needs no answer as `act: ack`; the Main's agreement step ends on `act:
+ * agree` with the contract at its version. Each act a role file names is one
+ * the tools take.
+ */
+describe("typed messages (delivery line design §9, §10)", () => {
+  const WRITING_LINE =
+    "Write every message to another agent in full sentences a newcomer to the work understands; name what you mean by its id in `refs`. A message that needs no answer is `act: ack`: it wakes no one.";
+  type Schema = { properties?: Record<string, { enum?: readonly string[]; type?: string; items?: Schema; properties?: Record<string, { enum?: readonly string[] }> }> };
+  const propertiesOf = (role: "manager" | "worker", name: string) => {
+    const face = toolFacesFor(role, true).find((candidate) => candidate.name === name);
+    expect(face, `${role} ${name}`).toBeDefined();
+    return (face!.inputSchema as Schema).properties ?? {};
+  };
+  const actsNamed = (text: string) => [...text.matchAll(/`act: ([a-z]+)`/g)].map((match) => match[1]!);
+
+  it.each([
+    ["manager.md", M],
+    ["worker.md", W],
+  ])("%s carries the design's line on writing for a reader, word for word", (_name, text) => {
+    verbatim(text, WRITING_LINE);
+  });
+
+  it("every act a role file names is an act the message tools take, and ack is one that starts no turn", () => {
+    const named = [...actsNamed(M), ...actsNamed(W)];
+    expect(new Set(named)).toEqual(new Set(["ack", "agree"]));
+    for (const act of named) expect(MESSAGE_ACTS, act).toContain(act);
+    expect(NO_TURN_ACTS).toContain("ack");
+    for (const [role, name] of [["worker", "bm_peer_reply"], ["manager", "bm_peer_reply"], ["manager", "bm_ask_mission"]] as const) {
+      const properties = propertiesOf(role, name);
+      expect(properties["act"]?.enum, `${role} ${name} act`).toEqual(MESSAGE_ACTS);
+      expect(properties["refs"]?.type, `${role} ${name} refs`).toBe("object");
+    }
+    // The tool's own word for ack is the role line's: it wakes no one.
+    expect(toolFacesFor("worker", true).find((face) => face.name === "bm_peer_reply")?.inputSchema).toMatchObject({ properties: { act: { description: expect.stringContaining("ack (needs no answer; wakes no one)") } } });
+  });
+
+  it("the tools the Main tells and links through take refs, as its messages name ids in them", () => {
+    for (const name of ["bm_tell_worker", "bm_link_workers"]) expect(propertiesOf("manager", name)["refs"]?.type, name).toBe("object");
+  });
+
+  it("the Main links Workers who must agree, records the contract, and tells each to answer on the link with act: agree and its Cn@vk", () => {
+    keys(M, "link, record, then each agrees on the link at the contract's version", "Link Workers who must agree with `bm_link_workers`", "`bm_mission_update` (`contracts`)", "tell each to answer on the link with `act: agree`", "its `Cn@vk`");
+    // Cn@vk is the shape refs.contracts takes; a contract the Main writes is proposed until both sides agree.
+    expect(new RegExp(CONTRACT_REF_SOURCE).test("C2@v3")).toBe(true);
+    const contracts = propertiesOf("manager", "bm_mission_update")["contracts"];
+    expect(contracts?.items?.properties?.["status"]?.enum).toEqual(["proposed", "agreed", "superseded", "withdrawn"]);
+  });
+});
+
 describe("plugin messages carry their own instructions", () => {
   it("each notice says what its receiver does", () => {
-    for (const part of ["never revert it", "Continue the review budget from `reviewCalls`", "send `received` to `managerAgentId`"]) {
+    for (const part of ["never revert it", "Continue the review cap from `reviewCalls`", "send `received` to `managerAgentId`"]) {
       expect(WORKER_CLOSING, part).toContain(part);
     }
     expect(toolsNotice("w", "pi")).toContain("Tell the user in one line; do not create another Worker");

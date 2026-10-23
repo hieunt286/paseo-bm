@@ -36,6 +36,7 @@ import {
   type PrecedentsUi,
 } from "../plugin/client/settings-autonomy-model";
 import type { Precedent } from "../plugin/shared/precedents";
+import { whyIneligible } from "../plugin/shared/question-subjects";
 import {
   AUTONOMY_LEVELS,
   EMPTY_AUTONOMY_POLICY,
@@ -495,6 +496,20 @@ describe("the precedents under More (autonomy design §B.6, §B.9)", () => {
     const busy = drawList(shown({ ...PRECEDENTS_UI_IDLE, busy: true, form: filled }));
     expect(labelsOf(busy)).not.toContain("Cancel");
     expect(texts(busy)).toContain("Saving…");
+  });
+
+  it("marks a stored precedent on a subject no precedent answers as inert, and refuses such a subject in the form (delivery line design §7.4)", () => {
+    const inert = { ...precedent({ id: "p:4", subject: "review-budget", text: "Two more calls." }), inert: whyIneligible("review-budget")! };
+    const view = shown(PRECEDENTS_UI_IDLE, [precedent({}), inert]);
+    const line = 'Answers nothing: "review-budget" is a retired question; no precedent answers it.';
+    expect(view.rows.map((row) => row.inertText)).toEqual([null, line]);
+    expect(view.rows[1]!.accessibilityLabel).toContain(line);
+    expect(view.rows[1]!.end.enabled).toBe(true);
+    expect(texts(drawList(view))).toContain(line);
+    for (const subject of ["review-cap", "review-budget"]) {
+      const form = shown({ ...PRECEDENTS_UI_IDLE, form: { scope: "all", subject, text: "Yes" } }).form!;
+      expect(form).toMatchObject({ saveEnabled: false, subjectError: `Answers nothing: ${whyIneligible(subject)}.` });
+    }
   });
 
   it("shows a failed change in the danger colour", () => {

@@ -8,7 +8,9 @@
  *   replan, arbitrate), `effects: none`, no request. The authority is
  *   structural, like `coordination:handoff`: the send (`command-send.ts`)
  *   delivers it only to the current Main of an open mission and counts its
- *   loop guard per mission (12 in 24 hours). The figures it names
+ *   loop guard per mission in the pool of its step (delivery line design
+ *   §8.1). A re-plan that repeats the last one of every family it concerns
+ *   (`isRepeatReplan`, §8.2) returns that re-plan and sends nothing. The figures it names
  *   (`governor-figures.ts`, read now) are appended to its text with their
  *   thresholds. Once delivered it adds a `governor` journal line to the
  *   mission and records itself as the `lastAction` of each family it
@@ -46,14 +48,15 @@
  * Main. Nothing here sends to a Reviewer, creates, archives, or writes to a
  * repository.
  */
-import { currentPolicy } from "./autonomy-store";
+import { effectivePolicy } from "./placements";
 import { copyRecipientOf, sendCommand, type CommandSendResult } from "./command-send";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { answerBlockOf } from "./decision-materialiser";
 import { createDecisionStore } from "./decision-store";
-import { GOVERNOR_FAMILIES, GOVERNOR_FIGURES, figureText, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
+import { deliveryEffect, nothingWas } from "./effects";
+import { GOVERNOR_FAMILIES, GOVERNOR_FIGURES, familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
 import { governorFiguresOf, readGovernorSnapshot } from "./governor-figures";
-import { createGovernorStore, type MissionLadder } from "./governor-store";
+import { createGovernorStore, type FamilyState, type MissionLadder } from "./governor-store";
 import { interventionOfGovern, recordIntervention } from "./intervention-store";
 import { readTimelinePages } from "./live-timeline";
 import { createMissionStore, type Mission } from "./mission-store";
@@ -195,7 +198,8 @@ async function stopAuthorityOf(input: { workspaceId: string; requestId: string |
     return { authority: decisionAuthorityOf(input.decisionId) };
   }
   // Read at each send, so a cell set back meanwhile refuses the command.
-  if (modeOf(currentPolicy(context.home), input.workspaceId, DEFAULT_DECISION_CLASS) === "delegate") {
+  // Delivery line design §3.1: a placement's request is covered by its repo's cell.
+  if (modeOf(effectivePolicy(context.home), input.workspaceId, DEFAULT_DECISION_CLASS) === "delegate") {
     return { authority: policyAuthorityOf(DEFAULT_DECISION_CLASS) };
   }
   if (!(await ownerJustSpoke(context))) refuse(notDelegatedRefusalOf([DEFAULT_DECISION_CLASS], DIRECT_REFUSED_MESSAGE));
@@ -233,7 +237,7 @@ function refuseStoredAnswers(body: string, workspaceId: string, requestId: strin
       return decision === null ? [] : [{ questionId: answer.id, decision }];
     });
   } catch (error) {
-    refuse(`the decisions of project ${workspaceId} cannot be read to check the BM-ANSWERS block (${errorText(error)}); nothing was sent`);
+    refuse(`the decisions of project ${workspaceId} cannot be read to check the BM-ANSWERS block (${errorText(error)}); ${nothingWas("sent")}`);
   }
   if (stored.length > 0) refuse(stored.map(({ questionId, decision }) => storedAnswerRefusalOf(questionId, decision)).join("; "));
 }
@@ -340,7 +344,8 @@ async function sendOwnCommand(
     ...(deps.store === undefined ? {} : { store: deps.store }),
     ...(deps.log === undefined ? {} : { log: deps.log }),
   });
-  if (!result.ok) refuse(result.stage === "delivery" ? `${result.reason}; nothing was sent` : result.reason);
+  // Delivery line design §7.3: a refusal at the delivery sent nothing.
+  if (!result.ok) refuse(result.stage === "delivery" ? `${result.reason}; ${deliveryEffect({ what: "the command", outcome: null }).sentence}` : result.reason);
   return result;
 }
 
@@ -366,17 +371,23 @@ export interface GovernInput {
  * nudge takes a family at step 1 to 2, a re-plan one at step 3 to the stop
  * step. A family at step 1 or 2 counts its window from the step: from its
  * `at` (the minutes) and from `mainTurns` (the Main's turns), whatever the
- * step. A family at step 0 is left as it is. Pure.
+ * step. A family at step 0 is left as it is. A re-plan keeps, with `all`
+ * (every figure, read now), its family's figure values on its `lastAction`
+ * (delivery line design §8.2). Pure.
  */
-export function governedLadderOf(ladder: MissionLadder, step: GovernorStep, figures: readonly GovernorFigureId[], action: { at: string; id: string; mainTurns: number }): MissionLadder {
-  const named = new Set(figures.map((id) => GOVERNOR_FIGURES[id]));
+export function governedLadderOf(
+  ladder: MissionLadder,
+  step: GovernorStep,
+  figures: readonly GovernorFigureId[],
+  action: { at: string; id: string; mainTurns: number; all?: readonly GovernorFigure[] },
+): MissionLadder {
   const next: MissionLadder = { ...ladder };
-  for (const family of GOVERNOR_FAMILIES) {
-    const state = ladder[family];
-    if (state === undefined || state.step === 0) continue;
-    if (named.size > 0 ? !named.has(family) : step === "arbitrate") continue;
-    const lastAction = { at: action.at, kind: step, id: action.id };
-    if (step === "nudge" && state.step === 1) next[family] = { ...state, step: 2, lastAction, mainTurnsAt: action.mainTurns };
+  for (const family of governedFamiliesOf(ladder, step, figures)) {
+    const state = ladder[family]!;
+    const values = step === "replan" && action.all !== undefined ? { figures: familyFiguresOf(action.all, family).map(({ id, value }) => ({ id, value })) } : {};
+    const lastAction = { at: action.at, kind: step, id: action.id, ...values };
+    // A nudge that goes takes the family out of a hold (delivery line design §8.3).
+    if (step === "nudge" && state.step === 1) next[family] = { ...withoutHold(state), step: 2, lastAction, mainTurnsAt: action.mainTurns };
     else if (step === "replan" && state.step === 3) next[family] = { ...state, step: GOVERNOR_STOP_STEP, lastAction };
     // In the window (§9.3): the step restarts its minutes (`lastAction.at`) and its Main turns alike.
     else if (state.step <= 2) next[family] = { ...state, lastAction, mainTurnsAt: action.mainTurns };
@@ -385,7 +396,37 @@ export function governedLadderOf(ladder: MissionLadder, step: GovernorStep, figu
   return next;
 }
 
-/** A governor command delivered (`governSend`), or the tool's refusal of its input. */
+function withoutHold(state: FamilyState): FamilyState {
+  const rest = { ...state };
+  delete rest.held;
+  return rest;
+}
+
+/** The families a governor step concerns: those of the named figures, else (but for an arbitration) every family above step 0. Pure. */
+export function governedFamiliesOf(ladder: MissionLadder, step: GovernorStep, figures: readonly GovernorFigureId[]): GovernorFamily[] {
+  const named = new Set(figures.map((id) => GOVERNOR_FIGURES[id]));
+  return GOVERNOR_FAMILIES.filter((family) => {
+    const state = ladder[family];
+    if (state === undefined || state.step === 0) return false;
+    return named.size > 0 ? named.has(family) : step !== "arbitrate";
+  });
+}
+
+/**
+ * Whether a re-plan now repeats the family's last one (delivery line design
+ * §8.2): its last action was a re-plan within `windowMs`, and no crossed
+ * figure of the family is higher now than it was then, nor newly crossed. A
+ * re-plan stored without its figures is no repeat. Pure.
+ */
+export function isRepeatReplan(state: FamilyState | undefined, now: readonly GovernorFigure[], at: Date, windowMs: number): boolean {
+  const last = state?.lastAction ?? null;
+  if (last === null || last.kind !== "replan" || last.id === null || last.figures === undefined) return false;
+  if (at.getTime() - Date.parse(last.at) >= windowMs) return false;
+  const then = new Map(last.figures.map((entry) => [entry.id, entry.value]));
+  return now.filter((entry) => entry.crossed).every((entry) => then.has(entry.id) && entry.value <= then.get(entry.id)!);
+}
+
+/** A governor command delivered (`governSend`), a re-plan it repeats (§8.2), or the tool's refusal of its input. */
 export type GovernSent =
   | {
       ok: true;
@@ -396,6 +437,13 @@ export type GovernSent =
       mission: Mission;
       /** The figures it named, as sent. */
       figures: GovernorFigure[];
+      repeated?: undefined;
+    }
+  | {
+      ok: true;
+      /** The re-plan it repeats (delivery line design §8.2): nothing was sent or spent. */
+      repeated: { id: string; at: string };
+      mission: Mission;
     }
   | { ok: false; text: string };
 
@@ -423,11 +471,23 @@ export async function governSend(input: GovernInput, context: ToolContext, deps:
   if (unknown.length > 0) return fixThese("bm_govern", unknown.map((id) => `input.figures: ${id} is not a figure; the figures are ${known.join(", ")}`));
   const named = [...new Set(input.figures ?? [])] as GovernorFigureId[];
   let snapshot: ReturnType<typeof readGovernorSnapshot> | null = null;
-  let figures: GovernorFigure[] = [];
+  let all: GovernorFigure[] = [];
+  let windowMs = 0;
   if (named.length > 0 || input.step !== "arbitrate") {
     const settings = readCoordinationSettings({ home: context.home, log });
     snapshot = readGovernorSnapshot(context.home, mission, { now: context.now, agents: await bmAgentsOf(context.paseo), settings, log });
-    figures = governorFiguresOf(snapshot, settings.governor).filter((entry) => named.includes(entry.id));
+    all = governorFiguresOf(snapshot, settings.governor);
+    windowMs = settings.governor.windowMinutes * 60_000;
+  }
+  const figures = all.filter((entry) => named.includes(entry.id));
+  if (input.step === "replan") {
+    // Delivery line design §8.2: a re-plan that repeats the last one of every family it concerns returns it.
+    const ladder = createGovernorStore(context.home).ladder(mission.missionId);
+    const families = governedFamiliesOf(ladder, "replan", named);
+    if (families.length > 0 && families.every((family) => isRepeatReplan(ladder[family], familyFiguresOf(all, family), context.now, windowMs))) {
+      const last = families.map((family) => ladder[family]!.lastAction!).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0]!;
+      return { ok: true, repeated: { id: last.id!, at: last.at }, mission };
+    }
   }
   const body = [input.text.trim(), ...(figures.length === 0 ? [] : ["", "Figures:", ...figures.map((entry) => `- ${figureText(entry)}`)])].join("\n");
   if (body.length > MAX_COMMAND_BODY_CHARS) {
@@ -471,7 +531,7 @@ export async function governSend(input: GovernInput, context: ToolContext, deps:
   // The families the step concerns: those whose last action it now is.
   let families: string[] = [];
   try {
-    const action = { at: context.now.toISOString(), id: sent.id, mainTurns: snapshot?.mainTurnEnds.length ?? 0 };
+    const action = { at: context.now.toISOString(), id: sent.id, mainTurns: snapshot?.mainTurnEnds.length ?? 0, all };
     const next = createGovernorStore(context.home).update(mission.missionId, (current) => governedLadderOf(current, input.step, named, action));
     families = GOVERNOR_FAMILIES.filter((family) => next[family]?.lastAction?.id === sent.id);
   } catch (error) {
@@ -491,6 +551,12 @@ export async function bmGovern(input: GovernInput, context: ToolContext, deps: C
   const sent = await governSend(input, context, deps);
   if (!sent.ok) return sent;
   const { mission } = sent;
+  if (sent.repeated !== undefined) {
+    return {
+      ok: true,
+      text: `Mission ${mission.code} was re-planned at ${sent.repeated.at} (command ${sent.repeated.id}) and its figures are no worse; ${nothingWas("sent")}.\n${json({ commandId: sent.repeated.id, repeated: true, missionId: mission.missionId })}`,
+    };
+  }
   const said =
     sent.outcome === "sent"
       ? `Sent to ${mission.mainId}, the Main of mission ${mission.code}, as a BM-COMMAND on governor:${input.step}.`

@@ -44,7 +44,7 @@ import type {
   InsightsWindow,
 } from "../shared/contracts";
 import { decisionKindOf, deliveryKindOf, isAnswerable, policyPredictorOf, realEffects, type Decision, type Effect } from "../shared/decisions";
-import { ago, confidenceSuffix, excerptLine, formatCost, formatTokens, localTimeText, type OverviewCard } from "./format";
+import { ago, confidenceSuffix, excerptLine, formatCost, formatTokens, localTimeText, shortRequestOf, type OverviewCard } from "./format";
 import type { Tone } from "./tone";
 import { agentDots, stageView } from "./orchestrator-model";
 import { timeOrNull } from "../shared/time";
@@ -329,18 +329,21 @@ export function waitingByWorkspace(decisions: readonly Pick<Decision, "workspace
 }
 
 /**
- * The workspaces with the plugin's own homes left out (missions design §3.1):
- * `homes` from `traces.workspaces`. Undefined until that answered (`settled`
- * when it failed: then none is known), so a home never shows for a moment.
+ * The workspaces with the plugin's own homes left out (missions design §3.1),
+ * and the mission placements, which nest under their repo (delivery line
+ * design §3.1): `homes` and `placements` from `traces.workspaces`. Undefined
+ * until that answered (`settled` when it failed: then none is known), so a
+ * home never shows for a moment.
  */
 export function projectWorkspacesOf<T extends { id: string }>(
   workspaces: readonly T[] | undefined,
-  stored: { homes?: readonly string[] } | undefined,
+  stored: { homes?: readonly string[]; placements?: Readonly<Record<string, string>> } | undefined,
   settled: boolean,
 ): T[] | undefined {
   if (workspaces === undefined || (stored === undefined && !settled)) return undefined;
   const homes = new Set(stored?.homes ?? []);
-  return workspaces.filter((workspace) => !homes.has(workspace.id));
+  const placements = stored?.placements ?? {};
+  return workspaces.filter((workspace) => !homes.has(workspace.id) && placements[workspace.id] === undefined);
 }
 
 function runningCount(overview: WorkspaceOverview | undefined): number {
@@ -456,6 +459,60 @@ export interface RequestSummary {
   turns: number;
   /** Its finish, labelled (autonomy design §C.3): present while its latest report is `finished`. */
   verification?: TraceVerification;
+  /** Delivery line design §2.7: the request it continues, the chain's first, the one that continues it, its place in the chain. */
+  continuationOf?: string;
+  chainRootId?: string;
+  continuedBy?: string;
+  chainPosition?: number;
+  /**
+   * On a chain's newest listed request (delivery line design §2.7, artboard
+   * K): how many requests the chain has, its first, the tokens of its listed
+   * requests together, and its earlier listed requests (their `traceId`,
+   * newest first), drawn under it when the owner opens the chain.
+   */
+  chain?: { length: number; rootId: string; tokens: number; earlier: string[] };
+  /** On an earlier request of a chain whose newest is listed: that request's `traceId`. The Requests list shows it under the newest. */
+  chainHead?: string;
+}
+
+/** A request's tokens: read, cached and written (the card's "Cost"). */
+function tokensOf(usage: Usage): number {
+  return usage.inputTokens + usage.cachedInputTokens + usage.outputTokens;
+}
+
+/**
+ * The chains among the listed requests (delivery line design §2.7): each
+ * chain is shown on its newest listed request, which gets `chain`; its earlier
+ * listed requests get `chainHead`. A chain's members share `chainRootId`, the
+ * first's own id. Pure; the list's order is kept.
+ */
+function withChains(summaries: RequestSummary[]): RequestSummary[] {
+  const rootOf = (summary: RequestSummary): string | null =>
+    summary.chainRootId ?? (summary.continuedBy !== undefined || summary.continuationOf !== undefined ? summary.requestId : null);
+  const members = new Map<string, RequestSummary[]>();
+  for (const summary of summaries) {
+    const root = rootOf(summary);
+    if (root === null) continue;
+    const group = members.get(root);
+    if (group === undefined) members.set(root, [summary]);
+    else group.push(summary);
+  }
+  const heads = new Map<string, { head: RequestSummary; chain: NonNullable<RequestSummary["chain"]> }>();
+  for (const [rootId, group] of members) {
+    // The newest: the one no listed request continues, else the list's first (newest first).
+    const listed = new Set(group.map((summary) => summary.requestId));
+    const head = group.find((summary) => summary.continuedBy === undefined || !listed.has(summary.continuedBy)) ?? group[0]!;
+    const length = Math.max(head.chainPosition ?? 1, group.length);
+    if (length < 2) continue;
+    const earlier = group.filter((summary) => summary !== head);
+    heads.set(head.traceId, { head, chain: { length, rootId, tokens: group.reduce((sum, summary) => sum + tokensOf(summary.usage), 0), earlier: earlier.map((summary) => summary.traceId) } });
+  }
+  const headOf = new Map([...heads.values()].flatMap(({ head, chain }) => chain.earlier.map((traceId) => [traceId, head.traceId] as const)));
+  return summaries.map((summary) => {
+    const chain = heads.get(summary.traceId)?.chain;
+    const chainHead = headOf.get(summary.traceId);
+    return chain === undefined && chainHead === undefined ? summary : { ...summary, ...(chain === undefined ? {} : { chain }), ...(chainHead === undefined ? {} : { chainHead }) };
+  });
 }
 
 const CONFIDENCE_ORDER: readonly Confidence[] = ["exact", "inferred", "unknown"];
@@ -490,6 +547,10 @@ function sumUsage(entries: readonly Usage[]): Usage {
  * state from the newest, its tokens and bead counts added up.
  */
 export function requestSummaries(rows: readonly TraceSummary[]): RequestSummary[] {
+  return withChains(requestsOf(rows));
+}
+
+function requestsOf(rows: readonly TraceSummary[]): RequestSummary[] {
   const groups = new Map<string, TraceSummary[]>();
   for (const row of rows) {
     const group = groups.get(row.traceId);
@@ -519,6 +580,11 @@ export function requestSummaries(rows: readonly TraceSummary[]): RequestSummary[
       beadCounts: { created: count("created"), updated: count("updated"), closed: count("closed"), ready: count("ready") },
       turns: Math.max(group.length, newest.turn?.total ?? 1),
       ...(verification === undefined ? {} : { verification }),
+      // The chain is the request's: every row carries the same fields.
+      ...(first.continuationOf === undefined ? {} : { continuationOf: first.continuationOf }),
+      ...(first.chainRootId === undefined ? {} : { chainRootId: first.chainRootId }),
+      ...(first.continuedBy === undefined ? {} : { continuedBy: first.continuedBy }),
+      ...(first.chainPosition === undefined ? {} : { chainPosition: first.chainPosition }),
     };
   });
 }
@@ -837,6 +903,13 @@ export interface RequestCardView {
   /** Ids, for Details only. */
   details: string[];
   accessibilityLabel: string;
+  /**
+   * Delivery line design §2.7 (artboard K), on a chain's newest request:
+   * "chain of 3 · started with req-…105259Z", the chain's tokens ("chain
+   * 121.0M", null when no earlier request is listed), and whether "show the
+   * chain" has earlier requests to show. Null on any other request.
+   */
+  chain: { line: string; tokens: string | null; earlier: number } | null;
 }
 
 const RUNTIME_ROLE_NAMES: Readonly<Record<TraceDetail["usageByAgent"][number]["role"], string>> = {
@@ -904,6 +977,14 @@ export function requestCardView(summary: RequestSummary, detail: TraceDetail | n
       ...(isShownVerification(summary.verification) ? verificationDetailLines(summary.verification) : []),
     ],
     accessibilityLabel: [title, meta, stage?.accessibilityLabel ?? null].filter((part) => part !== null).join(". "),
+    chain:
+      summary.chain === undefined
+        ? null
+        : {
+            line: `chain of ${summary.chain.length} · started with ${shortRequestOf(summary.chain.rootId)}`,
+            tokens: summary.chain.earlier.length === 0 ? null : `chain ${formatTokens(summary.chain.tokens)}`,
+            earlier: summary.chain.earlier.length,
+          },
   };
 }
 

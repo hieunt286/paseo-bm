@@ -443,6 +443,37 @@ describe("enqueue", () => {
     await turnEnded("mgr");
     expect(sends).toEqual([]);
   });
+
+  it("holds at the send what its isHeld holds now: it leaves the queue unsent, onHeld is told, and the next notice goes at once (delivery line design §6.4)", async () => {
+    const { paseo, sends, set, logs, queue, turnEnded } = world({ wrk: { status: "running" } });
+    let waiting = false;
+    const told: string[] = [];
+    const callbacks = { onSent: (_id: string, kind: string) => told.push(`sent ${kind}`), onHeld: (_id: string, kind: string) => told.push(`held ${kind}`) };
+    await expect(queue.enqueue("wrk", "BM-DELIVERY:review", "the review", paseo, callbacks, { isHeld: () => waiting })).resolves.toBe("queued");
+    await queue.enqueue("wrk", "BM-STOP", "stop", paseo);
+    // The running turn reported `blocked`: the gate holds the review at the send.
+    waiting = true;
+    set("wrk", { status: "idle" });
+    await turnEnded("wrk");
+    expect(texts(sends)).toEqual(["wrk:stop"]);
+    expect(told).toEqual(["held BM-DELIVERY:review"]);
+    expect(queue.pending("wrk")).toEqual([]);
+
+    // Not held: it goes as ever; a throwing isHeld lets it go, with one log line.
+    set("wrk", { status: "idle" });
+    waiting = false;
+    await expect(queue.enqueue("wrk", "BM-DELIVERY:message", "the tell", paseo, callbacks, { isHeld: () => waiting })).resolves.toBe("sent");
+    set("wrk", { status: "idle" });
+    await expect(
+      queue.enqueue("wrk", "BM-DELIVERY:peer", "the reply", paseo, callbacks, {
+        isHeld: () => {
+          throw new Error("registry unreadable");
+        },
+      }),
+    ).resolves.toBe("sent");
+    expect(told).toEqual(["held BM-DELIVERY:review", "sent BM-DELIVERY:message", "sent BM-DELIVERY:peer"]);
+    expect(logs).toEqual([expect.stringMatching(/^\[paseo-bm\] could not tell whether the BM-DELIVERY:peer notice is held: registry unreadable; it goes\./)]);
+  });
 });
 
 type OnHandler = (event: unknown, context: { paseo: unknown; signal: AbortSignal }) => unknown;
@@ -513,6 +544,20 @@ describe("enqueueBatch: the batch kind (autonomy design §A.8)", () => {
     expect(texts(sends)[1]).toBe("orc:BM-ANSWER older");
   });
 
+  it("a single notice queued first goes before every older notice, the oldest first one first (delivery line design §6.6)", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ wkr: { status: "running" } });
+    await queue.enqueue("wkr", "BM-DELIVERY", "BM-DELIVERY older", paseo);
+    await queue.enqueue("wkr", "BM-STATE", "BM-STATE brief", paseo, undefined, { first: true });
+    await queue.enqueue("wkr", "BM-ROLLOVER", "BM-ROLLOVER now", paseo, undefined, { first: true });
+    expect(queue.pending("wkr").map((notice) => notice.kind)).toEqual(["BM-DELIVERY", "BM-STATE", "BM-ROLLOVER"]);
+    for (let n = 0; n < 3; n += 1) {
+      set("wkr", { status: "idle" });
+      await turnEnded("wkr");
+    }
+    expect(texts(sends)).toEqual(["wkr:BM-STATE brief", "wkr:BM-ROLLOVER now", "wkr:BM-DELIVERY older"]);
+    expect(queue.pending("wkr")).toEqual([]);
+  });
+
   it("never sends into a running turn: the batch waits while the target still reads running at its turn end", async () => {
     const { paseo, sends, set, queue, turnEnded } = world({ orc: { status: "running" } });
     await queue.enqueueBatch("orc", batch, [item("a")], paseo);
@@ -556,6 +601,25 @@ describe("enqueueBatch: the batch kind (autonomy design §A.8)", () => {
     expect(outcomes).toEqual(["dropped", "sent"]);
     expect(texts(sends)).toEqual(["orc:BM-EVENTS\n- fine"]);
     expect(logs).toEqual([expect.stringMatching(/^\[paseo-bm\] could not tell whether the BM-EVENTS:broken notice is still current: store unreadable/)]);
+  });
+
+  it("holds a batch item at the send on its own: the others of its message go (delivery line design §6.4)", async () => {
+    const { paseo, sends, set, queue, turnEnded } = world({ wrk: { status: "running" } });
+    const held: string[] = [];
+    await queue.enqueueBatch(
+      "wrk",
+      batch,
+      [
+        { key: "a", line: "- a", isHeld: () => true, callbacks: { onHeld: (_id, kind) => held.push(kind) } },
+        { key: "b", line: "- b", isHeld: () => false },
+      ],
+      paseo,
+    );
+    set("wrk", { status: "idle" });
+    await turnEnded("wrk");
+    expect(texts(sends)).toEqual(["wrk:BM-EVENTS\n- b"]);
+    expect(held).toEqual(["BM-EVENTS:a"]);
+    expect(queue.pending("wrk")).toEqual([]);
   });
 
   it("replaces a queued item of the same key, and keeps other notices one idle moment apart", async () => {

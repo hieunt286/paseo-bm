@@ -12,6 +12,7 @@ import {
   SUCCESSOR_WAIT_MS,
   createHandoffStore,
   endedHandoff,
+  handoffTriesOf,
   handoffsDoneOf,
   lastHandoffAtOf,
   pendingHandoffOf,
@@ -178,6 +179,20 @@ describe("pending, done and stale (design §G.6, §G.7)", () => {
     expect(handoffsDoneOf(entries, REQUEST).map((entry) => entry.successorId)).toEqual(["s1", "s2"]);
     expect(lastHandoffAtOf(entries, REQUEST)).toBe(T0 + 20 * MIN);
     expect(lastHandoffAtOf([waiting], REQUEST)).toBeNull();
+  });
+
+  it("its tries (delivery line design §6.6): its handoffs so far and its no-safe-point drops, never another ending or a pending one", () => {
+    const entries = [
+      entryOf(),
+      entryOf({ state: "done", successorId: "s1", successorAt: iso(T0 + 10 * MIN) }),
+      entryOf({ state: "dropped", ending: "no-safe-point", endedAt: iso(T0) }),
+      entryOf({ state: "dropped", ending: "no-safe-point", endedAt: iso(T0), requestId: "req-20260930T120000Z" }),
+      entryOf({ state: "dropped", ending: "off", endedAt: iso(T0) }),
+      entryOf({ state: "failed", ending: "no-successor", commandSentAt: iso(T0) }),
+    ];
+    expect(handoffTriesOf(entries, REQUEST)).toBe(2);
+    expect(handoffTriesOf(entries, "req-20260930T120000Z")).toBe(1);
+    expect(handoffTriesOf([], REQUEST)).toBe(0);
   });
 });
 

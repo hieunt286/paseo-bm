@@ -593,6 +593,8 @@ export function RequestCard({
   onWhy,
   detailsExtra,
   tokens,
+  chainOpen,
+  onToggleChain,
   compact,
   styles,
   theme,
@@ -614,16 +616,41 @@ export function RequestCard({
   detailsExtra?: ReactNode;
   /** Drawn first while Details is open: the request's tokens and context (autonomy design §G.2). */
   tokens?: TokenFiguresState;
+  /** On a chain's newest request: whether its earlier requests show under it, and how to show or hide them (delivery line design §2.7, artboard K). */
+  chainOpen?: boolean;
+  onToggleChain?: () => void;
   compact: boolean;
   styles: Styles;
   theme: Theme;
 }) {
+  const chain = view.chain ?? null;
   return (
     <View style={[styles.card, { gap: 8 }]} accessibilityLabel={view.accessibilityLabel}>
       <View style={{ flexDirection: compact ? "column" : "row", gap: compact ? 2 : 12, alignItems: compact ? "stretch" : "flex-start" }}>
-        <Text style={[styles.sectionTitle, { flex: compact ? undefined : 1, fontWeight: "600" }]} numberOfLines={expanded ? undefined : 2}>
-          {view.title}
-        </Text>
+        <View style={{ flex: compact ? undefined : 1, minWidth: 0 }}>
+          <Text style={[styles.sectionTitle, { fontWeight: "600" }]} numberOfLines={expanded ? undefined : 2}>
+            {view.title}
+          </Text>
+          {chain === null ? null : (
+            <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }}>
+              {chain.line}
+              {chain.earlier === 0 || onToggleChain === undefined ? null : (
+                <>
+                  {" · "}
+                  <Text
+                    accessibilityRole="button"
+                    accessibilityLabel={`${chainOpen === true ? "Hide" : "Show"} the earlier requests of this chain`}
+                    accessibilityState={{ expanded: chainOpen === true }}
+                    onPress={onToggleChain}
+                    style={{ color: theme.colors.accent }}
+                  >
+                    {chainOpen === true ? "hide the chain" : "show the chain"}
+                  </Text>
+                </>
+              )}
+            </Text>
+          )}
+        </View>
         <Text style={styles.body}>{view.meta}</Text>
       </View>
       {view.stage === null ? null : <StageBarRow bar={view.stage} compact={compact} styles={styles} theme={theme} />}
@@ -637,7 +664,7 @@ export function RequestCard({
           styles={styles}
           theme={theme}
         />
-        <Text style={styles.body}>{view.cost}</Text>
+        <Text style={styles.body}>{chain === null || chain.tokens === null ? view.cost : `${view.cost} · ${chain.tokens}`}</Text>
         {onOpenAgent === undefined || view.workerId === null ? null : (
           <CardLink label="Open Worker ▸" a11y="Open the Worker of this request" onPress={() => onOpenAgent(view.workerId!)} styles={styles} theme={theme} />
         )}
@@ -1012,6 +1039,8 @@ function RequestCardContainer({
   onChanged,
   openAgent,
   onWhy,
+  chainOpen,
+  onToggleChain,
   compact,
   styles,
   theme,
@@ -1026,6 +1055,8 @@ function RequestCardContainer({
   onChanged: () => void;
   openAgent?: (agentId: string) => void;
   onWhy?: () => void;
+  chainOpen?: boolean;
+  onToggleChain?: () => void;
   compact: boolean;
   styles: Styles;
   theme: Theme;
@@ -1065,6 +1096,8 @@ function RequestCardContainer({
         <TraceActions theme={theme} compact={compact} styles={styles} workspaceId={workspaceId} scope="trace" traceId={traceId} onDone={onChanged} />
       }
       tokens={requestTokenFigures(summary, figures.data, figures.isError && figures.data === undefined ? errorMessageOf(figures.error) : null)}
+      chainOpen={chainOpen}
+      onToggleChain={onToggleChain}
       compact={compact}
       styles={styles}
       theme={theme}
@@ -1102,6 +1135,49 @@ function ClosedHistory({
       </Text>
       <TraceActions theme={theme} compact={compact} styles={styles} workspaceId={workspaceId} scope="workspace" workspaceState={state} onDone={onChanged} />
     </View>
+  );
+}
+
+/**
+ * The Requests list (delivery line design §2.7, artboard K): a chain shows on
+ * its newest request; its earlier requests are listed under it, indented,
+ * once the owner opens the chain. Hook-free.
+ */
+export function ChainedRequests({
+  summaries,
+  chainsOpen,
+  card,
+  compact,
+  styles,
+}: {
+  summaries: readonly RequestSummary[];
+  /** The `traceId`s of the chains open. */
+  chainsOpen: ReadonlySet<string>;
+  card: (summary: RequestSummary) => ReactNode;
+  compact: boolean;
+  styles: Styles;
+}) {
+  const byTrace = new Map(summaries.map((summary) => [summary.traceId, summary]));
+  return (
+    <>
+      {summaries
+        .filter((summary) => summary.chainHead === undefined)
+        .map((summary) =>
+          summary.chain === undefined || !chainsOpen.has(summary.traceId) ? (
+            card(summary)
+          ) : (
+            <View key={summary.traceId} style={column(compact, styles.content.gap)}>
+              {card(summary)}
+              <View style={{ gap: styles.content.gap, paddingLeft: compact ? 12 : 24 }}>
+                {summary.chain.earlier.flatMap((traceId) => {
+                  const earlier = byTrace.get(traceId);
+                  return earlier === undefined ? [] : [card(earlier)];
+                })}
+              </View>
+            </View>
+          ),
+        )}
+    </>
   );
 }
 
@@ -1152,6 +1228,14 @@ function RequestsTab({
     else next.add(traceId);
     setChosen(next);
   };
+  // Delivery line design §2.7 (artboard K): the chains whose earlier requests show under their newest.
+  const [chainsOpen, setChainsOpen] = useState<ReadonlySet<string>>(new Set());
+  const toggleChain = (traceId: string) => {
+    const next = new Set(chainsOpen);
+    if (next.has(traceId)) next.delete(traceId);
+    else next.add(traceId);
+    setChainsOpen(next);
+  };
   const decided = decisions.data?.decisions ?? [];
   // A deletion or a move changes the list and every request read from it.
   const changed = () => {
@@ -1171,6 +1255,8 @@ function RequestsTab({
       onChanged={changed}
       openAgent={openAgent}
       onWhy={whyOf(summary.requestId)}
+      chainOpen={chainsOpen.has(summary.traceId)}
+      onToggleChain={summary.chain === undefined ? undefined : () => toggleChain(summary.traceId)}
       compact={compact}
       styles={styles}
       theme={theme}
@@ -1197,7 +1283,7 @@ function RequestsTab({
         )}
         {traces.isPending ? <ActivityIndicator color={styles.spinner.color} accessibilityLabel="Reading the requests" /> : null}
         {traces.data !== undefined && summaries.length === 0 ? <Text style={styles.body}>{NO_REQUESTS_TEXT}</Text> : null}
-        {summaries.map(card)}
+        <ChainedRequests summaries={summaries} chainsOpen={chainsOpen} card={card} compact={compact} styles={styles} />
         {traces.data?.nextCursor == null ? null : (
           <Text style={styles.body}>{`Showing the ${summaries.length} newest requests.`}</Text>
         )}

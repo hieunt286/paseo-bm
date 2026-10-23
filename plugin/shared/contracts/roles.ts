@@ -41,6 +41,8 @@ export const managerEnsureRpc = defineRpc({
     replaceOutdated: z.boolean().optional(),
     /** Mission runtime design §5.5: a request of an open mission opens that mission's Main. */
     requestId: z.string().regex(/^req-\d{8}T\d{6}Z$/).optional(),
+    /** `/bm-worker-new`: also answer `mission`, where the new Worker will appear (delivery line design §3.3, §4.8). */
+    forNewRequest: z.boolean().optional(),
   }),
   output: z.object({
     agentId: agentIdSchema,
@@ -69,6 +71,23 @@ export const managerEnsureRpc = defineRpc({
      * server's answer still parses; the server always sends it.
      */
     replacedManagerId: agentIdSchema.nullable().optional(),
+    /**
+     * With `forNewRequest`, the Main's mission and where a Worker it creates
+     * for this workspace's repo appears: `here` (this workspace),
+     * `shared-checkout` (this workspace, the repo's root, until the mission's
+     * checkpoint is made) or `worktree` (the mission's worktree workspace,
+     * `worktreeTitle` when known). Absent otherwise, and for a Manager of no
+     * mission.
+     */
+    mission: z
+      .object({
+        missionId: z.string(),
+        code: z.string(),
+        name: z.string(),
+        workerIn: z.enum(["here", "shared-checkout", "worktree"]),
+        worktreeTitle: z.string().nullable(),
+      })
+      .optional(),
   }),
 });
 

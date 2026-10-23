@@ -10,8 +10,8 @@ import { createDecisionStore } from "../plugin/server/decision-store";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { MISSION_DECISION_ID_PATTERN, createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { createMissionRoster } from "../plugin/server/mission-roster";
-import { createMissionStore } from "../plugin/server/mission-store";
-import { MISSION_NOT_BOUND_MESSAGE, NOT_A_MAIN_MESSAGE, createMissionTools } from "../plugin/server/mission-tools";
+import { contractStatusOf, createMissionStore } from "../plugin/server/mission-store";
+import { MISSION_NOT_BOUND_MESSAGE, NOT_A_MAIN_MESSAGE, applyFreeUpdate, applyMissionChange, createMissionTools, type FreeMissionUpdate } from "../plugin/server/mission-tools";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
 import { createOutbox } from "../plugin/server/outbox";
 import { clearProposedMissionStarts, proposedMissionStartOf } from "../plugin/server/proposed-mission-starts";
@@ -164,6 +164,39 @@ describe("bm_mission (§4)", () => {
   });
 });
 
+describe("a done criterion's metAt (delivery line design §8.4)", () => {
+  const T = (hour: number) => `2026-10-20T${String(hour).padStart(2, "0")}:00:00.000Z`;
+  const status = (state: "open" | "met", evidence: string | null = null): FreeMissionUpdate => ({ newCriteria: [], statuses: [{ id: "D1", status: state, evidence }], newContracts: [], versions: [], addRepos: [] });
+
+  it("is set only when the criterion becomes met with evidence; back to open, a status sent again, or the owner's drop keeps it", () => {
+    let { mission } = missionOf();
+    mission = applyFreeUpdate(mission, { newCriteria: ["Invoices list"], statuses: [], newContracts: [], versions: [], addRepos: [] }, T(1));
+    expect(mission.charter.doneCriteria[0]).not.toHaveProperty("metAt");
+    mission = applyFreeUpdate(mission, status("met", "req-20261020T020000Z"), T(2));
+    expect(mission.charter.doneCriteria[0]).toMatchObject({ status: "met", at: T(2), metAt: T(2) });
+    // Sent again with new evidence: `at` moves, `metAt` stays.
+    mission = applyFreeUpdate(mission, status("met", "req-20261020T030000Z"), T(3));
+    expect(mission.charter.doneCriteria[0]).toMatchObject({ status: "met", at: T(3), evidence: "req-20261020T030000Z", metAt: T(2) });
+    // Back to open: the reset point stays where it was.
+    mission = applyFreeUpdate(mission, status("open"), T(4));
+    expect(mission.charter.doneCriteria[0]).toMatchObject({ status: "open", at: T(4), metAt: T(2) });
+    // Met again: a new reset point.
+    mission = applyFreeUpdate(mission, status("met", "req-20261020T050000Z"), T(5));
+    expect(mission.charter.doneCriteria[0]).toMatchObject({ metAt: T(5) });
+    // The owner's drop keeps it too.
+    const dropped = applyMissionChange(mission, { criteria: [{ id: "D1", status: "dropped" }] }, T(6));
+    if ("reasons" in dropped) throw new Error(dropped.reasons.join("; "));
+    expect(dropped.charter.doneCriteria[0]).toMatchObject({ status: "dropped", at: T(6), metAt: T(5) });
+  });
+
+  it("keeps an older met entry's reset point: its at becomes its metAt when the status is sent again", () => {
+    const { mission } = missionOf();
+    const older = { ...mission, charter: { ...mission.charter, doneCriteria: [{ id: "D1", text: "Invoices list", status: "met" as const, at: T(2), evidence: "req-20261020T020000Z" }] } };
+    expect(applyFreeUpdate(older, status("met", "again"), T(7)).charter.doneCriteria[0]).toMatchObject({ at: T(7), metAt: T(2) });
+    expect(applyFreeUpdate(older, status("open"), T(7)).charter.doneCriteria[0]).toMatchObject({ status: "open", at: T(7), metAt: T(2) });
+  });
+});
+
 describe("bm_mission_update (§4, §4.1)", () => {
   it("writes the free changes and journals them at once", async () => {
     const { json } = await setup();
@@ -188,10 +221,39 @@ describe("bm_mission_update (§4, §4.1)", () => {
 
     await json("bm_mission_update", { doneCriteria: [{ id: "D1", status: "met", evidence: "req-20261009T100000Z" }], contracts: [{ id: "C1", text: "GET /invoices?page", source: "review" }] }, who);
     stored = createMissionStore(home).get(mission.missionId)!;
-    expect(stored.charter.doneCriteria[0]).toMatchObject({ status: "met", evidence: "req-20261009T100000Z" });
+    expect(stored.charter.doneCriteria[0]).toMatchObject({ status: "met", evidence: "req-20261009T100000Z", metAt: NOW.toISOString() });
     expect(stored.contracts[0]).toMatchObject({ text: "GET /invoices?page", version: 2 });
     expect(createMissionStore(home).journal(mission.missionId).map((line) => line.kind)).toEqual(["plan", "criterion", "contract", "criterion", "contract"]);
     expect(createMissionDecisionStore(home).list(mission.missionId)).toEqual([]);
+  });
+
+  it("contract status (delivery line design §9.2): a new contract and a new version are proposed unless stated agreed; a status alone keeps the version; an older contract reads agreed", async () => {
+    const { json, call } = await setup();
+    const { mission, who } = missionOf();
+    const contract = { title: "Invoice API", providerRepo: "/repo/api", consumerRepos: ["wks-b"], text: "GET /invoices", source: "PRD §3" };
+    await json("bm_mission_update", { contracts: [contract, { ...contract, title: "Export", status: "agreed" }] }, who);
+    const read = () => createMissionStore(home).get(mission.missionId)!.contracts;
+    expect(read().map((entry) => [entry.id, entry.version, entry.status])).toEqual([
+      ["C1", 1, "proposed"],
+      ["C2", 1, "agreed"],
+    ]);
+    await json("bm_mission_update", { contracts: [{ id: "C2", text: "GET /export?csv", source: "review" }] }, who);
+    expect(read()[1]).toMatchObject({ version: 2, status: "proposed" });
+    await json("bm_mission_update", { contracts: [{ id: "C1", status: "withdrawn" }] }, who);
+    expect(read()[0]).toMatchObject({ version: 1, status: "withdrawn", text: "GET /invoices" });
+    expect(createMissionStore(home).journal(mission.missionId, 50, "contract").map((line) => line.text)).toEqual([
+      "The Main added the contracts C1, C2.",
+      "The Main wrote a new version of C2 (source: review).",
+      "The Main marked C1 withdrawn.",
+    ]);
+    expect((await call("bm_mission_update", { contracts: [{ id: "C1", text: "x" }] }, who)).text).toContain("input.contracts[0]: give a new version (text and source) or only its status");
+    expect((await call("bm_mission_update", { contracts: [{ title: "x", providerRepo: "/repo/api" }] }, who)).text).toContain("input.contracts[0]: a new contract needs its title, providerRepo, text and source");
+    // An older contract, written before the status, reads agreed; bm_mission shows it so.
+    createMissionStore(home).update(mission.missionId, (current) => ({ ...current, contracts: current.contracts.map((entry, index) => (index === 0 ? { ...entry, status: undefined } : entry)) }));
+    expect(read()[0]!.status).toBeUndefined();
+    expect(contractStatusOf(read()[0]!)).toBe("agreed");
+    const shown = (await json("bm_mission", {}, who))["contracts"] as Array<Record<string, unknown>>;
+    expect(shown.map((entry) => entry["status"])).toEqual(["agreed", "proposed"]);
   });
 
   it("adds a repo at once only when scope-repo is delegated", async () => {

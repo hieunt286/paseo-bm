@@ -3,10 +3,11 @@
  * `<data folder>/coordination/settings.json` =
  * `{ version: 1, advice: { everyFinished }, compact: { enabled,
  * managerTokensPerTurn, workerTokensPerTurn, contextShare, maxPerAgent },
- * handoff: { enabled, requestTokens, maxPerRequest }, review: { smallBudget,
- * mediumBudget, largeBudget }, governor: { <the governor's thresholds and
- * window, missions design §9.2, §9.3> }, guard: { compact, handoff } }`
- * (`shared/coordination.ts`). The owner's two RPCs over it,
+ * handoff: { enabled, requestTokens, maxPerRequest }, main: { compact,
+ * contextShare, contextTokens, hardShare }, review: { maxRereviews,
+ * callsPerBatch }, governor: { <the governor's thresholds, window and command
+ * pools, missions design §9.2, §9.3, delivery line design §8.1> }, guard: {
+ * compact, handoff } }` (`shared/coordination.ts`). The owner's two RPCs over it,
  * `coordination.settings` and `coordination.set`, are in `coordination-rpc.ts`
  * (code review 2026-09-30 §3.2).
  *
@@ -22,7 +23,9 @@
  * `coordination.set` answers as `E_COORDINATION_WRITE_FAILED`). A missing or
  * corrupt file reads as the defaults; each setting is read on its own, so one
  * that is missing or out of its bounds reads as its default and costs no
- * other; unknown keys are ignored and dropped by the next write; a file whose
+ * other; unknown keys are ignored and dropped by the next write — so are the
+ * retired `review.smallBudget`, `mediumBudget` and `largeBudget`, which `set`
+ * refuses (delivery line design §5.6), with `version` still 1; a file whose
  * `version` is newer than this build reads as the defaults and is never
  * written (`E_COORDINATION_WRITE_FAILED`). A refused change writes nothing.
  *
@@ -34,12 +37,14 @@ import {
   COORDINATION_FILE_VERSION,
   DEFAULT_COORDINATION_SETTINGS,
   applyCoordinationChange,
-  coordinationChangeSchema,
   coordinationRuleOf,
   coordinationSettingsOf,
+  isRetiredCoordinationKey,
+  liveCoordinationChangeSchema,
   switchOffCoordination,
   type CoordinationMechanism,
   type CoordinationSettings,
+  type IntegrationCi,
 } from "../shared/coordination";
 import { createJsonFileStore } from "./data-files";
 
@@ -54,7 +59,7 @@ export interface CoordinationStore {
   read(): CoordinationSettings;
   /**
    * Applies one change and returns every setting. Throws, writing nothing, on
-   * an unknown key or a value out of its bounds (`E_COORDINATION_INVALID`) and
+   * an unknown or retired key or a value out of its bounds (`E_COORDINATION_INVALID`) and
    * on a file written by a newer paseo-bm (`E_COORDINATION_WRITE_FAILED`).
    */
   set(change: unknown): CoordinationSettings;
@@ -73,6 +78,9 @@ export interface CoordinationStoreDeps {
 /** The refusal of a change that is not one known setting with a value in its bounds. */
 export function invalidCoordinationChange(change: unknown): DashboardError {
   const key = (change as { key?: unknown } | null | undefined)?.key;
+  if (isRetiredCoordinationKey(key)) {
+    return new DashboardError("E_COORDINATION_INVALID", `${key} no longer exists: review.maxRereviews and review.callsPerBatch set the review cap; nothing was saved`);
+  }
   const rule = coordinationRuleOf(key);
   if (rule !== null) return new DashboardError("E_COORDINATION_INVALID", `${rule}; nothing was saved`);
   return new DashboardError("E_COORDINATION_INVALID", `${JSON.stringify(key ?? null)} is not a coordination setting; nothing was saved`);
@@ -100,7 +108,7 @@ export function createCoordinationStore(home: string, deps: CoordinationStoreDep
     },
 
     set(change) {
-      const valid = coordinationChangeSchema.safeParse(change);
+      const valid = liveCoordinationChangeSchema.safeParse(change);
       if (!valid.success) throw invalidCoordinationChange(change);
       return file.update((settings) => applyCoordinationChange(settings, valid.data, now().toISOString()));
     },
@@ -110,4 +118,13 @@ export function createCoordinationStore(home: string, deps: CoordinationStoreDep
       return file.update((settings) => (settings[mechanism].enabled ? switchOffCoordination(settings, mechanism, figures, at) : null)) ?? file.read();
     },
   };
+}
+
+/** The owner's `integration.ci` (ADR-036, delivery line design §17.1): its default, off, when the settings cannot be read. Never throws. */
+export function integrationCiOf(home: string): IntegrationCi {
+  try {
+    return createCoordinationStore(home).read().integration.ci;
+  } catch {
+    return DEFAULT_COORDINATION_SETTINGS.integration.ci;
+  }
 }

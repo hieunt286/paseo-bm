@@ -102,6 +102,18 @@ export function formatBytes(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
+/** "req-…042844Z": a request id's last 7 (the mission page, Projects › Requests). */
+export function shortRequestOf(requestId: string): string {
+  return requestId.length <= 11 ? requestId : `req-…${requestId.slice(-7)}`;
+}
+
+/** "2nd", "3rd", "11th", "21st". */
+export function ordinal(n: number): string {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
+  return `${n}${suffix}`;
+}
+
 export function formatTokens(tokens: number): string {
   if (tokens < 1000) return String(tokens);
   if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`;

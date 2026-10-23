@@ -27,6 +27,7 @@ Code cites designs by name and section ("autonomy design §G.2", "design §7.13"
 | [paseo-bm-autonomy.md](design/paseo-bm-autonomy.md) | The autonomy programme, Parts A–G: decision objects and typed handoffs, autonomy per class and level, evidence, the action boundary, traceability, specialisation, coordination control |
 | [paseo-bm-evaluation.md](design/paseo-bm-evaluation.md) | Metric definitions A-1 → A-11, the replay over the trace store, the evaluation suite on an isolated daemon |
 | [paseo-bm-mission-runtime.md](design/paseo-bm-mission-runtime.md) | The mission runtime (ADR-033): the mission state, a long-lived Main, the authority resolver, transfers and merges, the Main's channel |
+| [paseo-bm-delivery-line.md](design/paseo-bm-delivery-line.md) | The delivery line (ADR-035): bounded requests and continuations, a branch per mission in its own worktree, integration as a stage (commits, one push-and-MR yes, CI as evidence), review by milestone with convergence, waits by structure, one question per decision, the governor's pools, typed messages |
 | [paseo-bm-missions.md](design/paseo-bm-missions.md) | Missions: the stores (mission, journal, roster, mission level, project memory), the home and the Main, the Main's tools, Main-side lookups, the two autonomy layers, the governor (figures, ladder, arbitration, splits), the Missions screen, a mission per wake and danger to the Main first (§20) |
 
 Each role's behaviour lives in its own instructions, which the designs do not copy: [`manager.md`](../plugin/roles/manager.md), [`worker.md`](../plugin/roles/worker.md), [`reviewer.md`](../plugin/roles/reviewer.md), [`orchestrator.md`](../plugin/roles/orchestrator.md).
@@ -71,6 +72,8 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [032](adr/ADR-032-one-governor-a-mission-per-wake.md) | One governor for the machine, a mission per wake, a disposable conversation; `danger` goes to the Main first; measured before splitting | Accepted; decisions 2 and 4 amended by 033 |
 | [033](adr/ADR-033-the-mission-is-the-system-of-record.md) | The mission is the system of record; the Main is long-lived; one authority, one owner, a signal budget | Accepted |
 | [034](adr/ADR-034-each-mission-has-its-own-workspace.md) | Each mission has its own workspace in the Mission-List project | Accepted |
+| [035](adr/ADR-035-a-delivery-line.md) | A delivery line: bounded requests, a branch per mission, integration as a stage, limits that hold | Accepted; supersedes parts of 027, 029, 033 and 034 |
+| [036](adr/ADR-036-no-agent-waits-on-machines.md) | No agent waits on machines: CI off, re-reviews of the fix diff by a fresh Reviewer, Workers capped by context | Accepted; amends 035 decisions 1, 3, 4 |
 
 ## Work in progress — `plans/`
 

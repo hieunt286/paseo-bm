@@ -94,8 +94,6 @@
  * Nothing here throws into an agent's turn end: a failure is one log line.
  */
 import { settleOwnerQuestionAnswers } from "./owner-question";
-import { deciderOf } from "../shared/authority";
-import { authorityFactsOf } from "./authority-facts";
 import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { parseAnswers, parseQuestions, type Answer, type Question } from "../shared/bm-questions";
@@ -103,10 +101,8 @@ import { parseReports } from "../shared/bm-report";
 import type { TraceMessage, TraceRecord } from "../shared/contracts";
 import {
   DECISION_ID_PATTERN,
-  REVIEW_BUDGET_SUBJECT,
   answerDecision,
   checkedClass,
-  decisionClassOf,
   declaredEffects,
   decisionKindOf,
   deliveryKindOf,
@@ -125,6 +121,7 @@ import {
   type ReviewGrant,
 } from "../shared/decisions";
 import { parseCommandBlock } from "../shared/orchestrator-command";
+import { isCodeSubject } from "../shared/question-subjects";
 import { BR_REOPEN } from "../shared/shell";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
@@ -136,7 +133,6 @@ import { takeProposedAnswers } from "./proposed-answers";
 import { settleMissionStart } from "./mission-tools";
 import { requestIndexOf } from "./mission-roster";
 import type { PaseoCliDeps } from "./paseo-cli";
-import { applyReviewBudgetGrants } from "./review-tools";
 import type { TraceStoreLocation } from "./trace-store";
 import { errorText } from "./rpc-kit";
 
@@ -215,6 +211,16 @@ export function normalisedQuestion(text: string): string {
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
+}
+
+/**
+ * Whether two questions ask the same thing by their text (`normalisedQuestion`
+ * equal and not empty): the open path's supersession, and `bm_owner_question`'s
+ * check for a Worker's question already open (delivery line design §7.2).
+ */
+export function sameQuestionText(a: string, b: string): boolean {
+  const text = normalisedQuestion(a);
+  return text !== "" && text === normalisedQuestion(b);
 }
 
 /** `a — text`, `(a) text`, `a: text`, a bare `a`: the option letter an answer starts with. */
@@ -497,9 +503,11 @@ function reverseReopened(context: Context): void {
 }
 
 /**
- * A question to open: a `BM-QUESTIONS` block's, or a bound Worker's
- * `bm_questions` (design §16.6), whose options may carry a grant and which
- * may say it asks a fact only the owner knows (`ownerOnly`, missions design §5).
+ * A question to open: a `BM-QUESTIONS` block's, a bound Worker's
+ * `bm_questions` (design §16.6) or the review tools' one `review-cap`
+ * decision, whose options may carry a grant (delivery line design §5.4), and
+ * which may say it asks a fact only the owner knows (`ownerOnly`, missions
+ * design §5).
  */
 export type OpenableQuestion = Omit<Question, "options"> & { options: Array<Question["options"][number] & { grant?: ReviewGrant }>; ownerOnly?: boolean };
 
@@ -519,33 +527,6 @@ function freshQuestions(existing: readonly Decision[], requestId: string, questi
   return questions.filter((question) => !ids.has(questionDecisionId(requestId, question.id)));
 }
 
-/**
- * Design §7.17.8 (a), mission runtime design §4.1 rule 3, §4.3: a
- * `review-budget` question that has just opened whose decider is **code**
- * (`deciderOf`: `cost` delegated by the repo or the request's mission, its
- * recommended option within the code cap — `untilClean` included, bounded)
- * is answered `by: policy` with that option, and its grant recorded at once
- * (`applyReviewBudgetGrants`, which turns a delegated `untilClean` into the
- * calls left of the cap): no card opens. Null when someone else decides.
- */
-function answerBudgetByPolicy(context: OpenContext, decision: Decision): Decision | null {
-  if (decision.subject !== REVIEW_BUDGET_SUBJECT) return null;
-  const option = decision.options.find((entry) => entry.recommended);
-  if (option === undefined) return null;
-  const { home, log, workspaceId } = context;
-  const decider = deciderOf(decision, authorityFactsOf(home, log));
-  if (decider.decider !== "code") return null;
-  const reason = `Answered as it opened by paseo-bm: ${decider.why}`;
-  const mutation = context.store.transition(
-    decision.id,
-    (current) => answerDecision(current, { by: "policy", via: "inbox", optionKey: option.key, class: decisionClassOf(current), reason, at: context.now }),
-    workspaceId,
-  );
-  if (mutation.status !== "updated") return null;
-  applyReviewBudgetGrants([mutation.decision], { home, log });
-  return mutation.decision;
-}
-
 /** Opens the questions of one `BM-QUESTIONS` block (§A.5 a). */
 async function openBlock(
   context: Context,
@@ -559,15 +540,30 @@ async function openBlock(
 }
 
 /**
+ * The highest `Qn` of the request's `q:` decisions; 0 for none. Who opens a
+ * question outside a recorded turn numbers it after this and opens it at once:
+ * a bound Worker's `bm_questions` (design §16.6) and the review tools' one
+ * `review-cap` decision (delivery line design §5.4). Throws when the store
+ * cannot be read.
+ */
+export function highestQuestionOf(store: Pick<DecisionStore, "list">, workspaceId: string, requestId: string): number {
+  return store
+    .list({ workspaceId, requestId })
+    .filter((decision) => decisionKindOf(decision.id) === "question")
+    .reduce((highest, decision) => Math.max(highest, Number(decision.id.slice(decision.id.lastIndexOf(":Q") + 2)) || 0), 0);
+}
+
+/**
  * The shared open path (§A.5 a; design §16.6): opens each question of
  * `questions` not stored yet as `q:<requestId>:<Qn>`, asked by the Worker
  * `askedBy` at `askedAt` — its class checked against its options' effects,
  * superseding the question it names or one of the same text, its round shared
  * with the others, its recommended option as the prediction — and lets an
  * active precedent answer it at once (`resolveAtOpen`; never on a subject a
- * precedent already answered in the request, never on `review-budget`), or
- * the owner's policy answer a `review-budget` one within its cap
- * (`answerBudgetByPolicy`, design §7.17.8 a).
+ * precedent already answered in the request, never on a code subject:
+ * delivery line design §7.4). A Worker's question on a code subject
+ * (`review-cap`, the retired `review-budget`) is not opened, with a log line;
+ * only paseo-bm's own (`byPlugin`: the review cap) is.
  * Records what it opened, superseded, answered and reversed in
  * `context.outcome`. Synchronous, so a caller that numbers the questions
  * first opens them before anything else reads the store. Never throws: a
@@ -575,12 +571,17 @@ async function openBlock(
  */
 export function openQuestions(
   context: OpenContext,
-  input: { requestId: string; questions: readonly OpenableQuestion[]; askedBy: string | null; askedAt: string },
+  input: { requestId: string; questions: readonly OpenableQuestion[]; askedBy: string | null; askedAt: string; byPlugin?: true },
 ): void {
   const { store } = context;
   const requestId = input.requestId;
   const existing = questionsOfRequest(context, requestId);
-  const fresh = freshQuestions(existing, requestId, input.questions);
+  // A code subject (`CODE_SUBJECTS`) is paseo-bm's own or retired: a Worker's question on one never opens (delivery line design §5.6, §7.4).
+  const fresh = freshQuestions(existing, requestId, input.questions).filter((question) => {
+    if (input.byPlugin === true || !isCodeSubject(question.subject)) return true;
+    context.log(`[paseo-bm] ${questionDecisionId(requestId, question.id)} was not opened: subject "${question.subject}" is paseo-bm's own or retired, never a Worker's question.`);
+    return false;
+  });
   if (fresh.length === 0) return;
 
   const storedRound = existing.find((decision) => input.questions.some((question) => decision.id === questionDecisionId(requestId, question.id)))?.round;
@@ -594,11 +595,7 @@ export function openQuestions(
     const current = index === 0 ? existing : questionsOfRequest(context, requestId);
     const tagged = question.supersedes === undefined ? null : questionDecisionId(requestId, question.supersedes);
     const byTag = tagged !== null && current.some((decision) => decision.id === tagged) ? tagged : null;
-    const text = normalisedQuestion(question.text);
-    const byText =
-      text === ""
-        ? null
-        : (current.find((decision) => decision.id !== id && (decision.status === "open" || decision.status === "needs-confirmation") && normalisedQuestion(decision.question) === text)?.id ?? null);
+    const byText = current.find((decision) => decision.id !== id && (decision.status === "open" || decision.status === "needs-confirmation") && sameQuestionText(decision.question, question.text))?.id ?? null;
     const options = optionsOf(question);
     // Missions design §5: the Worker's word, or the guard on an option that asserts something about the owner.
     const ownerFact = question.ownerOnly === true ? null : ownerFactOf(options);
@@ -643,7 +640,7 @@ export function openQuestions(
           // answered in this request: asked again, the same answer did not do, so the owner decides.
           skipPrecedent: answeredBefore(["precedent"]),
         });
-        const answered = atOpen.answered ?? answerBudgetByPolicy(context, atOpen.decision);
+        const answered = atOpen.answered;
         context.outcome.opened.push(answered ?? atOpen.decision);
         if (answered !== null) context.outcome.answered.push(answered);
       }

@@ -213,7 +213,6 @@ describe("the two layers (missions design §8; mission runtime design §4.1), pu
     modeOf: (workspaceId, decisionClass) => modeOf(policy, workspaceId, decisionClass),
     missionOf: () => "mis-0123456789",
     missionDelegates: (_missionId, cell) => cells.includes(cell),
-    reviewCaps: () => ({ codeLeft: 2, mainLeft: 2 }),
   });
 
   it("a repo-delegated class is the Main's; an owner or shadow cell only through the mission cell of its group", () => {
@@ -223,6 +222,11 @@ describe("the two layers (missions design §8; mission runtime design §4.1), pu
     expect(deciderOf(question(), factsOf(policyWith({ scope: "delegate" })))).toMatchObject({ decider: "main" });
     expect(deciderOf(question(), factsOf(policyWith({}), ["answer-technical"]))).toMatchObject({ decider: "main" });
     expect(deciderOf(question({ class: "release" }), factsOf(policyWith({}), ["answer-technical"]))).toMatchObject({ decider: "owner" });
+    // Delivery line design §7.1: the mission's answer-effects names the Main only for a question with an option of no effect.
+    expect(deciderOf(question({ class: "release" }), factsOf(policyWith({}), ["answer-effects"]))).toMatchObject({ decider: "main" });
+    const effectsOnly = question({ class: "release", options: [{ key: "a", label: "Push", recommended: true, effects: ["push"] }, { key: "b", label: "Commit", recommended: false, effects: ["commit"] }] });
+    expect(deciderOf(effectsOnly, factsOf(policyWith({}), ["answer-effects"]))).toMatchObject({ decider: "owner", rule: "mission-effects", recommend: true });
+    expect(deciderOf(effectsOnly, factsOf(policyWith({ release: "delegate" })))).toMatchObject({ decider: "main" });
     expect(deciderOf(question(), factsOf(policyWith({ scope: "shadow" })))).toMatchObject({ decider: "owner", recommend: true });
     expect(deciderOf(question({ ownerOnly: true }), factsOf(policyWith({ scope: "delegate" }), ["answer-technical", "answer-effects"]))).toMatchObject({ decider: "owner", rule: "owner-only" });
   });
@@ -261,11 +265,15 @@ describe("the two layers (missions design §8; mission runtime design §4.1), pu
 // ---------------------------------------------------------------------------
 
 describe("bm_answer_worker (missions design §4, §8)", () => {
-  async function setup() {
+  async function setup(recordDelivery?: (decision: Decision) => void) {
     const fake = fakePaseo<MissionsPaseo>({ workspaces: [{ id: WS, directory: "/repo/api" }, { id: "wks-own", directory: missionsHomeDirOf(home) }] });
     await ensureMissionsHome(fake.paseo, { home });
     const settled: Decision[][] = [];
-    const tools = createMissionTools({ paseo: () => fake.paseo, home: () => home, log, now: () => NOW, onSettled: (decisions) => void settled.push(decisions) });
+    const onSettled = (decisions: Decision[]): void => {
+      settled.push(decisions);
+      for (const decision of decisions) recordDelivery?.(decision);
+    };
+    const tools = createMissionTools({ paseo: () => fake.paseo, home: () => home, log, now: () => NOW, onSettled });
     const created = mission();
     const who: ToolCaller = { agentId: MAIN, role: "manager", workspaceId: "wks-own", requestId: null, parentId: null, batchId: null, missionId: created.missionId };
     const call = (answers: unknown, requestId = REQ) => tools.call("bm_answer_worker", { requestId, answers }, who);
@@ -279,10 +287,30 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
     createDecisionStore(home).open(question());
     const result = await call([{ qn: "Q1", option: "b", why: "The plan says ISO dates." }]);
     expect(result.ok, result.text).toBe(true);
-    expect(JSON.parse(result.text)).toEqual([expect.objectContaining({ qn: "Q1", decisionId: `q:${REQ}:Q1`, state: "answered" })]);
+    // Delivery line design §7.3: said from the store after the delivery ran — here a delivery that recorded nothing yet.
+    expect(JSON.parse(result.text)).toEqual([
+      { qn: "Q1", decisionId: `q:${REQ}:Q1`, state: "answered", said: "recorded as your answer, not the owner's; not delivered to the Worker yet; it grants nothing" },
+    ]);
     expect(stored()).toMatchObject({ status: "answered", grant: null, answer: { by: "main", via: "main", optionKey: "b", class: "scope", reason: "The plan says ISO dates." } });
     expect(settled.flat().map((decision) => decision.id)).toEqual([`q:${REQ}:Q1`]);
     expect(createMissionStore(home).journal(created.missionId).at(-1)).toMatchObject({ kind: "decision", by: "main", text: `The Main answered Q1 of request ${REQ}.` });
+  });
+
+  it("says what the delivery recorded: delivered, or queued for the Worker's turn end (delivery line design §7.3)", async () => {
+    let outcome: "sent" | "queued" = "sent";
+    const { call } = await setup((decision) => {
+      createDecisionStore(home).transition(decision.id, (current) => ({ ok: true, decision: { ...current, delivery: { to: WORKER, kind: `answers:${REQ}`, at: NOW.toISOString(), outcome } } }), WS);
+    });
+    delegateRepo("scope");
+    createDecisionStore(home).open(question());
+    createDecisionStore(home).open(question({ n: 2, subject: "other" }));
+    const sent = await call([{ qn: "Q1", option: "b", why: "ISO sorts." }]);
+    expect(JSON.parse(sent.text)).toEqual([expect.objectContaining({ qn: "Q1", said: "delivered to the Worker as your answer, not the owner's; it grants nothing" })]);
+    outcome = "queued";
+    const queued = await call([{ qn: "Q2", option: "a", why: "Fits." }]);
+    expect(JSON.parse(queued.text)).toEqual([
+      expect.objectContaining({ qn: "Q2", said: "queued for the Worker as your answer, not the owner's: it gets it when its current turn ends; it grants nothing" }),
+    ]);
   });
 
   it("in an owner cell, answers only what the mission level delegates", async () => {
@@ -300,18 +328,32 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
     expect(stored(2).status).toBe("open");
   });
 
+  it("named by the mission level alone, refuses an option that declares effects (delivery line design §7.1); the repo cell's delegation covers them", async () => {
+    const { call, settled, mission: created } = await setup();
+    createDecisionStore(home).open(question());
+    createMissionAutonomyStore(home).setLevel(created.missionId, 3);
+    const refused = await call([{ qn: "Q1", option: "b", why: "ISO sorts." }]);
+    expect(refused.ok).toBe(false);
+    expect(refused.text).toContain("Refused: option b of Q1 declares commit, which only the owner's answer covers here; choose an option without effects or leave it to the owner. Nothing was answered.");
+    expect(stored()).toMatchObject({ status: "open", answer: null });
+    expect(settled).toEqual([]);
+    delegateRepo("scope");
+    expect((await call([{ qn: "Q1", option: "b", why: "ISO sorts." }])).ok).toBe(true);
+    expect(stored().answer).toMatchObject({ by: "main", optionKey: "b" });
+  });
+
   it("in a shadow cell it may not decide, records the Main's recommendation as a prediction, once; the owner decides", async () => {
     const { call, settled } = await setup();
     delegateRepo("scope", "shadow");
     createDecisionStore(home).open(question());
     const result = await call([{ qn: "Q1", option: "b", why: "ISO sorts." }]);
-    expect(JSON.parse(result.text)).toEqual([expect.objectContaining({ state: "recommended" })]);
+    expect(JSON.parse(result.text)).toEqual([expect.objectContaining({ state: "recommended", said: "recorded as your recommendation; the owner decides it" })]);
     expect(stored()).toMatchObject({ status: "open", answer: null, prediction: { recommended: { optionKey: "a" }, main: { optionKey: "b", reason: "ISO sorts.", at: NOW.toISOString() } } });
     expect(settled).toEqual([]);
     expect((await call([{ qn: "Q1", option: "a", why: "again" }])).text).toContain("you recommended an option for Q1 already");
   });
 
-  it("refuses an ownerOnly question, a settled one, one code decides, and a request outside the mission; a late one is still the Main's; a refusal writes nothing", async () => {
+  it("refuses an ownerOnly question, a settled one, the review cap's question, and a request outside the mission; a late one is still the Main's; a refusal writes nothing", async () => {
     const { call } = await setup();
     delegateRepo("scope");
     delegateRepo("cost");
@@ -321,8 +363,9 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
     store.open(question({ n: 2, subject: "late", askedAt: new Date(NOW.getTime() - 60 * 60_000).toISOString() }));
     store.open(question({ n: 3, subject: "done" }));
     store.transition(`q:${REQ}:Q3`, (current) => answerDecision(current, { via: "inbox", optionKey: "a", at: ASKED }), WS);
-    const granting = question({ n: 4, subject: "review-budget", class: "cost" });
-    store.open({ ...granting, options: [{ ...granting.options[0]!, grant: { calls: 2 } }, granting.options[1]!] });
+    // Delivery line design §5.4: the review cap's one decision is ownerOnly, whatever is delegated.
+    const granting = question({ n: 4, subject: "review-cap", class: "cost", ownerOnly: true });
+    store.open({ ...granting, options: [{ ...granting.options[0]!, grant: { calls: 3 } }, granting.options[1]!] });
     store.open(question({ n: 5, subject: "fine" }));
 
     const result = await call([
@@ -336,8 +379,7 @@ describe("bm_answer_worker (missions design §4, §8)", () => {
     expect(result.text).toContain(`input.answers[0]: ${ownerOnlyRefusalText(`q:${REQ}:Q1`)}`);
     expect(result.text).not.toContain("input.answers[1]");
     expect(result.text).toContain("input.answers[2]: Q3 was already answered by the owner");
-    // A review budget within the code cap where cost is delegated is code's, not the Main's (§4.1 rule 3).
-    expect(result.text).toContain("input.answers[3]: Q4 is paseo-bm's to decide (a review budget within what the owner delegated: paseo-bm decides it)");
+    expect(result.text).toContain(`input.answers[3]: ${ownerOnlyRefusalText(`q:${REQ}:Q4`)}`);
     expect(stored(5).status).toBe("open");
     expect((await call([{ qn: "Q1", option: "a", why: "x" }], "req-20261009T090000Z")).text).toContain("is not one of mission WEB");
   });

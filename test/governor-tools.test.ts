@@ -12,6 +12,7 @@ import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-st
 import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { clearRequestIndexCache, createMissionRoster, requestIndexOf } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
+import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createOrchestratorTools, type OrchestratorToolsDeps } from "../plugin/server/orchestrator-tools";
 import type { PaseoCliDeps } from "../plugin/server/paseo-cli";
 import { createRequestRegistry } from "../plugin/server/request-registry";
@@ -180,6 +181,36 @@ describe("bm_arbitrate (§9.6)", () => {
     expect((await call({})).text).toContain("mission WEB is closed");
     expect(createArbitrationStore(home).list()).toEqual([]);
     expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("returns a standing arbitration of the area and both missions, sending, writing and spending nothing (delivery line design §8.2)", async () => {
+    twoMissions();
+    const tools = toolsWith(daemon().paseo);
+    const first = await tools.call("bm_arbitrate", { missions: [A, B], workspaceId: "repo-b", area: "src/pay", owner: A, reason: "Payments owns the pay page." });
+    expect(first.ok, first.text).toBe(true);
+    const [entry] = createArbitrationStore(home).list();
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    const commands = createOrchestratorStore(home).listCommands();
+    expect(commands.map((command) => [command.missionId, command.governorStep, command.by])).toEqual(
+      expect.arrayContaining([
+        [A, "arbitrate", "model"],
+        [B, "arbitrate", "model"],
+      ]),
+    );
+    const journals = [A, B].map((missionId) => createMissionStore(home).journal(missionId).length);
+
+    // The same area inside it, the missions named the other way round, the other owner: the standing call is returned.
+    const again = await tools.call("bm_arbitrate", { missions: [B, A], workspaceId: "repo-b", area: "src/pay/checkout/", owner: B, reason: "Again." });
+    expect(again.ok).toBe(true);
+    expect(again.text.split("\n")[0]).toBe(`Area src/pay/checkout was arbitrated as ${entry!.id} on 2026-10-09 (owner: PAY); nothing was sent.`);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(createArbitrationStore(home).list()).toHaveLength(1);
+    expect(createOrchestratorStore(home).listCommands()).toHaveLength(2);
+    expect([A, B].map((missionId) => createMissionStore(home).journal(missionId).length)).toEqual(journals);
+
+    // Another repo, or a wider area, is a new call.
+    expect((await tools.call("bm_arbitrate", { missions: [A, B], workspaceId: "repo-b", area: "src", owner: B, reason: "The whole src." })).text).toMatch(/^Arbitration arb-/);
+    expect(createArbitrationStore(home).list()).toHaveLength(2);
   });
 });
 

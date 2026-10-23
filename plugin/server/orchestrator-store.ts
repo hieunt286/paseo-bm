@@ -72,6 +72,7 @@ import {
   wakeEntrySchema,
   wakeUsageSchema,
   type CommandTarget,
+  type GovernorBy,
   type OrchestratorNote,
   type Proposal,
   type ProposalOutcome,
@@ -80,6 +81,7 @@ import {
   type WakeEntry,
   type WakeUsage,
 } from "../shared/orchestrator";
+import type { GovernorStep } from "../shared/orchestrator-command";
 import {
   assertNoSymlink,
   capBy,
@@ -156,6 +158,9 @@ export interface SentCommandInput {
   workerId?: string;
   /** A governor command's mission (missions design §9.4). */
   missionId?: string;
+  /** A governor command's step and who wrote it: its pool (delivery line design §8.1). */
+  governorStep?: GovernorStep;
+  by?: GovernorBy;
 }
 
 /** An interrupt allowance (design §6B.3): the Worker may be interrupted until `until`. */
@@ -420,6 +425,8 @@ export function createOrchestratorStore(home: string, deps: OrchestratorStoreDep
         ...(input.to === undefined ? {} : { to: input.to }),
         ...(input.workerId === undefined ? {} : { workerId: input.workerId }),
         ...(input.missionId === undefined ? {} : { missionId: input.missionId }),
+        ...(input.governorStep === undefined ? {} : { governorStep: input.governorStep }),
+        ...(input.by === undefined ? {} : { by: input.by }),
       });
       commands.update(({ entries }) => {
         if (entries.some((entry) => entry.id === command.id)) throw new Error(`command id already used: ${command.id}`);

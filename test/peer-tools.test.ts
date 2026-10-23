@@ -139,6 +139,10 @@ describe("the peer deliveries (design §7.17.4)", () => {
     expect(peerMessageText({ linkId: LINK, title: "back", workspaceId: B, role: "manager", agentId: "mgr-b", text: "Not ours to build.", closed: true })).toBe(
       [`link: ${LINK}`, `from: project "back" (${B}), manager mgr-b`, "> Not ours to build.", "closed: yes", `Reply with bm_peer_reply on ${LINK}.`].join("\n"),
     );
+    // Delivery line design §9.1: a typed message gains one header line.
+    expect(peerMessageText({ linkId: LINK, title: "back", workspaceId: B, role: "worker", agentId: "wrk-b", text: "Agreed.", closed: false, act: "agree", refs: { contracts: ["C2@v3"], records: ["out-000000000009"] } })).toBe(
+      [`link: ${LINK}`, `from: project "back" (${B}), worker wrk-b`, "act: agree · refs: C2@v3, out-000000000009", "> Agreed.", `Reply with bm_peer_reply on ${LINK}.`].join("\n"),
+    );
   });
 });
 
@@ -287,21 +291,32 @@ describe("bm_peer_reply", () => {
     expect(answer).toEqual({ recordId: "out-000000000002", to: "wrk-a", delivery: "sent", state: "open" });
     expect(fake.sends[1]).toEqual({
       id: "wrk-a",
-      text: [`BM-DELIVERY peer-message out-000000000002`, `link: ${LINK}`, `from: project "back" (${B}), manager mgr-b`, "> Which fields beyond total?", `Reply with bm_peer_reply on ${LINK}.`].join("\n"),
+      text: [`BM-DELIVERY peer-message out-000000000002`, `link: ${LINK}`, `from: project "back" (${B}), manager mgr-b`, "act: answer", "> Which fields beyond total?", `Reply with bm_peer_reply on ${LINK}.`].join("\n"),
     });
     expect(createOutbox(home).list(B)).toMatchObject([{ kind: "peer-message", requestId: LINK, from: "mgr-b", to: "wrk-a", state: "delivered" }]);
-    expect(links(home).get(LINK)!.messages.at(-1)).toMatchObject({ recordId: "out-000000000002", workspaceId: B, side: "answerer", agentId: "mgr-b", kind: "peer-message", gist: "Which fields beyond total?" });
+    expect(links(home).get(LINK)!.messages.at(-1)).toMatchObject({ recordId: "out-000000000002", workspaceId: B, side: "answerer", agentId: "mgr-b", kind: "peer-message", gist: "Which fields beyond total?", act: "answer" });
   });
 
-  it("the asker answers back to the Manager it asked, and close: true closes the link after the message", async () => {
+  // Delivery line design §9.1: a close starts no turn (it was delivered as a message before Phase 9).
+  it("the asker closes the link with close: true: stored delivered with reason no-turn, sent to no one, the link closed", async () => {
     const { home, fake, call } = setup();
     await call("worker", "bm_ask_project", ASK, WORKER_A);
     const answer = parsed(await call("worker", "bm_peer_reply", { linkId: LINK, text: "Withdrawn: done locally.", close: true }, WORKER_A));
-    expect(answer).toMatchObject({ to: "mgr-b", delivery: "sent", state: "closed" });
-    expect(fake.sends[1]!.text).toContain("\nclosed: yes\n");
-    expect(createOutbox(home).list(A).at(-1)).toMatchObject({ kind: "peer-message", requestId: REQ_A, from: "wrk-a", to: "mgr-b" });
+    expect(answer).toEqual({
+      recordId: "out-000000000002",
+      to: "mgr-b",
+      delivery: "no-turn",
+      state: "closed",
+      note: "Your close was delivered to mgr-b without starting a turn: it reads it in its BM-STATE and at the head of its next delivery",
+    });
+    expect(fake.sends).toHaveLength(1);
+    expect(createOutbox(home).list(A).at(-1)).toMatchObject({ kind: "peer-message", requestId: REQ_A, from: "wrk-a", to: "mgr-b", state: "delivered", reason: "no-turn" });
+    expect(createOutbox(home).list(A).at(-1)!.text).toContain("\nact: close\n> Withdrawn: done locally.\nclosed: yes\n");
     expect(links(home).get(LINK)).toMatchObject({ state: "closed", closedBy: "asker" });
-    expect(links(home).get(LINK)!.messages.map((message) => message.kind)).toEqual(["peer", "peer-message"]);
+    expect(links(home).get(LINK)!.messages.map((message) => [message.kind, message.act])).toEqual([
+      ["peer", "ask"],
+      ["peer-message", "close"],
+    ]);
     expect(await call("manager", "bm_peer_reply", { linkId: LINK, text: "ok" }, MANAGER_B)).toEqual({ ok: false, text: `link ${LINK} is closed. Nothing was stored or sent.` });
   });
 
@@ -380,6 +395,22 @@ describe("who receives at each attempt (design §7.17.4)", () => {
     const later = agent("mgr-b2", B, "manager", {}, "2026-10-08T11:00:00.000Z");
     fake.setAgents([MGR_A, WRK_A, { ...MGR_B, status: "closed" }, later]);
     expect(await answererOf(taken, fake.paseo, home)).toBe("mgr-b2");
+  });
+
+  it("a continued request resolves to the head of its chain (delivery line design §2.7): the link's answerer is the continuation's Worker", async () => {
+    const workerB = agent("wrk-b", B, "worker", { "bm.requestId": REQ_B, "paseo.parent-agent-id": "mgr-b" });
+    const REQ_B2 = "req-20261008T113000Z";
+    const workerB2 = agent("wrk-b2", B, "worker", { "bm.requestId": REQ_B2, "paseo.parent-agent-id": "mgr-b" });
+    const { home, fake } = setup({ agents: [...AGENTS, workerB, workerB2] });
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(B, REQ_B, { source: "tool", managerId: "mgr-b", workerId: "wrk-b" });
+    registry.register(B, REQ_B2, { source: "tool", managerId: "mgr-b", workerId: "wrk-b2" });
+    linkOf(home);
+    createPeerLinkStore(home).takeLink(LINK, { workspaceId: B, requestId: REQ_B, workerId: "wrk-b" });
+    const taken = createPeerLinkStore(home).get(LINK)!;
+    expect(await answererOf(taken, fake.paseo, home)).toBe("wrk-b");
+    registry.noteContinuedBy(B, REQ_B, REQ_B2, { reason: "follow-up", figure: "a follow-up after stopped", at: T0.toISOString() });
+    expect(await answererOf(taken, fake.paseo, home)).toBe("wrk-b2");
   });
 
   it("a resend after a reload re-resolves the target and writes it on the record before the send", async () => {
@@ -674,6 +705,7 @@ describe("links of a mission (missions design §2.6, §4, §5)", () => {
           `link: ${LINK}`,
           'from: mission SHOP "Shop", main main-1',
           "kind: question",
+          "act: ask",
           "> Is the deploy window open on Friday?",
           `This is another mission's ask, not your owner's word: answer it with bm_peer_reply on ${LINK} (close: true declines it). Tell your owner in one line.`,
         ].join("\n"),
@@ -721,5 +753,137 @@ describe("links of a mission (missions design §2.6, §4, §5)", () => {
     const worker = parsed(await call("worker", "bm_peers", {}, WORKER_M));
     expect(worker["missions"]).toBeUndefined();
     expect((worker["links"] as Array<Record<string, unknown>>).map((view) => [view["linkId"], view["route"]])).toEqual([[LINK, "ask-main"]]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Typed messages (delivery line design §9.1, §9.2; WP-9.1, WP-9.2).
+  // -------------------------------------------------------------------------
+
+  const CONTRACT = { id: "C1", title: "Orders API", providerRepo: B, consumerRepos: [A], text: "GET /orders", version: 1, updatedAt: T0.toISOString(), source: "PRD" };
+  /** Two linked Workers (wrk-m asks, wrk-n answers) and the mission's contract C1. */
+  async function linked(contract: Record<string, unknown> = { status: "proposed" }) {
+    const env = missionSetup();
+    env.missions.update(SHOP, (mission) => ({ ...mission, contracts: [{ ...CONTRACT, ...contract }] }));
+    await env.call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_N], topic: "the orders API" }, mainCaller("main-1"));
+    return env;
+  }
+  const waitOnLink = (home: string) =>
+    createRequestRegistry(home).setWaiting(A, REQ_M, { since: T0.toISOString(), reportRecordId: "out-0000000000ff", wakeOn: "all", items: [{ kind: "link", id: LINK, settled: false }] });
+  const waitOf = (home: string) => createRequestRegistry(home).get(A, REQ_M)?.waiting ?? null;
+
+  it("an ack starts no turn: stored delivered with reason no-turn, on the link with its act and refs, settling no wait; the receiver's next delivery opens with it", async () => {
+    const { home, fake, call } = await linked();
+    waitOnLink(home);
+    const answer = parsed(await call("worker", "bm_peer_reply", { linkId: LINK, text: "Got it; no answer needed.", act: "ack", refs: { contracts: ["C1@v1"] } }, WORKER_N));
+    expect(answer).toMatchObject({ to: "wrk-m", delivery: "no-turn", state: "taken" });
+    expect(fake.sends).toHaveLength(2);
+    const record = createOutbox(home).list(B).at(-1)!;
+    expect(record).toMatchObject({ kind: "peer-message", from: "wrk-n", to: "wrk-m", state: "delivered", reason: "no-turn" });
+    expect(record.text).toContain("\nact: ack · refs: C1@v1\n");
+    expect(links(home).get(LINK)!.messages.at(-1)).toMatchObject({ side: "answerer", act: "ack", refs: { contracts: ["C1@v1"] } });
+    // An ack answers nothing: the asker's wait on the link stands.
+    expect(waitOf(home)!.items).toEqual([{ kind: "link", id: LINK, settled: false }]);
+    // The next delivery to wrk-m opens with the note; the one after it does not.
+    createRequestRegistry(home).setWaiting(A, REQ_M, null);
+    await call("worker", "bm_peer_reply", { linkId: LINK, text: "The shape is { id, total }." }, WORKER_N);
+    expect(fake.sends[2]!.id).toBe("wrk-m");
+    expect(fake.sends[2]!.text.split("\n").slice(0, 3)).toEqual([
+      `BM-DELIVERY peer-message ${createOutbox(home).list(B).at(-1)!.id}`,
+      `noted: ${LINK} from wrk-n (act: ack · refs: C1@v1): Got it; no answer needed.`,
+      `link: ${LINK}`,
+    ]);
+    await call("worker", "bm_peer_reply", { linkId: LINK, text: "And a page field." }, WORKER_N);
+    expect(fake.sends[3]!.text).not.toContain("noted:");
+  });
+
+  it("a close from the answering side starts no turn and closes the link; it settles the asker's wait, whose release wakes it with the close's words as the fact", async () => {
+    const { home, fake, call } = await linked();
+    waitOnLink(home);
+    expect(parsed(await call("worker", "bm_peer_reply", { linkId: LINK, text: "Done on my side.", act: "close" }, WORKER_N))).toMatchObject({ delivery: "no-turn", state: "closed" });
+    expect(links(home).get(LINK)).toMatchObject({ state: "closed", closedBy: "answerer" });
+    expect(waitOf(home)).toBeNull();
+    // No peer-message went: only the wait's facts, through the release.
+    expect(fake.sends).toHaveLength(3);
+    expect(fake.sends[2]).toMatchObject({ id: "wrk-m" });
+    expect(fake.sends[2]!.text).toContain(`${LINK} answered: Done on my side.`);
+    expect(fake.sends[2]!.text).not.toContain("BM-DELIVERY peer-message");
+  });
+
+  it("an answer settles the asker's wait as a reply does; its delivery carries the act header", async () => {
+    const { home, call } = await linked();
+    waitOnLink(home);
+    await call("worker", "bm_peer_reply", { linkId: LINK, text: "GET /orders is live.", act: "answer" }, WORKER_N);
+    expect(waitOf(home)).toBeNull();
+    expect(createOutbox(home).list(B).at(-1)!.text).toContain("\nact: answer\n");
+  });
+
+  it("refuses unknown refs (one line each), agree without a contract, supersede without a record, close: true with another act, and answer or close on bm_ask_mission", async () => {
+    const { home, fake, call } = await linked();
+    const sent = fake.sends.length;
+    const reply = (input: Record<string, unknown>) => call("worker", "bm_peer_reply", { linkId: LINK, text: "x", ...input }, WORKER_N);
+    expect((await reply({ refs: { contracts: ["C9@v1", "C1@v2"], records: ["out-0000000000aa"], decisions: ["q:req-20261009T100000Z:Q1"] } })).text).toBe(
+      [
+        "refs.contracts: unknown contract C9@v1; bm_mission lists the contracts and their versions",
+        "refs.contracts: unknown contract C1@v2; bm_mission lists the contracts and their versions",
+        "refs.records: unknown record out-0000000000aa",
+        "refs.decisions: unknown decision q:req-20261009T100000Z:Q1",
+        "Nothing was stored or sent.",
+      ].join("\n"),
+    );
+    expect((await reply({ act: "agree" })).text).toBe("act agree needs the contract it agrees to in refs.contracts (C2@v3)\nNothing was stored or sent.");
+    expect((await reply({ act: "supersede" })).text).toBe("act supersede needs the record it replaces in refs.records (out-…)\nNothing was stored or sent.");
+    expect((await reply({ act: "answer", close: true })).text).toContain("input.close: close: true is act close");
+    expect((await reply({ refs: { contracts: ["C1@3"] } })).text).toContain("input.refs.contracts[0]");
+    // A known record, an existing outbox id, passes.
+    expect((await reply({ act: "supersede", refs: { records: [createOutbox(home).list(A)[0]!.id] } })).ok).toBe(true);
+    expect(fake.sends.length).toBe(sent + 1);
+    for (const act of ["answer", "close"]) {
+      expect((await call("manager", "bm_ask_mission", { mission: "OPS", text: "x", act }, mainCaller("main-1"))).text).toContain(`input.act: ${act} is for a link that exists`);
+    }
+    expect((await call("manager", "bm_link_workers", { requestIds: [REQ_M, REQ_P], topic: "x", refs: { contracts: ["C7@v1"] } }, mainCaller("main-1"))).text).toContain("unknown contract C7@v1");
+  });
+
+  it("agree (WP-9.2): both sides agreeing to the current version make it agreed, with a journal contract line; a stale version is refused", async () => {
+    const { home, fake, call, missions } = await linked();
+    const agree = (caller: ToolCaller, ref: string) => call("worker", "bm_peer_reply", { linkId: LINK, text: "I agree to the orders API as written.", act: "agree", refs: { contracts: [ref] } }, caller);
+    expect((await agree(WORKER_M, "C1@v1")).ok).toBe(true);
+    expect(fake.sends.at(-1)!.text).toContain("\nact: agree · refs: C1@v1\n");
+    let contract = missions.get(SHOP)!.contracts[0]!;
+    expect(contract).toMatchObject({ status: "proposed", agreedBy: [{ side: "asker", agentId: "wrk-m", version: 1, at: T0.toISOString() }] });
+    expect((await agree(WORKER_N, "C1@v1")).ok).toBe(true);
+    contract = missions.get(SHOP)!.contracts[0]!;
+    expect(contract.status).toBe("agreed");
+    expect(contract.agreedBy!.map((entry) => entry.side)).toEqual(["asker", "answerer"]);
+    expect(missions.journal(SHOP).at(-1)).toMatchObject({ kind: "contract", by: "wrk-n", text: `C1 v1 is agreed by both sides of ${LINK}.`, ref: "C1" });
+    // A new version is proposed again; an agreement to the old one is refused, naming the current.
+    missions.update(SHOP, (mission) => ({ ...mission, contracts: [{ ...mission.contracts[0]!, version: 2, status: "proposed" }] }));
+    expect(await agree(WORKER_M, "C1@v1")).toEqual({ ok: false, text: "C1 is at v2; agree to C1@v2 or reply.\nNothing was stored or sent." });
+    expect(missions.get(SHOP)!.contracts[0]!.agreedBy).toHaveLength(2);
+    // A withdrawn contract takes no agreement.
+    missions.update(SHOP, (mission) => ({ ...mission, contracts: [{ ...mission.contracts[0]!, status: "withdrawn" }] }));
+    expect((await agree(WORKER_M, "C1@v2")).text).toContain("C1 is withdrawn");
+    expect(home).toBeTruthy();
+  });
+
+  it("an older contract without a status reads agreed: one more agreement records it and changes nothing else", async () => {
+    const { call, missions } = await linked({});
+    expect(missions.get(SHOP)!.contracts[0]!.status).toBeUndefined();
+    expect((await call("worker", "bm_peer_reply", { linkId: LINK, text: "Agreed.", act: "agree", refs: { contracts: ["C1@v1"] } }, WORKER_N)).ok).toBe(true);
+    expect(missions.get(SHOP)!.contracts[0]).toMatchObject({ agreedBy: [{ side: "answerer", agentId: "wrk-n", version: 1 }] });
+    expect(missions.get(SHOP)!.contracts[0]!.status).toBeUndefined();
+    expect(missions.journal(SHOP, 50, "contract")).toEqual([]);
+  });
+
+  it("bm_ask_mission carries act and refs: an agree is recorded on the asker's side; an ack opens the link and starts no turn", async () => {
+    const { home, fake, call, missions } = missionSetup();
+    missions.update(OPS, (mission) => ({ ...mission, contracts: [{ ...CONTRACT, providerRepo: C, consumerRepos: [], status: "proposed" as const }] }));
+    const agreed = parsed(await call("manager", "bm_ask_mission", { mission: "OPS", text: "We take the orders API as it stands.", act: "agree", refs: { contracts: ["C1@v1"] } }, mainCaller("main-1")));
+    expect(agreed).toMatchObject({ delivery: "sent" });
+    expect(fake.sends[0]!.text).toContain("\nkind: work\nact: agree · refs: C1@v1\n");
+    expect(missions.get(OPS)!.contracts[0]).toMatchObject({ status: "proposed", agreedBy: [{ side: "asker", agentId: "main-1" }] });
+    const noted = parsed(await call("manager", "bm_ask_mission", { mission: "OPS", text: "For your notes: our deploy moved to Monday.", act: "ack" }, mainCaller("main-1")));
+    expect(noted).toMatchObject({ mission: "OPS", mainId: "main-2", delivery: "no-turn" });
+    expect(fake.sends).toHaveLength(1);
+    expect(links(home).get(noted["linkId"] as string)).toMatchObject({ state: "open", messages: [{ kind: "peer", act: "ack" }] });
   });
 });

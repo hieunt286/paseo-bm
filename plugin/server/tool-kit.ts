@@ -42,11 +42,11 @@ export function boundAs(caller: ToolCaller | null, role: BoundRole): BoundCaller
 }
 
 /** The delivery state a tool reports for a stored record. */
-export type DeliveryState = "sent" | "queued" | "dropped";
+export type DeliveryState = "sent" | "queued" | "dropped" | "held";
 
-/** The delivery state of a notice outcome (`replaced`: a newer copy of the same record waits). */
-export function deliveryOf(outcome: NoticeOutcome): DeliveryState {
-  return outcome === "sent" ? "sent" : outcome === "dropped" ? "dropped" : "queued";
+/** The delivery state of a record's outcome (`replaced`: a newer copy of the same record waits; `held`: the wake gate holds it, delivery line design §6.4). */
+export function deliveryOf(outcome: NoticeOutcome | "held"): DeliveryState {
+  return outcome === "sent" || outcome === "dropped" || outcome === "held" ? outcome : "queued";
 }
 
 /** What a tool's deps give the outbox. */

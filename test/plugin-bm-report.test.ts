@@ -383,6 +383,21 @@ describe("report parsing", () => {
     // The marker must still stand alone on its line.
     for (const line of ["**BM-REPORT** below", "**BM-REPORTS**", "BM-REPORT: see below"]) expect(parseReports([line, ...body].join("\n"), ctx), line).toEqual([]);
   });
+
+  it("reads the waits a bound blocked report names by id in blockers (delivery line design §6.2); other reports keep their shape", () => {
+    const report = (phase: string, blockers: string) => parseReports(["BM-REPORT", "requestId: req-20261003T100000Z", `phase: ${phase}`, `blockers: ${blockers}`].join("\n"), ctx)[0]!;
+    const waits = report("blocked", "waiting on the owner: Q1. waiting on requests: req-20261003T110000Z, req-20261003T120000Z. waiting on review: b2. waiting for: the schema. wake on: any");
+    expect(waits).toMatchObject({ waitingOnRequests: ["req-20261003T110000Z", "req-20261003T120000Z"], waitingOnBatches: ["b2"], wakeOn: "any" });
+    const all = report("blocked", "waiting on review: b1");
+    expect(all.waitingOnBatches).toEqual(["b1"]);
+    expect(all).not.toHaveProperty("wakeOn");
+    expect(all).not.toHaveProperty("waitingOnRequests");
+    for (const old of [report("blocked", "waiting for: req-20261003T110000Z to merge"), report("finished", "waiting on requests: req-20261003T110000Z")]) {
+      expect(old).not.toHaveProperty("waitingOnRequests");
+      expect(old).not.toHaveProperty("waitingOnBatches");
+      expect(old).not.toHaveProperty("wakeOn");
+    }
+  });
 });
 
 describe("review parsing", () => {
@@ -542,5 +557,22 @@ describe("the decided field (owner decision P2-2, 2026-09-24)", () => {
     for (const value of ["none.", "none — nothing to choose"]) {
       expect(parseReports(["BM-REPORT", "requestId: req-20260924T010000Z", `decided: ${value}`].join("\n"), ctx)[0]?.decided, value).toEqual([]);
     }
+  });
+});
+
+describe("the git fields (delivery line design §4.4)", () => {
+  const head = ["BM-REPORT", "requestId: req-20261021T100000Z", "phase: finished", "filesChanged: src/a.ts", "blockers: none"];
+  it("reads branch, commit, pushed, mr and ci; ci none is a state, a sha that is no sha is left out", () => {
+    const [report] = parseReports([...head, "branch: m/ABC/fe", "commit: ABC1234", "pushed: yes", "mr: https://gitlab.example.com/g/fe/-/merge_requests/7", "ci: none"].join("\n"), ctx);
+    expect(report?.integration).toEqual({ branch: "m/ABC/fe", commit: "abc1234", pushed: true, mr: "https://gitlab.example.com/g/fe/-/merge_requests/7", ci: "none" });
+    expect(report?.unparsedFields).toEqual([]);
+    const [loose] = parseReports([...head, "branch: `m/ABC/fe`", "commit: not yet", "pushed: false", "ci: green"].join("\n"), ctx);
+    expect(loose?.integration).toEqual({ branch: "m/ABC/fe", pushed: false });
+  });
+
+  it("a report written before them has no integration field", () => {
+    expect(parseReports(PRIOR_FORMAT, ctx)[0]).not.toHaveProperty("integration");
+    expect(parseReports(CURRENT_FORMAT, ctx)[0]).not.toHaveProperty("integration");
+    expect(parseReports(head.join("\n"), ctx)[0]).not.toHaveProperty("integration");
   });
 });

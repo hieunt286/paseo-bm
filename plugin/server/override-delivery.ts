@@ -20,10 +20,14 @@
  *   - a `queued` one becomes `sent` when a Worker's turn record carries it
  *     (`afterTurn`: the correction line and its `BM-ANSWERS` block), or when
  *     this run's queue no longer holds its `override:<id>` notice;
+ *   - held while the Worker waits by structure on other items (delivery line
+ *     design §6.4, `wake-gate.ts`): recorded `held`, it goes in the Worker's
+ *     release (`heldOverridesOf`), first when its own delivery meets the
+ *     wait; gated again after a reload;
  *   - without a Paseo handle or a data folder nothing is recorded, and once
  *     per plugin run — at the first settlement or recorded turn with a Paseo
  *     handle — every answered override of a `q:` still undelivered (`delivery`
- *     null or `queued`) is delivered again (`resume`). A `queued` one sent
+ *     null, `queued` or `held`) is delivered again (`resume`). A `queued` one sent
  *     just before a reload may reach the Worker twice; a corrected answer is
  *     never lost.
  * - **An Orchestrator decision (`o:`):** the Orchestrator's own delivery
@@ -51,10 +55,12 @@ import { soleWorkerOfRequest } from "./decision-delivery";
 import { answerBlockOf } from "./decision-materialiser";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
+import type { ChannelQueue } from "./main-channel";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import type { DashboardPaseo } from "./paseo-directory";
 import { dataHomeOf } from "./role-instructions";
 import { errorText } from "./rpc-kit";
+import { holdsAtSend, isReleasing, releaseWait, useHeldSource, wakeGate, type HeldItem } from "./wake-gate";
 
 const defaultLog = (message: string): void => console.warn(message);
 
@@ -117,13 +123,43 @@ function isAnsweredQuestionOverride(decision: Decision): boolean {
   );
 }
 
+/**
+ * The corrected answers held for a waiting Worker's request (delivery line
+ * design §6.4), one block each, for its release: recorded `queued` when
+ * released, then `sent` or `failed` as the release went. Never throws.
+ */
+export function heldOverridesOf(home: string, target: { requestId: string; workerId: string }, now: () => Date = () => new Date()): HeldItem[] {
+  const store = createDecisionStore(home, { log: defaultLog });
+  return store
+    .list({ requestId: target.requestId, statuses: ["answered"] })
+    .filter((decision) => isAnsweredQuestionOverride(decision) && decision.delivery?.outcome === "held")
+    .flatMap((decision): HeldItem[] => {
+      const kind = overrideKindOf(decision.id);
+      const write = (outcome: DecisionDelivery["outcome"]): void => {
+        try {
+          store.transition(decision.id, (current) => ({ ok: true, decision: { ...current, delivery: { to: target.workerId, kind, at: now().toISOString(), outcome } } }), decision.workspaceId);
+        } catch (error) {
+          defaultLog(`[paseo-bm] could not record the delivery of override ${decision.id}: ${errorText(error)}`);
+        }
+      };
+      try {
+        const block = overrideAnswersMessageOf(decision, decision.supersedes === null ? null : store.get(decision.supersedes, decision.workspaceId));
+        return [{ key: kind, block, at: decision.delivery!.at, release: () => write("queued"), callbacks: { onSent: () => write("sent"), onDropped: () => write("failed"), onHeld: () => write("held") } }];
+      } catch {
+        return [];
+      }
+    });
+}
+
+useHeldSource("overrides", heldOverridesOf);
+
 export interface OverrideDeliveryDeps {
   /** The data folder; looked up otherwise. */
   home?: () => string | null;
   now?: () => Date;
   log?: (message: string) => void;
-  /** The queue a Worker's corrected answer goes through; the plugin's shared one by default. */
-  queue?: Pick<NoticeQueue, "enqueue" | "pending">;
+  /** The queue a Worker's corrected answer goes through; the plugin's shared one by default. A release uses its batch kind when it has one. */
+  queue?: Pick<NoticeQueue, "enqueue" | "pending"> & ChannelQueue;
   /** The request's sole live Worker; `soleWorkerOfRequest` by default. */
   workerOf?: (input: { workspaceId: string; requestId: string; home: string }, paseo: DashboardPaseo) => Promise<string | null>;
   /** The Orchestrator's delivery (`createOrchestratorDecisionDelivery`): an override of an `o:` decision takes it. */
@@ -192,8 +228,10 @@ export function createOverrideDelivery(deps: OverrideDeliveryDeps = {}): Overrid
       const stored = store.get(decision.id, decision.workspaceId) ?? decision;
       if (!isAnsweredQuestionOverride(stored)) return;
       const delivery = stored.delivery;
-      // Delivered, failed, or queued in this run and still waiting in the queue (or just gone out): nothing to send.
-      if (delivery !== null && (delivery.outcome !== "queued" || queuedHere.has(stored.id))) {
+      // In a Worker's release not yet sent (delivery line design §6.4): it goes with it.
+      if (delivery !== null && isReleasing(delivery.to, overrideKindOf(stored.id))) return;
+      // Delivered, failed, or queued in this run and still waiting in the queue (or just gone out): nothing to send. Held: gated again.
+      if (delivery !== null && delivery.outcome !== "held" && (delivery.outcome !== "queued" || queuedHere.has(stored.id))) {
         settleLeftQueue(store, stored);
         return;
       }
@@ -222,7 +260,26 @@ export function createOverrideDelivery(deps: OverrideDeliveryDeps = {}): Overrid
         failed(workerId, errorText(error));
         return;
       }
-      const outcome = await queue.enqueue(workerId, kind, text, paseo);
+      // Delivery line design §6.4: held while the Worker waits on other items; released with them.
+      const hint = { workspaceId: stored.workspaceId, requestId };
+      const gate = wakeGate(home, workerId, "override", [], hint, { now, log });
+      /** The gate held it at the send (the Worker reported `blocked` meanwhile): `held`, for that wait's release. */
+      const heldAtSend = (): void => record(store, stored, { to: workerId, kind, at: now().toISOString(), outcome: "held" });
+      if (gate.action === "hold") {
+        if (delivery?.outcome !== "held" || delivery.to !== workerId) record(store, stored, { to: workerId, kind, at: now().toISOString(), outcome: "held" });
+        return;
+      }
+      if (gate.release !== null) {
+        const write = (outcome: DecisionDelivery["outcome"]): void => record(store, stored, { to: workerId, kind, at: now().toISOString(), outcome });
+        write("queued");
+        queuedHere.delete(stored.id);
+        const released = await releaseWait(gate.release, { key: kind, block: text, settles: gate.settles, callbacks: { onSent: () => write("sent"), onDropped: () => write("failed"), onHeld: heldAtSend } }, { home, queue, paseo, log, now });
+        if (released === "dropped") log(`[paseo-bm] the owner's corrected answer ${stored.id} was not delivered: Worker ${workerId} is archived, closed or gone, or the send failed.`);
+        return;
+      }
+      let heldNow = false;
+      const outcome = await queue.enqueue(workerId, kind, text, paseo, { onHeld: () => ((heldNow = true), heldAtSend()) }, { isHeld: holdsAtSend(home, workerId, "override", [], hint, { now, log }) });
+      if (heldNow) return;
       if (outcome === "dropped" || outcome === "replaced") {
         failed(workerId, `Worker ${workerId} is archived, closed or gone, or the send failed`);
         return;
@@ -243,7 +300,7 @@ export function createOverrideDelivery(deps: OverrideDeliveryDeps = {}): Overrid
     try {
       const pending = createDecisionStore(home, { log })
         .list({ statuses: ["answered"] })
-        .filter((decision) => isAnsweredQuestionOverride(decision) && (decision.delivery === null || decision.delivery.outcome === "queued"));
+        .filter((decision) => isAnsweredQuestionOverride(decision) && (decision.delivery === null || decision.delivery.outcome === "queued" || decision.delivery.outcome === "held"));
       for (const decision of pending) await deliverToWorker(decision, paseo, home);
     } catch (error) {
       log(`[paseo-bm] delivering the corrected answers left from before this run failed: ${errorText(error)}`);

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +9,6 @@ import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { createEventBus, type EventBusDeps } from "../plugin/server/event-bus";
 import { toolsStaleSince } from "../plugin/server/agent-tools";
-import { REVIEW_BUDGET } from "../plugin/server/review-budget";
 import {
   IDLE_UNFINISHED_MS,
   PEER_SILENT_MS,
@@ -17,6 +16,7 @@ import {
   STALL_PASS_MS,
   createStallWatcher,
   peerCeilingOf,
+  progressSinceOf,
   stallReasonsOf,
   unansweredOf,
   type StallWatcher,
@@ -29,16 +29,21 @@ import { alertKeyOf } from "../plugin/shared/alerts";
 import { flagsOf } from "../plugin/shared/orchestrator-rules";
 import { PEER_WAIT_SLACK_MS, ruleInputOf, waitedLinksOf, waitingSinceOf } from "../plugin/server/request-trace";
 import { createPeerLinkStore, type PeerLink } from "../plugin/server/peer-links";
-import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, msg, report, turn } from "./fixtures/orchestrator-traces";
+import { MANAGER, REVIEWER, WORKER, WORKSPACE_ID, agent, at, factsWith, msg, report, shell, turn } from "./fixtures/orchestrator-traces";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { makeDecision } from "./helpers/decisions";
 import { createDecisionStore } from "../plugin/server/decision-store";
 import { answerDecision } from "../plugin/shared/decisions";
+import { createMissionRoster } from "../plugin/server/mission-roster";
+import { REQUESTS_DIR_NAME, clearRequestRegistryCache, type RegisteredRequest } from "../plugin/server/request-registry";
+import type { SettledWait } from "../plugin/server/waits";
+import { structuralWaitOf, type StructuralWaitFacts } from "../plugin/shared/structural-wait";
+import type { Waiting } from "../plugin/shared/waits";
 
 /**
  * The stall pass (Orchestrator design §6, §12; autonomy design §A.8): the two
  * reasons on fixtures; one `request-stalled` Inbox alert per stalled request
- * of every project, raised once, cleared and raised again; a `request.stalled`
+ * of every project, raised once, cleared only on progress and raised again; a `request.stalled`
  * event only for a project with a class above `owner` in the policy, through
  * the event bus, as a batched `BM-EVENTS` message to the Orchestrator and
  * never to anybody else; every
@@ -156,7 +161,7 @@ function traceOf(records: TraceRecord[], agents: AgentFacts[]): { trace: Reconst
 /** The reasons `stallReasonsOf` sees at `now`, with the flags the server would compute. */
 function reasonsAt(records: TraceRecord[], agents: AgentFacts[], now: Date) {
   const { trace, facts } = traceOf(records, agents);
-  const flags = flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET });
+  const flags = flagsOf(ruleInputOf(trace), factsWith());
   return stallReasonsOf(trace, facts, flags, now);
 }
 
@@ -185,7 +190,7 @@ describe("stallReasonsOf (autonomy design §A.8)", () => {
     const working = [...handedOver(), relayed("received", at(1, 10))];
     const reasons = (records: TraceRecord[], waitsOnOwner: boolean) => {
       const { trace, facts } = traceOf(records, agentsWith());
-      return stallReasonsOf(trace, facts, flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET }), when(59), waitsOnOwner).map((entry) => entry.reason);
+      return stallReasonsOf(trace, facts, flagsOf(ruleInputOf(trace), factsWith()), when(59), waitsOnOwner).map((entry) => entry.reason);
     };
     // Blocked, but every question answered (or asked only in chat words): nobody the Inbox shows is asked — a stall.
     expect(reasons(blocked, false)).toEqual(["idle-unfinished"]);
@@ -218,8 +223,10 @@ describe("stallReasonsOf (autonomy design §A.8)", () => {
     const records = [...handedOver(), relayed("received", at(1, 10)), reviewCall(4), reviewCall(5), reviewCall(6)];
     const agents = agentsWith({ reviewer: "idle" });
     const { trace, facts } = traceOf(records, agents);
-    expect(trace.reviewCalls).toBeGreaterThan(REVIEW_BUDGET.Medium);
-    const flags = flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET });
+    // Three calls of one batch, past a cap of 2 (review.callsPerBatch 2: delivery line design §5.3).
+    expect(trace.reviewCalls).toBe(3);
+    expect(flagsOf(ruleInputOf(trace), factsWith())).toEqual([]);
+    const flags = flagsOf(ruleInputOf(trace), factsWith({ review: { callsPerBatch: 2 } }));
     expect(stallReasonsOf(trace, facts, flags, when(6, 40)).map((entry) => entry.reason)).toEqual(["review-over-budget"]);
     expect(stallReasonsOf(trace, facts, flags, when(12)).map((entry) => entry.reason)).toEqual(["idle-unfinished", "review-over-budget"]);
   });
@@ -402,22 +409,33 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
     expect(await stalls.pass()).toMatchObject({ raised: [alertOf()] });
   });
 
-  it("clears the alert when an agent runs, and raises it afresh once it holds again", async () => {
-    await seed([...handedOver(), relayed("received", at(1, 10))]);
+  it("keeps the alert while an agent only runs: a blocked request woken again and again no longer flips; a report clears it (delivery line design §8.4)", async () => {
+    // Blocked on nothing the Inbox holds: it stalls.
+    await seed([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))]);
     const fake = daemonWith(fakeAgentsFor());
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
-
     expect((await stalls.pass()).raised).toEqual([alertOf()]);
-    fake.byId(WORKER)!.status = "running";
-    clock = when(21);
-    expect(await stalls.pass()).toMatchObject({ raised: [], cleared: [alertOf()] });
-    expect(alerts().list({ open: true })).toEqual([]);
 
-    fake.byId(WORKER)!.status = "idle";
-    clock = when(22);
+    // Woken every other minute for 20 minutes: each wake-up runs a turn that reports nothing.
+    for (let minute = 21; minute <= 40; minute += 1) {
+      const running = minute % 2 === 1;
+      fake.byId(WORKER)!.status = running ? "running" : "idle";
+      if (!running) {
+        await seed([turn({ agentId: WORKER, role: "worker", turnId: `w-wake-${minute}`, requestId: REQUEST_ID, parentAgentId: MANAGER, startedAt: at(minute - 1), endedAt: at(minute - 1, 50), at: at(minute - 1, 50) })]);
+      }
+      clock = when(minute);
+      expect(await stalls.pass(), `minute ${minute}`).toMatchObject({ raised: [], cleared: [] });
+    }
+    expect(alerts().list()).toMatchObject([{ key: alertOf(), since: when(20).toISOString(), clearedAt: null }]);
+
+    // A report is progress: the alert clears, and is raised afresh once it holds again.
+    await seed([relayed("received", at(40, 30), { turnId: "m-progress" })]);
+    clock = when(41);
+    expect(await stalls.pass()).toMatchObject({ raised: [], cleared: [alertOf()] });
+    clock = when(46);
     expect(await stalls.pass()).toMatchObject({ raised: [alertOf()] });
-    expect(alerts().list({ open: true })).toMatchObject([{ since: when(22).toISOString(), clearedAt: null }]);
+    expect(alerts().list({ open: true })).toMatchObject([{ since: when(46).toISOString(), clearedAt: null }]);
   });
 
   it("clears the alert when a new report arrives, and when the request leaves the 24-hour window", async () => {
@@ -438,8 +456,8 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
     expect(await stalls.pass()).toMatchObject({ raised: [], cleared: [alertOf()] });
   });
 
-  // Bead 7gxw.12 (autonomy design §G.7): the pass reads the owner's review budget per tier, 2 / 2 / 4 by default.
-  it("judges review-over-budget by the owner's review budget in Settings → Coordination", async () => {
+  // Delivery line design §5.3: the pass reads the owner's review.callsPerBatch for the request's cap (3 by default).
+  it("judges review-over-budget by the request's review cap, from the owner's review.callsPerBatch in Settings → Coordination", async () => {
     const reviewCall = (minute: number) =>
       turn({
         agentId: REVIEWER,
@@ -453,7 +471,7 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
         sent: [msg(REVIEWER, at(minute), `Review batch b1 of ${REQUEST_ID}, stage implementation, round ${minute}.`, "agent")],
         received: [msg(REVIEWER, at(minute, 30), `BM-REVIEW\nrequestId: ${REQUEST_ID}\nbatchId: b1\nverdict: changes-required`)],
       });
-    // A Medium request with three review calls, its agents idle, a minute after the last: over 2, within 3.
+    // A Medium request with three review calls of one batch, its agents idle, a minute after the last: within a cap of 3, over 2.
     await seed([...handedOver(), relayed("received", at(1, 10)), reviewCall(4), reviewCall(5), reviewCall(6)]);
     const reviewer: FakeAgent = {
       id: REVIEWER,
@@ -467,9 +485,8 @@ describe("the pass: one Inbox alert per stalled request, of every project", () =
     const stalls = watcher();
     stalls.usePaseo(fake.paseo);
     clock = when(7, 30);
-    createCoordinationStore(home).set({ key: "review.mediumBudget", value: 3 });
     expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
-    createCoordinationStore(home).set({ key: "review.mediumBudget", value: 2 });
+    createCoordinationStore(home).set({ key: "review.callsPerBatch", value: 2 });
     expect((await stalls.pass()).raised).toEqual([alertOf()]);
     expect(alerts().list({ open: true })).toMatchObject([{ detail: "review-over-budget" }]);
   });
@@ -658,6 +675,28 @@ const answerer = (minute: number): PeerLink["messages"][number] => ({
   gist: "On it.",
 });
 
+describe("progressSinceOf (pure, delivery line design §8.4)", () => {
+  it("a report, a review result or a bead closed after the alert is progress; a turn that only ran is none", () => {
+    const since = at(20);
+    const ran = turn({ agentId: WORKER, role: "worker", turnId: "w-ran", endedAt: at(25), evidence: [{ ...shell("npm test", at(24)), status: "completed" }] });
+    const quiet = { records: [ran], reports: [report({ at: at(10) })], reviews: [] };
+    expect(progressSinceOf(quiet, since)).toBe(false);
+    expect(progressSinceOf({ ...quiet, reports: [report({ at: at(21) })] }, since)).toBe(true);
+
+    const review = { agentId: REVIEWER, at: at(22), batchId: "b1", verdict: "pass", blockingCount: 0 };
+    expect(progressSinceOf({ ...quiet, reviews: [review] }, since)).toBe(true);
+    expect(progressSinceOf({ ...quiet, reviews: [{ ...review, verdict: null }] }, since)).toBe(false);
+    expect(progressSinceOf({ ...quiet, reviews: [{ ...review, at: at(19) }] }, since)).toBe(false);
+
+    const closing = (status: string, endedAt: string) =>
+      turn({ agentId: WORKER, role: "worker", turnId: `w-close-${status}`, endedAt, evidence: [{ ...shell("br close bm-1 --reason 'tests pass'", endedAt), status }] });
+    expect(progressSinceOf({ ...quiet, records: [ran, closing("completed", at(26))] }, since)).toBe(true);
+    // A failed close, or one before the alert, is none.
+    expect(progressSinceOf({ ...quiet, records: [ran, closing("failed", at(26))] }, since)).toBe(false);
+    expect(progressSinceOf({ ...quiet, records: [closing("completed", at(19))] }, since)).toBe(false);
+  });
+});
+
 describe("the peer wait (pure, design §7.17.5)", () => {
   const blocked = () => traceOf([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))], agentsWith()).trace;
 
@@ -680,7 +719,7 @@ describe("the peer wait (pure, design §7.17.5)", () => {
 
   it("stallReasonsOf: a blocked request waiting on a peer is no idle-unfinished, even with its questions answered", () => {
     const { trace, facts } = traceOf([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))], agentsWith());
-    const flags = flagsOf(ruleInputOf(trace), { reviewBudget: REVIEW_BUDGET });
+    const flags = flagsOf(ruleInputOf(trace), factsWith());
     expect(stallReasonsOf(trace, facts, flags, when(59), false, true)).toEqual([]);
     expect(stallReasonsOf(trace, facts, flags, when(59), false, false).map((entry) => entry.reason)).toEqual(["idle-unfinished"]);
   });
@@ -812,5 +851,211 @@ describe("the pass: a request waiting on another project (design §7.17.5)", () 
     // Later passes raise it no more; the pass never changes the link.
     expect((await stalls.pass()).raised).toEqual([]);
     expect(links().get(linkId)!.state).toBe("open");
+  });
+});
+
+// ── Waits by structure (delivery line design §6.5) ──────────────────────────
+
+const waitOn = (items: Array<Pick<Waiting["items"][number], "kind" | "id">>, wakeOn: Waiting["wakeOn"] = "all"): Waiting => ({
+  since: at(4),
+  reportRecordId: "out-000000000001",
+  wakeOn,
+  items: items.map((item) => ({ ...item, settled: false })),
+});
+
+describe("structuralWaitOf (pure, delivery line design §6.5)", () => {
+  const facts = (over: Partial<StructuralWaitFacts> = {}): StructuralWaitFacts => ({
+    now: at(30),
+    pendingMs: 10 * 60_000,
+    question: (id) => (id === "q:open" ? "open" : id === "q:answered" ? "closed" : null),
+    request: (id) =>
+      id === REQUEST_2
+        ? { headId: REQUEST_2, state: "active", workers: 1, liveWorker: true }
+        : id === "req-20260926T090000Z"
+          ? { headId: "req-20260926T095000Z", state: "active", workers: 1, liveWorker: false }
+          : null,
+    link: (id) => (id === "peer-live" ? { state: "taken", closedBy: null, ceiling: null } : null),
+    isRunning: () => false,
+    ...over,
+  });
+  const batch = (callAt: string, results: Array<{ at: string }> | undefined = undefined) => ({
+    batchId: "b1",
+    reviewerIds: [REVIEWER],
+    calls: [{ at: callAt, reviewerId: REVIEWER }],
+    ...(results === undefined ? {} : { results }),
+  });
+
+  it("holds while every unsettled item is live: an open question, a running Reviewer or a young call, an active request with a live Worker, a link under its ceiling", () => {
+    const waiting = waitOn([
+      { kind: "question", id: "q:open" },
+      { kind: "request", id: REQUEST_2 },
+      { kind: "link", id: "peer-live" },
+      { kind: "batch", id: "b1" },
+    ]);
+    // The call is 5 minutes old: within the pending window.
+    expect(structuralWaitOf({ waiting, reviews: { batches: [batch(at(25))] } }, facts())).toMatchObject({ holds: true, dead: [] });
+    // An hour-old call whose Reviewer runs.
+    expect(structuralWaitOf({ waiting, reviews: { batches: [batch(at(0))] } }, facts({ isRunning: (id) => id === REVIEWER })).holds).toBe(true);
+    // A settled item is not judged; a wait that is met holds nothing.
+    const met = { ...waiting, wakeOn: "any" as const, items: waiting.items.map((item, i) => (i === 0 ? { ...item, settled: true } : item)) };
+    expect(structuralWaitOf({ waiting: met, reviews: { batches: [batch(at(25))] } }, facts())).toMatchObject({ holds: false, dead: [] });
+  });
+
+  it("each dead item kind carries its fact; an unknown item, or none at all, holds nothing", () => {
+    const dead = (item: Pick<Waiting["items"][number], "kind" | "id">, over: Partial<StructuralWaitFacts> = {}, batches = [batch(at(0))]) =>
+      structuralWaitOf({ waiting: waitOn([item]), reviews: { batches } }, facts(over));
+    expect(dead({ kind: "batch", id: "b1" })).toMatchObject({ holds: false, dead: [{ item: { id: "b1" }, fact: "b1 got no verdict: no Reviewer of it is running" }] });
+    // A verdict since the call: settled without a fact (its hook missed it).
+    expect(dead({ kind: "batch", id: "b1" }, {}, [batch(at(0), [{ at: at(1) }])]).dead).toEqual([{ item: expect.objectContaining({ id: "b1" }) }]);
+    expect(dead({ kind: "request", id: REQUEST_2 }, { request: () => ({ headId: REQUEST_2, state: "stopped", workers: 1, liveWorker: true }) }).dead[0]!.fact).toBe(`${REQUEST_2} stopped`);
+    expect(dead({ kind: "request", id: REQUEST_2 }, { request: () => ({ headId: "req-20260926T110000Z", state: "finished", workers: 1, liveWorker: false }) }).dead[0]!.fact).toBe(
+      `${REQUEST_2} finished as req-20260926T110000Z`,
+    );
+    expect(dead({ kind: "request", id: "req-20260926T090000Z" }).dead[0]!.fact).toBe("req-20260926T090000Z has no live Worker left (as req-20260926T095000Z)");
+    expect(dead({ kind: "link", id: "peer-a" }, { link: () => ({ state: "taken", closedBy: null, ceiling: "peer-a: no word from project wks_backend for 2 hours" }) }).dead[0]!.fact).toBe(
+      "peer-a: no word from project wks_backend for 2 hours",
+    );
+    expect(dead({ kind: "link", id: "peer-a" }, { link: () => ({ state: "closed", closedBy: "answerer", ceiling: null }) }).dead[0]!.fact).toBe("peer-a closed by the answering side");
+    expect(dead({ kind: "question", id: "q:answered" }).dead).toEqual([{ item: expect.objectContaining({ id: "q:answered" }) }]);
+
+    // Unknown: neither live nor dead.
+    for (const item of [{ kind: "question", id: "q:gone" }, { kind: "request", id: "req-20260926T000000Z" }, { kind: "link", id: "peer-gone" }, { kind: "batch", id: "b9" }] as const) {
+      expect(dead(item)).toMatchObject({ holds: false, dead: [] });
+    }
+    // A request no Worker took yet is not dead.
+    expect(dead({ kind: "request", id: REQUEST_2 }, { request: () => ({ headId: REQUEST_2, state: "active", workers: 0, liveWorker: false }) })).toMatchObject({ holds: false, dead: [] });
+    expect(structuralWaitOf({}, facts())).toEqual({ items: [], holds: false, dead: [] });
+    expect(structuralWaitOf({ waiting: waitOn([]) }, facts())).toEqual({ items: [], holds: false, dead: [] });
+  });
+
+  it("stallReasonsOf: a blocked request whose wait holds by structure is no idle-unfinished, even with no question open", () => {
+    const { trace, facts: agents } = traceOf([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))], agentsWith());
+    const flags = flagsOf(ruleInputOf(trace), factsWith());
+    expect(stallReasonsOf(trace, agents, flags, when(59), false, false, true)).toEqual([]);
+    expect(stallReasonsOf(trace, agents, flags, when(59), false, false, false).map((entry) => entry.reason)).toEqual(["idle-unfinished"]);
+  });
+});
+
+describe("the pass: a Worker waiting by structure (delivery line design §6.5)", () => {
+  const BACKEND_REQUEST = "req-20260926T090000Z";
+
+  function writeRegistry(requests: Array<Partial<RegisteredRequest> & { requestId: string }>): void {
+    mkdirSync(join(home, REQUESTS_DIR_NAME), { recursive: true, mode: 0o700 });
+    const full = requests.map((request) => ({
+      workspaceId: WORKSPACE_ID,
+      createdAt: at(0),
+      source: "tool",
+      managerId: MANAGER,
+      workerIds: [],
+      tier: null,
+      finishedAt: null,
+      reviews: { batches: [], grants: [] },
+      ...request,
+    }));
+    writeFileSync(join(home, REQUESTS_DIR_NAME, `${WORKSPACE_ID}.json`), JSON.stringify({ schemaVersion: 1, requests: full }), { mode: 0o600 });
+    clearRequestRegistryCache();
+  }
+
+  /** `REQUEST_ID`, blocked at 10:04 on `items`, its Worker idle; the second request's Worker on the daemon too. */
+  async function waitingOn(items: Array<Pick<Waiting["items"][number], "kind" | "id">>, extra: Partial<RegisteredRequest> = {}) {
+    await seed([...handedOver(), relayed("received", at(1, 10)), relayed("blocked", at(4))]);
+    writeRegistry([
+      { requestId: REQUEST_ID, workerIds: [WORKER], waiting: waitOn(items), ...extra },
+      { requestId: REQUEST_2, workerIds: [WORKER_2] },
+    ]);
+    inScope();
+    const fake = daemonWith([...fakeAgentsFor(), secondWorker("idle"), orchestratorAgent()]);
+    const wake = vi.fn<(settled: SettledWait[]) => void>();
+    const stalls = watcher({ onWaitsSettled: (settled) => wake(settled) });
+    stalls.usePaseo(fake.paseo);
+    return { fake, stalls, wake };
+  }
+
+  it("live items: no idle-unfinished, no event, no re-wake, however long it waits", async () => {
+    const { fake, stalls, wake } = await waitingOn([{ kind: "request", id: REQUEST_2 }]);
+    clock = when(59);
+    expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
+    clock = new Date(when(59).getTime() + 3_600_000);
+    expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
+    expect(alerts().list()).toEqual([]);
+    expect(wake).not.toHaveBeenCalled();
+    expect(fake.sends).toEqual([]);
+  });
+
+  it("an open alert clears once the request waits by structure on live items", async () => {
+    const { stalls } = await waitingOn([{ kind: "request", id: REQUEST_2 }]);
+    alerts().raise({ workspaceId: WORKSPACE_ID, kind: "request-stalled", subject: REQUEST_ID, detail: "idle-unfinished" });
+    clock = when(59);
+    expect((await stalls.pass()).cleared).toEqual([alertOf()]);
+  });
+
+  it("the awaited request loses its last live Worker: the item settles with its fact and wakes the Worker once", async () => {
+    const { fake, stalls, wake } = await waitingOn([{ kind: "request", id: REQUEST_2 }]);
+    clock = when(59);
+    await stalls.pass();
+    fake.byId(WORKER_2)!.archivedAt = at(58);
+    const settled = await stalls.pass();
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]![0]).toMatchObject([
+      { workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, met: true, waiting: { items: [{ kind: "request", id: REQUEST_2, settled: true, fact: `${REQUEST_2} has no live Worker left` }] } },
+    ]);
+    // Nothing holds it any more: idle, it stalls as any other request until the release wakes it.
+    expect(settled.raised).toEqual([alertOf()]);
+    await stalls.pass();
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "an awaited request stopped",
+      [{ kind: "request" as const, id: REQUEST_2 }],
+      {},
+      () => {
+        const roster = createMissionRoster(home, { env: {} });
+        roster.add("mis-0123456789", { requestId: REQUEST_2, workspaceId: WORKSPACE_ID, topic: "rename", workerId: WORKER_2 });
+        roster.setState("mis-0123456789", REQUEST_2, "stopped");
+      },
+      `${REQUEST_2} stopped`,
+    ],
+    [
+      "a Reviewer gone with no verdict",
+      [{ kind: "batch" as const, id: "b1" }],
+      { reviews: { batches: [{ batchId: "b1", reviewerIds: [REVIEWER], brief: "", calls: [{ callId: "call-1", kind: "create" as const, reviewerId: REVIEWER, at: at(5) }] }], grants: [] } },
+      () => {},
+      "b1 got no verdict: no Reviewer of it is running",
+    ],
+    [
+      "a link past its ceiling",
+      [{ kind: "link" as const, id: "peer-000000000001" }],
+      {},
+      () => {
+        const links = createPeerLinkStore(home, { now: () => when(2), newId: () => "peer-000000000001", env: {} });
+        const made = links.createLink({
+          kind: "work",
+          from: { workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, agentId: WORKER, role: "worker" },
+          to: { workspaceId: PEER_WS, managerId: "agent-backend-manager" },
+          text: "Add the /export endpoint.",
+        });
+        if (!made.ok) throw new Error(made.reasons.join("\n"));
+        links.takeLink(made.link.linkId, { workspaceId: PEER_WS, requestId: BACKEND_REQUEST, workerId: PEER_WORKER });
+      },
+      `peer-000000000001: taken by request ${BACKEND_REQUEST} of project ${PEER_WS}, which has no live agent`,
+    ],
+  ])("%s settles as a fact and wakes the Worker once", async (_name, items, extra, arrange, fact) => {
+    arrange();
+    const { stalls, wake } = await waitingOn(items, extra);
+    clock = when(59);
+    await stalls.pass();
+    await stalls.pass();
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]![0]).toMatchObject([{ requestId: REQUEST_ID, met: true, waiting: { items: [{ ...items[0], settled: true, fact }] } }]);
+  });
+
+  it("a review call within the pending window keeps the batch live", async () => {
+    const reviews = { batches: [{ batchId: "b1", reviewerIds: [REVIEWER], brief: "", calls: [{ callId: "call-1", kind: "create" as const, reviewerId: REVIEWER, at: at(55) }] }], grants: [] };
+    const { stalls, wake } = await waitingOn([{ kind: "batch", id: "b1" }], { reviews });
+    clock = when(59);
+    expect(await stalls.pass()).toMatchObject({ raised: [], events: [] });
+    expect(wake).not.toHaveBeenCalled();
   });
 });

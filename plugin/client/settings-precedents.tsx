@@ -1,7 +1,8 @@
 /**
  * Settings → More → Precedents (autonomy design §B.6, §B.9; PRD REQ-124):
  * the owner's standing answers. Each active
- * precedent shows its project, subject, answer and expiry with **End**
+ * precedent shows its project, subject, answer and expiry (and, for one
+ * `precedents.list` marks `inert`, why it answers nothing) with **End**
  * (`precedents.end`, a confirmation in place, Cancel first); **Add
  * precedent…** opens a form — project or all, subject, answer, Cancel first —
  * that saves through `precedents.save`. A precedent is also saved from an
@@ -67,6 +68,11 @@ function RowView({ row, busy, on, styles, theme }: { row: PrecedentRowView; busy
       </View>
       <Text style={styles.body}>{row.text}</Text>
       <ToneText tone="muted" style={{ fontSize: 11 }} styles={styles} theme={theme}>{`${row.expiresText} · ${row.sourceText}`}</ToneText>
+      {row.inertText === null ? null : (
+        <ToneText tone="warning" style={{ fontSize: 11 }} styles={styles} theme={theme}>
+          {row.inertText}
+        </ToneText>
+      )}
       {row.confirm === null ? null : (
         <ConfirmBlock dialog={row.confirm} busy={busy} busyLabel="Ending…" onConfirm={on.confirmEnd} onCancel={on.cancelEnd} styles={styles} theme={theme} />
       )}

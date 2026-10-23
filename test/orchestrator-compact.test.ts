@@ -8,14 +8,19 @@ import {
   COMPACT_FOCUS,
   SAFE_SEND_MS,
   STATE_BRIEF_MAX_CHARS,
+  WORKER_LINKS_BLOCK_MAX_CHARS,
   compactCommandOf,
   contextCrossingOf,
   createCompactionRunner,
   crossingWordsOf,
   reportedIn,
   stateBriefOf,
+  workerLinkLines,
   type CompactionRunner,
 } from "../plugin/server/compaction";
+import { createMissionRoster } from "../plugin/server/mission-roster";
+import { createMissionStore } from "../plugin/server/mission-store";
+import { createPeerLinkStore } from "../plugin/server/peer-links";
 import {
   COMPACTIONS_FILE,
   COMPACTION_WAIT_MS,
@@ -30,12 +35,14 @@ import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { createInterventionStore } from "../plugin/server/intervention-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
+import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { ORCHESTRATOR_INSTRUCTIONS_HASH } from "../plugin/server/orchestrator-agent";
 import { ORCHESTRATOR_DIR_NAME } from "../plugin/server/orchestrator-store";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import type { Evidence, TraceRecord, Usage } from "../plugin/shared/contracts";
 import { answerDecision } from "../plugin/shared/decisions";
 import { DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
+import { MAINTENANCE_WAIT_MS } from "../plugin/shared/interventions";
 import { STATE_NOTICE_MARKER, isPluginNotice } from "../plugin/shared/notices";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo, type FakePaseo } from "./helpers/fake-paseo";
@@ -80,6 +87,7 @@ beforeEach(() => {
 afterEach(() => {
   clearTraceStoreCache();
   clearDecisionStoreCache();
+  clearRequestRegistryCache();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -473,6 +481,112 @@ describe("a bound Worker's safe point: its report in its turn record (design §1
   });
 });
 
+describe("the maintenance ceiling (delivery line design §6.6)", () => {
+  /** 12.1M tokens read in one turn: over twice the Worker's 5.7M threshold. */
+  const heavy = (minute: number) => agentTurn(WORKER, minute, "claude", { usage: usageOf("claude", { cachedInputTokens: 12_000_000 }) });
+  const firstLines = (fake: FakePaseo<unknown>) => fake.sends.map((sent) => sent.text.split("\n")[0]);
+  /** Two deliveries queued for the Worker while it runs; then it is idle. */
+  async function queuedItems(fake: FakePaseo<unknown>): Promise<void> {
+    await queue.enqueue(WORKER, "BM-DELIVERY:a", "BM-DELIVERY a", fake.paseo as never);
+    await queue.enqueue(WORKER, "BM-DELIVERY:b", "BM-DELIVERY b", fake.paseo as never);
+    fake.byId(WORKER)!.status = "idle";
+  }
+
+  it("at twice its threshold the /compact goes at that turn end with no report and items queued, ahead of them; BM-STATE goes first after the compaction, then the items", async () => {
+    const fake = daemon({ worker: "running", timeline: busyTimeline });
+    await queuedItems(fake);
+    const runner = await recorded(fake, heavy(10), itemsOf(busyTimeline));
+    expect(fake.sends).toEqual([{ id: WORKER, text: compactCommandOf("claude") }]);
+    expect(queue.pending(WORKER).map((notice) => notice.kind)).toEqual(["BM-DELIVERY:a", "BM-DELIVERY:b"]);
+    expect(compactions().list()).toMatchObject([{ state: "compacting" }]);
+    // The compaction's turn: the brief goes before what waited.
+    fake.byId(WORKER)!.status = "idle";
+    clock = new Date(T0 + 32 * MIN);
+    const compacted = agentTurn(WORKER, 32, "claude", { usage: usageOf("claude", { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 }), evidence: [compactionEvidence(WORKER, iso(T0 + 32 * MIN))] });
+    await runner.turnRecorded(workerEnded([]), compacted, fake.paseo);
+    expect(firstLines(fake)).toEqual([compactCommandOf("claude"), STATE_NOTICE_MARKER]);
+    // Then the items, in order, one turn apart.
+    for (let n = 0; n < 2; n += 1) {
+      fake.byId(WORKER)!.status = "idle";
+      await queue.turnEnded({ agent: { id: WORKER } }, fake.paseo);
+    }
+    expect(firstLines(fake)).toEqual([compactCommandOf("claude"), STATE_NOTICE_MARKER, "BM-DELIVERY a", "BM-DELIVERY b"]);
+  });
+
+  it("below it, a turn without a report, or with items queued, still waits", async () => {
+    const fake = daemon({ worker: "running", timeline: busyTimeline });
+    await queuedItems(fake);
+    // 6.1M: over the threshold, under twice it, and no report.
+    const runner = await recorded(fake, agentTurn(WORKER, 10), itemsOf(busyTimeline));
+    expect(fake.sends).toEqual([]);
+    // A report, but items are queued.
+    await runner.turnRecorded(workerEnded(itemsOf(reportedTimeline)), agentTurn(WORKER, 12), fake.paseo);
+    expect(fake.sends).toEqual([]);
+    expect(compactions().list()).toMatchObject([{ state: "waiting" }]);
+  });
+
+  it("waiting 30 minutes, half its window, it goes at the next turn end without a safe point, ahead of what is queued", async () => {
+    expect(MAINTENANCE_WAIT_MS.compact).toBe(30 * MIN);
+    expect(MAINTENANCE_WAIT_MS.compact).toBe(SAFE_POINT_WAIT_MS / 2);
+    const fake = daemon({ worker: "running", timeline: busyTimeline });
+    const runner = await recorded(fake, agentTurn(WORKER, 10), itemsOf(busyTimeline));
+    await queuedItems(fake);
+    clock = new Date(T0 + 59 * MIN);
+    await runner.turnRecorded(workerEnded(itemsOf(busyTimeline)), agentTurn(WORKER, 59), fake.paseo);
+    expect(fake.sends).toEqual([]);
+    clock = new Date(T0 + 60 * MIN);
+    await runner.turnRecorded(workerEnded(itemsOf(busyTimeline)), agentTurn(WORKER, 60), fake.paseo);
+    expect(fake.sends).toEqual([{ id: WORKER, text: compactCommandOf("claude") }]);
+    expect(queue.pending(WORKER).map((notice) => notice.kind)).toEqual(["BM-DELIVERY:a", "BM-DELIVERY:b"]);
+  });
+
+  it("queued at its ceiling behind a notice sent at that turn end, the /compact still goes at the next turn end, past SAFE_SEND_MS", async () => {
+    // The queue ran first at this turn end and started another turn: the Worker reads running.
+    const fake = daemon({ worker: "running", timeline: busyTimeline });
+    await recorded(fake, heavy(10), itemsOf(busyTimeline));
+    const [entry] = compactions().list();
+    expect(entry).toMatchObject({ state: "waiting", ceilingAt: clock.toISOString() });
+    expect(queue.pending(WORKER).map((notice) => notice.kind)).toEqual([`${COMPACT_BATCH_NAME}:${entry!.id}`]);
+    clock = new Date(clock.getTime() + SAFE_SEND_MS + 2 * MIN);
+    fake.byId(WORKER)!.status = "idle";
+    await queue.turnEnded({ agent: { id: WORKER } }, fake.paseo);
+    expect(fake.sends).toEqual([{ id: WORKER, text: compactCommandOf("claude") }]);
+    expect(compactions().list()).toMatchObject([{ state: "compacting" }]);
+  });
+
+  it("reached once, its ceiling holds until it runs: a lighter next turn with no report and items queued still sends it first", async () => {
+    const fake = daemon({ worker: "running", timeline: busyTimeline });
+    const runner = await recorded(fake, heavy(10), itemsOf(busyTimeline));
+    // A reload forgets the queued /compact; deliveries queue meanwhile.
+    queue.clear();
+    await queuedItems(fake);
+    clock = new Date(clock.getTime() + MIN);
+    // 6.1M: under twice the threshold, and no report.
+    await runner.turnRecorded(workerEnded(itemsOf(busyTimeline)), agentTurn(WORKER, 12), fake.paseo);
+    expect(fake.sends).toEqual([{ id: WORKER, text: compactCommandOf("claude") }]);
+    expect(queue.pending(WORKER).map((notice) => notice.kind)).toEqual(["BM-DELIVERY:a", "BM-DELIVERY:b"]);
+  });
+
+  it("the owner's maintenance.ceilingFactor sets the ceiling", async () => {
+    createCoordinationStore(home).set({ key: "maintenance.ceilingFactor", value: 3 });
+    const fake = daemon({ worker: "running", timeline: busyTimeline });
+    await queuedItems(fake);
+    // 12.1M is under three times 5.7M.
+    await recorded(fake, heavy(10), itemsOf(busyTimeline));
+    expect(fake.sends).toEqual([]);
+    expect(compactions().list()).toMatchObject([{ state: "waiting" }]);
+  });
+
+  it("a Worker waiting by structure is at a safe point: its /compact goes though the turn shows no report", async () => {
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
+    registry.setWaiting(WORKSPACE_ID, REQUEST, { since: clock.toISOString(), reportRecordId: "out-0000000000ff", wakeOn: "all", items: [{ kind: "question", id: "dec-1", settled: false }] });
+    const fake = daemon({ timeline: busyTimeline });
+    await recorded(fake, agentTurn(WORKER, 10), itemsOf(busyTimeline));
+    expect(fake.sends).toEqual([{ id: WORKER, text: compactCommandOf("claude") }]);
+  });
+});
+
 describe("the BM-STATE brief, from the stores (design §G.5 step 4)", () => {
   it("a Worker's holds the request and the owner's words, the decisions with their answers and the report's plan, beads, findings, files and checks — masked, bounded", async () => {
     await store(
@@ -543,6 +657,58 @@ describe("the BM-STATE brief, from the stores (design §G.5 step 4)", () => {
       "blockers: Q1",
     ]);
     expect(brief).not.toContain(SECRET);
+  });
+
+  it("a Worker's carries its request's links with each one's latest message and refs, and its mission's live contracts touching its repo (delivery line design §9.3)", async () => {
+    await store(agentTurn(MANAGER, 1, "claude", { requestId: REQUEST, sent: [msg(MANAGER, iso(T0 + MIN), "Show the invoices.", "user")] }));
+    const API = "wks_api";
+    const made = createMissionStore(home, { newId: () => "mis-00000000aa", env: {}, now: () => clock }).create({ code: "INV", name: "Invoices", goal: "Bill", repos: [WORKSPACE_ID, API], createdBy: "owner", mainId: MANAGER });
+    if (!made.ok) throw new Error(made.reasons.join("; "));
+    const contract = (id: string, over: Record<string, unknown>) => ({ id, title: `API ${id}`, providerRepo: API, consumerRepos: [WORKSPACE_ID], text: "GET /x", version: 1, updatedAt: iso(T0), source: "PRD", ...over });
+    createMissionStore(home, { env: {}, now: () => clock }).update("mis-00000000aa", (mission) => ({
+      ...mission,
+      contracts: [contract("C1", {}), contract("C2", { status: "proposed", version: 2 }), contract("C3", { providerRepo: "wks_other", consumerRepos: [] }), contract("C4", { status: "withdrawn" })],
+    }));
+    createMissionRoster(home).add("mis-00000000aa", { requestId: REQUEST, workspaceId: WORKSPACE_ID, topic: "Invoices", workerId: WORKER });
+    let n = 0;
+    const links = createPeerLinkStore(home, { newId: () => `peer-00000000000${(n += 1)}`, now: () => new Date(T0 + 20 * MIN) });
+    links.createLink({ kind: "question", from: { workspaceId: WORKSPACE_ID, requestId: REQUEST, agentId: WORKER, role: "worker" }, to: { workspaceId: API, managerId: null }, text: "Which page size?" });
+    links.appendMessage("peer-000000000001", { recordId: "out-000000000001", workspaceId: WORKSPACE_ID, side: "asker", agentId: WORKER, kind: "peer", text: "Which page size?", act: "ask" });
+    links.appendMessage("peer-000000000001", { recordId: "out-000000000002", workspaceId: API, side: "answerer", agentId: "agent-api", kind: "peer-message", text: `Fifty, as in C2 v2; key ${SECRET}.`, act: "agree", refs: { contracts: ["C2@v2"] } });
+    // Another request's link is not this Worker's.
+    links.createLink({ kind: "work", from: { workspaceId: WORKSPACE_ID, requestId: "req-20260930T120000Z", agentId: "agent-other", role: "worker" }, to: { workspaceId: API, managerId: null }, text: "Not mine" });
+
+    const entry = compactions().add({ workspaceId: WORKSPACE_ID, requestId: REQUEST, agentId: WORKER, role: "worker", provider: "claude", interventionId: null, reason: "" });
+    const expected = [
+      "links:",
+      `- peer-000000000001 to ${API} (question, open): last agree by ${API} 10 min ago: Fifty, as in C2 v2; key [redacted]. · refs C2@v2`,
+      "contracts:",
+      `- C2 v2 proposed: API C2 (provider ${API}; consumers ${WORKSPACE_ID})`,
+      `- C1 v1 agreed: API C1 (provider ${API}; consumers ${WORKSPACE_ID})`,
+    ];
+    expect(workerLinkLines(home, entry, { PASEO_PASSWORD: SECRET }, clock)).toEqual(expected);
+    const brief = stateBriefOf(entry, home, { PASEO_PASSWORD: SECRET });
+    const lines = brief.split("\n");
+    // After the decisions, before the reports.
+    expect(lines.slice(lines.indexOf("links:"), lines.indexOf("links:") + 5).map((line) => line.replace(/ \d+ (min|h) ago/, " … ago"))).toEqual(expected.map((line) => line.replace(/ \d+ (min|h) ago/, " … ago")));
+    expect(lines.indexOf("decisions: none")).toBeLessThan(lines.indexOf("links:"));
+    expect(lines.indexOf("contracts:")).toBeLessThan(lines.indexOf("lastReport: none"));
+    expect(brief).not.toContain(SECRET);
+    expect(brief.length).toBeLessThanOrEqual(STATE_BRIEF_MAX_CHARS);
+
+    // Past its room, the contracts drop first, then the oldest links.
+    const many = createPeerLinkStore(home, { newId: () => `peer-0000000001${(n += 1).toString(16).padStart(2, "0")}`, now: () => new Date(T0 + 20 * MIN) });
+    const records = Array.from({ length: 10 }, (_, r) => `out-0000000000${r.toString(16).padStart(2, "0")}`);
+    for (let index = 0; index < 9; index += 1) {
+      const made = many.createLink({ kind: "work", from: { workspaceId: WORKSPACE_ID, requestId: REQUEST, agentId: WORKER, role: "worker" }, to: { workspaceId: API, managerId: null }, text: "Open the port" });
+      if (!made.ok) throw new Error(made.reasons.join("; "));
+      many.appendMessage(made.link.linkId, { recordId: `out-00000000ff${index.toString(16).padStart(2, "0")}`, workspaceId: API, side: "answerer", agentId: "agent-api", kind: "peer-message", text: `${index} ${"y".repeat(400)}`, act: "answer", refs: { records } });
+    }
+    const bounded = workerLinkLines(home, entry, {}, clock);
+    expect(bounded.join("\n").length).toBeLessThanOrEqual(WORKER_LINKS_BLOCK_MAX_CHARS);
+    expect(bounded).not.toContain("contracts:");
+    expect(bounded.filter((line) => line.startsWith("- peer-")).length).toBeLessThan(10);
+    expect(bounded.at(-1)).toContain("8 yyyy");
   });
 
   it("a Manager's lists its newest requests and the owner's newest words, never as a request id the collector would take", async () => {

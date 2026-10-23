@@ -47,11 +47,12 @@
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { roleOfProvider } from "./agent-role";
 import { liveBindingOf, type BindingStore } from "./agent-bindings";
+import { verdictTargetOf } from "./decision-delivery";
 import { parseReviews } from "./bm-report";
 import { joinStreamedText, sliceLastTurn } from "./collector";
 import type { NoticePaseo, NoticeQueue } from "./notice-queue";
 import { createOutbox, storeAndDeliver, type OutboxDeps } from "./outbox";
-import { createRequestRegistry, newestCallOf, type ReviewCall } from "./request-registry";
+import { createRequestRegistry, newestCallOf, noteReviewResult, type ReviewCall } from "./request-registry";
 import { requestIndexOf } from "./mission-roster";
 import { reasonOf } from "./role-choices";
 import { NO_VERDICT_SENTENCE, reviewCallIdOf } from "../shared/notices";
@@ -178,7 +179,7 @@ export async function checkNoVerdict(event: TurnEndedEvent, deps: NoVerdictDeps)
     // A provider failure is the fallback's (an incident, its card and its switch).
     if (!canceled && deps.classified) return "fallback";
 
-    const { requestId, batchId, workerId, workspaceId } = context;
+    const { requestId, batchId, workspaceId } = context;
     const request = createRequestRegistry(deps.home, { log }).get(workspaceId, requestId);
     const batch = request?.reviews.batches.find((entry) => entry.batchId === batchId);
     if (batch === undefined || batch.calls.length === 0) return "no-call";
@@ -190,10 +191,13 @@ export async function checkNoVerdict(event: TurnEndedEvent, deps: NoVerdictDeps)
     const outbox = createOutbox(deps.home, { ...(deps.now === undefined ? {} : { now: deps.now }), ...deps.outbox });
     const records = outbox.list(workspaceId).filter((record) => record.requestId === requestId && record.batchId === batchId && timeOrZero(record.createdAt) >= since);
     if (records.some((record) => record.kind === "review")) return "verdict";
+    // Delivery line design §6.4: the request's current Worker, when a handoff replaced the one that opened the batch.
+    const workerId = await verdictTargetOf({ workspaceId, requestId, home: deps.home }, context.workerId, deps.paseo);
     const noVerdict = { kind: "no-verdict" as const, requestId, batchId, from: agent.id, to: workerId, text: noVerdictTextOf({ requestId, batchId, reviewerId: agent.id }) };
     if (canceled) {
       if (records.some((record) => record.kind === "no-verdict")) return "already-sent";
-      outbox.add(workspaceId, noVerdict, "the Reviewer's turn was canceled: nothing was sent, so its stopped Worker is not woken");
+      const withheld = outbox.add(workspaceId, noVerdict, "the Reviewer's turn was canceled: nothing was sent, so its stopped Worker is not woken");
+      noteReviewResult(deps.home, workspaceId, withheld, log);
       return "withheld";
     }
     const delivery = {
@@ -209,14 +213,15 @@ export async function checkNoVerdict(event: TurnEndedEvent, deps: NoVerdictDeps)
       const raw: unknown = (event as { timeline?: unknown }).timeline;
       const review = finalReviewOf(Array.isArray(raw) ? raw : [], agent.id, (deps.now?.() ?? new Date()).toISOString());
       if (review !== null) {
-        await storeAndDeliver(workspaceId, { kind: "review", requestId, batchId, from: agent.id, to: workerId, text: review }, delivery);
+        // Delivery line design §5.2: its result is the batch's, as bm_review's would be.
+        await storeAndDeliver(workspaceId, { kind: "review", requestId, batchId, from: agent.id, to: workerId, text: review }, delivery, (record) => noteReviewResult(deps.home, workspaceId, record, log));
         return "review-delivered";
       }
     }
     // Once per (batchId, callId): a no-verdict created after the call is this call's.
     if (records.some((record) => record.kind === "no-verdict")) return "already-sent";
 
-    await storeAndDeliver(workspaceId, noVerdict, delivery);
+    await storeAndDeliver(workspaceId, noVerdict, delivery, (record) => noteReviewResult(deps.home, workspaceId, record, log));
     return "sent";
   } catch (error) {
     log(`[paseo-bm] the missing-verdict check of ${event?.agent?.id ?? "(unknown)"} failed: ${reasonOf(error)}`);

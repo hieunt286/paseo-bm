@@ -15,9 +15,16 @@
  * `shared/`: Zod and plain values only, no Node or React Native imports.
  */
 import { z } from "zod";
-import { coordinationChangeSchema, type ReviewBudget } from "./coordination";
-import { arbitrationActionSchema, isMissionActionKind, missionChangeActionSchema, missionMergeActionSchema, missionSplitActionSchema, missionTransferActionSchema } from "./mission-change";
-import type { Tier } from "./contracts";
+import { coordinationChangeSchema } from "./coordination";
+import {
+  arbitrationActionSchema,
+  integrationGrantActionSchema,
+  isMissionActionKind,
+  missionChangeActionSchema,
+  missionMergeActionSchema,
+  missionSplitActionSchema,
+  missionTransferActionSchema,
+} from "./mission-change";
 
 // ---------------------------------------------------------------------------
 // Vocabulary.
@@ -287,6 +294,8 @@ export const preparedActionSchema = z.discriminatedUnion("kind", [
   /** A legacy mission's merge and a transfer of requests on an `m:` card (mission runtime design §5.2, §5.3), the same way. */
   missionMergeActionSchema,
   missionTransferActionSchema,
+  /** The owner's one integration grant on the plugin's integration card (delivery line design §4.3), the same way. */
+  integrationGrantActionSchema,
 ]);
 export type PreparedAction = z.infer<typeof preparedActionSchema>;
 
@@ -322,42 +331,27 @@ export function preparedChangeRefusalText(decisionId: string): string {
 }
 
 /**
- * The subject of a question that asks the owner for more review calls (design
- * §16.8): its options may carry a `grant`, and no precedent ever answers it.
+ * The subject of the retired question that asked the owner for more review
+ * calls (design §16.8; delivery line design §5.6): it no longer opens. Kept
+ * for the upgrade sweep, which withdraws the open ones
+ * (`server/review-budget-sweep.ts`), and for reading stored decisions.
  */
-export const REVIEW_BUDGET_SUBJECT = "review-budget";
-/** The most review calls one `{ calls: n }` grant adds (design §16.6, §16.8). */
-export const MAX_REVIEW_GRANT_CALLS = 10;
-/** The fewest review calls a grant the owner's policy chooses may add, whatever the tier's budget (design §7.17.8 a). */
-export const MIN_POLICY_REVIEW_GRANT_CALLS = 2;
+export const LEGACY_REVIEW_BUDGET_SUBJECT = "review-budget";
+/** The most review calls one stored `{ calls: n }` grant may hold: what older builds wrote (design §16.6). */
+const STORED_GRANT_MAX_CALLS = 10;
 
 /**
- * The most review calls a grant the owner's policy chooses may add for a
- * request of `tier` (design §7.17.8 a): that tier's own budget in `budget`
- * (the owner's coordination settings), the Small one while the tier is
- * unknown, and at least `MIN_POLICY_REVIEW_GRANT_CALLS`. A larger grant or an
- * `untilClean` one is the owner's. Pure.
- */
-export function policyGrantCapOf(tier: Tier | null, budget: ReviewBudget): number {
-  return Math.max(MIN_POLICY_REVIEW_GRANT_CALLS, budget[tier ?? "Small"]);
-}
-
-/**
- * What choosing an option of a `review-budget` question grants (design §16.8):
- * `{ calls: n }` raises the request's ceiling by n, `{ untilClean: b }` lets
- * batch b go on until it passes. Additive on the option; only a
- * `review-budget` question carries one (`bm_questions`).
+ * What choosing an option grants (delivery line design §5.4): `{ calls: n }`
+ * raises the request's ceiling by n — option a of a `review-cap` decision
+ * (`applyReviewCapAnswer`). `{ untilClean: b }` is an older build's
+ * `review-budget` grant: still read, never written, and it no longer exempts
+ * any call (§5.6). Additive on the option.
  */
 export const reviewGrantSchema = z.union([
-  z.object({ calls: z.number().int().min(1).max(MAX_REVIEW_GRANT_CALLS) }).strict(),
+  z.object({ calls: z.number().int().min(1).max(STORED_GRANT_MAX_CALLS) }).strict(),
   z.object({ untilClean: z.string().regex(/^b\d+$/) }).strict(),
 ]);
 export type ReviewGrant = z.infer<typeof reviewGrantSchema>;
-
-/** True for a grant the owner's policy may choose: none, or `{ calls: n }` with n at most `cap` (`policyGrantCapOf`; design §16.8). Pure. */
-export function policyMayGrant(grant: ReviewGrant | undefined, cap: number): boolean {
-  return grant === undefined || ("calls" in grant && grant.calls <= cap);
-}
 
 export const decisionOptionSchema = z.object({
   key: z.string().regex(OPTION_KEY_PATTERN),
@@ -365,7 +359,7 @@ export const decisionOptionSchema = z.object({
   recommended: z.boolean(),
   effects: z.array(effectSchema).max(EFFECTS.length),
   action: preparedActionSchema.optional(),
-  /** A `review-budget` question's grant (design §16.8); absent on every other option. */
+  /** A `review-cap` decision's grant (delivery line design §5.4), or an older `review-budget` one; absent on every other option. */
   grant: reviewGrantSchema.optional(),
 });
 export type DecisionOption = z.infer<typeof decisionOptionSchema>;
@@ -447,7 +441,8 @@ export const decisionDeliverySchema = z.object({
   /** The notice-queue kind it went under (e.g. `answers:<requestId>`). */
   kind: z.string().min(1),
   at: isoTimeSchema,
-  outcome: z.enum(["sent", "queued", "failed"]),
+  /** `held`: the wake gate holds it until the Worker's wait is met (delivery line design §6.4). */
+  outcome: z.enum(["sent", "queued", "failed", "held"]),
 });
 export type DecisionDelivery = z.infer<typeof decisionDeliverySchema>;
 

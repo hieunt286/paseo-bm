@@ -15,7 +15,7 @@
  * previous shape (REQ-050b). The fixtures in
  * `test/plugin-bm-report.test.ts` are the enforcement.
  */
-import type { GuardrailReport, ParsedReport, ParsedReview, ReportPhase, Tier, TraceRecord } from "./contracts";
+import { REPORT_CI_STATES, type GuardrailReport, type ParsedReport, type ParsedReview, type ReportPhase, type Tier, type TraceRecord } from "./contracts";
 
 /** Values that mean "nothing here" in a block (roles/worker.md says to write `none`). */
 const ABSENT_VALUES = new Set(["", "none", "n/a", "na", "-", "null", "nil"]);
@@ -289,6 +289,12 @@ const REPORT_KEYS = new Map<string, keyof ParsedReport | "phase" | "tier" | "gua
   ["decided", "decided"],
   ["blockers", "blockers"],
   ["handoffnote", "handoffNote"],
+  ["remaining", "remaining"],
+  ["branch", "integration"],
+  ["commit", "integration"],
+  ["pushed", "integration"],
+  ["mr", "integration"],
+  ["ci", "integration"],
   ["guardrail", "guardrail"],
 ]);
 
@@ -356,6 +362,56 @@ function handoffNoteOf(raw: string | undefined): { handoffNote?: string } {
   return note === null ? {} : { handoffNote: note };
 }
 
+/** `{ remaining }` when the report lists it (delivery line design §2.6), `;`-separated as `bm_report` writes it, else nothing. */
+function remainingOf(raw: string | undefined): { remaining?: string[] } {
+  const items = parseDecided(raw);
+  return items.length === 0 ? {} : { remaining: items };
+}
+
+/**
+ * `{ integration }` from the report's git lines (delivery line design §4.4),
+ * each field only when it reads; nothing when none does: older reports keep
+ * their exact shape.
+ */
+function integrationOf(field: (key: string) => string | undefined): { integration?: NonNullable<ParsedReport["integration"]> } {
+  const value = (key: string): string | null => valueOrNull(field(key))?.trim().split(/\s+/)[0] ?? null;
+  const branch = value("branch");
+  const commit = value("commit");
+  const mr = value("mr");
+  const pushed = /^(?:yes|true)$/i.test(value("pushed") ?? "") ? true : /^(?:no|false)$/i.test(value("pushed") ?? "") ? false : null;
+  // `none` is a state here, not an absent value.
+  const ci = REPORT_CI_STATES.find((state) => state === field("ci")?.trim().replace(/^`+|`+$/g, "").toLowerCase()) ?? null;
+  const integration = {
+    ...(branch === null ? {} : { branch }),
+    ...(commit === null || !/^[0-9a-f]{7,40}$/i.test(commit) ? {} : { commit: commit.toLowerCase() }),
+    ...(pushed === null ? {} : { pushed }),
+    ...(mr === null ? {} : { mr }),
+    ...(ci === null ? {} : { ci }),
+  };
+  return Object.keys(integration).length === 0 ? {} : { integration };
+}
+
+/** The ids after `waiting on requests:` and `waiting on review:` in a `blockers` line, as `bm_report` writes them (delivery line design §6.2). */
+const WAITED_REQUESTS = /\bwaiting on requests: (req-\d{8}T\d{6}Z(?:, req-\d{8}T\d{6}Z)*)/;
+const WAITED_BATCHES = /\bwaiting on review: (b\d+(?:, b\d+)*)/;
+const WAKE_ON_ANY = /(?:^|\. )wake on: any(?:\.|$)/;
+
+/**
+ * `{ waitingOnRequests, waitingOnBatches, wakeOn }` a blocked report's
+ * `blockers` names (delivery line design §6.2), each only when present:
+ * older reports keep their exact shape.
+ */
+function structuredWaitOf(blockers: string | null): { waitingOnRequests?: string[]; waitingOnBatches?: string[]; wakeOn?: "any" } {
+  if (blockers === null) return {};
+  const requests = WAITED_REQUESTS.exec(blockers)?.[1];
+  const batches = WAITED_BATCHES.exec(blockers)?.[1];
+  return {
+    ...(requests === undefined ? {} : { waitingOnRequests: requests.split(", ") }),
+    ...(batches === undefined ? {} : { waitingOnBatches: batches.split(", ") }),
+    ...(WAKE_ON_ANY.test(blockers) ? { wakeOn: "any" as const } : {}),
+  };
+}
+
 export interface ParseContext {
   agentId: string;
   /** Timestamp of the message the block came in, used as the block's `at`. */
@@ -383,6 +439,7 @@ export function parseReports(text: string, context: ParseContext): ParsedReport[
       beadsReady: parseBeadIdList(field("beadsready")),
     };
     const skills = parseSkillList(field("skillsused"));
+    const blockers = valueOrNull(field("blockers"));
     const report: ParsedReport = {
       agentId: context.agentId,
       at: context.at,
@@ -398,10 +455,16 @@ export function parseReports(text: string, context: ParseContext): ParsedReport[
       buildAndTests: checksValueOrNull(field("buildandtests")),
       skillsUsed: skills.names,
       decided: parseDecided(field("decided")),
-      blockers: valueOrNull(field("blockers")),
+      blockers,
       guardrail: parseGuardrail(field("guardrail")),
       // Only an outgoing Worker's report carries it (autonomy design §G.6 step 1): absent otherwise.
       ...handoffNoteOf(field("handoffnote")),
+      // Only a size rollover's finished carries it (delivery line design §2.6): absent otherwise.
+      ...remainingOf(field("remaining")),
+      // Only a report on a mission branch carries them (delivery line design §4.4): absent otherwise.
+      ...integrationOf(field),
+      // Only a bound Worker's blocked report that waits by id carries them (delivery line design §6.2).
+      ...(parsePhase(field("phase")) === "blocked" ? structuredWaitOf(blockers) : {}),
       unparsedFields: [...new Set(block.unknown)],
       incompleteFields: [
         ...Object.entries(lists)
@@ -425,7 +488,7 @@ export function parseReports(text: string, context: ParseContext): ParsedReport[
  * marker line rather than in a field, so the suffix is read too.
  */
 /** A finding item of a review: `- severity: blocking`, quoted or bold or not. */
-const FINDING_BLOCKING = /^\s*(?:>\s*)*[-*]\s+\**severity\**\s*:\s*\**blocking\b/i;
+export const FINDING_BLOCKING = /^\s*(?:>\s*)*[-*]\s+\**severity\**\s*:\s*\**blocking\b/i;
 
 export function parseReviews(text: string, context: ParseContext): ParsedReview[] {
   if (typeof text !== "string" || text === "") return [];

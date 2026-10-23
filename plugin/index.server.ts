@@ -24,10 +24,14 @@ import { checkNoVerdict } from "./server/no-verdict";
 import { relayUnboundBlocks } from "./server/unbound-relay";
 import { cancelOffToolReviewer, checkOffToolReviewer, registerOffToolAlertClear, registerOffToolTurnCancel } from "./server/off-tool-reviewer";
 import { recoverHookBindings, settleCreatedAgent } from "./server/creation-settle";
-import { applyReviewBudgetGrants } from "./server/review-tools";
+import { applyReviewCapAnswer } from "./server/review-tools";
+import { createReviewBudgetSweep } from "./server/review-budget-sweep";
+import { createPlacementLifecycle } from "./server/placement-create";
+import { writeCutOver } from "./server/checkpoint";
+import { createCheckpointOffers } from "./server/checkpoint-card";
 import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
-import { registerNoticeQueue } from "./server/notice-queue";
+import { registerNoticeQueue, type NoticePaseo } from "./server/notice-queue";
 import { createOutboxResend } from "./server/outbox";
 import { dataHome } from "./server/rpc-kit";
 import { registerSetupRpcs } from "./server/setup-rpc";
@@ -47,7 +51,9 @@ import { registerUpdateInstallRpc } from "./server/update-install";
 import { createDecisionMaterialiser } from "./server/decision-materialiser";
 import { createQuestionDecisionDelivery } from "./server/decision-delivery";
 import { registerOrchestratorRpcs } from "./server/orchestrator-rpc";
+import { createOrchestratorRetirement } from "./server/orchestrator-agent";
 import { createStallWatcher } from "./server/stall-watcher";
+import { releaseSettledWaits } from "./server/wake-gate";
 import { createConflictWatch } from "./server/governor-conflicts";
 import { createGovernor, type GovernorPaseo } from "./server/governor-store";
 import { createOrchestratorTools } from "./server/orchestrator-tools";
@@ -57,6 +63,7 @@ import { createOverrideDelivery } from "./server/override-delivery";
 import { actsNoted, createEventBus } from "./server/event-bus";
 import { createCompactionRunner } from "./server/compaction";
 import { createHandoffRunner } from "./server/handoff";
+import { rolloverTurnRecorded } from "./server/rollover";
 import { createWritersWatch } from "./server/writers-watch";
 import { raiseInboxAlert } from "./server/alert-store";
 import { rolePairingAlertOf } from "./server/role-pairing";
@@ -187,7 +194,7 @@ export default function contribute(server: PluginServerContext): () => void {
   // Missions design §9.2, §9.3: the governor's figures and its ladder's code steps, for every open
   // mission each minute (beside the stall pass) and for a mission at each recorded turn of its agents.
   const governor = createGovernor();
-  // Missions design §9.6: conflicts between missions (charters, writers, links) wake the governor as mission.conflict.
+  // Missions design §9.6, delivery line design §4.7: conflicts between missions (branches changing one area, links) wake the governor as mission.conflict.
   const conflicts = createConflictWatch();
   // Design §7.17.7: each minute, before the stall pass, the hook bindings of Managers the owner opened are recovered.
   const stallWatcher = createStallWatcher({
@@ -199,8 +206,13 @@ export default function contribute(server: PluginServerContext): () => void {
       } finally {
         // Missions design §9.7: the governor's mission.signal, mission.review and mission.scope wake the Orchestrator.
         await eventBus.governed(await governor.pass(handle), handle);
-        await eventBus.publish(conflicts.pass(), handle);
+        await eventBus.publish(await conflicts.pass(), handle);
       }
+    },
+    // Delivery line design §6.4, §6.5: a wait the pass's dead items met wakes its Worker once, the fact first.
+    onWaitsSettled: (settled, handle) => {
+      const home = dataHome();
+      return home === null ? undefined : releaseSettledWaits(home, settled, { paseo: handle as unknown as NoticePaseo });
     },
   });
   // The agents' block-building tools (ADR-010): one endpoint, given to every bm-* agent created from now on.
@@ -241,10 +253,29 @@ export default function contribute(server: PluginServerContext): () => void {
   const outboxResend = createOutboxResend({ home: () => dataHome() });
   // Missions design §3.6: the first handle of the run turns each workspace's bound Manager into a one-repo mission.
   const legacyMigration = createLegacyMigration(missionDeps);
+  // Delivery line design §8.5: older Orchestrators still labelled main are relabelled retired and retitled,
+  // once at the first handle of the run and at each new Orchestrator's agent.created (never archived, ADR-005).
+  const orchestratorRetirement = createOrchestratorRetirement();
+  // Delivery line design §5.6: the first handle of the run withdraws the open review-budget questions an
+  // older build left, once, and tells their Workers.
+  const reviewBudgetSweep = createReviewBudgetSweep();
+  // Delivery line design §3.3, §3.6: the mission placements are reconciled with Paseo's workspaces at the first
+  // handle of the run (then at most every ten minutes); an archived worktree workspace marks its placement archived.
+  const placements = createPlacementLifecycle();
+  // Delivery line design §4.8: this build's first start is the cut-over (missions/placement-mode.json { since });
+  // the owner's checkpoint cards are offered at the first handle of the run, then at most every ten minutes.
+  writeCutOver(dataHome(), new Date(), (message) => console.warn(message));
+  const checkpoints = createCheckpointOffers();
+  const removePlacementArchived =
+    typeof server.on === "function" ? server.on("workspace.archived", (event) => placements.archived(event?.workspace?.id)) : () => {};
   const shareHandle = (paseo: unknown): void => {
     void bindingSweep.run(paseo);
     void legacyMigration.run(paseo);
+    void orchestratorRetirement.start(paseo);
     void outboxResend.run(paseo);
+    void reviewBudgetSweep.run(paseo);
+    void placements.run(paseo);
+    void checkpoints.run(paseo);
     agentTools.usePaseo(paseo);
     stallWatcher.usePaseo(paseo);
     eventBus.usePaseo(paseo);
@@ -302,6 +333,8 @@ export default function contribute(server: PluginServerContext): () => void {
           void cancelOffToolReviewer(finding);
         },
       });
+      // Delivery line design §8.5: a new Orchestrator retires the older ones still labelled main.
+      await orchestratorRetirement.agentCreated(agent, paseo);
       return handoffs.agentCreated(agent, paseo);
     },
   );
@@ -408,10 +441,10 @@ export default function contribute(server: PluginServerContext): () => void {
     // Autonomy design §D.2: the owner's Allow or Deny of a held request answers it, exactly once.
     held: actionBoundary.onSettled,
   });
-  // Design §16.8: an answered review-budget decision — by the owner, or by the policy where cost is
-  // delegated (bm_decide) — grants its chosen option's review calls before its answer is delivered.
+  // Delivery line design §5.4: the owner's answer to a request's review-cap decision grants its calls
+  // before its answer is delivered. A review-budget answer grants nothing any more (§5.6).
   const onDecisionsSettled: OnDecisionsSettled = (decisions, context) => {
-    applyReviewBudgetGrants(decisions);
+    applyReviewCapAnswer(decisions);
     return deliverSettled(decisions, context);
   };
   registerDecisionRpcs(server, { onSettled: onDecisionsSettled, missions: missionDeps });
@@ -492,8 +525,8 @@ export default function contribute(server: PluginServerContext): () => void {
       coordinationGuard.afterCheck(interventionCheck.run());
       // Alerts need no Paseo handle; the events go with the bus's last one when this turn brought none.
       const collisions = writersWatch.turnRecorded(record, location, typeof event?.agent?.cwd === "string" ? event.agent.cwd : null);
-      // Missions design §9.6: a collision between Workers of two missions is a mission.conflict too.
-      const writersObserved = [...collisions, ...conflicts.writersCollided(collisions)];
+      // Delivery line design §4.7: a collision stays inside a placement; it is no conflict between missions.
+      const writersObserved = collisions;
       interruptions.turnRecorded(record, paseo);
       if (paseo === undefined) {
         if (writersObserved.length > 0) await eventBus.publish(writersObserved);
@@ -506,6 +539,9 @@ export default function contribute(server: PluginServerContext): () => void {
       await compactions.turnRecorded(event, record, paseo);
       // Autonomy design §G.6: this turn may be a pending handoff's next step; before the events, which read it.
       await handoffs.turnRecorded(event, record, paseo);
+      // Delivery line design §2.6: a bound request past its size figures is asked to roll over.
+      const home = dataHome();
+      if (home !== null) await rolloverTurnRecorded(home, record, paseo);
       // Missions design §9.1: decisions opened and finished requests wake nothing any more; a finish
       // (the Manager's turn or the Worker's own, design §7.17.8 i) only counts toward advice.
       await eventBus.turnRecorded(record, paseo);
@@ -533,6 +569,7 @@ export default function contribute(server: PluginServerContext): () => void {
     fallbackWaiter.clear();
     removeCollector();
     removeDenyWatch();
+    removePlacementArchived();
     stallWatcher.stop();
     void agentTools.close();
   };

@@ -61,9 +61,10 @@
  */
 import { resolveDataHome } from "./data-home";
 import { createAlertStore } from "./alert-store";
-import { currentPolicy } from "./autonomy-store";
+import { effectivePolicy, inCharter, repoKeysIn } from "./placements";
 import { readCoordinationSettings } from "./coordination-rpc";
-import { usageOfSnapshot, type CollectorPaseo } from "./collector";
+import { runtimeOf, usageOfSnapshot, type CollectorPaseo } from "./collector";
+import { inputIncludesCached, tokenProviderOf } from "../shared/eval-metrics/helpers";
 import type { CoordinationRole, ThresholdFigure } from "../shared/coordination";
 import { noticeQueue, type BatchItem, type NoticeBatch, type NoticeQueue } from "./notice-queue";
 import { EVENTS_NOTICE_MARKER } from "./notices";
@@ -423,8 +424,11 @@ export async function closingTurnUsage(agentId: string, paseo: unknown): Promise
     const timeline = (paseo as Partial<CollectorPaseo> | null | undefined)?.agents?.ref(agentId)?.timeline;
     if (typeof timeline?.refetch !== "function") return null;
     const payload = await timeline.refetch({ direction: "tail", limit: 1 });
-    const usage = usageOfSnapshot((payload as { agent?: unknown } | null)?.agent);
-    return usage === null ? null : { inputTokens: usage.inputTokens, cachedInputTokens: usage.cachedInputTokens, outputTokens: usage.outputTokens };
+    const agent = (payload as { agent?: unknown } | null)?.agent;
+    const usage = usageOfSnapshot(agent);
+    if (usage === null) return null;
+    const includesCached = inputIncludesCached(usage, tokenProviderOf({ runtime: runtimeOf(agent), usage }));
+    return { inputTokens: usage.inputTokens, cachedInputTokens: usage.cachedInputTokens, outputTokens: usage.outputTokens, ...(includesCached ? { includesCached: true as const } : {}) };
   } catch {
     return null;
   }
@@ -507,18 +511,19 @@ export function missionReviewEventsOf(missionId: string, before: ReviewMarks | u
  * add. Reads the stores; throws only what they throw.
  */
 export function outsideCharterOf(home: string, mission: Pick<Mission, "missionId" | "state" | "charter">): MissionScopeEvent[] {
-  const repos = new Set(mission.charter.repos);
-  if (mission.state !== "open" || repos.size === 0 || createMissionAutonomyStore(home).isDelegated(mission.missionId, "scope-repo")) return [];
+  if (mission.state !== "open" || mission.charter.repos.length === 0 || createMissionAutonomyStore(home).isDelegated(mission.missionId, "scope-repo")) return [];
+  // Delivery line design §3.1: a request in a placement of a charter repo is inside the charter; the event names the repo.
+  const keyOf = repoKeysIn(home);
   const roster = createMissionRoster(home).list(mission.missionId);
   const requestIds = new Set(roster.map((entry) => entry.requestId));
   const found: MissionScopeEvent[] = [
     ...roster
-      .filter((entry) => entry.state === "active" && !repos.has(entry.workspaceId))
-      .map((entry): MissionScopeEvent => ({ type: "mission.scope", missionId: mission.missionId, workspaceId: entry.workspaceId, requestId: entry.requestId, linkId: null })),
+      .filter((entry) => entry.state === "active" && !inCharter(home, mission, entry.workspaceId))
+      .map((entry): MissionScopeEvent => ({ type: "mission.scope", missionId: mission.missionId, workspaceId: keyOf(entry.workspaceId), requestId: entry.requestId, linkId: null })),
     ...createPeerLinkStore(home)
       .list()
-      .filter((link) => isLiveLink(link) && link.from.requestId !== null && requestIds.has(link.from.requestId) && !repos.has(link.to.workspaceId))
-      .map((link): MissionScopeEvent => ({ type: "mission.scope", missionId: mission.missionId, workspaceId: link.to.workspaceId, requestId: link.from.requestId, linkId: link.linkId })),
+      .filter((link) => isLiveLink(link) && link.from.requestId !== null && requestIds.has(link.from.requestId) && !inCharter(home, mission, link.to.workspaceId))
+      .map((link): MissionScopeEvent => ({ type: "mission.scope", missionId: mission.missionId, workspaceId: keyOf(link.to.workspaceId), requestId: link.from.requestId, linkId: link.linkId })),
   ];
   if (found.length === 0) return [];
   const asked = new Set(
@@ -560,12 +565,13 @@ export function actsNoted<T extends { call(name: string, input: unknown): Promis
 export const EVENTS_BATCH: NoticeBatch = { name: EVENTS_NOTICE_MARKER, compose: (lines) => eventsMessageOf(lines) };
 
 /**
- * The owner's policy as the events read it, at each publish and delivery. A
- * policy that cannot be read is the empty policy — no project in the scope:
- * the safe side — with one log line. Never throws.
+ * The owner's policy as the events read it, at each publish and delivery, a
+ * placement read as its repo (delivery line design §3.1). A policy that
+ * cannot be read is the empty policy — no project in the scope: the safe
+ * side — with one log line. Never throws.
  */
 function eventPolicyOf(home: string, log: (message: string) => void = (message) => console.warn(message)): AutonomyPolicy {
-  return currentPolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy for the Orchestrator's events: ${reason}`));
+  return effectivePolicy(home, (reason) => log(`[paseo-bm] could not read the autonomy policy for the Orchestrator's events: ${reason}`));
 }
 
 /**

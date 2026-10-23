@@ -20,7 +20,6 @@ import { handleDecisionsAnswer, handleDecisionsList } from "../plugin/server/dec
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { createMissionRoster } from "../plugin/server/mission-roster";
-import { applyReviewBudgetGrants, policyGrantCapAt } from "../plugin/server/review-tools";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { decideRefusalOf, type AutonomyPolicy } from "../plugin/shared/autonomy";
 import { GRANT_TTL_MS, answerDecision, confirmDecision, markNeedsConfirmation, type Decision } from "../plugin/shared/decisions";
@@ -172,6 +171,14 @@ describe("opening at a Manager's turn end (§A.5 a)", () => {
     await materialiseTurn(askedTurn(), deps({ workerOf }));
     expect(workerOf).toHaveBeenCalledTimes(1);
     expect(workerOf).toHaveBeenCalledWith({ requestId: REQUEST, workspaceId: WORKSPACE_ID, managerId: MANAGER }, PASEO);
+  });
+
+  it("never opens a Worker's question on a code subject (delivery line design §5.6, §7.4), with a log line", async () => {
+    const outcome = await ask("Q1: More review calls? [subject: review-budget]\n- a: Yes (recommended)\n- b: No\nQ2: One more round? [subject: review-cap]\n- a: Yes (recommended)\n- b: No\nQ3: Which name?\n- a: foo (recommended)\n- b: bar");
+    expect(outcome.opened.map((decision) => decision.id)).toEqual([idOf("Q3")]);
+    expect(get("Q1")).toBeNull();
+    expect(get("Q2")).toBeNull();
+    expect(logs).toEqual(expect.arrayContaining([`[paseo-bm] ${idOf("Q1")} was not opened: subject "review-budget" is paseo-bm's own or retired, never a Worker's question.`]));
   });
 
   it("puts a later block in the next round", async () => {
@@ -764,114 +771,30 @@ describe("owner precedents (autonomy design §B.6)", () => {
     expect(get("Q2", OTHER_REQUEST)?.answer).toMatchObject({ by: "precedent", optionKey: "b", precedentId: database.id });
   });
 
-  it("a review-budget question in a project whose cost cell delegates is answered by the policy as it opens, within the tier's cap (design §7.17.8 a)", () => {
-    const registry = createRequestRegistry(home, { backfill: () => [] });
-    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
-    registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Small", phase: "blocked", at: NOW });
-    const budget = (id: string, calls: number) => ({
-      id,
-      text: "Review budget reached: allow more review calls?",
-      subject: "review-budget",
-      class: "cost" as const,
-      options: [
-        { key: "a", text: `${calls} more calls`, recommended: true, effects: ["none" as const], grant: { calls } },
-        { key: "b", text: "No more reviews", recommended: false, effects: ["none" as const] },
-      ],
-    });
-    const open = (question: ReturnType<typeof budget>) => {
-      const outcome = { opened: [] as Decision[], superseded: [] as Decision[], answered: [] as Decision[], reversed: [] as Decision[] };
-      openQuestions({ home, store: store(), workspaceId: WORKSPACE_ID, now: NOW, log: (message) => logs.push(message), outcome }, { requestId: REQUEST, questions: [question], askedBy: WORKER, askedAt: NOW });
-      return outcome;
-    };
-
-    // cost not delegated: it waits for the owner, as before.
-    expect(open(budget("Q1", 2)).answered).toEqual([]);
-    expect(get("Q1")?.status).toBe("open");
-
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "cost", mode: "delegate", confirmed: true }, NOW);
-    // Within the Small cap (2): answered by the policy with the recommended option, and the grant recorded; no card.
-    const within = open(budget("Q2", 2));
-    expect(within.answered.map((decision) => decision.id)).toEqual([idOf("Q2")]);
-    expect(within.opened.map((decision) => decision.status)).toEqual(["answered"]);
-    expect(get("Q2")?.answer).toMatchObject({ by: "policy", via: "inbox", optionKey: "a", class: "cost" });
-    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.reviews.grants).toEqual([{ decisionId: idOf("Q2"), calls: 2, untilCleanBatch: null }]);
-    // Over the cap: it waits.
-    expect(open(budget("Q3", 3)).answered).toEqual([]);
-    expect(get("Q3")?.status).toBe("open");
-    expect(logs).toEqual([]);
-  });
-
-  it("the XAI case (mission runtime design §4.1 rule 3, §4.3): an untilClean recommended where cost is delegated is code's, granted as the calls its cap leaves; past the cap it waits", () => {
+  it("a Worker's review-budget question never opens, so nothing answers it, cost delegated or not, and it grants nothing (delivery line design §5.6, §7.2)", () => {
     const registry = createRequestRegistry(home, { backfill: () => [] });
     registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
     registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Small", phase: "blocked", at: NOW });
     createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "cost", mode: "delegate", confirmed: true }, NOW);
-    const untilClean = (id: string, batch: string) => ({
-      id,
-      text: `Review batch ${batch} again until it is clean?`,
-      subject: "review-budget",
-      class: "cost" as const,
-      options: [
-        { key: "a", text: "Review until clean", recommended: true, effects: ["none" as const], grant: { untilClean: batch } },
-        { key: "b", text: "Commit as it is", recommended: false, effects: ["commit" as const] },
-      ],
-    });
-    const open = (question: ReturnType<typeof untilClean>) => {
-      const outcome = { opened: [] as Decision[], superseded: [] as Decision[], answered: [] as Decision[], reversed: [] as Decision[] };
-      openQuestions({ home, store: store(), workspaceId: WORKSPACE_ID, now: NOW, log: (message) => logs.push(message), outcome }, { requestId: REQUEST, questions: [question], askedBy: WORKER, askedAt: NOW });
-      return outcome;
-    };
-    expect(open(untilClean("Q1", "b2")).answered.map((decision) => decision.id)).toEqual([idOf("Q1")]);
-    expect(get("Q1")?.answer).toMatchObject({ by: "policy", optionKey: "a", reason: expect.stringContaining("paseo-bm decides it") });
-    // Bounded: the Small cap's 2 calls, not an open-ended until-clean.
-    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.reviews.grants).toEqual([{ decisionId: idOf("Q1"), calls: 2, untilCleanBatch: null }]);
-    // The cap spent: the next one is no longer code's; it opens (for the request's Main, or the owner outside a mission).
-    expect(open(untilClean("Q2", "b3")).answered).toEqual([]);
-    expect(get("Q2")?.status).toBe("open");
-  });
-
-  it("the policy grants a request at most its tier's budget in all: past it a review-budget question waits; the owner's grants do not count (design §7.17.8 a)", () => {
-    const registry = createRequestRegistry(home, { backfill: () => [] });
-    registry.register(WORKSPACE_ID, REQUEST, { source: "tool", managerId: MANAGER, workerId: WORKER });
-    registry.noteReport(WORKSPACE_ID, REQUEST, { tier: "Small", phase: "blocked", at: NOW });
-    createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "cost", mode: "delegate", confirmed: true }, NOW);
-    const budget = (id: string, calls: number) => ({
+    const budget = (id: string, grant: { calls: number } | { untilClean: string }) => ({
       id,
       text: `Review budget reached (${id}): allow more review calls?`,
       subject: "review-budget",
       class: "cost" as const,
       options: [
-        { key: "a", text: `${calls} more calls`, recommended: true, effects: ["none" as const], grant: { calls } },
+        { key: "a", text: "More calls", recommended: true, effects: ["none" as const], grant },
         { key: "b", text: "No more reviews", recommended: false, effects: ["none" as const] },
       ],
     });
-    const answeredAt = (question: ReturnType<typeof budget>) => {
-      const outcome = { opened: [] as Decision[], superseded: [] as Decision[], answered: [] as Decision[], reversed: [] as Decision[] };
-      openQuestions({ home, store: store(), workspaceId: WORKSPACE_ID, now: NOW, log: (message) => logs.push(message), outcome }, { requestId: REQUEST, questions: [question], askedBy: WORKER, askedAt: NOW });
-      return outcome.answered.map((decision) => decision.id);
-    };
-    const callsGranted = () => createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.reviews.grants.map((grant) => [grant.decisionId, grant.calls]);
-
-    // The Small budget is 2: the policy grants 1, then the owner grants 3 on a question the policy may not answer.
-    expect(answeredAt(budget("Q1", 1))).toEqual([idOf("Q1")]);
-    expect(answeredAt(budget("Q2", 3))).toEqual([]);
-    const owners = store().transition(idOf("Q2"), (decision) => answerDecision(decision, { via: "inbox", optionKey: "a", at: NOW }), WORKSPACE_ID);
-    expect(owners.status).toBe("updated");
-    applyReviewBudgetGrants(owners.status === "updated" ? [owners.decision] : [], { home, log: (message) => logs.push(message) });
-    // The owner's grant leaves the policy's room as it was: 1 more call.
-    expect(answeredAt(budget("Q3", 1))).toEqual([idOf("Q3")]);
-    // The policy has granted 2 in all: one more call waits for the Orchestrator or the owner.
-    expect(answeredAt(budget("Q4", 1))).toEqual([]);
-    expect(get("Q4")?.status).toBe("open");
-    expect(callsGranted()).toEqual([
-      [idOf("Q1"), 1],
-      [idOf("Q2"), 3],
-      [idOf("Q3"), 1],
-    ]);
-    // bm_decide's check reads the same room: none left for the policy.
-    expect(policyGrantCapAt(home, WORKSPACE_ID, REQUEST)).toBe(0);
-    expect(decideRefusalOf(createAutonomyStore(home).read(), get("Q4")!, { optionKey: "a", finishedUnverified: false, grantCap: 0 })).toMatch(/at most \{ calls: 0 \} now/);
-    expect(logs).toEqual([]);
+    const outcome = { opened: [] as Decision[], superseded: [] as Decision[], answered: [] as Decision[], reversed: [] as Decision[] };
+    openQuestions(
+      { home, store: store(), workspaceId: WORKSPACE_ID, now: NOW, log: (message) => logs.push(message), outcome },
+      { requestId: REQUEST, questions: [budget("Q1", { calls: 2 }), budget("Q2", { untilClean: "b2" })], askedBy: WORKER, askedAt: NOW },
+    );
+    expect(outcome).toMatchObject({ opened: [], answered: [] });
+    expect([get("Q1"), get("Q2")]).toEqual([null, null]);
+    expect(createRequestRegistry(home).get(WORKSPACE_ID, REQUEST)!.reviews.grants).toEqual([]);
+    expect(logs).toEqual(["Q1", "Q2"].map((qn) => `[paseo-bm] ${idOf(qn)} was not opened: subject "review-budget" is paseo-bm's own or retired, never a Worker's question.`));
   });
 });
 

@@ -268,7 +268,13 @@ function answerLines(decision: Decision, agents: readonly ChatPeer[]): string[] 
     const to = agentNamed(delivery.to, agents, null);
     const name = to === "Agent" ? "the agent" : to;
     lines.push(
-      delivery.outcome === "sent" ? `Sent to ${name}.` : delivery.outcome === "queued" ? `Queued for ${name}: it goes when the agent is idle.` : `Could not deliver to ${name}.`,
+      delivery.outcome === "sent"
+        ? `Sent to ${name}.`
+        : delivery.outcome === "queued"
+          ? `Queued for ${name}: it goes when the agent is idle.`
+          : delivery.outcome === "held"
+            ? `Held for ${name}: it goes with what the agent waits on.`
+            : `Could not deliver to ${name}.`,
     );
   }
   return lines;

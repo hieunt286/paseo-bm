@@ -13,17 +13,19 @@ import {
   STOP_NOT_OPEN_MESSAGE,
   STOP_ONLY_MESSAGE,
   governedLadderOf,
+  isRepeatReplan,
   notDelegatedRefusalOf,
   storedAnswerRefusalOf,
 } from "../plugin/server/command-authority";
 import { createGovernorStore, type FamilyState } from "../plugin/server/governor-store";
+import type { GovernorFigure } from "../plugin/shared/governor-figures";
 import { createInterventionStore } from "../plugin/server/intervention-store";
 import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { GIT_READ_ONLY_PREFIX, REPO_OUTPUT_MAX_CHARS, type GitRunner } from "../plugin/server/repo-tool";
 import type { ServerToolResult } from "../plugin/server/orchestrator-tool-context";
-import { ASK_OWNER_OPTION_KEYS, questionIsTheMainsText } from "../plugin/server/orchestrator-decide-tools";
+import { ASK_OWNER_OPTION_KEYS, questionIsTheMainsText, stepGateText } from "../plugin/server/orchestrator-decide-tools";
 import { firstLine } from "../plugin/server/request-trace";
-import { COMMAND_LIMIT_MESSAGE, COMMAND_LIMIT_PER_REQUEST, MISSION_COMMAND_LIMIT_MESSAGE } from "../plugin/server/command-send";
+import { COMMAND_LIMIT_MESSAGE, COMMAND_LIMIT_PER_REQUEST, missionPoolSpentMessage } from "../plugin/server/command-send";
 import { isOwnerWord } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
 import { createAlertStore } from "../plugin/server/alert-store";
@@ -816,15 +818,24 @@ describe("bm_ask_owner (autonomy design §A.3, §A.6)", () => {
     ]);
   });
 
-  it("refuses to ask a request's review budget, or a subject the Worker's open question of that request already asks (design §7.17.8 a, b)", async () => {
+  it("refuses to ask a request's review budget or cap, or a subject the Worker's open question of that request already asks (design §7.17.8 b; delivery line design §5.4, §5.6)", async () => {
     const { paseo } = daemonWith(agents());
     const tools = toolsWith(paseo);
     const budget = { ...ask, subject: "review-budget", class: "cost" };
-    expect((await tools.call("bm_ask_owner", budget)).text).toBe("Refused: the Worker asks for review calls itself, with bm_questions subject review-budget; nothing was stored.");
+    const retired = "Refused: review budgets are retired: paseo-bm asks the owner once, at the request's review cap; nothing was stored.";
+    expect((await tools.call("bm_ask_owner", budget)).text).toBe(retired);
     expect((await tools.call("bm_ask_owner", { ...budget, subject: "Review budget for the auth fix" })).ok).toBe(false);
-    // Another class, or no request, is asked as before.
-    expect((await tools.call("bm_ask_owner", { ...budget, class: "scope", separate: true })).ok).toBe(true);
-    expect((await tools.call("bm_ask_owner", { workspaceId: ask.workspaceId, question: ask.question, recommendation: ask.recommendation, subject: "review-budget", class: "cost" })).ok).toBe(true);
+    expect((await tools.call("bm_ask_owner", { ...budget, subject: "review-cap-auth" })).text).toBe(retired);
+    // Another class, or no request, is asked as before — on a subject that is not code's own.
+    expect((await tools.call("bm_ask_owner", { ...budget, subject: "review-budget-auth", class: "scope", separate: true })).ok).toBe(true);
+    expect((await tools.call("bm_ask_owner", { workspaceId: ask.workspaceId, question: ask.question, recommendation: ask.recommendation, subject: "review-budget-auth", class: "cost" })).ok).toBe(true);
+    // Delivery line design §7.4: a CODE_SUBJECTS subject is refused in any class, with or without a request.
+    expect((await tools.call("bm_ask_owner", { ...budget, class: "scope", separate: true })).text).toBe(
+      'Refused: subject "review-budget" is retired; name what you ask with another subject; nothing was stored.',
+    );
+    expect((await tools.call("bm_ask_owner", { workspaceId: ask.workspaceId, question: ask.question, recommendation: ask.recommendation, subject: "review-cap", class: "cost" })).text).toBe(
+      'Refused: subject "review-cap" is a question paseo-bm itself asks the owner; nothing was stored.',
+    );
 
     const workerQuestion = (status: Decision["status"]) =>
       makeDecision({ id: `q:${REQUEST}:Q4`, workspaceId: WORKSPACE_ID, requestId: REQUEST, askedBy: { role: "worker", agentId: WORKER }, subject: "invoices-table", status });
@@ -1257,7 +1268,7 @@ describe("bm_decide (autonomy design §B.5, §B.9; missions design §9.1): the O
 
     expect(result.ok).toBe(true);
     expect(result.text.split("\n")[0]).toBe(
-      `Decided fallback incident ${FID} for the owner with option a (Wait for the reset), on the owner's policy: environment is delegated to you in this project. The owner sees your choice and your reason on the decision. The plugin runs the option's action as it runs the owner's choice. Send nothing more for it. Tell the owner in one line what you chose and why.`,
+      `Decided fallback incident ${FID} for the owner with option a (Wait for the reset), on the owner's policy: environment is delegated to you in this project. The owner sees your choice and your reason on the decision. The option's action has not run yet; bm_decisions shows its delivery once it has. Send nothing more for it. Tell the owner in one line what you chose and why.`,
     );
     expect(jsonOf(result)).toEqual({ decisionId: FID, optionKey: "a", class: "environment", answeredBy: "policy", grant: null, delivery: null });
     expect(stored(FID)).toMatchObject({ status: "answered", answer: { by: "policy", via: "inbox", optionKey: "a", class: "environment", reason: REASON }, grant: null });
@@ -2081,7 +2092,7 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     expect(createOrchestratorStore(home).readNotes({ missionId: MISSION })).toHaveLength(1);
   });
 
-  it("bm_govern refuses an unknown mission, an unknown figure, a mission with no Main, a text that shows an effect, and a 13th command for the mission in 24 hours, sending nothing", async () => {
+  it("bm_govern refuses an unknown mission, an unknown figure, a mission with no Main, a text that shows an effect, and a command past its pool for the mission in 24 hours, sending nothing", async () => {
     expect(createMissionStore(home).create({ code: "NOMAIN", name: "No Main", goal: "Waits.", repos: [WORKSPACE_ID], createdBy: "owner" }).ok).toBe(true);
     const lonely = createMissionStore(home).list().find((entry) => entry.code === "NOMAIN")!.missionId;
     const govern = (input: Record<string, unknown>) => tools().call("bm_govern", { missionId: MISSION, step: "nudge", text: "Re-plan.", ...input });
@@ -2097,7 +2108,9 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     for (let index = 0; index < COMMAND_LIMIT_PER_REQUEST; index += 1) {
       earlier.appendCommand({ workspaceId: MISSIONS_HOME, managerId: OLD_MAIN, requestId: null, situation: "", command: "Re-plan.", reason: "", sentText: "Re-plan.", outcome: "sent", missionId: MISSION });
     }
-    expect(await govern({})).toEqual({ ok: false, text: `Refused: ${MISSION_COMMAND_LIMIT_MESSAGE}.` });
+    // Delivery line design §8.1: entries stored before the pools count in other, the pool of a model's nudge (4).
+    expect(await govern({})).toEqual({ ok: false, text: `Refused: ${missionPoolSpentMessage("other", new Date(NOW.getTime() + 23 * 3_600_000))}.` });
+    expect((await govern({})).text).toMatch(/paseo-bm puts the figures in the Main's daily digest\. Nothing was sent\.$/);
     expect(enqueue).not.toHaveBeenCalled();
     expect(createMissionStore(home).journal(MISSION).filter((entry) => entry.kind === "governor")).toEqual([]);
   });
@@ -2129,7 +2142,16 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
 
     expect((await tools().call("bm_govern", { missionId: MISSION, step: "replan", text: "Your plan grew past its criteria: cut it back to D1 and D2." })).ok).toBe(true);
 
-    expect(createGovernorStore(home).ladder(MISSION).mess).toEqual({ ...family(2, { at: NOW.toISOString(), kind: "replan", id: "proposal-1" }), mainTurnsAt: 3 });
+    // Delivery line design §8.2: a re-plan keeps its family's figure values, for a repeat to compare.
+    const figures = [
+      { id: "writersOnOneFile", value: 0 },
+      { id: "workersInOneRepo", value: 1 },
+      { id: "reAsks", value: 0 },
+      { id: "dropped", value: 0 },
+      // Delivery line design §4.9: the mess family's line figure (no placement: 0).
+      { id: "uncommittedHours", value: 0 },
+    ] as const;
+    expect(createGovernorStore(home).ladder(MISSION).mess).toEqual({ ...family(2, { at: NOW.toISOString(), kind: "replan", id: "proposal-1", figures: [...figures] }), mainTurnsAt: 3 });
   });
 
   it("bm_missions reads each open mission: its charter, roster, figures against their thresholds, ladder and open m: cards", async () => {
@@ -2186,6 +2208,105 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     expect(enqueue).not.toHaveBeenCalled();
   });
 
+  it("bm_govern returns a re-plan that repeats the last one within the window, figures no worse, sending and spending nothing (delivery line design §8.2)", async () => {
+    createGovernorStore(home).put(MISSION, { overengineering: family(3) });
+    const replan = { missionId: MISSION, step: "replan", text: "Your plan grew past its criteria: cut it back to D1 and D2." };
+    expect((await tools().call("bm_govern", replan)).ok).toBe(true);
+    const ladder = createGovernorStore(home).ladder(MISSION);
+    expect(ladder.overengineering).toMatchObject({ step: 4, lastAction: { kind: "replan", id: "proposal-1" } });
+    expect(ladder.overengineering!.lastAction!.figures!.map((entry) => entry.id)).toContain("beadsPerFinishedRequest");
+
+    const again = await tools().call("bm_govern", replan);
+    expect(again.ok).toBe(true);
+    expect(again.text.split("\n")[0]).toBe(`Mission EXP was re-planned at ${NOW.toISOString()} (command proposal-1) and its figures are no worse; nothing was sent.`);
+    expect(jsonOf(again)).toEqual({ commandId: "proposal-1", repeated: true, missionId: MISSION });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(createOrchestratorStore(home).listCommands()).toHaveLength(1);
+    expect(createGovernorStore(home).ladder(MISSION)).toEqual(ladder);
+
+    // Past the window it is a new re-plan, counted in its pool.
+    const later = new Date(NOW.getTime() + 31 * 60_000);
+    deps.now = () => later;
+    deps.store = { ...deps.store, now: () => later };
+    expect((await tools().call("bm_govern", replan)).text.split("\n")[0]).toBe(`Sent to ${MAIN}, the Main of mission EXP, as a BM-COMMAND on governor:replan.`);
+    expect(createOrchestratorStore(home).listCommands().map((entry) => [entry.governorStep, entry.by])).toEqual([
+      ["replan", "model"],
+      ["replan", "model"],
+    ]);
+  });
+
+  it("isRepeatReplan: only a re-plan with its figures, within the window, with no crossed figure higher or newly crossed", () => {
+    const figure = (id: GovernorFigure["id"], value: number, crossed = true): GovernorFigure => ({ family: "overengineering", id, value, threshold: 15, op: ">", crossed, detail: null });
+    const replanned = family(4, { at: NOW.toISOString(), kind: "replan", id: "c-1", figures: [{ id: "beadsPerFinishedRequest", value: 20 }] });
+    const soon = new Date(NOW.getTime() + 60_000);
+    const WINDOW_MS = 30 * 60_000;
+    expect(isRepeatReplan(replanned, [figure("beadsPerFinishedRequest", 20)], soon, WINDOW_MS)).toBe(true);
+    expect(isRepeatReplan(replanned, [figure("beadsPerFinishedRequest", 18), figure("tierRaised", 0, false)], soon, WINDOW_MS)).toBe(true);
+    expect(isRepeatReplan(replanned, [figure("beadsPerFinishedRequest", 21)], soon, WINDOW_MS)).toBe(false);
+    expect(isRepeatReplan(replanned, [figure("beadsPerFinishedRequest", 20), figure("tierRaised", 2)], soon, WINDOW_MS)).toBe(false);
+    expect(isRepeatReplan(replanned, [figure("beadsPerFinishedRequest", 20)], new Date(NOW.getTime() + WINDOW_MS), WINDOW_MS)).toBe(false);
+    expect(isRepeatReplan(family(4, { at: NOW.toISOString(), kind: "replan", id: "c-1" }), [], soon, WINDOW_MS)).toBe(false);
+    expect(isRepeatReplan(family(4, { at: NOW.toISOString(), kind: "nudge", id: "c-1", figures: [] }), [], soon, WINDOW_MS)).toBe(false);
+    expect(isRepeatReplan(undefined, [], soon, WINDOW_MS)).toBe(false);
+  });
+
+  it("bm_ask_owner about a mission's process reaches the owner only from ladder step 4; a goal change, a split or a riskier class passes (delivery line design §8.3)", async () => {
+    const ask = (input: Record<string, unknown> = {}) =>
+      tools().call(
+        "bm_ask_owner",
+        Object.fromEntries(
+          Object.entries({
+            workspaceId: WORKSPACE_ID,
+            requestId: REQUEST,
+            question: "The Main keeps re-planning the export: stop or go on?",
+            recommendation: "Go on.",
+            options: [{ label: "Go on", effects: ["none"] }, { label: "Stop the export", effects: ["none"] }],
+            ...input,
+          }).filter(([, value]) => value !== undefined),
+        ),
+      );
+    const stored = () => createDecisionStore(home).list({ workspaceId: WORKSPACE_ID });
+    expect(await ask()).toEqual({ ok: false, text: stepGateText(0) });
+    expect(stepGateText(0)).toBe("The governor reaches the owner from step 4; this mission is at step 0. Nothing was stored.");
+    createGovernorStore(home).put(MISSION, { drift: family(3), stuck: family(1) });
+    expect(await ask()).toEqual({ ok: false, text: "The governor reaches the owner from step 4; this mission is at step 3. Nothing was stored." });
+    // The mission named by its Main alone, or by a prepared command to it.
+    expect((await ask({ requestId: undefined, managerId: MAIN })).text).toBe(stepGateText(3));
+    expect((await ask({ requestId: undefined, options: [{ label: "Go on", effects: ["none"], command: { to: "manager", agentId: MAIN, intent: "continue", body: "Go on." } }] })).text).toBe(stepGateText(3));
+    expect((await ask({ class: "scope" })).text).toBe(stepGateText(3));
+    expect(stored()).toEqual([]);
+
+    // Not a process class, a goal change, a split: through.
+    expect((await ask({ class: "cost", subject: "export-cost" })).ok).toBe(true);
+    expect((await ask({ subject: "mission-goal", separate: true })).ok).toBe(true);
+    expect((await ask({ subject: "split-export", separate: true })).ok).toBe(true);
+    expect(stored()).toHaveLength(3);
+    // From step 4, anything.
+    createGovernorStore(home).put(MISSION, { drift: family(4) });
+    expect((await ask({ separate: true })).ok).toBe(true);
+    // No mission: no gate.
+    expect((await tools().call("bm_ask_owner", { workspaceId: WORKSPACE_ID, question: "Keep the old exports?", recommendation: "Keep them.", separate: true })).ok).toBe(true);
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("the step-4 gate lets the Orchestrator answer the owner who wrote to it in the last 2 hours (REQ-198 b), and only then", async () => {
+    createGovernorStore(home).put(MISSION, { drift: family(1) });
+    const ago = (minutes: number) => new Date(NOW.getTime() - minutes * 60_000).toISOString();
+    const askAfter = (minutes: number) =>
+      toolsWith(daemonWith(agents(), { [ORCHESTRATOR]: [[ownerSays("Give me a plan to speed things up.", ago(minutes))]] }).paseo).call("bm_ask_owner", {
+        workspaceId: WORKSPACE_ID,
+        requestId: REQUEST,
+        question: "Speed up the export: one Worker per repo?",
+        recommendation: "Yes.",
+        options: [{ label: "One Worker per repo", effects: ["none"] }, { label: "Keep as is", effects: ["none"] }],
+        separate: true,
+      });
+    const passed = await askAfter(30);
+    expect(passed.ok, passed.text).toBe(true);
+    expect(await askAfter(180)).toEqual({ ok: false, text: stepGateText(1) });
+    expect(createDecisionStore(home).list({ workspaceId: WORKSPACE_ID })).toHaveLength(1);
+  });
+
   it("bm_direct_worker copies a stop to the Worker's request's current Main, not its archived creator", async () => {
     createOrchestratorStore(home, { now: () => NOW }).openDangerAllowance(WORKSPACE_ID, MISSION_WORKER);
     const result = await tools().call("bm_direct_worker", stop);
@@ -2196,6 +2317,8 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
   });
 
   it("a prepared command to an earlier Main reaches the current Main once the owner chooses it", async () => {
+    // Delivery line design §8.3: the governor reaches the owner about the mission from step 4.
+    createGovernorStore(home).put(MISSION, { drift: family(4) });
     const fake = daemon();
     const onSettled = settledByKind({ orchestrator: createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW, queue: deps.queue, log: () => {} }) });
     const asked = await toolsWith(fake.paseo).call("bm_ask_owner", {
@@ -2219,6 +2342,7 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
   });
 
   it("with no request, a prepared command named to an earlier Main reaches the current Main", async () => {
+    createGovernorStore(home).put(MISSION, { drift: family(4) });
     const fake = daemon();
     const onSettled = settledByKind({ orchestrator: createOrchestratorDecisionDelivery({ home: () => home, now: () => NOW, queue: deps.queue, log: () => {} }) });
     const asked = await toolsWith(fake.paseo).call("bm_ask_owner", {

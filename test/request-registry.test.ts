@@ -4,12 +4,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   MAX_REQUESTS_PER_WORKSPACE,
+  NO_VERDICT_RESULT,
   REQUESTS_DIR_NAME,
   REQUEST_ID_PATTERN,
   clearRequestRegistryCache,
   createRequestRegistry,
   creatorIsBound,
+  chainPositionOf,
+  finishedRequestRefusal,
+  isBoundRequest,
   knownRequestIdOf,
+  noteReviewResult,
   requestIdAt,
   sightRequestId,
   type RegisteredRequest,
@@ -174,6 +179,138 @@ describe("the store (design §16.4)", () => {
     expect(ids).not.toContain(id(1));
     expect(ids).toContain(id(0));
     expect(ids.slice(-3)).toEqual(["req-20261003T100000Z", "req-20261003T100001Z", "req-20261003T100002Z"]);
+  });
+});
+
+describe("a request's place in its chain (delivery line design §2.7)", () => {
+  it("counts back through the requests each continues; null for one that continues none; bounded on a loop", () => {
+    const previous: Record<string, string | undefined> = { c: "b", b: "a", a: undefined, x: "y", y: "x" };
+    expect(chainPositionOf(undefined, (id) => previous[id])).toBeNull();
+    expect(chainPositionOf(null, (id) => previous[id])).toBeNull();
+    expect(chainPositionOf("a", (id) => previous[id])).toBe(2);
+    expect(chainPositionOf("b", (id) => previous[id])).toBe(3);
+    // A predecessor not known ends the walk where it is.
+    expect(chainPositionOf("unknown", (id) => previous[id])).toBe(2);
+    expect(chainPositionOf("x", (id) => previous[id])).toBe(3);
+  });
+});
+
+describe("a finished bound request is final (delivery line design §2.2, §2.3)", () => {
+  const REQ = "req-20261003T100000Z";
+  const NEXT = "req-20261003T110000Z";
+  const at = (minute: number) => new Date(T0.getTime() + minute * 60_000).toISOString();
+
+  it("a bound request's finishedAt is never cleared by a later report; its tier still follows", () => {
+    const home = dataFolder();
+    const registry = createRequestRegistry(home, { now: () => T0, backfill: () => [] });
+    const made = registry.generate(WS, { managerId: "mgr-1" });
+    expect(isBoundRequest(made)).toBe(true);
+    registry.noteReport(WS, made.requestId, { tier: "Small", phase: "received", at: at(0) });
+    expect(registry.get(WS, made.requestId)).toMatchObject({ tier: "Small", finishedAt: null });
+    registry.noteReport(WS, made.requestId, { tier: "Medium", phase: "finished", at: at(1) });
+    for (const phase of ["received", "blocked", "stopped", "finished"]) registry.noteReport(WS, made.requestId, { tier: "Large", phase, at: at(2) });
+    expect(registry.get(WS, made.requestId)).toMatchObject({ tier: "Large", finishedAt: at(1) });
+  });
+
+  it("the hand path keeps today's reopening: an agent-typed or backfilled request's finishedAt is cleared by a later report", () => {
+    const home = dataFolder();
+    const registry = createRequestRegistry(home, { now: () => T0, backfill: () => [request(NEXT, { source: "backfill" })] });
+    registry.register(WS, REQ, { source: "agent-typed" });
+    for (const requestId of [REQ, NEXT]) {
+      expect(isBoundRequest(registry.get(WS, requestId))).toBe(false);
+      registry.noteReport(WS, requestId, { tier: "Small", phase: "finished", at: at(1) });
+      expect(registry.get(WS, requestId)!.finishedAt).toBe(at(1));
+      registry.noteReport(WS, requestId, { tier: "Small", phase: "received", at: at(2) });
+      expect(registry.get(WS, requestId)!.finishedAt).toBeNull();
+    }
+    expect(isBoundRequest(null)).toBe(false);
+  });
+
+  it("reads the chain fields, keeps them through a write, and still reads an entry without them (registry v stays 1)", () => {
+    const home = dataFolder();
+    mkdirSync(join(home, REQUESTS_DIR_NAME), { mode: 0o700 });
+    const chained = request(NEXT, { source: "tool", continuationOf: REQ, chainRootId: REQ, rollover: { reason: "follow-up", figure: "a follow-up after finished", at: at(3) } });
+    const first = request(REQ, { source: "tool", finishedAt: at(2), continuedBy: NEXT });
+    const old = request("req-20261003T090000Z");
+    writeFileSync(join(home, REQUESTS_DIR_NAME, `${WS}.json`), JSON.stringify({ schemaVersion: 1, requests: [old, first, chained] }), { mode: 0o600 });
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    expect(registry.list(WS)).toEqual([old, first, chained]);
+    registry.noteReport(WS, NEXT, { tier: "Small", phase: "received", at: at(4) });
+    expect(registry.get(WS, NEXT)).toEqual({ ...chained, tier: "Small" });
+    expect(registry.get(WS, REQ)).toEqual(first);
+    const body = JSON.parse(readFileSync(join(home, REQUESTS_DIR_NAME, `${WS}.json`), "utf8"));
+    expect(body.schemaVersion).toBe(1);
+    // A chain field that is not a request id is not a usable entry: it is read as none, and the rest stays.
+    writeFileSync(join(home, REQUESTS_DIR_NAME, `${WS}.json`), JSON.stringify({ schemaVersion: 1, requests: [old, { ...first, continuedBy: "nope" }] }), { mode: 0o600 });
+    clearRequestRegistryCache();
+    expect(createRequestRegistry(home, { backfill: () => [] }).list(WS)).toEqual([old]);
+  });
+
+  it("the refusal of a late report names the continuation, or the Main when there is none", () => {
+    expect(finishedRequestRefusal({ requestId: REQ, continuedBy: NEXT })).toBe(`Request ${REQ} is finished; its work goes on as ${NEXT}. Nothing was stored or sent.`);
+    expect(finishedRequestRefusal({ requestId: REQ })).toBe(`Request ${REQ} is finished; ask your Main. Nothing was stored or sent.`);
+  });
+});
+
+describe("a batch's milestone and results (delivery line design §5.1, §5.2)", () => {
+  const REQ = "req-20261003T100000Z";
+  const record = (over: Record<string, unknown>) => ({ id: "out-000000000001", kind: "review", requestId: REQ, batchId: "b1", from: "rev-1", createdAt: T0.toISOString(), text: "", ...over });
+
+  function opened() {
+    const home = dataFolder();
+    const registry = createRequestRegistry(home, { now: () => T0, backfill: () => [] });
+    registry.register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wkr-1" });
+    expect(registry.addReviewCall(WS, REQ, "b1", { callId: "out-00000000000a", kind: "create", reviewerId: "", at: T0.toISOString() }, "brief", "wave")).toBe("added");
+    return { home, registry };
+  }
+
+  it("a batch this build opens has its milestone and an empty results list; a re-review call keeps both", () => {
+    const { registry } = opened();
+    registry.addReviewCall(WS, REQ, "b1", { callId: "out-00000000000b", kind: "rereview", reviewerId: "rev-1", at: T0.toISOString() });
+    expect(registry.get(WS, REQ)!.reviews.batches[0]).toMatchObject({ batchId: "b1", milestone: "wave", results: [] });
+    expect(registry.addReviewCall(WS, REQ, "b2", { callId: "out-00000000000c", kind: "create", reviewerId: "", at: T0.toISOString() }, "brief")).toBe("added");
+    expect(registry.get(WS, REQ)!.reviews.batches[1]).not.toHaveProperty("milestone");
+  });
+
+  it("appends a result once per record; an unknown batch or request, and an older batch, get none", () => {
+    const { registry } = opened();
+    const result = { at: T0.toISOString(), recordId: "out-000000000001", verdict: "changes-required", blocking: 2 };
+    expect(registry.addReviewResult(WS, REQ, "b1", result)).toBe("added");
+    expect(registry.addReviewResult(WS, REQ, "b1", result)).toBe("known");
+    expect(registry.addReviewResult(WS, REQ, "b9", result)).toBe("no-batch");
+    expect(registry.addReviewResult(WS, "req-20261003T110000Z", "b1", result)).toBe("no-request");
+    expect(registry.get(WS, REQ)!.reviews.batches[0]!.results).toEqual([result]);
+  });
+
+  it("reads a batch an older build wrote — no milestone, no results — and leaves it so", () => {
+    const home = dataFolder();
+    mkdirSync(join(home, REQUESTS_DIR_NAME), { mode: 0o700 });
+    const old = request(REQ, { reviews: { batches: [{ batchId: "b1", reviewerIds: ["rev-1"], brief: "brief", calls: [] }], grants: [] } });
+    writeFileSync(join(home, REQUESTS_DIR_NAME, `${WS}.json`), JSON.stringify({ schemaVersion: 1, requests: [old] }), { mode: 0o600 });
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    expect(registry.get(WS, REQ)!.reviews.batches[0]).toEqual(old.reviews.batches[0]);
+    expect(registry.addReviewResult(WS, REQ, "b1", { at: T0.toISOString(), recordId: "out-1", verdict: "pass", blocking: 0 })).toBe("older-batch");
+    expect(registry.get(WS, REQ)!.reviews.batches[0]).not.toHaveProperty("results");
+  });
+
+  it("noteReviewResult: a review record's verdict and blocking count, a no-verdict as null; anything else nothing; never throws", () => {
+    const { home, registry } = opened();
+    const review = ["BM-REVIEW", `requestId: ${REQ}`, "batchId: b1", "reviewKind: first", "verdict: changes-required", "checked: x", "findings:", "- severity: blocking", "  location: a.ts:1", "- severity: blocking", "  location: b.ts:2", "- severity: non-blocking", "  location: c.ts:3", "notChecked: none"].join("\n");
+    noteReviewResult(home, WS, record({ text: review }));
+    noteReviewResult(home, WS, record({ id: "out-000000000002", kind: "no-verdict", text: "The Reviewer ended its turn without a verdict." }));
+    noteReviewResult(home, WS, record({ id: "out-000000000003", text: "BM-REVIEW\nverdict: pass\nfindings: none" }));
+    // A message, a review without a verdict, and no batch: nothing.
+    noteReviewResult(home, WS, record({ id: "out-000000000004", kind: "message", text: review }));
+    noteReviewResult(home, WS, record({ id: "out-000000000005", text: "no block here" }));
+    noteReviewResult(home, WS, record({ id: "out-000000000006", batchId: null, text: review }));
+    expect(registry.get(WS, REQ)!.reviews.batches[0]!.results).toEqual([
+      { at: T0.toISOString(), recordId: "out-000000000001", verdict: "changes-required", blocking: 2 },
+      { at: T0.toISOString(), recordId: "out-000000000002", verdict: NO_VERDICT_RESULT, blocking: null },
+      { at: T0.toISOString(), recordId: "out-000000000003", verdict: "pass", blocking: 0 },
+    ]);
+    const logs: string[] = [];
+    expect(() => noteReviewResult(home, "../bad", record({ id: "out-000000000007", text: review }), (line) => logs.push(line))).not.toThrow();
+    expect(logs).toHaveLength(1);
   });
 });
 

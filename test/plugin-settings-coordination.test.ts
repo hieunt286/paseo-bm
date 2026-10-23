@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  COORDINATION_CARDS,
   COORDINATION_MEANING,
   MECHANISM_THRESHOLDS,
-  REVIEW_BUDGET_WORDS,
-  changedReviewBudget,
+  REVIEW_KEYS,
+  REVIEW_WORDS,
+  CI_CARD_WORDS,
+  changedReview,
   changedThresholds,
+  ciCardView,
+  ciToggleChange,
   coordinationDefaultsDraft,
   coordinationInputText,
   helpedText,
@@ -13,10 +18,11 @@ import {
   coordinationResetView,
   defaultsDraft,
   mechanismCardView,
-  reviewBudgetCardView,
-  reviewBudgetDefaultsDraft,
-  reviewBudgetValueText,
-  stepReviewBudget,
+  reviewCapsText,
+  reviewCardView,
+  reviewDefaultsDraft,
+  reviewValueText,
+  stepReview,
   mechanismsText,
   stepThreshold,
   switchedOffMechanisms,
@@ -37,7 +43,7 @@ import { allNodes, pressables, renderTree, texts } from "./helpers/element-tree"
 // The root tsconfig has no `jsx`, so the .tsx module loads through a non-literal specifier.
 const cardPath = "../plugin/client/settings-coordination.tsx";
 type Component = (props: Record<string, unknown>) => unknown;
-const { MechanismCard, ReviewBudgetCard } = (await import(cardPath)) as { MechanismCard: Component; ReviewBudgetCard: Component };
+const { MechanismCard, ReviewCard } = (await import(cardPath)) as { MechanismCard: Component; ReviewCard: Component };
 
 const styles = new Proxy({}, { get: (_target, key) => ({ name: String(key) }) });
 const theme = { colors: new Proxy({}, { get: (_target, key) => `#${String(key)}` }) };
@@ -94,12 +100,13 @@ describe("the fields' text (the approved mockup's number inputs)", () => {
     expect(parseCoordinationInput("compact.managerTokensPerTurn", "390000")).toEqual({ value: 390_000, error: null });
     expect(parseCoordinationInput("compact.contextShare", "55 %")).toEqual({ value: 0.55, error: null });
     expect(parseCoordinationInput("compact.contextShare", "60")).toEqual({ value: 0.6, error: null });
-    expect(parseCoordinationInput("review.largeBudget", "6")).toEqual({ value: 6, error: null });
+    expect(parseCoordinationInput("review.callsPerBatch", "6")).toEqual({ value: 6, error: null });
     expect(parseCoordinationInput("advice.everyFinished", "0")).toEqual({ value: 0, error: null });
     expect(parseCoordinationInput("compact.maxPerAgent", "9")).toEqual({ value: null, error: "At most, per agent: a number from 1 to 5." });
     expect(parseCoordinationInput("compact.managerTokensPerTurn", "lots").error).toBe("Main reads more than, per turn: a number from 50 K to 100 M.");
     expect(parseCoordinationInput("compact.contextShare", "95").error).toBe("Or its context window is fuller than: a number from 10 % to 90 %.");
-    expect(parseCoordinationInput("review.smallBudget", "1").error).toBe("Small: a number from 2 to 8.");
+    expect(parseCoordinationInput("review.callsPerBatch", "1").error).toBe("Calls per milestone batch: a number from 2 to 6.");
+    expect(parseCoordinationInput("review.maxRereviews", "7").error).toBe("Re-reviews per batch: a number from 1 to 6.");
     expect(inputErrorsOf(["compact.maxPerAgent", "compact.contextShare"], { "compact.maxPerAgent": "3", "compact.contextShare": "x" })).toEqual([
       "Or its context window is fuller than: a number from 10 % to 90 %.",
     ]);
@@ -200,22 +207,110 @@ describe("the Coordination group's line", () => {
 });
 
 describe("Reset coordination to defaults (change-014 outcome 5)", () => {
-  it("fills every card's draft with the defaults — both mechanisms' thresholds, the review budget — and saves nothing itself", () => {
+  it("fills every card's draft with the defaults — both mechanisms' thresholds, rollover's, the review settings — and saves nothing itself", () => {
     const changed: CoordinationSettings = { ...D, advice: { everyFinished: 9 } };
     const drafts = coordinationDefaultsDraft(D);
     expect(Object.keys(drafts).sort()).toEqual(["review", "thresholds"]);
-    expect(drafts.thresholds).toEqual({ ...defaultsDraft("compact", D), ...defaultsDraft("handoff", D) });
-    expect(Object.keys(drafts.thresholds).sort()).toEqual([...MECHANISM_THRESHOLDS.compact, ...MECHANISM_THRESHOLDS.handoff].sort());
-    expect(drafts.review).toEqual(reviewBudgetDefaultsDraft(D));
+    expect(drafts.thresholds).toEqual({ ...defaultsDraft("compact", D), ...defaultsDraft("handoff", D), ...defaultsDraft("rollover", D) });
+    expect(Object.keys(drafts.thresholds).sort()).toEqual([...MECHANISM_THRESHOLDS.compact, ...MECHANISM_THRESHOLDS.handoff, ...MECHANISM_THRESHOLDS.rollover].sort());
+    expect(drafts.review).toEqual(reviewDefaultsDraft(D));
     // Against stored defaults the drafts change nothing; a card's Save sends only what differs.
     expect(changedThresholds("compact", D, drafts.thresholds)).toEqual([]);
-    expect(changedReviewBudget(changed, drafts.review)).toEqual([]);
+    expect(changedReview(changed, drafts.review)).toEqual([]);
     expect(coordinationResetView(false)).toEqual({
       enabled: true,
       label: "Reset coordination to defaults",
       accessibilityLabel: "Fill every coordination setting with its default; each card saves with its own Save",
     });
     expect(coordinationResetView(true).enabled).toBe(false);
+  });
+});
+
+describe("the rollover card (delivery line design §2.6, §6.6, §12 item 4)", () => {
+  const rollover = (over: Partial<Parameters<typeof mechanismCardView>[0]> = {}) => view({ mechanism: "rollover", ...over });
+
+  it("lists the rollover figures, where it is asked now and the maintenance ceiling, in their units; no A-12 figures", () => {
+    expect(COORDINATION_CARDS).toEqual(["compact", "handoff", "rollover"]);
+    const card = rollover();
+    expect(card).toMatchObject({ mechanism: "rollover", title: "Rollover", helped: null, status: { text: "On", tone: "success" }, toggle: { turnsOn: false, label: "Turn off" }, reset: null });
+    expect(card.rows.map((row) => [row.key, row.label, row.inputText, row.valueText])).toEqual([
+      ["rollover.beads", "A request has closed beads", "15", "15 beads"],
+      ["rollover.turns", "Or its Worker turns reach", "40", "40 turns"],
+      ["rollover.tokens", "Or it has read", "50 M", "50M tokens read"],
+      ["rollover.contextTokens", "Or its context reaches", "250 K", "context 250k"],
+      ["rollover.ceilingFactor", "Finish now at, × a figure", "2 ×", "2×"],
+      ["maintenance.ceilingFactor", "Skip the safe point at, × a threshold", "2 ×", "2×"],
+    ]);
+  });
+
+  it("reads and steps a factor by a half within 1.5 to 5, and refuses one out of bounds", () => {
+    expect(parseCoordinationInput("maintenance.ceilingFactor", "2.5 ×")).toEqual({ value: 2.5, error: null });
+    expect(parseCoordinationInput("rollover.ceilingFactor", "3")).toEqual({ value: 3, error: null });
+    expect(parseCoordinationInput("rollover.ceilingFactor", "3x")).toEqual({ value: 3, error: null });
+    expect(parseCoordinationInput("maintenance.ceilingFactor", "1.4")).toEqual({ value: null, error: "Skip the safe point at, × a threshold: a number from 1.5 × to 5 ×." });
+    expect(parseCoordinationInput("rollover.tokens", "80M")).toEqual({ value: 80_000_000, error: null });
+    expect(parseCoordinationInput("rollover.contextTokens", "300 K")).toEqual({ value: 300_000, error: null });
+    expect(parseCoordinationInput("rollover.contextTokens", "1M")).toEqual({ value: null, error: "Or its context reaches: a number from 100 K to 900 K." });
+    expect(stepThreshold("rollover.contextTokens", 250_000, 1)).toBe(300_000);
+    expect(parseCoordinationInput("rollover.beads", "2")).toEqual({ value: null, error: "A request has closed beads: a number from 3 to 100." });
+    expect(stepThreshold("maintenance.ceilingFactor", 2, 1)).toBe(2.5);
+    expect(stepThreshold("maintenance.ceilingFactor", 1.5, -1)).toBe(1.5);
+    expect(stepThreshold("rollover.ceilingFactor", 5, 1)).toBe(5);
+  });
+
+  it("Save sends one change per setting, the maintenance ceiling included; off, it turns on at once with no confirmation", () => {
+    const draft = { "rollover.turns": 60, "maintenance.ceilingFactor": 3 };
+    expect(changedThresholds("rollover", D, draft)).toEqual([
+      { key: "rollover.turns", value: 60 },
+      { key: "maintenance.ceilingFactor", value: 3 },
+    ]);
+    expect(rollover({ draft }).save).toMatchObject({ enabled: true, accessibilityLabel: "Save the rollover thresholds" });
+    const off = rollover({ settings: { ...D, rollover: { ...D.rollover, enabled: false } } });
+    expect(off.status).toEqual({ text: "Off", tone: "muted" });
+    expect(off.toggle).toEqual({ turnsOn: true, enabled: true, label: "Turn on", accessibilityLabel: "Turn rollover on now" });
+  });
+
+  it("MechanismCard draws it without a helped line", () => {
+    const nodes = renderTree(
+      MechanismCard({ view: rollover(), inputs: {}, dialog: null, busy: false, error: null, onToggle: noop, onConfirm: noop, onCancel: noop, onInput: noop, onSave: noop, styles, theme }),
+    );
+    expect(texts(nodes)).toEqual(["Rollover", rollover().meaning, ...rollover().rows.map((row) => row.label)]);
+  });
+});
+
+describe("the CI card (ADR-036, delivery line design §17.1)", () => {
+  const on: CoordinationSettings = { ...D, integration: { ci: "on" } };
+
+  it("is off by default: Off, Turn on at once; on: On, Turn off at once; no figures, no Save, no reset", () => {
+    expect(ciCardView(D, false)).toEqual({
+      mechanism: "integration",
+      title: "CI",
+      helped: null,
+      meaning: CI_CARD_WORDS.meaning,
+      note: null,
+      status: { text: "Off", tone: "muted" },
+      toggle: { turnsOn: true, enabled: true, label: "Turn on", accessibilityLabel: "Turn CI on now" },
+      rows: [],
+      save: { enabled: false, label: "Save", accessibilityLabel: "Save the CI setting" },
+      reset: null,
+    });
+    expect(ciCardView(on, false)).toMatchObject({ status: { text: "On", tone: "success" }, toggle: { turnsOn: false, enabled: true, label: "Turn off", accessibilityLabel: "Turn CI off now" } });
+    expect(ciCardView(D, true).toggle.enabled).toBe(false);
+  });
+
+  it("its switch saves integration.ci the other way", () => {
+    expect(ciToggleChange(D)).toEqual({ key: "integration.ci", value: "on" });
+    expect(ciToggleChange(on)).toEqual({ key: "integration.ci", value: "off" });
+  });
+
+  it("MechanismCard draws it with its title, what it means and its switch, and no foot", () => {
+    const onToggle = vi.fn();
+    const nodes = renderTree(MechanismCard({ view: ciCardView(D, false), inputs: {}, dialog: null, busy: false, error: null, onToggle, onConfirm: noop, onCancel: noop, onInput: noop, onSave: noop, styles, theme }));
+    expect(texts(nodes)).toEqual(["CI", CI_CARD_WORDS.meaning]);
+    const toggle = allNodes(nodes).find((node) => node.props["accessibilityLabel"] === "Turn CI on now");
+    expect(toggle).toBeDefined();
+    (toggle!.props["onPress"] as () => void)();
+    expect(onToggle).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -308,89 +403,100 @@ describe("MechanismCard (hook-free)", () => {
   });
 });
 
-// Bead 7gxw.12 (autonomy design §C.4, §G.7; change-008 C6): the review budget per tier, below compaction and handoff.
-describe("the review budget card (autonomy design §G.7)", () => {
-  const budgetView = (over: Partial<Parameters<typeof reviewBudgetCardView>[0]> = {}) =>
-    reviewBudgetCardView({ settings: D, defaults: D, draft: {}, saving: false, ...over });
-  const stored = (small: number, medium: number, large: number): CoordinationSettings => ({ ...D, review: { smallBudget: small, mediumBudget: medium, largeBudget: large } });
+// Delivery line design §5.6: the review card, below compaction and handoff — two settings with the existing controls and the caps they make, read-only.
+describe("the review card (delivery line design §5.6)", () => {
+  const reviewView = (over: Partial<Parameters<typeof reviewCardView>[0]> = {}) => reviewCardView({ settings: D, defaults: D, draft: {}, saving: false, ...over });
+  const stored = (maxRereviews: number, callsPerBatch: number): CoordinationSettings => ({ ...D, review: { maxRereviews, callsPerBatch } });
 
-  it("steps a tier's budget by one call, within 2 to 8: never below one review and its re-review", () => {
-    expect(stepReviewBudget("review.smallBudget", 2, -1)).toBe(2);
-    expect(stepReviewBudget("review.smallBudget", 2, 1)).toBe(3);
-    expect(stepReviewBudget("review.largeBudget", 8, 1)).toBe(8);
-    expect(stepReviewBudget("review.largeBudget", 8, -1)).toBe(7);
-    expect(reviewBudgetValueText(2)).toBe("2 review calls");
+  it("steps each setting by one within its bounds: re-reviews 1 to 6, calls per milestone batch 2 to 6", () => {
+    expect(stepReview("review.maxRereviews", 1, -1)).toBe(1);
+    expect(stepReview("review.maxRereviews", 3, 1)).toBe(4);
+    expect(stepReview("review.maxRereviews", 6, 1)).toBe(6);
+    expect(stepReview("review.callsPerBatch", 2, -1)).toBe(2);
+    expect(stepReview("review.callsPerBatch", 6, 1)).toBe(6);
+    expect(stepReview("review.callsPerBatch", 6, -1)).toBe(5);
+    expect(reviewValueText("review.maxRereviews", 1)).toBe("1 re-review");
+    expect(reviewValueText("review.maxRereviews", 3)).toBe("3 re-reviews");
+    expect(reviewValueText("review.callsPerBatch", 3)).toBe("3 review calls");
   });
 
-  it("at the defaults: Small, Medium and Large with − and +, − off at the minimum, nothing to save, no defaults to restore", () => {
-    const card = budgetView();
-    expect(card).toMatchObject({ title: "Review budget", meaning: REVIEW_BUDGET_WORDS.meaning, note: REVIEW_BUDGET_WORDS.note, reset: null });
+  it("computes the caps per request from the calls per milestone batch: Small 3, Medium 6, Large 12 at the defaults", () => {
+    expect(reviewCapsText(3)).toBe("Cap per request: Small 3, Medium 6, Large 12 calls");
+    expect(reviewCapsText(2)).toBe("Cap per request: Small 2, Medium 4, Large 8 calls");
+    expect(reviewCapsText(6)).toBe("Cap per request: Small 6, Medium 12, Large 24 calls");
+  });
+
+  it("at the defaults: the two settings with − and +, the caps read-only, nothing to save, no defaults to restore", () => {
+    const card = reviewView();
+    expect(card).toMatchObject({ title: "Review", meaning: REVIEW_WORDS.meaning, caps: "Cap per request: Small 3, Medium 6, Large 12 calls", reset: null });
     expect(card.rows.map((row) => [row.label, row.key, row.valueText, row.decrease.enabled, row.increase.enabled])).toEqual([
-      ["Small", "review.smallBudget", "2 review calls", false, true],
-      ["Medium", "review.mediumBudget", "2 review calls", false, true],
-      ["Large", "review.largeBudget", "4 review calls", true, true],
+      ["Re-reviews per batch", "review.maxRereviews", "3 re-reviews", true, true],
+      ["Calls per milestone batch", "review.callsPerBatch", "3 review calls", true, true],
     ]);
-    expect(card.rows[2]!.increase.accessibilityLabel).toBe("Review budget of a Large request: raise to 5 review calls");
-    expect(card.rows[2]!.decrease.accessibilityLabel).toBe("Review budget of a Large request: lower to 3 review calls");
-    expect(card.save).toEqual({ enabled: false, label: "Save", accessibilityLabel: "Save the review budget" });
-    // + off at the maximum.
-    expect(budgetView({ settings: stored(8, 2, 4) }).rows[0]!.increase.enabled).toBe(false);
+    expect(card.rows.map((row) => row.key)).toEqual([...REVIEW_KEYS]);
+    expect(card.rows[1]!.increase.accessibilityLabel).toBe("Review calls per milestone batch: raise to 4 review calls");
+    expect(card.rows[0]!.decrease.accessibilityLabel).toBe("Re-reviews per batch: lower to 2 re-reviews");
+    expect(card.save).toEqual({ enabled: false, label: "Save", accessibilityLabel: "Save the review settings" });
+    // − off at the minimum, + off at the maximum.
+    expect(reviewView({ settings: stored(1, 6) }).rows.map((row) => [row.decrease.enabled, row.increase.enabled])).toEqual([[false, true], [true, false]]);
   });
 
-  it("offers Save for a changed budget only, and the defaults away from them; Save sends one coordination.set per tier, Small first", () => {
-    const draft = { "review.largeBudget": 6, "review.smallBudget": 3, "review.mediumBudget": 2 };
-    const card = budgetView({ draft });
-    expect(card.rows.map((row) => row.valueText)).toEqual(["3 review calls", "2 review calls", "6 review calls"]);
+  it("follows the draft: the caps change with the calls per milestone batch before Save; Save sends one coordination.set per changed setting, in the card's order", () => {
+    const draft = { "review.callsPerBatch": 4, "review.maxRereviews": 2 };
+    const card = reviewView({ draft });
+    expect(card.rows.map((row) => row.valueText)).toEqual(["2 re-reviews", "4 review calls"]);
+    expect(card.caps).toBe("Cap per request: Small 4, Medium 8, Large 16 calls");
     expect(card.save.enabled).toBe(true);
-    expect(card.reset).toEqual({ enabled: true, label: "Use the defaults", accessibilityLabel: "Set the review budget back to its defaults" });
-    expect(changedReviewBudget(D, draft)).toEqual([
-      { key: "review.smallBudget", value: 3 },
-      { key: "review.largeBudget", value: 6 },
+    expect(card.reset).toEqual({ enabled: true, label: "Use the defaults", accessibilityLabel: "Set the review settings back to their defaults" });
+    expect(changedReview(D, draft)).toEqual([
+      { key: "review.maxRereviews", value: 2 },
+      { key: "review.callsPerBatch", value: 4 },
     ]);
     // A draft back at the stored value changes nothing: Save stays off.
-    expect(budgetView({ draft: { "review.largeBudget": 4 } }).save.enabled).toBe(false);
+    expect(reviewView({ draft: { "review.callsPerBatch": 3 } }).save.enabled).toBe(false);
     // Stored away from the defaults: "Use the defaults" shows them as a draft, which Save then sends.
-    const owner = stored(3, 4, 6);
-    expect(budgetView({ settings: owner }).reset).not.toBeNull();
-    const back = reviewBudgetDefaultsDraft(D);
-    expect(back).toEqual({ "review.smallBudget": 2, "review.mediumBudget": 2, "review.largeBudget": 4 });
-    expect(budgetView({ settings: owner, draft: back })).toMatchObject({ reset: null, save: { enabled: true } });
-    expect(changedReviewBudget(owner, back)).toEqual([
-      { key: "review.smallBudget", value: 2 },
-      { key: "review.mediumBudget", value: 2 },
-      { key: "review.largeBudget", value: 4 },
+    const owner = stored(5, 2);
+    expect(reviewView({ settings: owner }).reset).not.toBeNull();
+    expect(reviewView({ settings: owner }).caps).toBe("Cap per request: Small 2, Medium 4, Large 8 calls");
+    const back = reviewDefaultsDraft(D);
+    expect(back).toEqual({ "review.maxRereviews": 3, "review.callsPerBatch": 3 });
+    expect(reviewView({ settings: owner, draft: back })).toMatchObject({ reset: null, save: { enabled: true } });
+    expect(changedReview(owner, back)).toEqual([
+      { key: "review.maxRereviews", value: 3 },
+      { key: "review.callsPerBatch", value: 3 },
     ]);
   });
 
   it("disables everything while saving", () => {
-    const card = budgetView({ draft: { "review.largeBudget": 6 }, saving: true });
+    const card = reviewView({ draft: { "review.callsPerBatch": 4 }, saving: true });
     expect(card.rows.every((row) => !row.decrease.enabled && !row.increase.enabled)).toBe(true);
     expect(card.save).toMatchObject({ enabled: false, label: "Saving…" });
     expect(card.reset).toMatchObject({ enabled: false });
   });
 
-  it("ReviewBudgetCard (hook-free): the title, Small, Medium and Large as joined number fields, what the budget means, Save once a tier changed", () => {
+  it("ReviewCard (hook-free): the title, the two settings as joined number fields, the caps, what they mean, Save once one changed", () => {
     const onInput = vi.fn();
     const onSave = vi.fn();
     const draw = (props: Record<string, unknown>) =>
-      renderTree(ReviewBudgetCard({ view: budgetView(), inputs: {}, busy: false, error: null, onInput, onSave, styles, theme, ...props }));
+      renderTree(ReviewCard({ view: reviewView(), inputs: {}, busy: false, error: null, onInput, onSave, styles, theme, ...props }));
     const atRest = draw({});
-    expect(texts(atRest)).toEqual(["Review budget", "Small", "Medium", "Large", "Review calls a request may use before the Worker asks you."]);
+    expect(texts(atRest)).toEqual(["Review", "Re-reviews per batch", "Calls per milestone batch", "Cap per request: Small 3, Medium 6, Large 12 calls", REVIEW_WORDS.meaning]);
     expect(pressables(atRest)).toHaveLength(0);
     const fields = allNodes(atRest).filter((node) => node.type === "TextInput");
-    expect(fields.map((field) => field.props.value)).toEqual(["2", "2", "4"]);
-    expect(fields[2]!.props.accessibilityLabel).toBe("Review budget of a Large request: 4 review calls");
-    (fields[2]!.props.onChangeText as (text: string) => void)("6");
-    expect(onInput.mock.calls).toEqual([["review.largeBudget", "6"]]);
+    expect(fields.map((field) => field.props.value)).toEqual(["3", "3"]);
+    expect(fields[1]!.props.accessibilityLabel).toBe("Review calls per milestone batch: 3 review calls");
+    (fields[1]!.props.onChangeText as (text: string) => void)("4");
+    expect(onInput.mock.calls).toEqual([["review.callsPerBatch", "4"]]);
 
-    const card = budgetView({ draft: { "review.largeBudget": 6 } });
-    const changed = draw({ view: card, inputs: { "review.largeBudget": "6" } });
+    const card = reviewView({ draft: { "review.callsPerBatch": 4 } });
+    const changed = draw({ view: card, inputs: { "review.callsPerBatch": "4" } });
+    expect(texts(changed)).toContain("Cap per request: Small 4, Medium 8, Large 16 calls");
     const [save] = pressables(changed);
     expect(texts([save!])).toEqual(["Save"]);
-    expect(save!.props.accessibilityLabel).toBe("Save the review budget");
+    expect(save!.props.accessibilityLabel).toBe("Save the review settings");
     (save!.props.onPress as () => void)();
     expect(onSave).toHaveBeenCalledOnce();
-    const failed = draw({ view: card, error: "E_COORDINATION_INVALID: review.largeBudget must be a whole number from 2 to 8" });
+    const failed = draw({ view: card, error: "E_COORDINATION_INVALID: review.callsPerBatch must be a whole number from 2 to 6" });
     const error = allNodes(failed).find((node) => node.type === "Text" && texts([node])[0]?.startsWith("E_COORDINATION_INVALID"))!;
     expect(JSON.stringify(error.props.style)).toContain("#statusDanger");
   });
@@ -410,14 +516,14 @@ describe("Coordination on a phone (MobileSettings.dc.html)", () => {
     expect(texts(nodes).slice(0, 3)).toEqual(["Compact", view().meaning, "helped —"]);
   });
 
-  it("stacks the review budget's tiers as rows with 84px fields and puts Save across the card", () => {
+  it("stacks the review settings as rows with 84px fields, the caps under them, and puts Save across the card", () => {
     const onSave = vi.fn();
-    const card = reviewBudgetCardView({ settings: D, defaults: D, draft: { "review.largeBudget": 6 }, saving: false });
+    const card = reviewCardView({ settings: D, defaults: D, draft: { "review.callsPerBatch": 4 }, saving: false });
     const nodes = renderTree(
-      ReviewBudgetCard({ view: card, inputs: { "review.largeBudget": "6" }, busy: false, error: null, narrow: true, onInput: noop, onSave, styles, theme }),
+      ReviewCard({ view: card, inputs: { "review.callsPerBatch": "4" }, busy: false, error: null, narrow: true, onInput: noop, onSave, styles, theme }),
     );
-    expect(texts(nodes)).toEqual(["Review budget", card.meaning, "Small", "Medium", "Large", "Save"]);
-    expect(fieldWidths(nodes)).toEqual([84, 84, 84]);
+    expect(texts(nodes)).toEqual(["Review", card.meaning, "Re-reviews per batch", "Calls per milestone batch", "Cap per request: Small 4, Medium 8, Large 16 calls", "Save"]);
+    expect(fieldWidths(nodes)).toEqual([84, 84]);
     const [save] = pressables(nodes);
     expect(JSON.stringify(save!.props.style)).toContain('"alignSelf":"stretch"');
     (save!.props.onPress as () => void)();

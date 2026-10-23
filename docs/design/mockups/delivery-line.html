@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paseo-bm — mission page: request chains and mission branches (draft for approval)</title>
+<style>
+  /* Colours stand for the theme tokens the plugin uses (no literal colours in code):
+     surface0, surface1, border, foreground, foregroundMuted, accent, accentForeground,
+     statusWarning, statusDanger, statusSuccess. Radius 2. */
+  :root { --s0:#0f1115; --s1:#161a20; --s2:#1c2129; --b:#2a303a; --fg:#e6e8eb; --mu:#8b93a1;
+          --ac:#7c93ff; --acf:#0b0d12; --wa:#e3a33b; --da:#e5534b; --ok:#3fb27f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#07080a; color:var(--fg); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  h1.page { font-size:15px; color:var(--mu); font-weight:500; margin:24px 32px 8px; }
+  .note { margin:0 32px 24px; color:var(--mu); font-size:12px; max-width:1100px; }
+  .boards { display:flex; flex-wrap:wrap; gap:32px; padding:0 32px 48px; align-items:flex-start; }
+  .board { background:var(--s0); border:1px solid var(--b); border-radius:6px; overflow:hidden; }
+  .board > .cap { font-size:11px; color:var(--mu); padding:6px 10px; border-bottom:1px solid var(--b); background:#0b0d11; }
+  .desk { width:1040px; } .phone { width:390px; }
+  .tabs { display:flex; gap:18px; padding:12px 24px 0; border-bottom:1px solid var(--b); }
+  .phone .tabs { padding:10px 12px 0; gap:12px; overflow:hidden; }
+  .tab { padding:0 0 10px; color:var(--mu); font-size:13px; }
+  .tab.on { color:var(--fg); border-bottom:2px solid var(--ac); }
+  .content { padding:24px; display:flex; flex-direction:column; gap:12px; }
+  .phone .content { padding:12px; gap:8px; }
+  .title { font-size:24px; font-weight:600; } .phone .title { font-size:18px; }
+  .row { display:flex; align-items:center; gap:10px; } .between { justify-content:space-between; }
+  .wrap { flex-wrap:wrap; }
+  .label { color:var(--mu); font-size:12px; font-weight:500; text-transform:uppercase; letter-spacing:.6px; }
+  .muted { color:var(--mu); } .small { font-size:12px; } .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  .card { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:14px; display:flex; flex-direction:column; gap:8px; position:relative; }
+  .phone .card { padding:10px; gap:6px; }
+  .bar { position:absolute; left:0; top:0; bottom:0; width:3px; }
+  .btn { padding:9px 14px; border-radius:2px; font-size:13px; border:1px solid var(--b); background:transparent; color:var(--fg); }
+  .btn.pri { background:var(--ac); color:var(--acf); border-color:var(--ac); }
+  .btn.dan { border-color:var(--da); color:var(--da); }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--fg); padding:2px 8px; border:1px solid var(--b); border-radius:2px; background:var(--s2); }
+  .sq { width:7px; height:7px; display:inline-block; }
+  .code { font-weight:700; letter-spacing:.5px; }
+  .prog { height:4px; background:var(--s2); border-radius:2px; overflow:hidden; } .prog > i { display:block; height:100%; background:var(--ac); }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .grid3 { display:grid; grid-template-columns: repeat(3,1fr); gap:10px; }
+  .stat { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:12px; }
+  .stat b { font-size:20px; display:block; } .phone .stat b { font-size:16px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:7px 8px; border-bottom:1px solid var(--b); vertical-align:top; }
+  th { color:var(--mu); font-weight:500; font-size:12px; }
+  .ok{color:var(--ok)} .wa{color:var(--wa)} .da{color:var(--da)} .ac{color:var(--ac)}
+  .crit { display:flex; gap:8px; align-items:flex-start; font-size:13px; } .box { width:14px; height:14px; border:1px solid var(--b); border-radius:2px; flex:none; margin-top:2px; }
+  .box.met { background:var(--ok); border-color:var(--ok); } .box.drop { background:var(--s2); }
+  .seg { display:flex; border:1px solid var(--b); border-radius:2px; overflow:hidden; } .seg span { padding:6px 10px; font-size:12px; color:var(--mu); border-right:1px solid var(--b); } .seg span:last-child{border-right:none} .seg span.on { background:var(--ac); color:var(--acf); }
+  .journal div { font-size:12px; color:var(--mu); padding:3px 0; border-bottom:1px dashed var(--b); } .journal b { color:var(--fg); font-weight:500; }
+  .input { border:1px solid var(--b); background:var(--s0); border-radius:2px; padding:8px 10px; color:var(--mu); font-size:13px; }
+  .new { outline:1px dashed var(--ac); outline-offset:3px; }
+  .tag { font-size:10px; color:var(--ac); border:1px solid var(--ac); border-radius:2px; padding:0 4px; margin-left:6px; text-transform:none; letter-spacing:0; }
+  .dim { opacity:.45; }
+  .q { display:flex; gap:8px; align-items:flex-start; font-size:13px; padding:6px 0; border-bottom:1px dashed var(--b); }
+  .q:last-child { border-bottom:none; }
+  .who { font-size:11px; color:var(--mu); min-width:84px; }
+</style>
+</head>
+<body>
+<h1 class="page">paseo-bm · mission page — request chains and mission branches — mockup for the owner's approval (2026-10-20, draft 1)</h1>
+<p class="note">Design: docs/design/paseo-bm-delivery-line.md §2.7, §4.9, §12 (ADR-035). Three additions to the approved mission page (mission-runtime.html, artboards G and H) and one to Projects › Requests. Everything else is unchanged and shown dimmed; new parts have a dashed outline. <b>Chains:</b> a request now ends at <i>finished</i>; more work for it opens a continuation, shown as "continues …". <b>Repositories:</b> each mission writes on its own branch in its own worktree; the row shows the branch and its state, and the one yes per mission and repository for push and merge request, with Revoke. Nothing here is built until you approve it — comment on what to add, remove, rename or move.</p>
+
+<div class="boards">
+
+<!-- ============ I. Desktop · mission page ============ -->
+<div class="board desk">
+  <div class="cap">I · Desktop — a mission's page: Repositories with their branches, In flight with request chains</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span><span class="tab">Tools &amp; skills</span></div>
+  <div class="content">
+    <div class="row between">
+      <div class="row"><span class="muted">Missions ›</span><span class="code" style="font-size:20px">INO</span><span class="title" style="font-size:20px">Cải tiến sáng tạo AI Assistant</span></div>
+      <div class="row"><span class="btn pri">Open Main</span><span class="btn">Rename</span><span class="btn dan">Close mission</span></div>
+    </div>
+    <div class="dim"><div class="card"><span class="label">Main</span><div class="small">As approved (artboard G)</div></div>
+      <div style="height:12px"></div>
+      <div class="grid3">
+        <div class="stat"><span class="small muted">Done criteria</span><b>10 / 18</b></div>
+        <div class="stat"><span class="small muted">Live Workers</span><b>2</b></div>
+        <div class="stat"><span class="small muted">Questions for you</span><b class="wa">1</b></div>
+      </div>
+    </div>
+
+    <div class="card new"><div class="row between"><span class="label">Repositories<span class="tag">new: branches</span></span><span class="small muted">each mission writes on its own branch · read 12:40</span></div>
+      <table>
+        <tr><th>Repository</th><th>Branch → integration</th><th>State</th><th>Merge request · CI</th><th>Push &amp; merge request</th></tr>
+        <tr><td>xspace-ai-assistant</td><td><span class="mono">m/INO/xspace-ai-assistant</span> → <span class="mono">develop</span></td><td>↑4 ↓0 · <span class="wa">● uncommitted</span><div class="small muted">last commit 11:52</div></td><td><span class="ac">!42 open</span> · <span class="ok">CI passed</span></td><td><span class="small">allowed since 10:42</span> <span class="btn" style="padding:3px 8px;margin-left:6px">Revoke</span></td></tr>
+        <tr><td>ai-assistant</td><td><span class="mono">m/INO/ai-assistant</span> → <span class="mono">develop</span></td><td>↑2 ↓7 · clean<div class="small muted">last commit 12:05</div></td><td class="muted">no merge request yet</td><td><span class="wa">waiting for you</span> <span class="btn" style="padding:3px 8px;margin-left:6px">Answer</span></td></tr>
+      </table>
+      <span class="small muted">↑ commits on the mission branch not yet in the integration branch · ↓ commits of the integration branch not yet merged into it. Merging stays on GitLab. A worktree is removed only by you, when the mission closes.</span>
+    </div>
+
+    <div class="card new"><div class="row between"><span class="label">In flight<span class="tag">new: chains</span></span><span class="small muted">what the Main knows · read 12:40</span></div>
+      <table>
+        <tr><th>Request · topic</th><th>Repository</th><th>Worker</th><th>State</th><th>Last report</th></tr>
+        <tr><td><span class="mono">req-…124012Z</span> Widget flows W13<div class="small muted">continues <span class="mono">req-…105259Z</span> · 3rd of its chain</div></td><td>xspace-ai-assistant</td><td>🔵 7c2e9d1</td><td><span class="ac">working</span></td><td class="small muted">implementing · 12:31</td></tr>
+        <tr><td><span class="mono">req-…121530Z</span> Document category admin<div class="small muted">continues <span class="mono">req-…132118Z</span></div></td><td>ai-assistant</td><td>🔵 112e496</td><td><span class="wa">waiting for you · Q1</span></td><td class="small muted">blocked · 12:20</td></tr>
+        <tr><td class="muted"><span class="mono">req-…105259Z</span> Review and propose the feature</td><td class="muted">xspace-ai-assistant</td><td class="muted">🔵 6689326</td><td><span class="ok">finished</span> <span class="muted">→ req-…124012Z</span></td><td class="small muted">finished · committed <span class="mono">a1b2c3d</span> · 11:58</td></tr>
+      </table>
+      <span class="small muted">A request ends at finished; more work for it continues as a new request with a fresh Worker. Finished requests stay listed for a day, then only in the journal.</span>
+    </div>
+
+    <div class="dim"><div class="grid2">
+      <div class="card"><span class="label">Questions · Links</span><div class="small">As approved (artboard G)</div></div>
+      <div class="card"><span class="label">Contracts · Journal</span><div class="small">As approved (artboard G)</div></div>
+    </div></div>
+  </div>
+</div>
+
+<!-- ============ J. Phone · mission page ============ -->
+<div class="board phone">
+  <div class="cap">J · Phone — a mission's page</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span></div>
+  <div class="content">
+    <div class="small muted">Missions ›</div>
+    <div class="row"><span class="code" style="font-size:18px">INO</span><span class="title">Cải tiến sáng tạo AI Assistant</span></div>
+    <div class="row"><span class="btn pri" style="flex:1;text-align:center">Open Main</span><span class="btn">⋯</span></div>
+    <div class="dim"><div class="card"><span class="label">Main</span><div class="small muted">As approved (artboard H)</div></div></div>
+    <div class="card new"><span class="label">Repositories<span class="tag">new</span></span>
+      <div class="small"><b>xspace-ai-assistant</b> · ↑4 ↓0 · <span class="wa">● uncommitted</span></div>
+      <div class="small muted"><span class="mono">m/INO/…</span> → develop · <span class="ac">!42</span> · <span class="ok">CI passed</span></div>
+      <div class="small">Push &amp; MR allowed · <span class="ac">Revoke</span></div>
+      <div class="small" style="margin-top:6px"><b>ai-assistant</b> · ↑2 ↓7 · clean</div>
+      <div class="small"><span class="wa">Push &amp; MR: waiting for you</span> · <span class="ac">Answer</span></div>
+    </div>
+    <div class="card new"><span class="label">In flight<span class="tag">new: chains</span></span>
+      <div class="small"><b>Widget flows W13</b> · <span class="ac">working</span></div>
+      <div class="small muted">continues Review and propose the feature · 3rd</div>
+      <div class="small"><b>Document category admin</b> · <span class="wa">waiting for you · Q1</span></div>
+      <div class="small muted">continues req-…132118Z</div>
+      <div class="small muted">+ 1 finished</div>
+    </div>
+    <div class="dim"><div class="card"><span class="label">Questions · Links · Charter · Governor · Workers</span><div class="small muted">As approved (artboards D, H)</div></div></div>
+  </div>
+</div>
+
+<!-- ============ K. Desktop · Projects › Requests ============ -->
+<div class="board desk">
+  <div class="cap">K · Desktop — Projects › a repository › Requests: a chain shown on its newest request</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab">Missions</span><span class="tab on">Projects</span><span class="tab">Settings</span><span class="tab">Tools &amp; skills</span></div>
+  <div class="content">
+    <div class="row"><span class="muted">Projects ›</span><span class="title" style="font-size:20px">UI - xSpace AI Assistant</span><span class="muted">› Requests</span></div>
+    <div class="card"><table>
+      <tr><th>Request</th><th>Tier</th><th>State</th><th>Tokens</th><th>Updated</th></tr>
+      <tr class="new"><td><b>Widget flows W13</b><div class="small muted">chain of 3 · started with req-…105259Z · <span class="ac">show the chain</span></div></td><td>Large</td><td><span class="ac">working</span></td><td>38 M<div class="small muted">chain 121 M</div></td><td class="small muted">12:31</td></tr>
+      <tr class="dim"><td>Menu uses the shell's mechanism</td><td>Medium</td><td><span class="ok">finished</span></td><td>9.2 M</td><td class="small muted">yesterday</td></tr>
+    </table></div>
+    <span class="small muted">The earlier requests of a chain are listed under it when you open it; nothing else on this screen changes.</span>
+  </div>
+</div>
+
+</div>
+<p class="note">Words used: "continues &lt;request&gt;" for a continuation; "finished → &lt;request&gt;" on the one it continues; ↑/↓ ahead and behind the integration branch; "● uncommitted" when the worktree has changes not committed; merge request "open · merged · conflicting"; CI "passed · failed · running · not run". "Push &amp; merge request" reads "allowed since &lt;time&gt; · Revoke", "waiting for you · Answer" (the one card per mission and repository), or "not now" when you said not now.</p>
+</body>
+</html>

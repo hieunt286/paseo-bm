@@ -5,8 +5,9 @@
  * - `<data folder>/missions/<missionId>.json` — one mission, the source of
  *   everything a successor Main needs (§1 principle 3).
  * - `missions/index.json` — `{ missionId, code, name, state, mainId, repos }`
- *   per mission, rewritten with each mission write, for lists and code
- *   lookups. A missing or stale index (a mission file newer than it, or the
+ *   per mission, and `placements: { <placement>: { missionId, repo } }`
+ *   (delivery line design §3.1), rewritten with each mission write, for lists,
+ *   code and placement lookups. A missing or stale index (a mission file newer than it, or the
  *   set of missions changed) is rebuilt from the mission files.
  * - `missions/<missionId>.journal.jsonl` — append-only, one line per event,
  *   the newest `MAX_JOURNAL_LINES` kept. What happened, never a source of state.
@@ -68,6 +69,9 @@ export const MAX_JOURNAL_TEXT = 500;
 
 export const MISSION_CREATORS = ["owner", "orchestrator", "legacy"] as const;
 export const MAIN_CHANGE_REASONS = ["created", "replaced", "fallback", "handoff", "owner"] as const;
+/** A contract's states (delivery line design §9.2). */
+export const CONTRACT_STATUSES = ["proposed", "agreed", "superseded", "withdrawn"] as const;
+export type ContractStatus = (typeof CONTRACT_STATUSES)[number];
 export const JOURNAL_KINDS = ["charter", "plan", "criterion", "contract", "worker", "link", "decision", "main", "governor", "note", "split-suggested"] as const;
 export type JournalKind = (typeof JOURNAL_KINDS)[number];
 
@@ -79,6 +83,13 @@ const criterionSchema = z.object({
   status: z.enum(["open", "met", "dropped"]),
   at: isoOrNull,
   evidence: z.string().nullable(),
+  /**
+   * When it was last met with evidence (delivery line design §8.4): the
+   * governor's drift counts from it. Kept when the criterion moves back to
+   * open or its status is sent again. Additive: an older entry has none and
+   * reads `at` while it is met.
+   */
+  metAt: z.string().optional(),
 });
 
 const contractSchema = z.object({
@@ -90,13 +101,96 @@ const contractSchema = z.object({
   version: z.number().int().min(1),
   updatedAt: z.string(),
   source: z.string(),
+  /** Delivery line design §9.2: absent on an older contract, which reads `agreed` (`contractStatusOf`). */
+  status: z.enum(CONTRACT_STATUSES).optional(),
+  /** Who agreed to which version, on which side of a link (delivery line design §9.2); absent: none. */
+  agreedBy: z.array(z.object({ side: z.enum(["asker", "answerer"]), agentId: z.string().min(1), version: z.number().int().min(1), at: z.string() })).optional(),
 });
+
+/** A contract's status (delivery line design §9.2): absent reads `agreed`. Pure. */
+export function contractStatusOf(contract: Pick<MissionContract, "status">): ContractStatus {
+  return contract.status ?? "agreed";
+}
+
+/** The most `agreedBy` entries a contract keeps: the newest. */
+export const MAX_CONTRACT_AGREEMENTS = 20;
+
+/** An agreement to a contract at a version, from one side of a link (delivery line design §9.2). */
+export interface ContractAgreement {
+  side: "asker" | "answerer";
+  agentId: string;
+  version: number;
+  at: string;
+}
+
+/**
+ * `mission` with `agreement` to `contractId` recorded (delivery line design
+ * §9.2): appended to `agreedBy` at the current version; once both sides of a
+ * link agreed to it, the contract is `agreed` (`nowAgreed`). Refused: an
+ * unknown contract, a stale version ("C2 is at v4; agree to C2@v4 or
+ * reply."), a superseded or withdrawn contract. Pure.
+ */
+export function applyAgreement(mission: Mission, contractId: string, agreement: ContractAgreement): { mission: Mission; nowAgreed: boolean } | { reasons: string[] } {
+  const contract = mission.contracts.find((entry) => entry.id === contractId);
+  if (contract === undefined) return { reasons: [`unknown contract ${contractId}`] };
+  const reason = agreementRefusalOf(contract, agreement.version);
+  if (reason !== null) return { reasons: [reason] };
+  const agreedBy = [...(contract.agreedBy ?? []), agreement].slice(-MAX_CONTRACT_AGREEMENTS);
+  const sides = new Set(agreedBy.filter((entry) => entry.version === contract.version).map((entry) => entry.side));
+  const nowAgreed = contractStatusOf(contract) !== "agreed" && sides.has("asker") && sides.has("answerer");
+  const next: MissionContract = { ...contract, agreedBy, ...(nowAgreed ? { status: "agreed" as const } : {}) };
+  return { mission: { ...mission, contracts: mission.contracts.map((entry) => (entry.id === contractId ? next : entry)) }, nowAgreed };
+}
+
+/** Why an agreement to `contract` at `version` is refused (delivery line design §9.2), or null. Pure. */
+export function agreementRefusalOf(contract: Pick<MissionContract, "id" | "version" | "status">, version: number): string | null {
+  const status = contractStatusOf(contract);
+  if (status === "superseded" || status === "withdrawn") return `${contract.id} is ${status}; there is nothing to agree to: reply instead`;
+  if (version !== contract.version) return `${contract.id} is at v${contract.version}; agree to ${contract.id}@v${contract.version} or reply.`;
+  return null;
+}
 
 const budgetSchema = z.object({
   requests: z.number().int().min(0).nullable(),
   workers: z.number().int().min(0).nullable(),
   reviewCalls: z.number().int().min(0).nullable(),
   days: z.number().min(0).nullable(),
+});
+
+/** A mission's standing integration grant for one repo (delivery line design §4.3). */
+const integrationGrantSchema = z.object({
+  state: z.enum(["granted", "revoked"]),
+  decisionId: z.string(),
+  grantedAt: z.string(),
+  revokedAt: isoOrNull,
+  scope: z.object({ remote: z.literal("origin"), branch: z.string(), target: z.string() }),
+  mr: z.object({ url: z.string(), iid: z.number().int().nullable() }).nullable(),
+});
+
+export const PLACEMENT_STATES = ["creating", "ready", "failed", "retired", "archived"] as const;
+
+/** The workspace a mission's agents run in for one repo: its worktree (delivery line design §3.2). */
+const placementSchema = z.object({
+  /** The repo key: the repo's root workspace. */
+  repo: z.string().min(1),
+  /** The Paseo worktree workspace; null until it is made. */
+  workspaceId: z.string().min(1).nullable(),
+  directory: z.string().nullable(),
+  branch: z.string(),
+  target: z.string(),
+  base: z.string(),
+  worktreeSlug: z.string(),
+  state: z.enum(PLACEMENT_STATES),
+  requestKey: z.string(),
+  createdAt: z.string(),
+  deps: z.object({ cloned: z.array(z.string()), at: isoOrNull, note: z.string().nullable() }),
+  integration: integrationGrantSchema.nullable(),
+  /** The exact `workspaces.create` options sent under `requestKey` (§3.3 step 1): a retry resends them byte for byte. */
+  requestBody: z.string().optional(),
+  /** Why it is `failed` (§3.3 step 3). */
+  note: z.string().optional(),
+  /** The owner's archive card (`m:`) once one names it (§3.6). */
+  archiveCard: z.string().optional(),
 });
 
 export const missionSchema = z.object({
@@ -126,10 +220,20 @@ export const missionSchema = z.object({
   }),
   plan: z.object({ text: z.string(), updatedAt: isoOrNull }),
   contracts: z.array(contractSchema),
+  /** Its worktree per repo (delivery line design §3.2); absent: none, its agents run in each repo's root. */
+  placements: z.array(placementSchema).optional(),
 });
 
 export type Mission = z.infer<typeof missionSchema>;
+export type Placement = z.infer<typeof placementSchema>;
+export type IntegrationGrant = z.infer<typeof integrationGrantSchema>;
 export type MissionContract = z.infer<typeof contractSchema>;
+export type MissionCriterion = z.infer<typeof criterionSchema>;
+
+/** When a criterion was last met with evidence (delivery line design §8.4): its `metAt`, else (an older entry) its `at` while it is met; null when never. Pure. */
+export function metAtOf(criterion: Pick<MissionCriterion, "status" | "at" | "metAt">): string | null {
+  return criterion.metAt ?? (criterion.status === "met" ? criterion.at : null);
+}
 
 const indexEntrySchema = z.object({
   missionId: z.string().regex(MISSION_ID_PATTERN),
@@ -143,6 +247,16 @@ const indexEntrySchema = z.object({
 });
 
 export type MissionIndexEntry = z.infer<typeof indexEntrySchema>;
+
+/** The index's map of placements (delivery line design §3.1): each placement workspace's mission and repo key. */
+export type PlacementIndex = Record<string, { missionId: string; repo: string }>;
+
+const placementIndexSchema = z.record(z.string(), z.object({ missionId: z.string(), repo: z.string() }));
+
+/** The placements of a mission that have a workspace, as the index maps them. Pure. */
+export function placementIndexOf(mission: Pick<Mission, "missionId" | "placements">): PlacementIndex {
+  return Object.fromEntries((mission.placements ?? []).flatMap((placement) => (placement.workspaceId === null ? [] : [[placement.workspaceId, { missionId: mission.missionId, repo: placement.repo }]])));
+}
 
 /** What a `split-suggested` line carries (§9.6): the fields `bm_create_main` takes, bar the source mission. */
 const splitSuggestionSchema = z.object({
@@ -265,6 +379,8 @@ export interface MissionStore {
   get(missionId: string): Mission | null;
   /** Every mission's index entry, as the mission files say (rebuilt when missing or stale). Never throws. */
   list(): MissionIndexEntry[];
+  /** The index's placements map (delivery line design §3.1), rebuilt with the index. Never throws. */
+  placements(): PlacementIndex;
   /** The open mission with this code, else the closed one closed last (else created last), else null. Never throws. */
   byCode(code: string): MissionIndexEntry | null;
   /** The open mission whose current Main is `agentId`, or null. Never throws. */
@@ -288,6 +404,12 @@ export interface MissionStore {
   appendJournal(missionId: string, entry: NewJournalEntry): JournalEntry;
   /** The newest `limit` journal lines (of `kind` only, when given), oldest first; a line that does not parse is skipped. Never throws. */
   journal(missionId: string, limit?: number, kind?: JournalKind): JournalEntry[];
+}
+
+/** `missions/index.json`: an entry per mission and the placements map (delivery line design §3.1). */
+interface MissionIndex {
+  missions: MissionIndexEntry[];
+  placements: PlacementIndex;
 }
 
 /** A mission file's content: the mission, or `{}` for a missing one. */
@@ -331,14 +453,15 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
       cached: true,
     });
 
-  const indexFile = createJsonFileStore<{ missions: MissionIndexEntry[] }>({
+  const indexFile = createJsonFileStore<MissionIndex>({
     home,
     dir: MISSIONS_DIR_NAME,
     file: MISSION_INDEX_FILE_NAME,
     version: MISSIONS_VERSION,
     versionKey: "schemaVersion",
-    parse: (body) => ({ missions: entriesOf(indexEntrySchema, body["missions"]) }),
-    empty: () => ({ missions: [] }),
+    // An index written before placements has none: none of its missions had one.
+    parse: (body) => ({ missions: entriesOf(indexEntrySchema, body["missions"]), placements: placementIndexSchema.catch({}).parse(body["placements"] ?? {}) }),
+    empty: () => ({ missions: [], placements: {} }),
     codes: { unwritable: UNWRITABLE },
     // Derived from the mission files: an unusable index is simply rebuilt.
   });
@@ -370,15 +493,15 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
   };
 
   /** Writes the index; a failure leaves the old one, which the next read finds stale. */
-  const writeIndex = (missions: MissionIndexEntry[]): void => {
+  const writeIndex = (index: MissionIndex): void => {
     try {
-      indexFile.write({ missions });
+      indexFile.write(index);
     } catch {
       // Rebuilt from the mission files at the next read.
     }
   };
 
-  const list = (): MissionIndexEntry[] => {
+  const readIndex = (): MissionIndex => {
     const files = missionFiles();
     try {
       const found = indexFile.inspect();
@@ -389,17 +512,19 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
         indexAt !== null &&
         ids.length === files.length &&
         files.every((file, at) => file.missionId === ids[at] && file.mtimeMs <= indexAt);
-      if (fresh) return found.value.missions;
+      if (fresh) return found.value;
     } catch {
       // A symlinked index: rebuilt below, in memory.
     }
-    const rebuilt = files.flatMap((file) => {
+    const missions = files.flatMap((file) => {
       const mission = get(file.missionId);
-      return mission === null ? [] : [indexEntryOf(mission)];
+      return mission === null ? [] : [mission];
     });
+    const rebuilt: MissionIndex = { missions: missions.map(indexEntryOf), placements: Object.assign({}, ...missions.map(placementIndexOf)) as PlacementIndex };
     if (files.length > 0) writeIndex(rebuilt);
     return rebuilt;
   };
+  const list = (): MissionIndexEntry[] => readIndex().missions;
 
   /** The open mission of `index` other than `missionId` that holds `code`. */
   const holderIn = (index: readonly MissionIndexEntry[], code: string, missionId: string | null): MissionIndexEntry | null =>
@@ -412,11 +537,12 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     return taken === null ? [] : [takenText(code, taken)];
   };
 
-  /** Writes a mission, then its index entry; `index` is the index as read before. */
-  const put = (mission: Mission, index: readonly MissionIndexEntry[]): Mission => {
-    const before = index.filter((entry) => entry.missionId !== mission.missionId);
+  /** Writes a mission, then its index entry and placements; `index` is the index as read before. */
+  const put = (mission: Mission, index: MissionIndex): Mission => {
+    const before = index.missions.filter((entry) => entry.missionId !== mission.missionId);
+    const placements = Object.fromEntries(Object.entries(index.placements).filter(([, entry]) => entry.missionId !== mission.missionId));
     const written = missionFile(mission.missionId).write(mission) as Mission;
-    writeIndex([...before, indexEntryOf(written)]);
+    writeIndex({ missions: [...before, indexEntryOf(written)], placements: { ...placements, ...placementIndexOf(written) } });
     return written;
   };
 
@@ -429,8 +555,8 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     const valid = missionSchema.safeParse(next);
     if (!valid.success) return { ok: false, reasons: valid.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`) };
     if (valid.data.missionId !== missionId) return { ok: false, reasons: ["a mission's id never changes"] };
-    const index = list();
-    const taken = valid.data.state === "open" ? holderIn(index, valid.data.code, missionId) : null;
+    const index = readIndex();
+    const taken = valid.data.state === "open" ? holderIn(index.missions, valid.data.code, missionId) : null;
     if (taken !== null) return { ok: false, reasons: [takenText(valid.data.code, taken)] };
     return { ok: true, mission: put(valid.data, index) };
   };
@@ -454,6 +580,7 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     dir,
     get,
     list,
+    placements: () => readIndex().placements,
     byCode(code) {
       const named = list().filter((entry) => entry.code === code);
       const open = named.find((entry) => entry.state === "open");
@@ -471,8 +598,8 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     codeTakenBy: (code, missionId = null) => holderIn(list(), code, missionId),
     codeRefusals: (code) => codeRefusalsIn(list(), code),
     create(init) {
-      const index = list();
-      const reasons = codeRefusalsIn(index, init.code);
+      const index = readIndex();
+      const reasons = codeRefusalsIn(index.missions, init.code);
       if (reasons.length > 0) return { ok: false, reasons };
       const known = new Set(missionFiles().map((file) => file.missionId));
       let missionId = newId();

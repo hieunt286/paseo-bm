@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   GOVERNOR_FIGURES,
+  countsForDrift,
   governorFiguresOf,
   lastCriterionChangeOf,
   liveWorkersOf,
   readGovernorSnapshot,
+  unconvergedTimesOf,
   type GovernorFigure,
   type GovernorRequestFacts,
   type GovernorSnapshot,
@@ -19,8 +21,12 @@ import { createMissionStore, type Mission } from "../plugin/server/mission-store
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { appendRecord } from "../plugin/server/trace-store";
 import { DEFAULT_COORDINATION_SETTINGS, GOVERNOR_BOUNDS } from "../plugin/shared/coordination";
+import { GOVERNOR_FIGURE_IDS, storedFigureIdOf } from "../plugin/shared/governor-figures";
 import type { TraceRecord } from "../plugin/shared/contracts";
+import type { Waiting } from "../plugin/shared/waits";
 import { file, report, turn } from "./fixtures/orchestrator-traces";
+import { fakeLineGit } from "./helpers/line-git";
+import { clearLineCache, refreshLines, type PlacementFacts } from "../plugin/server/line-watch";
 
 /**
  * The governor's figures (missions design §9.2): each family computed from a
@@ -60,7 +66,7 @@ const MISSION: Mission = {
 const mission = (charter: Partial<Mission["charter"]> = {}): Mission => ({ ...MISSION, charter: { ...MISSION.charter, ...charter } });
 
 function request(requestId: string, over: Partial<GovernorRequestFacts> = {}): GovernorRequestFacts {
-  return { requestId, workspaceId: "repo-a", rosterState: "active", workerIds: [], finishedAt: null, tier: null, reviewCalls: 0, reviewGranted: 0, reviewExempt: 0, ...over };
+  return { requestId, workspaceId: "repo-a", rosterState: "active", workerIds: [], finishedAt: null, tier: null, reviewCalls: 0, reviewGranted: 0, reviewMilestones: 0, ...over };
 }
 
 function snapshot(over: Partial<GovernorSnapshot> = {}): GovernorSnapshot {
@@ -76,7 +82,7 @@ function snapshot(over: Partial<GovernorSnapshot> = {}): GovernorSnapshot {
     dropped: [],
     alerts: [],
     links: [],
-    reviewBudget: { Small: 2, Medium: 2, Large: 4 },
+    review: { callsPerBatch: 3 },
     ...over,
   };
 }
@@ -116,17 +122,31 @@ describe("the defaults are the design's table (§9.2)", () => {
       finishedSinceCriterion: 6,
       outsideCharter: 1,
       cardAgeHours: 24,
+      // The line's figures (delivery line design §4.9).
+      uncommittedHours: 4,
+      unpushedHours: 24,
+      ciRedMinutes: 30,
+      behindCommits: 50,
       budgetPercent: 100,
       windowMinutes: 30,
       windowTurns: 5,
+      // The command pools (delivery line design §8.1).
+      quotaCodeNudge: 6,
+      quotaReplan: 3,
+      quotaArbitrate: 4,
+      quotaOther: 4,
     });
     for (const [name, bounds] of Object.entries(GOVERNOR_BOUNDS)) expect(bounds.default, name).toBe(SETTINGS[name as keyof typeof SETTINGS]);
   });
 
   it("an empty mission crosses nothing, and has budget figures only for its budget's fields", () => {
+    // With integration.ci off, the default (ADR-036, §17.1), there is no ciRed; on, every figure.
     const figures = figuresOf();
-    expect(figures.map((entry) => entry.id)).toEqual(Object.keys(GOVERNOR_FIGURES).filter((id) => !id.endsWith("Budget")));
+    expect(figures.map((entry) => entry.id)).toEqual(Object.keys(GOVERNOR_FIGURES).filter((id) => !id.endsWith("Budget") && id !== "ciRed"));
     expect(figures.filter((entry) => entry.crossed)).toEqual([]);
+    const withCi = figuresOf({ ci: "on" });
+    expect(withCi.map((entry) => entry.id)).toEqual(Object.keys(GOVERNOR_FIGURES).filter((id) => !id.endsWith("Budget")));
+    expect(withCi.filter((entry) => entry.crossed)).toEqual([]);
     const budgeted = governorFiguresOf(snapshot({ mission: mission({ budget: { requests: 4, workers: null, reviewCalls: 0, days: null } }) }), SETTINGS);
     expect(budgeted.filter((entry) => entry.family === "budget").map((entry) => entry.id)).toEqual(["requestsBudget"]);
   });
@@ -209,11 +229,68 @@ describe("overengineering", () => {
     expect(figureOf(figuresOf({ records: records.slice(0, 1), requests }), "tierRaised").crossed).toBe(false);
   });
 
-  it("counts requests whose review budget is exhausted, their grants and exempt calls included", () => {
-    const exhausted = [request("req-20261009T100000Z", { tier: "Small", reviewCalls: 2 }), request("req-20261009T110000Z", { tier: "Large", reviewCalls: 4 })];
-    expect(figureOf(figuresOf({ requests: exhausted }), "reviewBudgetExhausted")).toMatchObject({ value: 2, crossed: true });
-    const granted = [exhausted[0]!, { ...exhausted[1]!, reviewGranted: 1 }, request("req-20261009T120000Z", { tier: "Medium", reviewCalls: 3, reviewExempt: 2 })];
-    expect(figureOf(figuresOf({ requests: granted }), "reviewBudgetExhausted").value).toBe(1);
+  it("counts requests whose review cap is reached even for a new milestone batch, their grants included; no call is exempt (delivery line design §5.3, §5.6)", () => {
+    const reached = [
+      request("req-20261009T100000Z", { tier: "Small", reviewCalls: 3, reviewMilestones: 1 }),
+      request("req-20261009T110000Z", { tier: "Large", reviewCalls: 12, reviewMilestones: 4 }),
+    ];
+    expect(figureOf(figuresOf({ requests: reached }), "reviewCapReached")).toMatchObject({ value: 2, threshold: SETTINGS.reviewExhausted, op: ">=", crossed: true });
+    // A Large request of two batches at 6 calls may still open a third (a cap of 9): not reached.
+    expect(figureOf(figuresOf({ requests: [request("req-20261009T110000Z", { tier: "Large", reviewCalls: 6, reviewMilestones: 2 })] }), "reviewCapReached").value).toBe(0);
+    const granted = [
+      reached[0]!,
+      { ...reached[1]!, reviewGranted: 1 },
+      // Medium at 6 of 6: reached; an untilClean grant no longer leaves calls out.
+      request("req-20261009T120000Z", { tier: "Medium", reviewCalls: 6, reviewMilestones: 2 }),
+    ];
+    expect(figureOf(figuresOf({ requests: granted }), "reviewCapReached").value).toBe(2);
+    // The cap follows the owner's review.callsPerBatch.
+    expect(figureOf(figuresOf({ requests: reached, review: { callsPerBatch: 4 } }), "reviewCapReached").value).toBe(0);
+  });
+
+  it("counts the batches the convergence rule stopped in the last 24 h (delivery line design §5.2, §5.6)", () => {
+    const requests = [
+      request("req-20261009T100000Z", { unconvergedAt: [hoursAgo(1), hoursAgo(23)] }),
+      request("req-20261009T110000Z", { unconvergedAt: [hoursAgo(25)] }),
+      request("req-20261009T120000Z"),
+    ];
+    expect(figureOf(figuresOf({ requests }), "unconvergedBatches")).toMatchObject({ family: "overengineering", value: 2, threshold: SETTINGS.reviewExhausted, op: ">=", crossed: true });
+    expect(figureOf(figuresOf({ requests: requests.slice(1) }), "unconvergedBatches")).toMatchObject({ value: 0, crossed: false });
+  });
+
+  it("a batch is unconverged when the rule refuses its next re-review for its counts: re-reviews spent, or blocking not falling", () => {
+    const call = (n: number, kind: "create" | "rereview") => ({ callId: `c${n}`, kind, reviewerId: "rev-1", at: hoursAgo(10 - n) });
+    const result = (n: number, verdict: string, blocking: number | null) => ({ at: hoursAgo(9.5 - n), recordId: `r${n}`, verdict, blocking });
+    const batch = (batchId: string, results: ReturnType<typeof result>[]) => ({
+      batchId,
+      reviewerIds: ["rev-1"],
+      brief: "",
+      calls: results.map((_, n) => call(n, n === 0 ? "create" : "rereview")),
+      results,
+    });
+    const reviews = {
+      batches: [
+        batch("b1", [result(0, "pass", 0)]),
+        batch("b2", [result(0, "changes-required", 3), result(1, "changes-required", 3), result(2, "changes-required", 3)]),
+        batch("b3", [result(0, "changes-required", 4), result(1, "changes-required", 3), result(2, "changes-required", 2), result(3, "changes-required", 1)]),
+        batch("b4", [result(0, "changes-required", 2)]),
+      ],
+      grants: [],
+    };
+    expect(unconvergedTimesOf({ reviews }, [], 3)).toEqual([hoursAgo(7.5), hoursAgo(6.5)]);
+    expect(unconvergedTimesOf({ reviews }, [], 4)).toEqual([hoursAgo(7.5)]);
+    // A batch an older build opened has no results: its reviews are read from the trace by batch id.
+    const older = { batches: [{ batchId: "b9", reviewerIds: ["rev-1"], brief: "", calls: [call(0, "create"), call(1, "rereview"), call(2, "rereview")] }], grants: [] };
+    const traced = (n: number, blockingCount: number) => ({ agentId: "rev-1", at: hoursAgo(9.5 - n), batchId: "b9", verdict: "changes-required", blockingCount });
+    expect(unconvergedTimesOf({ reviews: older }, [traced(0, 2), traced(1, 1), traced(2, 1)], 3)).toEqual([hoursAgo(7.5)]);
+    expect(unconvergedTimesOf({ reviews: older }, [], 3)).toEqual([]);
+  });
+
+  it("reads a figure id an older build stored by its new name", () => {
+    expect(storedFigureIdOf("reviewBudgetExhausted")).toBe("reviewCapReached");
+    expect(storedFigureIdOf("tierRaised")).toBe("tierRaised");
+    expect(storedFigureIdOf("toString")).toBe("toString");
+    expect(GOVERNOR_FIGURE_IDS).not.toContain("reviewBudgetExhausted");
   });
 
   it("counts open approvals: more than 8 open q:, o: and m: cards", () => {
@@ -230,7 +307,7 @@ describe("overengineering", () => {
 });
 
 describe("drift", () => {
-  it("counts the Mains' turns since a done criterion last changed state, else since the charter was confirmed", () => {
+  it("counts the Mains' turns since a done criterion was last met, else since the charter was confirmed", () => {
     const turns = (n: number, hours: number) => Array.from({ length: n }, () => hoursAgo(hours));
     expect(lastCriterionChangeOf(MISSION)).toBe(MISSION.charter.confirmedAt);
     expect(figureOf(figuresOf({ mainTurnEnds: [...turns(41, 10), ...turns(5, 45)] }), "mainTurnsSinceCriterion")).toMatchObject({ value: 41, threshold: 40, crossed: true });
@@ -238,6 +315,31 @@ describe("drift", () => {
     expect(lastCriterionChangeOf(met)).toBe(hoursAgo(5));
     const open = [request("req-20261009T050000Z")];
     expect(figureOf(figuresOf({ mission: met, requests: open, mainTurnEnds: [...turns(41, 10), ...turns(3, 1)] }), "mainTurnsSinceCriterion")).toMatchObject({ value: 3, crossed: false });
+  });
+
+  it("resets only on a criterion met with evidence (metAt); back to open, or a status sent again, moves nothing (delivery line design §8.4)", () => {
+    const criterion = (over: Partial<Mission["charter"]["doneCriteria"][number]>) => ({ id: "D1", text: "a card payment goes through", status: "open" as const, at: null, evidence: null, ...over });
+    // Met with evidence at 20 h, moved back to open at 2 h: the reset stays at 20 h.
+    expect(lastCriterionChangeOf(mission({ doneCriteria: [criterion({ status: "open", at: hoursAgo(2), evidence: "test run", metAt: hoursAgo(20) })] }))).toBe(hoursAgo(20));
+    // Met at 20 h, its status sent again at 1 h: `at` moved, `metAt` did not.
+    expect(lastCriterionChangeOf(mission({ doneCriteria: [criterion({ status: "met", at: hoursAgo(1), evidence: "test run", metAt: hoursAgo(20) })] }))).toBe(hoursAgo(20));
+    // An older entry has no metAt: its `at` while met, nothing once it is open again.
+    expect(lastCriterionChangeOf(mission({ doneCriteria: [criterion({ status: "met", at: hoursAgo(5), evidence: "test run" })] }))).toBe(hoursAgo(5));
+    expect(lastCriterionChangeOf(mission({ doneCriteria: [criterion({ status: "open", at: hoursAgo(2) })] }))).toBe(MISSION.charter.confirmedAt);
+    // The newest met wins.
+    expect(lastCriterionChangeOf(mission({ doneCriteria: [criterion({ metAt: hoursAgo(20) }), criterion({ id: "D2", status: "met", at: hoursAgo(3), evidence: "e", metAt: hoursAgo(3) })] }))).toBe(hoursAgo(3));
+  });
+
+  it("counts only the Main turns the owner or a report started: the plugin's wake-ups are no drift (delivery line design §8.4)", () => {
+    const turns = (n: number, hours: number) => Array.from({ length: n }, () => hoursAgo(hours));
+    // 300 turns, 30 of them owner- or report-started: under the threshold of 40.
+    const all = turns(300, 10);
+    expect(figureOf(figuresOf({ mainTurnEnds: all, driftTurnEnds: turns(30, 10) }), "mainTurnsSinceCriterion")).toMatchObject({ value: 30, crossed: false });
+    expect(figureOf(figuresOf({ mainTurnEnds: all, driftTurnEnds: turns(41, 10) }), "mainTurnsSinceCriterion")).toMatchObject({ value: 41, crossed: true });
+    // A snapshot without the split counts every turn, as before.
+    expect(figureOf(figuresOf({ mainTurnEnds: all }), "mainTurnsSinceCriterion").value).toBe(300);
+    // Records written before `trigger` count; owner and report count; plugin and agent do not.
+    expect([undefined, null, "owner", "report", "plugin", "agent"].map((trigger) => countsForDrift({ trigger: trigger as TraceRecord["trigger"] }))).toEqual([true, false, true, true, false, false]);
   });
 
   it("counts no turns while every done criterion is settled and no request is open: the Main only answers the owner", () => {
@@ -259,6 +361,11 @@ describe("drift", () => {
     const finished = Array.from({ length: 7 }, (_, i) => request(`req-20261009T0${i}0000Z`, { finishedAt: hoursAgo(2) }));
     expect(figureOf(figuresOf({ requests: finished }), "finishedSinceCriterion")).toMatchObject({ value: 7, crossed: true });
     expect(figureOf(figuresOf({ requests: finished.map((entry) => ({ ...entry, finishedAt: hoursAgo(41) })) }), "finishedSinceCriterion").value).toBe(0);
+    // Delivery line design §2.7: a chain counts once, finished at its head or not.
+    const [a, b, c] = ["req-20261009T010000Z", "req-20261009T020000Z", "req-20261009T030000Z"];
+    const chain = [request(a, { finishedAt: hoursAgo(3), continuedBy: b }), request(b, { finishedAt: hoursAgo(2), continuedBy: c }), request(c, { finishedAt: hoursAgo(1) })];
+    expect(figureOf(figuresOf({ requests: chain }), "finishedSinceCriterion").value).toBe(1);
+    expect(figureOf(figuresOf({ requests: [chain[0]!, request(b)] }), "finishedSinceCriterion").value).toBe(1);
   });
 
   it("counts requests and links in repos outside the charter; none while it names no repo", () => {
@@ -266,6 +373,12 @@ describe("drift", () => {
     expect(figureOf(figuresOf(outside), "outsideCharter")).toMatchObject({ value: 2, crossed: true, detail: "repo-c, repo-d" });
     expect(figureOf(figuresOf({ ...outside, mission: mission({ repos: [] }) }), "outsideCharter").value).toBe(0);
     expect(figureOf(figuresOf({ requests: [request("req-20261009T100000Z", { workspaceId: "repo-b" })] }), "outsideCharter").crossed).toBe(false);
+  });
+
+  it("reads a request in a placement as its repo (delivery line design §3.1)", () => {
+    const placed = { requests: [request("req-20261009T100000Z", { workspaceId: "wt-place-a" })], links: [{ linkId: "peer-000000000001", toWorkspaceId: "wt-place-c" }] };
+    expect(figureOf(figuresOf(placed), "outsideCharter")).toMatchObject({ value: 2, detail: "wt-place-a, wt-place-c" });
+    expect(figureOf(figuresOf({ ...placed, repoKeys: { "wt-place-a": "repo-a", "wt-place-c": "repo-c" } }), "outsideCharter")).toMatchObject({ value: 1, detail: "repo-c" });
   });
 });
 
@@ -300,6 +413,121 @@ describe("stuck", () => {
     expect(figureOf(figuresOf({ requests, alerts: stalled }), "stalled")).toMatchObject({ value: 3, detail: [B, C, D].join(", ") });
     // A wait on the owner names nothing: still stalled.
     expect(figureOf(figuresOf({ requests: [request(A, { lastPhase: "blocked", waitingOn: null })], alerts: [stalled[0]!] }), "stalled").value).toBe(1);
+  });
+
+  it("reads a structured wait first: out of stalled while every unsettled item is live (delivery line design §6.5)", () => {
+    const [A, B, C] = ["req-20261009T100000Z", "req-20261009T110000Z", "req-20261009T120000Z"];
+    const waiting = (items: Array<Pick<Waiting["items"][number], "kind" | "id">>): Waiting => ({
+      since: hoursAgo(1),
+      reportRecordId: "out-000000000001",
+      wakeOn: "all",
+      items: items.map((item) => ({ ...item, settled: false })),
+    });
+    const alerts = [{ kind: "request-stalled" as const, subject: A }];
+    const stalledWith = (a: Partial<GovernorRequestFacts>, over: Partial<GovernorSnapshot> = {}) =>
+      figureOf(
+        figuresOf({
+          requests: [request(A, { lastPhase: "blocked", workerIds: ["w-a"], ...a }), request(B, { lastPhase: "implementing", workerIds: ["w-b"] }), request(C, { rosterState: "finished", lastPhase: "finished", workerIds: ["w-c"] })],
+          liveWorkers: [{ agentId: "w-b", workspaceId: "repo-a" }],
+          alerts,
+          ...over,
+        }),
+        "stalled",
+      ).value;
+
+    // An active request with a live Worker, an open question, a live link, a batch whose Reviewer runs: waiting.
+    expect(stalledWith({ waiting: waiting([{ kind: "request", id: B }]) })).toBe(0);
+    expect(stalledWith({ waiting: waiting([{ kind: "question", id: `q:${A}:1` }]) }, { decisions: [question(A, 1, null)] })).toBe(0);
+    expect(stalledWith({ waiting: waiting([{ kind: "link", id: "peer-000000000001" }]) }, { links: [{ linkId: "peer-000000000001", toWorkspaceId: "repo-b" }] })).toBe(0);
+    const reviewBatches = [{ batchId: "b1", reviewerIds: ["rev-1"], calls: [{ at: hoursAgo(2), reviewerId: "rev-1" }] }];
+    expect(stalledWith({ waiting: waiting([{ kind: "batch", id: "b1" }]), reviewBatches }, { runningAgents: ["rev-1"] })).toBe(0);
+    // A continued request is read at the head of its chain.
+    expect(stalledWith({ waiting: waiting([{ kind: "request", id: C }]) }, { requests: [request(A, { lastPhase: "blocked", workerIds: ["w-a"], waiting: waiting([{ kind: "request", id: C }]) }), request(C, { finishedAt: hoursAgo(3), continuedBy: B }), request(B, { workerIds: ["w-b"] })] })).toBe(0);
+
+    // Delivery line design §2.7: a continued request is never stalled; its continuation carries the work.
+    expect(stalledWith({ lastPhase: "implementing", continuedBy: B })).toBe(0);
+
+    // A dead item, or one the snapshot does not know: stalled.
+    expect(stalledWith({ waiting: waiting([{ kind: "request", id: C }]) })).toBe(1);
+    expect(stalledWith({ waiting: waiting([{ kind: "question", id: `q:${A}:1` }]) }, { decisions: [question(A, 1, null, "answered")] })).toBe(1);
+    expect(stalledWith({ waiting: waiting([{ kind: "batch", id: "b1" }]), reviewBatches })).toBe(1);
+    expect(stalledWith({ waiting: waiting([{ kind: "link", id: "peer-000000000001" }]) })).toBe(1);
+    expect(stalledWith({ waiting: waiting([{ kind: "request", id: "req-20261009T000000Z" }]) })).toBe(1);
+    // The structure is read before the text: the regex would have counted B as active work.
+    expect(stalledWith({ waitingOn: `the Worker of ${B}`, waiting: waiting([{ kind: "request", id: C }]) })).toBe(1);
+    // An older report, with no items, is read by the regex.
+    expect(stalledWith({ waitingOn: `the Worker of ${B}` })).toBe(0);
+    expect(stalledWith({ waitingOn: `the Worker of ${B}`, waiting: waiting([]) })).toBe(0);
+    expect(stalledWith({ waitingOn: `the Worker of ${C}` })).toBe(1);
+  });
+});
+
+describe("the line (delivery line design §4.9)", () => {
+  const line = (over: Partial<PlacementFacts> = {}): PlacementFacts => ({
+    repo: "repo-a",
+    name: null,
+    workspaceId: "wt-a",
+    branch: "m/PAY/repo-a",
+    target: "develop",
+    state: "ready",
+    dirty: false,
+    ahead: 0,
+    behind: 0,
+    lastCommitAt: null,
+    pushed: null,
+    mr: null,
+    ci: null,
+    grant: null,
+    readAt: NOW,
+    firstAheadAt: null,
+    ciSince: null,
+    ...over,
+  });
+  const R = "req-20261009T100000Z";
+
+  it("uncommittedHours: a dirty worktree with no live Worker, from its last finished request", () => {
+    const finished = [request(R, { workspaceId: "wt-a", rosterState: "finished", finishedAt: hoursAgo(5), workerIds: ["w1"] }), request("req-20261009T090000Z", { workspaceId: "wt-a", rosterState: "finished", finishedAt: hoursAgo(9) })];
+    const dirty = { requests: finished, placements: [line({ dirty: true })] };
+    expect(figureOf(figuresOf(dirty), "uncommittedHours")).toMatchObject({ family: "mess", value: 5, threshold: 4, op: ">=", crossed: true, detail: "repo-a" });
+    // A live Worker in it, a clean tree, or no finished request yet: nothing.
+    expect(figureOf(figuresOf({ ...dirty, liveWorkers: [{ agentId: "w1", workspaceId: "wt-a" }] }), "uncommittedHours")).toMatchObject({ value: 0, crossed: false });
+    expect(figureOf(figuresOf({ ...dirty, placements: [line({ dirty: false })] }), "uncommittedHours").crossed).toBe(false);
+    expect(figureOf(figuresOf({ requests: [request(R, { workspaceId: "wt-a" })], placements: [line({ dirty: true })] }), "uncommittedHours").crossed).toBe(false);
+    expect(figureOf(figuresOf({ requests: [request(R, { workspaceId: "wt-a", finishedAt: hoursAgo(3) })], placements: [line({ dirty: true })] }), "uncommittedHours")).toMatchObject({ value: 3, crossed: false });
+  });
+
+  it("unpushedNoMr: ahead with no merge request, from the oldest commit it is ahead with", () => {
+    const ahead = line({ ahead: 3, firstAheadAt: hoursAgo(30) });
+    expect(figureOf(figuresOf({ placements: [ahead] }), "unpushedNoMr")).toMatchObject({ family: "stuck", value: 30, threshold: 24, crossed: true, detail: "repo-a" });
+    expect(figureOf(figuresOf({ placements: [{ ...ahead, firstAheadAt: hoursAgo(2) }] }), "unpushedNoMr")).toMatchObject({ value: 2, crossed: false });
+    expect(figureOf(figuresOf({ placements: [{ ...ahead, mr: { url: "https://gitlab.example/mr/1", state: null, mergeable: null } }] }), "unpushedNoMr").crossed).toBe(false);
+    expect(figureOf(figuresOf({ placements: [{ ...ahead, ahead: 0 }] }), "unpushedNoMr").crossed).toBe(false);
+  });
+
+  it("ciRed (integration.ci on): CI red for 30 minutes; mrConflicting: a merge request not mergeable", () => {
+    const mr = { url: "https://github.example/pr/1", state: "open", mergeable: false };
+    const red = line({ ahead: 1, mr, ci: "failure", ciSince: hoursAgo(1) });
+    const figures = figuresOf({ ci: "on", placements: [red, line({ repo: "repo-b", workspaceId: "wt-b", ci: "failure", ciSince: hoursAgo(0.25) })] });
+    expect(figureOf(figures, "ciRed")).toMatchObject({ family: "stuck", value: 60, threshold: 30, crossed: true, detail: "repo-a" });
+    expect(figureOf(figures, "mrConflicting")).toMatchObject({ family: "stuck", value: 1, threshold: 1, crossed: true, detail: "repo-a" });
+    expect(figureOf(figuresOf({ ci: "on", placements: [{ ...red, ci: "success", ciSince: null, mr: { ...mr, mergeable: true } }] }), "ciRed").crossed).toBe(false);
+    expect(figureOf(figuresOf({ ci: "on", placements: [{ ...red, mr: { ...mr, mergeable: null } }] }), "mrConflicting").crossed).toBe(false);
+  });
+
+  it("integration.ci off (the default, ADR-036 §17.1): no ciRed is computed, even on a line red for hours", () => {
+    const red = line({ ahead: 1, ci: "failure", ciSince: hoursAgo(5) });
+    for (const ci of ["off", undefined] as const) {
+      const figures = figuresOf({ ...(ci === undefined ? {} : { ci }), placements: [red] });
+      expect(figures.map((entry) => entry.id)).not.toContain("ciRed");
+      expect(figures.filter((entry) => entry.crossed).map((entry) => entry.id)).toEqual([]);
+    }
+  });
+
+  it("behindIntegration: the most commits a branch is behind; an archived placement counts for nothing", () => {
+    const figures = figuresOf({ placements: [line({ behind: 12 }), line({ repo: "repo-b", workspaceId: "wt-b", behind: 61 })] });
+    expect(figureOf(figures, "behindIntegration")).toMatchObject({ family: "drift", value: 61, threshold: 50, crossed: true, detail: "repo-b" });
+    const archived = figuresOf({ placements: [line({ state: "archived", behind: 80, dirty: true, ci: "failure", ciSince: hoursAgo(2) })] });
+    expect(archived.filter((entry) => entry.crossed)).toEqual([]);
   });
 });
 
@@ -358,11 +586,82 @@ describe("readGovernorSnapshot: what the stores of a data folder give", () => {
       agents: [{ workspaceId: "repo-a", facts: { id: "w1", status: "running", archived: false } }],
       settings: DEFAULT_COORDINATION_SETTINGS,
     });
-    expect(read.requests).toEqual([request(R, { workerIds: ["w1"], lastPhase: "blocked", waitingOn: "req-20261009T110000Z to finish" })]);
+    expect(read.requests).toEqual([request(R, { workerIds: ["w1"], lastPhase: "blocked", waitingOn: "req-20261009T110000Z to finish", unconvergedAt: [] })]);
     expect(read.liveWorkers).toEqual([{ agentId: "w1", workspaceId: "repo-a" }]);
     expect(read.records.map((record) => record.agentId)).toEqual(["w1"]);
     expect(read.alerts.map((alert) => alert.subject)).toEqual([R]);
-    expect(read.reviewBudget).toEqual({ Small: 2, Medium: 2, Large: 4 });
+    expect(read.review).toMatchObject({ callsPerBatch: 3 });
     expect(figureOf(governorFiguresOf(read, SETTINGS), "stalled").crossed).toBe(true);
+  });
+
+  it("reads each request's structured wait, its batches and chain, and the running agents (delivery line design §6.5)", () => {
+    const R = "req-20261009T100000Z";
+    const NEXT = "req-20261009T110000Z";
+    const created = createMissionStore(home, { newId: () => "mis-0123456789", env: {} }).create({ code: "PAY", name: "Payments", goal: "Ship", repos: ["repo-a"], createdBy: "owner", mainId: "main-1" });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+    createMissionRoster(home, { env: {} }).add("mis-0123456789", { requestId: R, workspaceId: "repo-a", topic: "cards", workerId: "w1" });
+    const registry = createRequestRegistry(home, { backfill: () => [] });
+    registry.register("repo-a", R, { source: "tool", managerId: "main-1", workerId: "w1" });
+    const waiting: Waiting = { since: hoursAgo(1), reportRecordId: "out-000000000001", wakeOn: "all", items: [{ kind: "request", id: NEXT, settled: false }] };
+    registry.setWaiting("repo-a", R, waiting);
+
+    const read = readGovernorSnapshot(home, created.mission, {
+      now: new Date(NOW),
+      agents: [
+        { workspaceId: "repo-a", facts: { id: "w1", status: "idle", archived: false } },
+        { workspaceId: "repo-a", facts: { id: "rev-1", status: "running", archived: false } },
+      ],
+      settings: DEFAULT_COORDINATION_SETTINGS,
+    });
+    expect(read.requests[0]).toMatchObject({ requestId: R, waiting, reviewBatches: [] });
+    expect(read.requests[0]!.continuedBy).toBeUndefined();
+    expect(read.runningAgents).toEqual(["rev-1"]);
+  });
+
+  it("reads each repo's line as the 60-second pass last read it, and the newest report's git fields; no git of its own (delivery line design §4.9)", async () => {
+    clearLineCache();
+    const R = "req-20261009T100000Z";
+    const created = createMissionStore(home, { newId: () => "mis-0123456789", env: {} }).create({ code: "PAY", name: "Payments", goal: "Ship", repos: ["repo-a"], createdBy: "owner", mainId: "main-1" });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+    const placement = { repo: "repo-a", workspaceId: "wt-a", directory: "/w/pay", branch: "m/PAY/repo-a", target: "develop", base: "origin/develop", worktreeSlug: "m-pay-repo-a", state: "ready" as const, requestKey: "bm-place-1", createdAt: hoursAgo(40), deps: { cloned: [], at: null, note: null }, integration: null };
+    const updated = createMissionStore(home, { env: {} }).update("mis-0123456789", (mission) => ({ ...mission, placements: [placement] }));
+    if (!updated.ok) throw new Error(updated.reasons.join("; "));
+    createMissionRoster(home, { env: {} }).add("mis-0123456789", { requestId: R, workspaceId: "wt-a", topic: "cards", workerId: "w1" });
+    createOutbox(home, { now: () => new Date(hoursAgo(2)) }).add("wt-a", { kind: "report", requestId: R, from: "w1", to: "main-1", text: `BM-REPORT\nrequestId: ${R}\nphase: finished\nbranch: m/PAY/repo-a\ncommit: abcdef1\npushed: yes\nmr: https://gitlab.example/mr/7\nci: failure` });
+    const { git, calls } = fakeLineGit({ "/w/pay": { counts: "55\t2", status: " M a.ts", lastCommitAt: hoursAgo(3), head: "abcdef1234567", branch: "m/PAY/repo-a", aheadOfOrigin: "0", aheadLog: `${hoursAgo(3)}\n${hoursAgo(6)}` } });
+    await refreshLines(home, { now: () => new Date(NOW), git });
+    const seen = calls.length;
+    const withCi = { ...DEFAULT_COORDINATION_SETTINGS, integration: { ci: "on" as const } };
+    const read = readGovernorSnapshot(home, updated.mission, { now: new Date(NOW), agents: [], settings: withCi });
+    expect(calls.length).toBe(seen);
+    expect(read.ci).toBe("on");
+    expect(read.placements).toEqual([
+      expect.objectContaining({ repo: "repo-a", workspaceId: "wt-a", dirty: true, ahead: 2, behind: 55, pushed: true, mr: { url: "https://gitlab.example/mr/7", state: null, mergeable: null }, ci: "failure", ciSince: hoursAgo(2), firstAheadAt: hoursAgo(6), readAt: NOW }),
+    ]);
+    const figures = governorFiguresOf(read, SETTINGS);
+    expect(figureOf(figures, "ciRed")).toMatchObject({ value: 120, crossed: true });
+    expect(figureOf(figures, "behindIntegration")).toMatchObject({ value: 55, crossed: true });
+    // ADR-036 (§17.1): with integration.ci off, the default, the report's ci is not read and no ciRed is computed.
+    const off = readGovernorSnapshot(home, updated.mission, { now: new Date(NOW), agents: [], settings: DEFAULT_COORDINATION_SETTINGS });
+    expect(off.ci).toBe("off");
+    expect(off.placements).toEqual([expect.objectContaining({ repo: "repo-a", mr: { url: "https://gitlab.example/mr/7", state: null, mergeable: null }, ci: null, ciSince: null })]);
+    const offFigures = governorFiguresOf(off, SETTINGS);
+    expect(offFigures.map((entry) => entry.id)).not.toContain("ciRed");
+    expect(figureOf(offFigures, "behindIntegration")).toMatchObject({ value: 55, crossed: true });
+    clearLineCache();
+  });
+
+  it("splits the Mains' turns by what started them: drift reads those of the owner, a report, or a record without trigger (delivery line design §8.4)", async () => {
+    const created = createMissionStore(home, { newId: () => "mis-0123456789", env: {} }).create({ code: "PAY", name: "Payments", goal: "Ship", repos: ["repo-a"], createdBy: "owner", mainId: "main-1" });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+    const location = { tracesDir: join(home, "traces") };
+    const triggers = ["owner", "report", "plugin", "agent", null, undefined] as const;
+    for (const [i, trigger] of triggers.entries()) {
+      const ended = hoursAgo(10 - i);
+      await appendRecord(location, turn({ workspaceId: "wks-mission", agentId: "main-1", turnId: `m-${i}`, at: ended, startedAt: ended, endedAt: ended, ...(trigger === undefined ? {} : { trigger }) }));
+    }
+    const read = readGovernorSnapshot(home, { ...created.mission, workspaceId: "wks-mission" }, { now: new Date(NOW), agents: [], settings: DEFAULT_COORDINATION_SETTINGS });
+    expect(read.mainTurnEnds).toHaveLength(6);
+    expect(read.driftTurnEnds).toEqual([hoursAgo(10), hoursAgo(9), hoursAgo(5)]);
   });
 });

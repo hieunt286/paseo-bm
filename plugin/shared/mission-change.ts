@@ -142,8 +142,17 @@ export const missionTransferActionSchema = z.object({
 });
 export type MissionTransferAction = z.infer<typeof missionTransferActionSchema>;
 
+/**
+ * The owner's one integration grant for a mission's repo (delivery line
+ * design §4.3): option a of the plugin's integration card. On the owner's tap
+ * the plugin writes the placement's `integration` grant; nothing else
+ * answers that card (`server/integration-grant.ts`).
+ */
+export const integrationGrantActionSchema = z.object({ kind: z.literal("integration.grant"), missionId: missionIdSchema, repo: z.string().min(1) });
+export type IntegrationGrantAction = z.infer<typeof integrationGrantActionSchema>;
+
 /** The prepared actions of `m:` cards: applied by the plugin on the owner's tap only, kept out of `PREPARED_CHANGE_KINDS` so `bm_ask_owner` cannot offer one. */
-export const MISSION_ACTION_KINDS = ["mission-change", "mission-split", "arbitration", "mission-merge", "mission-transfer"] as const;
+export const MISSION_ACTION_KINDS = ["mission-change", "mission-split", "arbitration", "mission-merge", "mission-transfer", "integration.grant"] as const;
 
 /** True for the kind of an `m:` card's prepared action. Pure. */
 export function isMissionActionKind(kind: string | undefined): boolean {

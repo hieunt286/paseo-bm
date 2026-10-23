@@ -85,7 +85,7 @@ import { createHandoffStore, isPendingHandoffState, staleEndingOf as staleHandof
 import { ORCHESTRATOR_DIR_NAME } from "./orchestrator-store";
 import { readRecords, type TraceStoreLocation } from "./trace-store";
 import { errorText } from "./rpc-kit";
-import { timeOrNull } from "../shared/time";
+import { timeOrNull, timeOrZero } from "../shared/time";
 
 export const INTERVENTIONS_FILE = "interventions.json";
 /** The newest entries kept (design §G.3). */
@@ -499,7 +499,8 @@ function adviceOutcome(evidence: InterventionEvidence, w: Window): InterventionO
 
 /**
  * `govern`: every family it concerns is back under its thresholds (the
- * ladder reset it to step 0) within the window. A family still above 0 once
+ * ladder reset it to step 0) within the window — from when its figures went
+ * under (`underSince`), the reset itself coming a quiet window later. A family still above 0 once
  * the window is over, or reset only after it, is a miss; without a family or
  * a ladder to read, the check cannot tell.
  */
@@ -508,8 +509,13 @@ function governOutcome(entry: InterventionEntry, evidence: InterventionEvidence,
   const ladder = evidence.ladder;
   if (families.length === 0 || ladder === undefined) return w.over ? "unknown" : "pending";
   const states = families.map((family) => ladder[family as keyof MissionLadder]);
-  if (states.some((state) => state !== undefined && state.step > 0)) return w.over ? "missed" : "pending";
-  const resets = states.map((state) => (state?.lastAction?.kind === "reset" ? timeOrNull(state.lastAction.at) : null));
+  if (states.some((state) => state !== undefined && state.step > 0)) {
+    // A family under its thresholds since within the window waits for its reset, or for crossing again (`underSince` then goes).
+    const quiet = states.every((state) => state === undefined || state.step === 0 || (state.underSince !== undefined && timeOrZero(state.underSince) <= w.end));
+    return w.over && !quiet ? "missed" : "pending";
+  }
+  // Delivery line design §8.4: a reset comes after the figures stayed under for the governor's window; it counts from when they went under.
+  const resets = states.map((state) => (state?.lastAction?.kind === "reset" ? timeOrNull(state.underSince ?? state.lastAction.at) : null));
   return resets.some((at) => at !== null && at > w.end) ? "missed" : "met";
 }
 

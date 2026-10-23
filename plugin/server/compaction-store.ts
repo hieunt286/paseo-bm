@@ -104,6 +104,12 @@ export const compactionEntrySchema = z.object({
   reason: z.string().max(MAX_COMPACTION_REASON_CHARS),
   state: z.enum(COMPACTION_STATES),
   requestedAt: time,
+  /**
+   * When it first reached the maintenance ceiling (delivery line design §6.6):
+   * from then it stays at its ceiling until it runs. Absent below it, and in
+   * older files.
+   */
+  ceilingAt: time.optional(),
   /** When the `/compact` went out; null while it waits. */
   sentAt: time.nullable(),
   /** When the target's completed `compaction` item was recorded. */

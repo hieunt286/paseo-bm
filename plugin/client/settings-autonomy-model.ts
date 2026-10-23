@@ -44,7 +44,8 @@ import {
   type AutonomyPolicy,
 } from "../shared/autonomy";
 import { DECISION_CLASSES, SUBJECT_PATTERN, type DecisionClass } from "../shared/decisions";
-import { MAX_PRECEDENT_TEXT_CHARS, PRECEDENT_SCOPE_ALL, type Precedent } from "../shared/precedents";
+import { MAX_PRECEDENT_TEXT_CHARS, PRECEDENT_SCOPE_ALL, type ListedPrecedent, type Precedent } from "../shared/precedents";
+import { whyIneligible } from "../shared/question-subjects";
 import type { InsightsProject } from "./insights-model";
 import type { ConfirmDialog } from "./ui-types";
 
@@ -469,6 +470,8 @@ export interface PrecedentRowView {
   text: string;
   expiresText: string;
   sourceText: string;
+  /** "Answers nothing: <why>." for a precedent `precedents.list` marks `inert` (delivery line design §7.4); null otherwise. */
+  inertText: string | null;
   end: { label: string; enabled: boolean; accessibilityLabel: string };
   /** The End confirmation, Cancel first, while it is asked for this row. */
   confirm: ConfirmDialog | null;
@@ -548,6 +551,11 @@ function endDialog(subject: string, scopeText: string): ConfirmDialog {
   };
 }
 
+/** The line for a precedent that answers nothing, from its `why` (delivery line design §7.4); null for none. */
+function inertTextOf(why: string | null | undefined): string | null {
+  return why === null || why === undefined ? null : `Answers nothing: ${why}.`;
+}
+
 /** The Add precedent form, opened on the given project (else all projects), empty. */
 export function openPrecedentForm(defaultScope: string | null): PrecedentFormState {
   return { scope: defaultScope ?? PRECEDENT_SCOPE_ALL, subject: "", text: "" };
@@ -557,8 +565,10 @@ export function openPrecedentForm(defaultScope: string | null): PrecedentFormSta
 export function precedentFormErrors(form: PrecedentFormState): { subject: string | null; text: string | null } {
   const subject = form.subject.trim();
   const length = [...form.text.trim()].length;
+  const subjectError =
+    subject === "" ? null : !SUBJECT_PATTERN.test(subject) ? "Lowercase letters, digits and dashes only, at most 60." : inertTextOf(whyIneligible(subject));
   return {
-    subject: subject === "" || SUBJECT_PATTERN.test(subject) ? null : "Lowercase letters, digits and dashes only, at most 60.",
+    subject: subjectError,
     text: length > MAX_PRECEDENT_TEXT_CHARS ? `At most ${MAX_PRECEDENT_TEXT_CHARS} characters (now ${length}).` : null,
   };
 }
@@ -600,7 +610,7 @@ function formView(form: PrecedentFormState, projects: readonly AutonomyProject[]
  * confirmation in place, Cancel first); **Add precedent…** or the form.
  */
 export function precedentsView(input: {
-  precedents: readonly Precedent[];
+  precedents: readonly ListedPrecedent[];
   projects: readonly AutonomyProject[];
   ui: PrecedentsUi;
   now: Date;
@@ -610,6 +620,7 @@ export function precedentsView(input: {
     const scopeText = precedentScopeText(precedent.scope, projects);
     const expiresText = precedentExpiresText(precedent.expiresAt, now);
     const confirming = ui.ending === precedent.id;
+    const inertText = inertTextOf(precedent.inert);
     return {
       id: precedent.id,
       scopeText,
@@ -617,13 +628,14 @@ export function precedentsView(input: {
       text: precedent.text,
       expiresText,
       sourceText: sourceText(precedent),
+      inertText,
       end: {
         label: "End",
         enabled: !ui.busy && ui.ending === null,
         accessibilityLabel: `End the precedent on ${precedent.subject} in ${scopeText}`,
       },
       confirm: confirming ? endDialog(precedent.subject, scopeText) : null,
-      accessibilityLabel: `Precedent on ${precedent.subject}, ${scopeText}: ${precedent.text}. ${expiresText}`,
+      accessibilityLabel: `Precedent on ${precedent.subject}, ${scopeText}: ${precedent.text}. ${expiresText}${inertText === null ? "" : `. ${inertText}`}`,
     };
   });
   return {

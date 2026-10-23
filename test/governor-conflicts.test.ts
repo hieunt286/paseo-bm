@@ -3,32 +3,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { clearJsonFileCache } from "../plugin/server/data-files";
-import type { WritersObservedEvent } from "../plugin/server/event-bus";
 import {
   WHOLE_REPO_AREA,
   areaCovers,
   areaOfFile,
-  charterConflictsOf,
   createArbitrationStore,
   createConflictWatch,
   isArbitrated,
   linkConflictsOf,
   normalArea,
-  writerConflictsOf,
+  overlapConflictsOf,
   type Arbitration,
 } from "../plugin/server/governor-conflicts";
+import { LINE_REFRESH_MS, cachedLineOf, clearLineCache, refreshLines } from "../plugin/server/line-watch";
 import { clearRequestIndexCache, createMissionRoster } from "../plugin/server/mission-roster";
-import { createMissionStore } from "../plugin/server/mission-store";
+import { createMissionStore, type Placement } from "../plugin/server/mission-store";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import type { TraceRecord } from "../plugin/shared/contracts";
 import { file, turn } from "./fixtures/orchestrator-traces";
+import { fakeLineGit, type FakeLine } from "./helpers/line-git";
 
 /**
- * Conflict detection between missions (missions design §9.6, WP-204): two
- * charters on one area, a writer collision between two missions' Workers, a
- * link from one mission into another's repo — and the arbitrations that
- * settle them — on a temporary data folder.
+ * Conflict detection between missions (missions design §9.6, WP-204;
+ * delivery line design §4.7): two missions' branches of one repo changing one
+ * area, a link from one mission into another's repo — and the arbitrations
+ * that settle them — on a temporary data folder. Writer collisions and
+ * charter areas are no source any more. The lines' git is a fake runner.
  */
 
 const NOW = new Date("2026-10-09T12:00:00.000Z");
@@ -43,10 +44,12 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "bm-governor-conflicts-"));
   clearRequestIndexCache();
   clearTraceStoreCache();
+  clearLineCache();
 });
 afterEach(() => {
   clearRequestIndexCache();
   clearTraceStoreCache();
+  clearLineCache();
   clearJsonFileCache();
   rmSync(home, { recursive: true, force: true });
 });
@@ -61,6 +64,38 @@ function twoMissions(reposOfB: string[] = ["repo-a"]): void {
   roster.add(A, { requestId: RA, workspaceId: "repo-a", topic: "cards", workerId: "w-a" });
   roster.add(B, { requestId: RB, workspaceId: reposOfB[0]!, topic: "pages", workerId: "w-b" });
 }
+
+/** Each mission's placement of `repo`: PAY's worktree /w/pay, WEB's /w/web. */
+function placeBoth(repoOfB = "repo-a"): void {
+  const placement = (code: string, repo: string): Placement => ({
+    repo,
+    workspaceId: `wks-${code.toLowerCase()}`,
+    directory: `/w/${code.toLowerCase()}`,
+    branch: `m/${code}/${repo}`,
+    target: "develop",
+    base: "origin/develop",
+    worktreeSlug: `m-${code.toLowerCase()}-${repo}`,
+    state: "ready",
+    requestKey: `bm-place-${code}`,
+    createdAt: NOW.toISOString(),
+    deps: { cloned: [], at: null, note: null },
+    integration: null,
+  });
+  const store = createMissionStore(home, { now: () => NOW, env: {} });
+  expect(store.update(A, (mission) => ({ ...mission, placements: [placement("PAY", "repo-a")] })).ok).toBe(true);
+  expect(store.update(B, (mission) => ({ ...mission, placements: [placement("WEB", repoOfB)] })).ok).toBe(true);
+}
+
+/** A clean worktree on its branch, one commit ahead, changing `files`. */
+const line = (branch: string, files: readonly string[]): FakeLine => ({
+  counts: "0\t1",
+  status: "",
+  lastCommitAt: hoursAgo(1),
+  head: "abcdef1234567",
+  branch,
+  aheadLog: hoursAgo(1),
+  diff: files.join("\n"),
+});
 
 const wrote = (agentId: string, requestId: string, paths: readonly string[], hours: number): TraceRecord =>
   turn({ workspaceId: "repo-a", agentId, role: "worker", requestId, turnId: `turn-${agentId}-${hours}`, endedAt: hoursAgo(hours), at: hoursAgo(hours), evidence: paths.map((path) => file(path, hoursAgo(hours), agentId)) });
@@ -104,55 +139,62 @@ describe("areas (pure)", () => {
 });
 
 describe("conflict detection (§9.6)", () => {
-  it("two open charters with one repo and one area written in the last 7 days are a mission.conflict, once per area", async () => {
+  it("two open missions' branches of one repo changing one area against origin/<target> are 'expect a merge conflict', once per area (delivery line design §4.7)", async () => {
     twoMissions();
-    const location = { tracesDir: join(home, "traces") };
-    await appendRecord(location, wrote("w-a", RA, ["src/shared/money.ts", "src/pay/card.ts"], 5));
-    await appendRecord(location, wrote("w-b", RB, ["src/shared/format.ts", "src/web/page.ts"], 30));
-    // Older than 7 days: not an area of the mission now.
-    await appendRecord(location, wrote("w-b", RB, ["src/pay/old.ts"], 24 * 8));
-
-    expect(charterConflictsOf(home, NOW)).toEqual([
+    placeBoth();
+    const { git, calls } = fakeLineGit({
+      "/w/pay": line("m/PAY/repo-a", ["src/shared/money.ts", "src/pay/card.ts"]),
+      "/w/web": line("m/WEB/repo-a", ["src/shared/money.ts", "src/web/page.ts"]),
+    });
+    const watch = createConflictWatch({ home: () => home, now: () => NOW, log: () => {}, git });
+    expect(await watch.pass()).toEqual([
       {
         type: "mission.conflict",
         missions: [A, B],
         workspaceId: "repo-a",
         area: "src/shared",
-        evidence: "both charters hold this repo and both missions wrote src/shared in the last 7 days: PAY 1 file, e.g. src/shared/money.ts; WEB 1 file, e.g. src/shared/format.ts",
+        evidence: "expect a merge conflict: PAY (m/PAY/repo-a) and WEB (m/WEB/repo-a) both change src/shared against origin/develop: 1 file, e.g. src/shared/money.ts",
       },
     ]);
+    // The read-only diff of each branch against its integration branch, three dots.
+    expect(calls.filter((call) => call.args[0] === "diff").map((call) => [call.cwd, call.args.join(" ")])).toEqual([
+      ["/w/pay", "diff --name-only origin/develop...m/PAY/repo-a"],
+      ["/w/web", "diff --name-only origin/develop...m/WEB/repo-a"],
+    ]);
+    // The pure source reads the lines as last read: no git.
+    const before = calls.length;
+    expect(overlapConflictsOf(home).map((event) => event.area)).toEqual(["src/shared"]);
+    expect(calls.length).toBe(before);
   });
 
-  it("charters on two repos, or one mission closed, raise nothing", async () => {
-    twoMissions(["repo-b"]);
+  it("branches changing different files raise nothing; nor do the charters' written areas or two Workers writing one file, which are no source any more", async () => {
+    twoMissions();
+    placeBoth();
+    // Both missions wrote src/shared in their traces: the old charter source would have raised it.
     const location = { tracesDir: join(home, "traces") };
     await appendRecord(location, wrote("w-a", RA, ["src/shared/money.ts"], 5));
-    expect(charterConflictsOf(home, NOW)).toEqual([]);
+    await appendRecord(location, wrote("w-b", RB, ["src/shared/format.ts"], 3));
+    const { git } = fakeLineGit({ "/w/pay": line("m/PAY/repo-a", ["src/pay/card.ts"]), "/w/web": line("m/WEB/repo-a", ["src/web/page.ts"]) });
+    const watch = createConflictWatch({ home: () => home, now: () => NOW, log: () => {}, git });
+    expect(await watch.pass()).toEqual([]);
+    // Writer collisions stay inside a placement (writers-observed): the watch has no turn source.
+    expect(Object.keys(watch)).toEqual(["pass"]);
   });
 
-  it("a writers.observed collision between Workers of two missions is a conflict on that file; one of one mission is not", () => {
-    twoMissions();
-    const collision = (requestIds: [string, string]): WritersObservedEvent => ({
-      type: "writers.observed",
-      workspaceId: "repo-a",
-      file: "src/shared/money.ts",
-      writers: [
-        { agentId: "w-a", role: "worker", requestId: requestIds[0], startedAt: hoursAgo(2) },
-        { agentId: "w-b", role: "worker", requestId: requestIds[1], startedAt: hoursAgo(1) },
-      ],
-      alertKey: "writers-observed:repo-a:src/shared/money.ts",
-      at: hoursAgo(1),
-    });
-    expect(writerConflictsOf(home, [collision([RA, RB])])).toEqual([
-      {
-        type: "mission.conflict",
-        missions: [A, B],
-        workspaceId: "repo-a",
-        area: "src/shared/money.ts",
-        evidence: `w-a (request ${RA}, mission PAY) and w-b (request ${RB}, mission WEB) wrote it in overlapping turns, at ${hoursAgo(1)}`,
-      },
-    ]);
-    expect(writerConflictsOf(home, [collision([RA, RA])])).toEqual([]);
+  it("reads each line at most once a minute, and a diff only where two open missions share a repo", async () => {
+    twoMissions(["repo-b"]);
+    placeBoth("repo-b");
+    const { git, calls } = fakeLineGit({ "/w/pay": line("m/PAY/repo-a", ["src/a.ts"]), "/w/web": line("m/WEB/repo-b", ["src/a.ts"]) });
+    await refreshLines(home, { now: () => NOW, git });
+    // Two repos: no diff read, no conflict.
+    expect(calls.some((call) => call.args[0] === "diff")).toBe(false);
+    expect(cachedLineOf(home, "wks-pay")).toMatchObject({ at: NOW.toISOString(), changed: null, firstAheadAt: hoursAgo(1), line: { ahead: 1, behind: 0, dirty: false } });
+    expect(overlapConflictsOf(home)).toEqual([]);
+    const first = calls.length;
+    await refreshLines(home, { now: () => new Date(NOW.getTime() + LINE_REFRESH_MS - 1), git });
+    expect(calls.length).toBe(first);
+    await refreshLines(home, { now: () => new Date(NOW.getTime() + LINE_REFRESH_MS), git });
+    expect(calls.length).toBe(first * 2);
   });
 
   it("a live project link of a mission's request into a repo of another mission's charter is a conflict on the whole repo", () => {
@@ -176,16 +218,14 @@ describe("conflict detection (§9.6)", () => {
     ]);
   });
 
-  it("the watch leaves out a conflict an arbitration settled, and a writer conflict too", async () => {
+  it("the watch leaves out a conflict an arbitration settled", async () => {
     twoMissions();
-    const location = { tracesDir: join(home, "traces") };
-    await appendRecord(location, wrote("w-a", RA, ["src/shared/money.ts"], 5));
-    await appendRecord(location, wrote("w-b", RB, ["src/shared/format.ts"], 3));
-    const watch = createConflictWatch({ home: () => home, now: () => NOW, log: () => {} });
-    expect(watch.pass().map((event) => event.area)).toEqual(["src/shared"]);
+    placeBoth();
+    const { git } = fakeLineGit({ "/w/pay": line("m/PAY/repo-a", ["src/shared/money.ts"]), "/w/web": line("m/WEB/repo-a", ["src/shared/money.ts"]) });
+    const watch = createConflictWatch({ home: () => home, now: () => NOW, log: () => {}, git });
+    expect((await watch.pass()).map((event) => event.area)).toEqual(["src/shared"]);
     createArbitrationStore(home).put(arbitration());
-    expect(watch.pass()).toEqual([]);
+    expect(await watch.pass()).toEqual([]);
     expect(createArbitrationStore(home).list()).toEqual([arbitration()]);
-    expect(watch.writersCollided([])).toEqual([]);
   });
 });

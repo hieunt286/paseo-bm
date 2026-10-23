@@ -17,17 +17,23 @@ export const GOVERNOR_FIGURES = {
   workersInOneRepo: "mess",
   reAsks: "mess",
   dropped: "mess",
+  uncommittedHours: "mess",
   processDocsPerCriterion: "overengineering",
   beadsPerFinishedRequest: "overengineering",
   tierRaised: "overengineering",
-  reviewBudgetExhausted: "overengineering",
+  reviewCapReached: "overengineering",
+  unconvergedBatches: "overengineering",
   openApprovals: "overengineering",
   mainTurnsSinceCriterion: "drift",
   finishedSinceCriterion: "drift",
   outsideCharter: "drift",
+  behindIntegration: "drift",
   stalled: "stuck",
   unansweredLinks: "stuck",
   oldCards: "stuck",
+  unpushedNoMr: "stuck",
+  ciRed: "stuck",
+  mrConflicting: "stuck",
   requestsBudget: "budget",
   workersBudget: "budget",
   reviewCallsBudget: "budget",
@@ -37,6 +43,14 @@ export type GovernorFigureId = keyof typeof GOVERNOR_FIGURES;
 
 /** Every figure id, in `GOVERNOR_FIGURES` order. */
 export const GOVERNOR_FIGURE_IDS = Object.keys(GOVERNOR_FIGURES) as [GovernorFigureId, ...GovernorFigureId[]];
+
+/** The figure ids an older build stored, by the figure they are now (delivery line design §5.6). */
+const RENAMED_FIGURE_IDS: Readonly<Record<string, GovernorFigureId>> = { reviewBudgetExhausted: "reviewCapReached" };
+
+/** A stored figure id as this build names it: a renamed one by its new name, any other as it is. Pure. */
+export function storedFigureIdOf(id: unknown): unknown {
+  return typeof id === "string" && Object.hasOwn(RENAMED_FIGURE_IDS, id) ? RENAMED_FIGURE_IDS[id] : id;
+}
 
 /** Longest `detail` a figure keeps. */
 export const MAX_FIGURE_DETAIL = 200;

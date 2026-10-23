@@ -44,14 +44,18 @@
  * sends to an agent.
  */
 import { randomUUID } from "node:crypto";
-import { currentPolicy } from "./autonomy-store";
+import { effectivePolicy } from "./placements";
 import { redactText } from "./collector";
-import { ownerJustSpoke, preparedCommandOf } from "./command-authority";
+import { GOVERNOR_STOP_STEP, ownerJustSpoke, preparedCommandOf } from "./command-authority";
 import { COMMAND_LIMIT_PER_REQUEST, COMMAND_LIMIT_WINDOW_HOURS, loopGuardFull } from "./command-send";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
 import { decisionsText, type DecisionsQuery } from "./decision-tools";
+import { commandDeliveryEffect, deliveryEffect, incidentActionEffect, nothingWas, nothingWasSentence } from "./effects";
+import { createGovernorStore } from "./governor-store";
+import { ownerWroteRecently, type OrchestratorAgentPaseo } from "./orchestrator-agent";
 import { interventionOfAdvice, interventionOfDecision, recordIntervention } from "./intervention-store";
+import { createMissionStore } from "./mission-store";
 import { commandRequestIdOf } from "./orchestrator-state";
 import { preparedChangeFactsOf } from "./prepared-changes";
 import {
@@ -59,6 +63,7 @@ import {
   belongsToProject,
   commandManagerIdOf,
   json,
+  missionOfRequest,
   orchestratorIdOf,
   refuse,
   requireManager,
@@ -76,7 +81,6 @@ import {
   MAX_ANSWER_REASON_CHARS,
   MAX_ASK_OWNER_OPTIONS,
   MAX_DECISION_TEXT_CHARS,
-  REVIEW_BUDGET_SUBJECT,
   UNSETTLED_STATUSES,
   answerDecision,
   carriesPreparedChange,
@@ -88,15 +92,18 @@ import {
   realEffects,
   type Decision,
   type DecisionClass,
+  type DecisionDelivery,
   type DecisionOption,
   type Effect,
   type TransitionResult,
 } from "../shared/decisions";
 import { commandInputProblems, type CommandTo, type DeclaredCommandIntent } from "../shared/orchestrator-command";
 import { preparedChangeCheckOf, preparedChangeLinesOf, preparedChangeOfInput, type PreparedChangeFacts, type PreparedChangeInput } from "../shared/prepared-changes";
+import { codeSubjectAskRefusal } from "../shared/question-subjects";
 import { timeOrZero } from "../shared/time";
 import { errorText } from "./rpc-kit";
-import { fixThese } from "./tool-kit";
+import { fixThese, refused } from "./tool-kit";
+import { GOVERNOR_FAMILIES } from "../shared/governor-figures";
 
 /** What the decision tools read of the plugin's deps. */
 export interface DecideToolDeps extends ToolDeps {
@@ -118,6 +125,15 @@ export interface DecideToolDeps extends ToolDeps {
  * answers take; a failing delivery is one log line saying `how` it was
  * answered, and the answer stands.
  */
+/** The delivery the store records for `decision` now, or null when there is none or it cannot be read. */
+function deliveryOf(decision: Decision, home: string): DecisionDelivery | null {
+  try {
+    return createDecisionStore(home).get(decision.id, decision.workspaceId)?.delivery ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function settle(answered: Decision, how: string, context: ToolContext, deps: DecideToolDeps): Promise<void> {
   if (deps.onSettled === undefined) return;
   try {
@@ -151,6 +167,57 @@ export interface AskOwnerInput {
   subject?: string;
   class?: DecisionClass;
   separate?: boolean;
+}
+
+/**
+ * The classes of an ask about how a mission runs (delivery line design §8.3):
+ * on these the governor reaches the owner about a mission only from ladder
+ * step 4. Every riskier class reaches the owner at once.
+ */
+export const PROCESS_CLASSES: readonly DecisionClass[] = ["scope", "preference", "reversible-technical"];
+
+/** A subject naming a goal change or a split (`mission-goal`, `split-billing`): an ask the step-4 gate lets through (§8.3). */
+const GOAL_OR_SPLIT_SUBJECT = /(^|-)(goal|split)(-|$)/;
+
+/** The step-4 gate's refusal (§8.3). */
+export function stepGateText(step: number): string {
+  return `The governor reaches the owner from step ${GOVERNOR_STOP_STEP}; this mission is at step ${step}. ${nothingWasSentence("stored")}`;
+}
+
+/**
+ * Why `bm_ask_owner` refuses an ask about a mission's process (delivery line
+ * design §8.3), or null. The ask is about the open missions its request
+ * belongs to, whose Main it names (`managerId`, a prepared command) or whose
+ * workspace it is asked in; none: no gate. It passes when a family of one of
+ * them stands at ladder step 4 (`GOVERNOR_STOP_STEP`), its subject names a
+ * goal change or a split, or its class is not a process class. The step the
+ * refusal names is the highest of the missions' families. Reads only.
+ */
+export function stepGateRefusalOf(
+  home: string,
+  ask: { workspaceId: string; requestId: string | null; agentIds: readonly string[]; class: DecisionClass; subject: string | null },
+): string | null {
+  if (!PROCESS_CLASSES.includes(ask.class)) return null;
+  if (ask.subject !== null && GOAL_OR_SPLIT_SUBJECT.test(ask.subject)) return null;
+  const missions = createMissionStore(home);
+  const ids = new Set<string>();
+  const ofRequest = missionOfRequest(home, ask.requestId);
+  if (ofRequest !== null && ofRequest.state === "open") ids.add(ofRequest.missionId);
+  for (const agentId of ask.agentIds) {
+    const main = missions.openByMain(agentId);
+    if (main !== null) ids.add(main.missionId);
+  }
+  for (const entry of missions.list()) if (entry.state === "open" && entry.workspaceId === ask.workspaceId) ids.add(entry.missionId);
+  if (ids.size === 0) return null;
+  const governor = createGovernorStore(home);
+  const step = Math.max(...[...ids].flatMap((missionId) => GOVERNOR_FAMILIES.map((family) => governor.ladder(missionId)[family]?.step ?? 0)));
+  return step >= GOVERNOR_STOP_STEP ? null : stepGateText(step);
+}
+
+/** Whether the owner wrote in the Orchestrator's chat within `OWNER_QUIET_MS` (`ownerWroteRecently`); no Orchestrator → false. Never throws. */
+async function ownerAskedRecently(context: ToolContext): Promise<boolean> {
+  const orchestratorId = await orchestratorIdOf(context);
+  return orchestratorId !== null && (await ownerWroteRecently(context.paseo as unknown as OrchestratorAgentPaseo, orchestratorId, context.now.getTime()));
 }
 
 /** The keys of `bm_ask_owner`'s options, by position: one letter for each option it takes (`MAX_ASK_OWNER_OPTIONS`). */
@@ -205,7 +272,10 @@ function replacedByAsk(workspaceId: string, requestId: string | null, subject: s
  * `onSettled` like the owner's, and the tool says so. It does not answer at
  * once while the loop guard is full for its request (`loopGuardFull`): the
  * owner does, and the owner's choice is the one command the guard never
- * refuses.
+ * refuses. An ask about a mission's process is refused below ladder step 4
+ * (`stepGateRefusalOf`, delivery line design §8.3), storing nothing — unless
+ * the owner wrote in the Orchestrator's chat in the last 2 hours
+ * (`ownerWroteRecently`, REQ-198 b): then it answers the owner.
  */
 export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, deps: DecideToolDeps): Promise<ServerToolResult> {
   if (input.managerId !== undefined) await requireManager({ workspaceId: input.workspaceId, managerId: input.managerId, requestId: input.requestId ?? null }, context);
@@ -280,16 +350,29 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
   const askedClass = checkedClass(input.class, declaredEffects({ options }));
   const subject = input.subject ?? null;
   if (requestId !== null && subject !== null) {
-    // Design §7.17.8 (a): a request's review budget is the Worker's to ask, so the policy can answer it as it opens.
-    if (askedClass === "cost" && /review[\s_-]*budget/i.test(subject)) {
-      refuse(`the Worker asks for review calls itself, with bm_questions subject ${REVIEW_BUDGET_SUBJECT}; nothing was stored`);
+    // Delivery line design §5.4, §5.6: more review calls for a request are paseo-bm's own question, asked once at its review cap.
+    if (askedClass === "cost" && /review[\s_-]*(?:budget|cap)/i.test(subject)) {
+      refuse(`review budgets are retired: paseo-bm asks the owner once, at the request's review cap; ${nothingWas("stored")}`);
     }
     // Design §7.17.8 (b): the Worker's own question on this subject is the one the owner answers.
     const asked = createDecisionStore(context.home)
       .list({ workspaceId: input.workspaceId, requestId, statuses: UNSETTLED_STATUSES })
       .find((decision) => decisionKindOf(decision.id) === "question" && decision.subject === subject);
-    if (asked !== undefined) refuse(`the Worker's question ${asked.id} of this request asks "${subject}" already: its Main or the owner answers it; nothing was stored`);
+    if (asked !== undefined) refuse(`the Worker's question ${asked.id} of this request asks "${subject}" already: its Main or the owner answers it; ${nothingWas("stored")}`);
   }
+  // Delivery line design §7.4: a CODE_SUBJECTS subject is paseo-bm's own question, or retired.
+  const codeSubject = codeSubjectAskRefusal(subject);
+  if (codeSubject !== null) refuse(codeSubject);
+  // Delivery line design §8.3: about a mission's process, the governor reaches the owner from ladder step 4.
+  const gate = stepGateRefusalOf(context.home, {
+    workspaceId: input.workspaceId,
+    requestId,
+    agentIds: [...(input.managerId === undefined ? [] : [input.managerId]), ...options.flatMap((option) => (option.action?.kind === "command" ? [option.action.agentId] : []))],
+    class: askedClass,
+    subject,
+  });
+  // …unless the owner wrote to the Orchestrator in the last 2 hours (REQ-198 b): its cards then answer the owner.
+  if (gate !== null && !(await ownerAskedRecently(context))) return refused(gate);
 
   const replaced = input.separate === true ? null : replacedByAsk(input.workspaceId, requestId, subject, context.home);
   const decision: Decision = {
@@ -344,8 +427,9 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
     const said = [
       `Answered at once by the owner's precedent ${precedentId ?? ""} on "${answered.subject}" (${answerText}); the owner is not asked.`,
       replacedLine,
+      // Delivery line design §7.3: the command's delivery as recorded once settled.
       option?.action !== undefined
-        ? "The plugin delivers the option's command itself, with the owner's authority."
+        ? commandDeliveryEffect(deliveryOf(answered, context.home)).sentence
         : "It comes back to you as a BM-ANSWER notice that cites the precedent; act on it as the owner's answer.",
       "Tell the owner in one line here too.",
     ]
@@ -358,7 +442,7 @@ export async function bmAskOwner(input: AskOwnerInput, context: ToolContext, dep
   const changes = options.filter((option) => carriesPreparedChange({ options: [option] })).length;
   const suggested = atOpen?.precedent ?? null;
   const said = [
-    `Asked. The owner answers it in paseo-bm${options.length === 0 ? "" : ", with one button per option"}; nothing was sent to any agent.`,
+    `Asked. The owner answers it in paseo-bm${options.length === 0 ? "" : ", with one button per option"}; ${deliveryEffect({ what: "the question", to: "any agent", outcome: null }).sentence}.`,
     replacedLine,
     guardFull ? `${COMMAND_LIMIT_PER_REQUEST} commands went to this request in ${COMMAND_LIMIT_WINDOW_HOURS} hours: the owner answers this one, not a precedent.` : null,
     suggested === null ? null : `The owner's precedent on "${suggested.subject}" is shown to them as a suggestion only.`,
@@ -455,7 +539,8 @@ function transitionUnderPolicy(input: DecideInput, context: ToolContext, rule: P
   try {
     const decision = store.get(input.decisionId);
     if (decision === null) refuse(`no decision ${input.decisionId}; use a decisionId ${rule.idsFrom}`);
-    const policy = currentPolicy(context.home);
+    // Delivery line design §3.1: a placement's decision is read under its repo's cells.
+    const policy = effectivePolicy(context.home);
     const problem = rule.refusalOf(policy, decision);
     if (problem !== null) refuse(problem);
     if (!decision.options.some((option) => option.key === input.optionKey)) {
@@ -473,23 +558,11 @@ function transitionUnderPolicy(input: DecideInput, context: ToolContext, rule: P
     );
   } catch (error) {
     if (error instanceof Refusal) throw error;
-    refuse(`${rule.what} ${input.decisionId} could not be stored (${errorText(error)}); nothing was changed`);
+    refuse(`${rule.what} ${input.decisionId} could not be stored (${errorText(error)}); ${nothingWas("changed")}`);
   }
   if (mutation.status === "not-found") refuse(`no decision ${input.decisionId}`);
-  if (mutation.status === "refused") refuse(`${mutation.message}; nothing was changed`);
+  if (mutation.status === "refused") refuse(`${mutation.message}; ${nothingWas("changed")}`);
   return { decision: mutation.decision, store };
-}
-
-/** What the Orchestrator's decision of an incident did, in one sentence, from the delivery the plugin recorded. */
-function decidedDeliveryText(decision: Decision): string {
-  switch (decision.delivery?.outcome) {
-    case "sent":
-      return "The plugin ran the option's action on the incident.";
-    case "failed":
-      return "The plugin could not run the option's action; the owner sees that in the Inbox.";
-    default:
-      return "The plugin runs the option's action as it runs the owner's choice.";
-  }
 }
 
 /**
@@ -547,7 +620,8 @@ export async function bmDecide(input: DecideInput, context: ToolContext, deps: D
   const said = [
     `Decided fallback incident ${answered.id} for the owner with option ${option.key} (${option.label}), on the owner's policy: ${decisionClass} is delegated to you in this project.`,
     "The owner sees your choice and your reason on the decision.",
-    decidedDeliveryText(now),
+    // Delivery line design §7.3: what the delivery recorded, not what it was meant to do.
+    incidentActionEffect(now.delivery).sentence,
     "Send nothing more for it. Tell the owner in one line what you chose and why.",
   ].join(" ");
   const facts = { decisionId: answered.id, optionKey: option.key, class: decisionClass, answeredBy: "policy", grant: now.grant, delivery: now.delivery };

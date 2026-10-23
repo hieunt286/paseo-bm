@@ -7,15 +7,19 @@ import {
   ORCHESTRATOR_FIRST_PROMPT,
   ORCHESTRATOR_HOME_README,
   ORCHESTRATOR_INSTRUCTIONS_HASH,
+  ORCHESTRATOR_RETIRED_TITLE,
   ORCHESTRATOR_TITLE,
+  createOrchestratorRetirement,
   findOrchestratorAgent,
   handleOrchestratorOpen,
   handleOrchestratorOpenPreview,
   isOutdatedOrchestrator,
   orchestratorHomeOf,
+  retireOlderOrchestrators,
   wakeableOrchestrator,
   type OrchestratorAgentDeps,
   type OrchestratorAgentPaseo,
+  type OrchestratorRetirementDeps,
 } from "../plugin/server/orchestrator-agent";
 import { toolsStaleSince } from "../plugin/server/agent-tools";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
@@ -617,5 +621,123 @@ describe("orchestrator.open-preview", () => {
     const error = await handleOrchestratorOpenPreview(fake.paseo).catch((caught: unknown) => caught);
 
     expect(codeOf(error)).toBe("E_ORCHESTRATOR_UNAVAILABLE");
+  });
+});
+
+describe("older Orchestrators are retired (delivery line design §8.5)", () => {
+  /** The Paseo CLI calls, faked on the fake daemon: a label lands on its agent, a title is recorded. */
+  function cliOn(fake: ReturnType<typeof daemonWith>, failLabelsOnce = false) {
+    const titles: Array<[string, string]> = [];
+    const labels: Array<[string, Record<string, string>]> = [];
+    let failing = failLabelsOnce;
+    const cli: OrchestratorRetirementDeps = {
+      log: () => {},
+      setTitle: vi.fn(async (agentId: string, title: string) => {
+        titles.push([agentId, title]);
+        return { ok: true as const };
+      }),
+      setLabels: vi.fn(async (agentId: string, next: Readonly<Record<string, string>>) => {
+        labels.push([agentId, { ...next }]);
+        if (failing) {
+          failing = false;
+          return { ok: false as const, reason: "the daemon did not answer" };
+        }
+        const agent = fake.byId(agentId)!;
+        agent.labels = { ...agent.labels, ...next };
+        return { ok: true as const };
+      }),
+    };
+    return { cli, titles, labels };
+  }
+
+  const twoMains = () => [
+    orchestratorAgent("o-old", { createdAt: "2026-10-18T09:00:00.000Z" }),
+    orchestratorAgent("o-new", { createdAt: "2026-10-20T09:00:00.000Z" }),
+  ];
+
+  it("relabels and retitles the older of two mains once; a second pass changes nothing; nothing is archived or stopped", async () => {
+    const fake = daemonWith({ agents: twoMains() });
+    const { cli, titles, labels } = cliOn(fake);
+
+    await expect(retireOlderOrchestrators(fake.paseo, cli)).resolves.toEqual(["o-old"]);
+    await expect(retireOlderOrchestrators(fake.paseo, cli)).resolves.toEqual([]);
+
+    expect(titles).toEqual([["o-old", ORCHESTRATOR_RETIRED_TITLE]]);
+    expect(ORCHESTRATOR_RETIRED_TITLE).toBe("Beads Orchestrator (retired)");
+    expect(labels).toEqual([["o-old", { "bm.orchestrator": "retired" }]]);
+    expect(fake.byId("o-old")!.labels).toMatchObject({ "bm.role": "orchestrator", "bm.orchestrator": "retired" });
+    expect(fake.byId("o-new")!.labels).toMatchObject({ "bm.orchestrator": "main" });
+    await expect(findOrchestratorAgent(fake.paseo)).resolves.toMatchObject({ id: "o-new" });
+    expect(fake.archives).toEqual([]);
+    expect(fake.sends).toEqual([]);
+    expect(fake.calls.filter((call) => !call.startsWith("agents.list"))).toEqual([]);
+  });
+
+  it("leaves a lone Orchestrator, a retired one and other agents alone, even when the daemon ignores the filter", async () => {
+    const fake = fakePaseo<OrchestratorAgentPaseo>({
+      ignoresListFilter: true,
+      agents: [
+        orchestratorAgent("o-main", { createdAt: "2026-10-18T09:00:00.000Z" }),
+        orchestratorAgent("o-retired", { createdAt: "2026-10-20T09:00:00.000Z", labels: { "bm.role": "orchestrator", "bm.orchestrator": "retired" } }),
+        { id: "w-1", workspaceId: "wks-1", createdAt: "2026-10-20T10:00:00.000Z", status: "idle", provider: "bm-worker", labels: { "bm.role": "worker" } },
+        orchestratorAgent("o-archived", { createdAt: "2026-10-19T09:00:00.000Z", archivedAt: "2026-10-19T10:00:00.000Z" }),
+      ],
+    });
+    const { cli, titles, labels } = cliOn(fake as unknown as ReturnType<typeof daemonWith>);
+
+    await expect(retireOlderOrchestrators(fake.paseo, cli)).resolves.toEqual([]);
+
+    expect(titles).toEqual([]);
+    expect(labels).toEqual([]);
+  });
+
+  it("retries a relabel that failed at the next pass", async () => {
+    const fake = daemonWith({ agents: twoMains() });
+    const { cli, labels } = cliOn(fake, true);
+
+    await expect(retireOlderOrchestrators(fake.paseo, cli)).resolves.toEqual([]);
+    await expect(retireOlderOrchestrators(fake.paseo, cli)).resolves.toEqual(["o-old"]);
+    await expect(retireOlderOrchestrators(fake.paseo, cli)).resolves.toEqual([]);
+
+    expect(labels.map(([id]) => id)).toEqual(["o-old", "o-old"]);
+  });
+
+  it("runs once at start, and at the agent.created of a new Orchestrator only", async () => {
+    const fake = daemonWith({ agents: twoMains() });
+    const { cli, labels } = cliOn(fake);
+    const retirement = createOrchestratorRetirement(cli);
+
+    await expect(retirement.start(fake.paseo)).resolves.toEqual(["o-old"]);
+    fake.setAgents([...fake.agents, orchestratorAgent("o-newer", { createdAt: "2026-10-20T11:00:00.000Z" })]);
+    // A second start is no pass, and a Worker's creation starts none.
+    await expect(retirement.start(fake.paseo)).resolves.toEqual([]);
+    await expect(retirement.agentCreated({ id: "w-1", provider: "bm-worker/claude-sonnet" }, fake.paseo)).resolves.toEqual([]);
+    expect(labels.map(([id]) => id)).toEqual(["o-old"]);
+
+    await expect(retirement.agentCreated({ id: "o-newer", provider: "bm-orchestrator/claude-opus-5-5" }, fake.paseo)).resolves.toEqual(["o-new"]);
+    expect(fake.archives).toEqual([]);
+  });
+
+  it("counts the new Orchestrator its agent.created names even before the list shows it", async () => {
+    const fake = daemonWith({ agents: [orchestratorAgent("o-old", { createdAt: "2026-10-18T09:00:00.000Z" })] });
+    const { cli } = cliOn(fake);
+    const retirement = createOrchestratorRetirement(cli);
+    const created = orchestratorAgent("o-created", { createdAt: "2026-10-20T09:00:00.000Z" });
+    // The daemon lists it a moment later; its own handle already answers.
+    fake.handle("o-created").refresh.mockResolvedValue({ agent: created, project: null } as never);
+
+    await expect(retirement.agentCreated({ id: "o-created", provider: "bm-orchestrator" }, fake.paseo)).resolves.toEqual(["o-old"]);
+  });
+
+  it("retires the outdated Orchestrator a recreate replaced, at the new one's agent.created", async () => {
+    const fake = daemonWith({ agents: [orchestratorAgent("o-old", { labels: OLD_LABELS })] });
+    const { cli } = cliOn(fake);
+    const retirement = createOrchestratorRetirement(cli);
+
+    const opened = await handleOrchestratorOpen({ confirmed: true, recreate: true }, fake.paseo, deps);
+    await expect(retirement.agentCreated({ id: opened.agentId, provider: "bm-orchestrator/claude-opus-5-5" }, fake.paseo)).resolves.toEqual(["o-old"]);
+
+    await expect(findOrchestratorAgent(fake.paseo)).resolves.toMatchObject({ id: opened.agentId });
+    expect(fake.archives).toEqual([]);
   });
 });

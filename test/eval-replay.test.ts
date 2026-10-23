@@ -961,3 +961,110 @@ describe("admission evidence in the replay (autonomy design §F.2; bead i8fc.3)"
     for (const secret of [SECRET_PATH, SECRET_CHECK, ALPHA_DIRECTORY]) expect(stdout).not.toContain(secret);
   });
 });
+
+describe("replay of the Missions places and the owner's cards (A-14, M-39, M-41; delivery line design §13)", () => {
+  let missionsHome: string;
+  const ROOT = "wks_mission_list_root";
+  const MISSION_WS = "wks_mission_one";
+  const STALE_WS = "wks_mission_two";
+  const MISSION = "mis-00000000a1";
+  const STALE = "mis-00000000b2";
+  const RQ = "req-20261016T090000Z";
+  const SECRET_ASK = "Should the private ledger keep its legacy layout?";
+  const minute = (m: number) => `2026-10-16T09:${String(m).padStart(2, "0")}:00.000Z`;
+  const main = (workspaceId: string, m: number, text: string, origin: "user" | "agent") =>
+    turn({ workspaceId, agentId: `agent-main-${workspaceId}`, turnId: `main-${workspaceId}-${m}`, at: minute(m), endedAt: minute(m), sent: [msg(`agent-main-${workspaceId}`, minute(m), text, origin)] });
+  const card = (id: string, extra: Partial<Decision>): Decision =>
+    makeDecision({
+      id,
+      workspaceId: WS_A,
+      requestId: RQ,
+      askedAt: minute(1),
+      question: SECRET_ASK,
+      options: [
+        { key: "a", label: "Keep", recommended: true, effects: ["none"] },
+        { key: "b", label: "Change", recommended: false, effects: ["none"] },
+      ],
+      ...extra,
+    });
+
+  beforeAll(() => {
+    missionsHome = mkdtempSync(join(tmpdir(), "bm-replay-missions-"));
+    // As in the field: the Mission-List root has no trace folder; the Mains record under each mission's own workspace.
+    for (const id of [MISSION_WS, STALE_WS, WS_A]) mkdirSync(join(missionsHome, "traces", id), { recursive: true });
+    const write = (path: string, value: unknown) => writeFileSync(join(missionsHome, ...path.split("/")), typeof value === "string" ? value : JSON.stringify(value));
+    write(`traces/${MISSION_WS}/events-202610.jsonl`, `${[main(MISSION_WS, 2, "Plan the ledger.", "user"), main(MISSION_WS, 4, `BM-DELIVERY report out-0123456789ab\nBM-REPORT\nrequestId: ${RQ}\nphase: implementing`, "agent")].map((record) => JSON.stringify(record)).join("\n")}\n`);
+    write(`traces/${STALE_WS}/events-202610.jsonl`, `${JSON.stringify(main(STALE_WS, 6, "Go on.", "user"))}\n`);
+    // A project Manager's turn: not a Main's.
+    write(`traces/${WS_A}/events-202610.jsonl`, `${JSON.stringify(turn({ workspaceId: WS_A, requestId: RQ, turnId: "repo-1", at: minute(1), endedAt: minute(1), sent: [msg(MANAGER, minute(1), "hi", "user")] }))}\n`);
+    mkdirSync(join(missionsHome, "ui"), { recursive: true });
+    write("ui/missions-home.json", { schemaVersion: 1, workspaceId: ROOT, directory: "/private/missions/Mission-List" });
+    mkdirSync(join(missionsHome, "missions"), { recursive: true });
+    // The index knows the first mission's workspace; the second is only in its own file (an index older than it).
+    write("missions/index.json", { schemaVersion: 1, missions: [{ missionId: MISSION, code: "LED", name: "Ledger", state: "open", mainId: "agent-main", repos: [WS_A], workspaceId: MISSION_WS }] });
+    write(`missions/${STALE}.json`, { missionId: STALE, workspaceId: STALE_WS, legacyWorkspaceId: null });
+    write(`missions/${MISSION}.roster.json`, { schemaVersion: 1, requests: [{ requestId: RQ, workspaceId: WS_A, createdAt: minute(0), workerIds: [], topic: "ledger", state: "active" }] });
+    mkdirSync(join(missionsHome, "decisions"), { recursive: true });
+    write(`decisions/${WS_A}.json`, {
+      version: 1,
+      entries: [
+        card(`q:${RQ}:Q1`, { subject: "ledger-layout" }),
+        card(`q:${RQ}:Q2`, { subject: "review-cap", question: "Allow more review calls?" }),
+        card(`q:${RQ}:Q3`, { subject: "review-budget", question: "More review calls?", status: "answered", settledAt: minute(3), answer: { by: "owner", via: "inbox", optionKey: "a", words: null, at: minute(3) } }),
+      ],
+    });
+    write(`missions/${MISSION}.decisions.json`, {
+      version: 1,
+      entries: [card(`m:${MISSION}:1`, { workspaceId: MISSION, requestId: null, askedBy: { role: "plugin", agentId: "agent-main" }, round: null, subject: null, askedAt: minute(5) })],
+    });
+    const old = new Date("2020-01-01T00:00:00.000Z");
+    for (const path of Object.keys(mtimes(missionsHome)).reverse()) utimesSync(path, old, old);
+  });
+
+  afterAll(() => {
+    rmSync(missionsHome, { recursive: true, force: true });
+  });
+
+  it("finds the Missions places — the root, each mission's workspace from the index and from its own file — and counts the Mains' turns", () => {
+    const before = mtimes(missionsHome);
+    const out = run(["--home", missionsHome, "--json"]);
+    expect([out.code, out.stderr]).toEqual([0, ""]);
+    const report = JSON.parse(out.stdout) as ReplayReport;
+    expect(report.metrics.a14).toMatchObject({ homeKnown: true, turns: 3, byTrigger: { owner: 2, report: 1 }, ownerShare: 2 / 3 });
+    const markdown = run(["--home", missionsHome]).stdout;
+    expect(markdown).toContain("| A-14 Main turns: owner share · by trigger · batched | 0.67 · owner 2 / report 1 / message 0 / peer 0 / command 0 / state 0 / other 0 · 0 |");
+    expect(markdown).not.toContain("Missions home unknown");
+    expect(mtimes(missionsHome)).toEqual(before);
+  });
+
+  it("reports M-39 and M-41 from the decision stores and the missions' decisions, numbers only", () => {
+    const out = run(["--home", missionsHome, "--json"]);
+    const report = JSON.parse(out.stdout) as ReplayReport;
+    expect(report.metrics.m39).toEqual({ decisionsIncluded: true, cards: 2, reviewCap: 1, belowCap: 1, requests: 1, maxPerRequest: 2, meanPerRequest: 2, requestsOverOne: 1, withoutRequest: 0 });
+    // Cards: the product question, the two review cards, and the Main's m: repeating the open Q1.
+    expect(report.metrics.m41).toEqual({
+      decisionsIncluded: true,
+      missionDecisionsIncluded: true,
+      cards: 4,
+      notProduct: 3,
+      share: 0.75,
+      byKind: { duplicate: 1, governorProcess: 0, review: 2 },
+      missionCardsWithoutRequests: 0,
+    });
+    const markdown = run(["--home", missionsHome]).stdout;
+    expect(markdown).toContain(
+      "| M-39 owner cards about review (review-cap, review-budget): per request max / mean · requests with them, over one · cards (review-cap / below the cap: review-budget) · without a request | 2 / 2 · 1, 1 · 2 (1 / 1) · 0 |",
+    );
+    expect(markdown).toContain(
+      "| M-41 owner cards that are not product decisions: share · not product / cards · duplicates of an open q: / governor process (o: of a process class, ladder step not stored) / review | 75.0 % · 3 / 4 · 1 / 0 / 2 |",
+    );
+    for (const stdout of [out.stdout, markdown]) for (const secret of [SECRET_ASK, "/private/missions", "Plan the ledger"]) expect(stdout).not.toContain(secret);
+  });
+
+  it("--workspace keeps a mission's decisions when one of its requests is of that workspace", () => {
+    const alpha = run(["--home", missionsHome, "--json", "--workspace", WS_A]);
+    expect((JSON.parse(alpha.stdout) as ReplayReport).metrics.m41).toMatchObject({ cards: 4, byKind: { duplicate: 1 } });
+    const beta = run(["--home", missionsHome, "--json", "--workspace", WS_B]);
+    expect((JSON.parse(beta.stdout) as ReplayReport).metrics.m41).toMatchObject({ cards: 0, byKind: { duplicate: 0 } });
+  });
+});

@@ -38,20 +38,24 @@ export interface RuleInput {
   /** Null when no Reviewer turn was recorded: unknown, not zero. */
   reviewCalls: number | null;
   /**
-   * The request's review-budget grants (design §16.8), from the request
+   * The request's review grants and its milestone batches, from the request
    * registry (`ruleReviewGrantOf`): `calls`, the sum of its `{ calls: n }`
-   * grants; `exempt`, the tool calls of the batches whose `{ untilClean }`
-   * grant is still live. Absent: none.
+   * grants; `milestones`, its batches (delivery line design §5.3). Absent:
+   * none, and one batch.
    */
   reviewGrant?: RuleReviewGrant;
   /** Every inbound message of every agent of the request, oldest first. */
   inbound: RuleMessage[];
 }
 
-/** A request's review-budget grants, as the rule reads them (`RuleInput.reviewGrant`). */
+/**
+ * A request's review grants and milestone batches, as the rule reads them
+ * (`RuleInput.reviewGrant`). An older build's `{ untilClean }` grant no longer
+ * exempts any call (delivery line design §5.6).
+ */
 export interface RuleReviewGrant {
   /** Σ of the `{ calls: n }` grants: added to the ceiling. */
   calls: number;
-  /** Calls of batches a live `{ untilClean }` grant covers: left out of the count. */
-  exempt: number;
+  /** The request's milestone batches, M of the review cap (`reviewCapOf`); absent: one. */
+  milestones?: number;
 }

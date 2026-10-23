@@ -29,6 +29,7 @@ import { createMissionStore, journalQuietly, type Mission } from "./mission-stor
 import { NOT_A_MAIN_MESSAGE, missionOfMain } from "./mission-tools";
 import { Refusal } from "./orchestrator-tool-context";
 import { directoryIn, listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
+import { inCharter, placementOf, repoKeyOf } from "./placements";
 import { createPrecedentStore } from "./precedent-store";
 import { repoIn, type GitRunner } from "./repo-tool";
 import { readWorkspaceMeta } from "./trace-store";
@@ -123,9 +124,9 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
     return mission === null ? refused(NOT_A_MAIN_MESSAGE) : { main, mission };
   };
 
-  /** Why `project` is not a repo of `mission`'s charter, or null. */
+  /** Why `project` is not a repo of `mission`'s charter, or null; a placement counts as its repo (delivery line design §3.1). */
   const outsideCharter = (mission: Mission, project: string): ServerToolAnswer | null =>
-    mission.charter.repos.includes(project)
+    inCharter(deps.home(), mission, project)
       ? null
       : refused(`project ${project} is not a repo of mission ${mission.code} (${mission.charter.repos.join(", ") || "none yet"}); add it with bm_mission_update repos first. ${NOTHING}`);
 
@@ -169,7 +170,7 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
     if (issues.length === 0) issues.push(...opIssues(input));
     if (issues.length > 0) return fixThese("bm_memory", issues);
     const { main, mission } = found;
-    const project = input.project!;
+    const project = repoKeyOf(deps.home(), input.project!);
     return outsideCharter(mission, project) ?? memory(input, project, { role: "main", agentId: main.agentId, missionId: mission.missionId });
   };
 
@@ -180,9 +181,12 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
     const issues = [...schemaIssues(faceOf("bm_memory", "worker").inputSchema, input)];
     if (issues.length === 0) issues.push(...opIssues(input));
     if (issues.length > 0) return fixThese("bm_memory", issues);
-    const project = input.project ?? worker.workspaceId;
-    if (project !== worker.workspaceId) {
-      return refused(`bm_memory reads and adds to your own repo's memory only (${worker.workspaceId}); ask another repo with bm_ask_project. ${NOTHING}`);
+    // Delivery line design §3.1: a Worker in a placement reads and adds to its repo's memory.
+    const home = deps.home();
+    const own = repoKeyOf(home, worker.workspaceId);
+    const project = repoKeyOf(home, input.project ?? worker.workspaceId);
+    if (project !== own) {
+      return refused(`bm_memory reads and adds to your own repo's memory only (${own}); ask another repo with bm_ask_project. ${NOTHING}`);
     }
     return memory(input, project, { role: "worker", agentId: worker.agentId, missionId: worker.missionId ?? null });
   };
@@ -195,11 +199,16 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
     if (issues.length > 0) return fixThese("bm_repo", issues);
     const outside = outsideCharter(found.mission, input.workspaceId);
     if (outside !== null) return outside;
-    // The folder Paseo lists for the repo, else the one the trace store last saw — never one the agent typed.
+    // Delivery line design §3.1: the mission's placement of the repo (its own branch) when it has one, else the repo's root.
     const home = deps.home();
+    const repo = repoKeyOf(home, input.workspaceId);
+    const placement = placementOf(home, found.mission.missionId, repo);
+    const own = placement?.workspaceId != null && (placement.state === "ready" || placement.state === "retired") ? placement : null;
+    const place = own?.workspaceId ?? repo;
+    // The folder Paseo lists for it, else the one recorded or the trace store last saw — never one the agent typed.
     const paseo = deps.paseo();
     const listed = paseo === null || paseo === undefined ? null : await listedWorkspaces(paseo as DashboardPaseo);
-    const directory = directoryIn(listed, input.workspaceId) ?? readWorkspaceMeta({ tracesDir: join(home, TRACES_DIR_NAME) }, input.workspaceId)?.lastKnownDirectory ?? null;
+    const directory = directoryIn(listed, place) ?? own?.directory ?? readWorkspaceMeta({ tracesDir: join(home, TRACES_DIR_NAME) }, place)?.lastKnownDirectory ?? null;
     try {
       return await repoIn(input, directory, env, deps.git === undefined ? {} : { git: deps.git });
     } catch (error) {

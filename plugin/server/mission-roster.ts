@@ -24,7 +24,7 @@ import { redactText } from "./collector";
 import { assertNoSymlink, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
 import { MISSIONS_DIR_NAME, MISSIONS_VERSION, MISSION_ID_PATTERN, createMissionStore, journalQuietly } from "./mission-store";
 import { bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
-import { REQUEST_ID_PATTERN, createRequestRegistry } from "./request-registry";
+import { REQUEST_ID_PATTERN, createRequestRegistry, isBoundRequest } from "./request-registry";
 import { errorText } from "./rpc-kit";
 
 /** The longest topic: the Main's one-line label of a request. */
@@ -42,6 +42,11 @@ const rosterEntrySchema = z.object({
   state: z.enum(ROSTER_STATES),
   /** The newest follow-up the Main told the request's Worker (`bm_tell_worker`, mission runtime design §2.3); absent when none. */
   followUpAt: z.string().optional(),
+  /** Delivery line design §2.2: the request of the same mission this one continues; absent when none. */
+  continuationOf: z
+    .string()
+    .refine((id) => REQUEST_ID_PATTERN.test(id), "not a request id")
+    .optional(),
 });
 
 export type RosterEntry = z.infer<typeof rosterEntrySchema>;
@@ -141,18 +146,34 @@ export function missionManagerOf(home: string | null, requestId: string | null):
 }
 
 /**
+ * True when `requestId`'s roster entry is `finished` or `stopped` and the
+ * request is bound (delivery line design §2.3): it never reopens. Never throws.
+ */
+function isFinalEntry(home: string, place: RequestPlace, requestId: string): boolean {
+  const state = createMissionRoster(home).get(place.missionId, requestId)?.state;
+  if (state !== "finished" && state !== "stopped") return false;
+  try {
+    return isBoundRequest(createRequestRegistry(home, { log: () => {} }).get(place.workspaceId, requestId));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A Worker's report of `requestId` sets its roster state (missions design
  * §2.3): `finished` or `stopped` as the report says, `active` again for any
  * other phase (a follow-up through `bm_tell_worker` reopened the work). A
- * request of no mission is left alone. Called by `bm_report` and the unbound
- * relay. Never throws: a failure is one log line.
+ * bound request that is finished or stopped is never `active` again (delivery
+ * line design §2.3); the hand path keeps reopening. A request of no mission is
+ * left alone. Called by `bm_report` and the unbound relay. Never throws: a
+ * failure is one log line.
  */
 export function noteRosterReport(home: string, requestId: string, phase: string, log: (message: string) => void = () => {}, reportText?: string): void {
   try {
     const place = requestIndexOf(home, requestId);
     if (place === null) return;
     const state: RosterState = phase === "finished" || phase === "stopped" ? phase : "active";
-    createMissionRoster(home).setState(place.missionId, requestId, state);
+    if (state !== "active" || !isFinalEntry(home, place, requestId)) createMissionRoster(home).setState(place.missionId, requestId, state);
     // Mission runtime design §2.3: the phases that change what the mission waits on are its history.
     if (reportText !== undefined && (phase === "blocked" || phase === "finished" || phase === "stopped")) {
       const summary = reportSummaryOf(reportText);
@@ -178,12 +199,14 @@ export function reportSummaryOf(text: string): string {
  * The Main told a request's Worker more work (`bm_tell_worker`, mission
  * runtime design §2.3): the roster entry is `active` again with `followUpAt`,
  * and the journal gets "Follow-up to <request>: <first line>". A request of no
- * mission is left alone. Never throws: a failure is one log line.
+ * mission is left alone, and so is a bound one that is finished or stopped
+ * (delivery line design §2.3): its work goes on as a continuation. Never
+ * throws: a failure is one log line.
  */
 export function noteFollowUp(home: string, requestId: string, text: string, at: string, log: (message: string) => void = () => {}): void {
   try {
     const place = requestIndexOf(home, requestId);
-    if (place === null) return;
+    if (place === null || isFinalEntry(home, place, requestId)) return;
     createMissionRoster(home).noteFollowUp(place.missionId, requestId, at);
     const first = redactText(text.split("\n").find((line) => line.trim() !== "") ?? "").replace(/\s+/g, " ").trim();
     journalQuietly(createMissionStore(home), place.missionId, { kind: "worker", by: "main", text: `Follow-up to ${requestId}: ${first.length <= 160 ? first : `${first.slice(0, 159)}…`}`, ref: requestId }, log);
@@ -248,12 +271,13 @@ export interface MissionRoster {
   /** One request of the mission, or null. Never throws. */
   get(missionId: string, requestId: string): RosterEntry | null;
   /**
-   * Adds a request (`active`), or — already listed — appends `workerId` to its
+   * Adds a request (`active`, with `continuationOf` for a continuation,
+   * delivery line design §2.2), or — already listed — appends `workerId` to its
    * Workers (newest last). Refused (null) when another mission's roster holds
    * the request or it is listed under another repo. Throws when the file
    * cannot be written.
    */
-  add(missionId: string, init: { requestId: string; workspaceId: string; topic: string; workerId?: string | null }): RosterEntry | null;
+  add(missionId: string, init: { requestId: string; workspaceId: string; topic: string; workerId?: string | null; continuationOf?: string }): RosterEntry | null;
   /** Sets a listed request's state; false when it is not listed. Throws when the file cannot be written. */
   setState(missionId: string, requestId: string, state: RosterState): boolean;
   /** A follow-up was told (mission runtime design §2.3): the entry becomes `active` with `followUpAt = at`; false when it is not listed. Throws when the file cannot be written. */
@@ -265,6 +289,12 @@ export interface MissionRoster {
    * file cannot be written (the source is put back first).
    */
   move(fromMissionId: string, toMissionId: string, requestIds: readonly string[]): RosterEntry[];
+  /**
+   * Delivery line design §4.8: a listed request now lives in `workspaceId`
+   * (its mission's placement, with `request-registry.ts` `move`). False when
+   * it is not listed. Throws when the file cannot be written.
+   */
+  moveWorkspace(missionId: string, requestId: string, workspaceId: string): boolean;
 }
 
 /** The roster store of the data folder `home`. Creating it touches nothing on disk. */
@@ -299,6 +329,7 @@ export function createMissionRoster(home: string, deps: MissionRosterDeps = {}):
             workerIds: workerId === null ? [] : [workerId],
             topic: redactText(init.topic.replace(/\s+/g, " ").trim(), env).slice(0, MAX_ROSTER_TOPIC),
             state: "active",
+            ...(init.continuationOf === undefined ? {} : { continuationOf: init.continuationOf }),
           });
           return { requests: [...current.requests, entry] };
         }
@@ -346,6 +377,17 @@ export function createMissionRoster(home: string, deps: MissionRosterDeps = {}):
         throw error;
       }
       return moved;
+    },
+    moveWorkspace(missionId, requestId, workspaceId) {
+      let found = false;
+      rosterFile(home, missionId).update((current) => {
+        const index = current.requests.findIndex((request) => request.requestId === requestId);
+        if (index === -1) return null;
+        found = true;
+        if (current.requests[index]!.workspaceId === workspaceId) return null;
+        return { requests: current.requests.map((request, at) => (at === index ? { ...request, workspaceId } : request)) };
+      });
+      return found;
     },
   };
 }

@@ -14,6 +14,9 @@ import { createOutbox } from "../plugin/server/outbox";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
 import { clearTraceStoreCache, appendRecord } from "../plugin/server/trace-store";
 import { makeDecision } from "./helpers/decisions";
+import { fakeLineGit } from "./helpers/line-git";
+import { clearLineCache, refreshLines } from "../plugin/server/line-watch";
+import { finishedLineFactsOf, finishedLineOf } from "../plugin/server/line-state";
 import { turn } from "./fixtures/orchestrator-traces";
 
 /**
@@ -40,7 +43,6 @@ const FACTS: AuthorityFacts = {
   modeOf: (workspaceId) => (workspaceId === FRONT ? "delegate" : "owner"),
   missionOf: (requestId) => (requestId === null ? null : MISSION),
   missionDelegates: () => false,
-  reviewCaps: () => ({ codeLeft: 2, mainLeft: 2 }),
 };
 
 beforeEach(() => {
@@ -91,6 +93,14 @@ describe("requestStateOf (design §2.1)", () => {
     expect(requestStateOf({ rosterState: "active", lastReport: { phase: "blocked", at: at(0) }, followUpAt: null, openDeciders: [], waitingOn: "req-x" })).toBe("waiting-other");
     expect(requestStateOf({ rosterState: "active", lastReport: { phase: "received", at: at(0) }, followUpAt: null, openDeciders: [], waitingOn: null })).toBe("working");
     expect(requestStateOf({ rosterState: "stopped", lastReport: null, followUpAt: null, openDeciders: [], waitingOn: null })).toBe("stopped");
+  });
+
+  it("a bound finished or stopped request is final: a later follow-up never reads it working (delivery line design §2.3)", () => {
+    for (const rosterState of ["finished", "stopped"] as const) {
+      expect(requestStateOf({ rosterState, lastReport: { phase: rosterState, at: at(0) }, followUpAt: at(1), openDeciders: ["owner"], waitingOn: null, bound: true })).toBe(rosterState);
+      // The hand path keeps today's reopening.
+      expect(requestStateOf({ rosterState, lastReport: { phase: rosterState, at: at(0) }, followUpAt: at(1), openDeciders: [], waitingOn: null, bound: false })).toBe("working");
+    }
   });
 
   it("waitingOnOf reads a blocked report's wait, never the owner", () => {
@@ -152,8 +162,171 @@ describe("missionStateOf (design §2.1)", () => {
     expect(MISSION_STATE_MAX_CHARS).toBe(6_000);
   });
 
+  it("a finished bound request with a continuation reads finished → its id; a follow-up does not reopen it (delivery line design §2.3, §2.7)", () => {
+    roster().add(MISSION, { requestId: REQ_A, workspaceId: BACK, topic: "Push", workerId: "w-back" });
+    roster().add(MISSION, { requestId: REQ_B, workspaceId: BACK, topic: "Push, more", workerId: "w-back-2", continuationOf: REQ_A });
+    mkdirSync(join(home, "requests"), { recursive: true, mode: 0o700 });
+    const entry = (requestId: string, over: Record<string, unknown>) => ({ requestId, workspaceId: BACK, createdAt: NOW.toISOString(), source: "tool", managerId: MAIN, workerIds: [], tier: "Small", finishedAt: null, reviews: { batches: [], grants: [] }, ...over });
+    writeFileSync(
+      join(home, "requests", `${BACK}.json`),
+      JSON.stringify({ schemaVersion: 1, requests: [entry(REQ_A, { workerIds: ["w-back"], finishedAt: NOW.toISOString(), continuedBy: REQ_B }), entry(REQ_B, { workerIds: ["w-back-2"], continuationOf: REQ_A, chainRootId: REQ_A })] }),
+      { mode: 0o600 },
+    );
+    report(BACK, REQ_A, "w-back", "finished", [], new Date(NOW.getTime() - 60_000));
+    noteRosterReport(home, REQ_A, "finished");
+    // A follow-up of the Main after the finished report does not reopen a bound request.
+    noteFollowUp(home, REQ_A, "More work", NOW.toISOString());
+    const found = state();
+    expect(found.requests.map((request) => [request.requestId, request.state, request.continuationOf, request.continuedBy])).toEqual([
+      [REQ_B, "working", REQ_A, null],
+      [REQ_A, "finished", null, REQ_B],
+    ]);
+    expect(renderMissionState(found)).toContain(`- ${REQ_A} in ${BACK}: finished → ${REQ_B}; Worker w-back`);
+    // Its place in the chain, walked back through the roster (delivery line design §2.7, the mission page's "nth of its chain").
+    expect(found.requests.map((request) => request.chainPosition)).toEqual([2, null]);
+  });
+
+  it("holds one line per repo as the 60-second pass last read it, and a placement request's committed and verified (delivery line design §4.6, §4.9)", async () => {
+    clearLineCache();
+    const PLACE = "wks_back_m";
+    const placement = { repo: BACK, workspaceId: PLACE, directory: "/w/back", branch: "m/XAI/back", target: "develop", base: "origin/develop", worktreeSlug: "m-xai-back", state: "ready" as const, requestKey: "bm-place-1", createdAt: NOW.toISOString(), deps: { cloned: [], at: null, note: null }, integration: { state: "granted" as const, decisionId: `m:${MISSION}:2`, grantedAt: "2026-10-10T04:00:00.000Z", revokedAt: null, scope: { remote: "origin" as const, branch: "m/XAI/back", target: "develop" }, mr: null } };
+    const updated = createMissionStore(home, { env: {}, now: () => NOW }).update(MISSION, (mission) => ({ ...mission, placements: [{ ...placement, state: "failed" as const, workspaceId: null, directory: null }, placement] }));
+    if (!updated.ok) throw new Error(updated.reasons.join("; "));
+    roster().add(MISSION, { requestId: REQ_A, workspaceId: PLACE, topic: "Push and add routes", workerId: "w-back" });
+    roster().add(MISSION, { requestId: REQ_B, workspaceId: FRONT, topic: "G14 tools", workerId: "w-front" });
+    // The finished delivery carries what the plugin confirmed when the report arrived (WP-8.4).
+    report(PLACE, REQ_A, "w-back", "finished", ["branch: m/XAI/back", "commit: abcdef1", "pushed: yes", "mr: https://gitlab.example/mr/7", "ci: pending", "", "finished, committed on m/XAI/back; CI pending."], new Date(NOW.getTime() - 60_000));
+    noteRosterReport(home, REQ_A, "finished");
+    report(FRONT, REQ_B, "w-front", "received");
+    const { git, calls } = fakeLineGit({ "/w/back": { counts: "12\t3", status: "", lastCommitAt: "2026-10-10T03:00:00.000Z", head: "abcdef1234567", branch: "m/XAI/back", aheadOfOrigin: "0", aheadLog: "2026-10-10T03:00:00.000Z" } });
+    // Before the first read of the run: the line is there, not read yet.
+    expect(state().placements).toEqual([expect.objectContaining({ repo: BACK, readAt: null, dirty: null })]);
+    await refreshLines(home, { now: () => NOW, git });
+    const seen = calls.length;
+    // integration.ci on: §4.5, §4.6 as built.
+    const found = missionStateOf(home, MISSION, { now: () => NOW, env: {}, facts: FACTS, ci: "on" })!;
+    expect(calls.length).toBe(seen);
+    expect(found.placements).toEqual([
+      {
+        repo: BACK,
+        name: null,
+        workspaceId: PLACE,
+        branch: "m/XAI/back",
+        target: "develop",
+        state: "ready",
+        dirty: false,
+        ahead: 3,
+        behind: 12,
+        lastCommitAt: "2026-10-10T03:00:00.000Z",
+        pushed: true,
+        mr: { url: "https://gitlab.example/mr/7", state: null, mergeable: null },
+        ci: "pending",
+        grant: { at: "2026-10-10T04:00:00.000Z" },
+        readAt: NOW.toISOString(),
+      },
+    ]);
+    expect(found.requests.find((request) => request.requestId === REQ_A)).toMatchObject({ committed: true, verified: "pending", commit: "abcdef1" });
+    expect(found.requests.find((request) => request.requestId === REQ_B)?.committed).toBeUndefined();
+    const text = renderMissionState(found);
+    expect(text).toContain(`- ${REQ_A} in ${PLACE}: finished, committed, CI pending; Worker w-back`);
+    expect(text).toContain(`Lines:\n- ${BACK}: m/XAI/back → develop, ready; ahead 3, behind 12; clean; last commit 2 h ago; pushed; MR https://gitlab.example/mr/7; CI pending; push & MR allowed`);
+    expect(renderMissionState(found, { maxChars: 6_000 }).length).toBeLessThanOrEqual(MISSION_STATE_MAX_CHARS);
+    // ADR-036 (§17.1): integration.ci off, the default: the merge request without CI, and an older delivery's CI word read as unverified.
+    for (const off of [state(), missionStateOf(home, MISSION, { now: () => NOW, env: {}, facts: FACTS, ci: "off" })!]) {
+      expect(off.placements).toEqual([expect.objectContaining({ repo: BACK, mr: { url: "https://gitlab.example/mr/7", state: null, mergeable: null }, ci: null })]);
+      expect(off.requests.find((request) => request.requestId === REQ_A)).toMatchObject({ committed: true, verified: "unverified", commit: "abcdef1" });
+      const offText = renderMissionState(off);
+      expect(offText).toContain(`- ${REQ_A} in ${PLACE}: finished, committed; Worker w-back`);
+      expect(offText).toContain(`Lines:\n- ${BACK}: m/XAI/back → develop, ready; ahead 3, behind 12; clean; last commit 2 h ago; pushed; MR https://gitlab.example/mr/7; push & MR allowed`);
+      expect(offText).not.toMatch(/\bCI\b/);
+    }
+    // A delivery the plugin wrote with CI off says verified from a detected check: kept.
+    report(PLACE, REQ_A, "w-back", "finished", ["branch: m/XAI/back", "commit: abcdef1", "pushed: yes", "mr: https://gitlab.example/mr/7", "ci: failure", "", "finished, committed on m/XAI/back; verified."], new Date(NOW.getTime() - 30_000));
+    expect(state().requests.find((request) => request.requestId === REQ_A)).toMatchObject({ committed: true, verified: "verified" });
+    expect(renderMissionState(state())).toContain(`- ${REQ_A} in ${PLACE}: finished, committed, verified; Worker w-back`);
+    clearLineCache();
+  });
+
+  it("reads the finished line the plugin wrote back: committed or not, and its CI then", () => {
+    const line = { dirty: false, ahead: 1, behind: 0, lastCommitAt: null, head: "abc", branchOk: true, aheadOfOrigin: 0 };
+    for (const verified of ["verified", "ci-red", "pending", "unverified"] as const) {
+      expect(finishedLineFactsOf(`text\n\n${finishedLineOf({ committed: true, line }, "m/A.b/c", verified)}`)).toEqual({ committed: true, verified });
+    }
+    expect(finishedLineFactsOf(finishedLineOf({ committed: false, why: "the worktree has changes not committed", line: null }, "m/A/c", "unverified"))).toEqual({ committed: false, verified: "unverified" });
+    expect(finishedLineFactsOf("BM-REPORT\nphase: finished")).toBeNull();
+    // A mission with no placement has no Lines section.
+    expect(renderMissionState(state())).not.toContain("Lines:");
+  });
+
   it("returns null for an unknown mission", () => {
     expect(missionStateOf(home, "mis-ffffffffff", { facts: FACTS })).toBeNull();
+  });
+});
+
+describe("contracts and each link's latest message (delivery line design §9.3)", () => {
+  const contract = (id: string, over: Record<string, unknown> = {}) => ({ id, title: `API ${id}`, providerRepo: BACK, consumerRepos: [FRONT], text: "GET /x", version: 1, updatedAt: NOW.toISOString(), source: "PRD", ...over });
+
+  it("lists the live contracts after In flight, proposed first; a link shows its latest message with its refs; a link closed today stays to show its close", () => {
+    createMissionStore(home, { env: {}, now: () => NOW }).update(MISSION, (mission) => ({
+      ...mission,
+      contracts: [contract("C1"), contract("C2", { status: "proposed", version: 3 }), contract("C3", { status: "withdrawn" }), contract("C4", { status: "agreed", consumerRepos: [] })],
+    }));
+    roster().add(MISSION, { requestId: REQ_B, workspaceId: FRONT, topic: "G14 tools", workerId: "w-front" });
+    const links = createPeerLinkStore(home, { newId: (() => { let n = 0; return () => `peer-00000000000${(n += 1)}`; })(), now: () => new Date(NOW.getTime() - 40 * 60_000) });
+    links.createLink({ kind: "question", from: { workspaceId: FRONT, requestId: REQ_B, agentId: "w-front", role: "worker" }, to: { workspaceId: "wks_shell", managerId: null }, text: "Register the remote?" });
+    links.appendMessage("peer-000000000001", { recordId: "out-000000000001", workspaceId: FRONT, side: "asker", agentId: "w-front", kind: "peer", text: "Register the remote?", act: "ask" });
+    links.appendMessage("peer-000000000001", { recordId: "out-000000000002", workspaceId: "wks_shell", side: "answerer", agentId: "w-shell", kind: "peer-message", text: "Registered as origin-b.", act: "answer", refs: { contracts: ["C2@v3"] } });
+    links.createLink({ kind: "work", from: { workspaceId: FRONT, requestId: REQ_B, agentId: "w-front", role: "worker" }, to: { workspaceId: "wks_ops", managerId: null }, text: "Open the port" });
+    links.appendMessage("peer-000000000002", { recordId: "out-000000000003", workspaceId: "wks_ops", side: "answerer", agentId: "w-ops", kind: "peer-message", text: "Not needed any more.", act: "close" });
+    links.closeLink("peer-000000000002", "answerer");
+    links.createLink({ kind: "work", from: { workspaceId: FRONT, requestId: REQ_B, agentId: "w-front", role: "worker" }, to: { workspaceId: "wks_db", managerId: null }, text: "Add the index" });
+
+    const found = state();
+    expect(found.contracts!.map((entry) => [entry.id, entry.version, entry.status])).toEqual([
+      ["C2", 3, "proposed"],
+      ["C1", 1, "agreed"],
+      ["C4", 1, "agreed"],
+    ]);
+    expect(found.links.map((link) => [link.linkId, link.state, link.last?.act ?? null])).toEqual([
+      ["peer-000000000001", "open", "answer"],
+      ["peer-000000000002", "closed", "close"],
+      ["peer-000000000003", "open", null],
+    ]);
+    const text = renderMissionState(found);
+    expect(text).toContain(`In flight:\n- ${REQ_B}`);
+    expect(text).toContain(
+      [`Contracts:`, `- C2 v3 proposed: API C2 (provider ${BACK}; consumers ${FRONT})`, `- C1 v1 agreed: API C1 (provider ${BACK}; consumers ${FRONT})`, `- C4 v1 agreed: API C4 (provider ${BACK}; consumers none)`, "Waiting on the owner:"].join("\n"),
+    );
+    expect(text).not.toContain("C3");
+    expect(text).toContain("- peer-000000000001 to wks_shell (question, open): last answer by wks_shell 40 min ago: Registered as origin-b. · refs C2@v3");
+    expect(text).toContain("- peer-000000000002 to wks_ops (work, closed): last close by wks_ops 40 min ago: Not needed any more.");
+    // A link with no message but its ask shows the ask.
+    expect(text).toContain("- peer-000000000003 to wks_db (work, open): Add the index");
+    expect(text.length).toBeLessThanOrEqual(MISSION_STATE_MAX_CHARS);
+  });
+
+  it("drops Recently, Governor and the owner's words first, then Contracts (agreed before proposed), then Links", () => {
+    const base = state();
+    const filled = {
+      ...base,
+      contracts: [
+        { id: "C1", version: 2, status: "proposed", title: "Orders", provider: "back", consumers: ["front"] },
+        { id: "C2", version: 1, status: "agreed", title: "Invoices", provider: "back", consumers: [] },
+      ],
+      links: [{ linkId: "peer-000000000001", route: "project", kind: "work", direction: "out" as const, partner: "ops", state: "open", waitingSince: null, gist: "Open the port", last: null }],
+      owner: [{ at: NOW.toISOString(), from: "owner" as const, text: "o".repeat(200) }],
+      journal: [{ at: NOW.toISOString(), kind: "note", by: "owner", text: "j".repeat(190) }],
+    };
+    const full = renderMissionState(filled);
+    const parts = ["Recently:\n-", "The owner said lately:\n-", "- C2 v1", "- C1 v2", "- peer-000000000001"];
+    for (const part of parts) expect(full).toContain(part);
+    // Shrinking the room one character at a time, the order in which each part leaves.
+    const gone: string[] = [];
+    for (let max = full.length; max > 0 && gone.length < parts.length; max -= 1) {
+      const text = renderMissionState(filled, { maxChars: max });
+      for (const part of parts) if (!gone.includes(part) && !text.includes(part)) gone.push(part);
+    }
+    expect(gone).toEqual(parts);
   });
 });
 

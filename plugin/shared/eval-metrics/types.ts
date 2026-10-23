@@ -80,6 +80,20 @@ export interface EvalInput {
   dangers?: readonly unknown[];
   /** The Missions places' workspace ids (ADR-034: the Mission-List root, the earlier shared home, each mission's workspace), whose `manager` records are the Mains' turns (A-14); absent or empty when unknown. */
   missionsWorkspaceIds?: readonly string[];
+  /** `missions/<missionId>.decisions.json` → `entries` (the `m:` decisions), unvalidated (M-41); absent when they were not read. */
+  missionDecisions?: readonly unknown[];
+  /** Each mission's request ids (`missions/<missionId>.roster.json`), which tie an `m:` decision to its requests (M-41 (a)); absent when not read. */
+  missionRequests?: Readonly<Record<string, readonly string[]>>;
+  /** The missions' placements (delivery line design §3.1): each placement workspace's mission and repo key, from `missions/index.json` and each mission file (M-37, M-38); absent when not read, empty before any placement. */
+  placements?: Readonly<Record<string, { missionId: string; repo: string }>>;
+  /** The request registry's entries (`requests/<workspaceId>.json` → `requests`), unvalidated: their chain fields and batch results (M-36, M-40); absent when not read. */
+  requests?: readonly unknown[];
+  /** `coordination/settings.json` as read, unvalidated: the rollover figures M-36 judges against (the defaults when absent). */
+  coordinationSettings?: unknown;
+  /** `orchestrator/compactions.json` → `entries`, unvalidated (M-42); absent when not read. */
+  compactions?: readonly unknown[];
+  /** Every `handoffs/<id>.json` → `handoff`, unvalidated (M-42); absent when not read. */
+  handoffs?: readonly unknown[];
   window: EvalWindow;
   /** Workspace directory by workspace id, for the `rm -rf` outside-the-workspace rule of A-6. */
   workspaceDirectories?: Readonly<Record<string, string>>;
@@ -525,6 +539,189 @@ export interface EvalMetrics {
     batched: number;
   };
   /**
+   * M-39 (missions PRD; delivery line design §5, §13; `eval-metrics/owner-cards.ts`):
+   * the owner's cards about review — subject `review-cap`, or the retired
+   * `review-budget`, which asked below the cap — per request. A card is a
+   * stored decision no agent answered (`answer` null or `by: owner`); one
+   * counts as A-4's decisions do (its request in the window, else asked in it).
+   * Target: at most one per request and none below the cap.
+   */
+  m39: {
+    /** False when no decision store was supplied. */
+    decisionsIncluded: boolean;
+    /** Every such card in scope. */
+    cards: number;
+    /** Of `cards`: subject `review-cap` (asked at the cap). */
+    reviewCap: number;
+    /** Of `cards`: subject `review-budget` (asked below the cap; retired, 0 from Phase 6 on). */
+    belowCap: number;
+    /** The requests with at least one card. */
+    requests: number;
+    /** Over `requests`; null with none. */
+    maxPerRequest: number | null;
+    meanPerRequest: number | null;
+    /** Requests with more than one card. */
+    requestsOverOne: number;
+    /** Cards with no request: in `cards`, in no per-request figure. */
+    withoutRequest: number;
+  };
+  /**
+   * M-41 (missions PRD; delivery line design §7, §8, §13;
+   * `eval-metrics/owner-cards.ts`): the owner's cards that are not product
+   * decisions, by kind. A card is a stored decision — `q:`, `o:`, `f:`, `h:`
+   * or a mission's `m:` (never an override `r:`) — no agent answered, scoped
+   * as M-39's. Each card counts in one kind at most, in this order:
+   * `review` (M-39's subjects), `duplicate` (an `m:` whose text, as the
+   * materialiser compares it, or subject equals a `q:` of one of its
+   * mission's requests open when it was asked), `governorProcess` (an `o:` of
+   * a process class — scope, preference, reversible-technical — with no
+   * goal-change or split subject and no mission action: the ladder step at
+   * its time is not stored, so every such card counts, not only those below
+   * step 4). Target: `share` ≤ 10 %.
+   */
+  m41: {
+    /** False when no decision store was supplied. */
+    decisionsIncluded: boolean;
+    /** False when the missions' decisions were not read: no `m:` card, so no duplicate, is counted. */
+    missionDecisionsIncluded: boolean;
+    cards: number;
+    /** Of `cards`: in one of `byKind`. */
+    notProduct: number;
+    /** notProduct ÷ cards; null with no card. */
+    share: number | null;
+    byKind: { duplicate: number; governorProcess: number; review: number };
+    /** `m:` cards whose mission's requests were not read: never judged a duplicate. */
+    missionCardsWithoutRequests: number;
+  };
+  /**
+   * M-36 (missions PRD; delivery line design §2.6, §13;
+   * `eval-metrics/delivery-line.ts`): the tokens a request reads — input +
+   * cached over all its turns, every role (`turnTokensOf`) — over the
+   * requests in the window with usage. Target: none above `ceilingTokens`.
+   */
+  m36: {
+    /** False when the request registry was not read: every request is its own chain. */
+    registryIncluded: boolean;
+    /** False when the coordination settings were not read: the defaults are used. */
+    settingsIncluded: boolean;
+    /** `rollover.ceilingFactor` × `rollover.tokens` at the settings read (defaults: 100 million). */
+    ceilingTokens: number;
+    /** Requests in the window with a turn with usage. */
+    requests: number;
+    largest: { requestId: string; workspaceId: string; tokensRead: number } | null;
+    p50: number | null;
+    p95: number | null;
+    /** Requests above `ceilingTokens`. */
+    overCeiling: number;
+    /** Chains (the registry's `chainRootId` or `continuationOf`) with more than one request in the window. */
+    chains: number;
+    /** The chain whose requests in the window read the most; a request no chain holds is its own. */
+    largestChain: { rootId: string; requests: number; tokensRead: number } | null;
+  };
+  /**
+   * M-37 (missions PRD; delivery line design §3, §13;
+   * `eval-metrics/delivery-line.ts`): files written by Workers of two
+   * missions in one workspace — a placement, or before placements the shared
+   * checkout — from the Workers' own reports' `filesChanged` of the requests
+   * in the window, each relative to its workspace folder. A request's mission
+   * is its roster's, else the mission whose placement its workspace is.
+   * Target: 0.
+   */
+  m37: {
+    /** False when the missions' rosters were not read: a request's mission is known from a placement only. */
+    missionsIncluded: boolean;
+    /** False when the placements were not read: none of `files` is known to be in a placement. */
+    placementsIncluded: boolean;
+    /** Mission requests in the window whose Workers reported a file. */
+    requests: number;
+    /** Requests in the window whose Workers reported a file but that belong to no mission: in no other figure. */
+    requestsWithoutMission: number;
+    /** Files (workspace, path) written by Workers of two or more missions. */
+    files: number;
+    /** Of `files`: in a mission's placement. */
+    inPlacements: number;
+    /** Each pair of missions that wrote one file in one workspace, and how many such files; most files first. */
+    pairs: Array<{ workspaceId: string; placement: boolean; missions: [string, string]; files: number }>;
+  };
+  /**
+   * M-38 (missions PRD; delivery line design §4.4, §4.6, §13;
+   * `eval-metrics/delivery-line.ts`): the finished mission requests in the
+   * window (labelled by `requestFinishOf`, as A-9's admission evidence) that
+   * changed files with no commit on their mission branch — the Main's
+   * finished line where a delivery carries it, else the report's
+   * `integration.commit` — and of those the share verified: the line's
+   * "verified", `integration.ci` success, or a detected check; CI red is
+   * never verified (over the finishes with changed files, as the admission
+   * evidence's verification share). Targets: 0; ≥ 80 %.
+   */
+  m38: {
+    /** False when the missions' rosters were not read: a request's mission is known from a placement only. */
+    missionsIncluded: boolean;
+    /** Finished mission requests whose latest report with a milestone is `finished`. */
+    finished: number;
+    /** Of `finished`: a report names a file, or a record edited or wrote one. */
+    changedFiles: number;
+    /** Of `changedFiles`: no commit on the mission branch. */
+    uncommitted: number;
+    /** How `changedFiles` were judged: by the Main's finished line, or by the report's `integration.commit` alone. */
+    committedBy: { line: number; report: number };
+    /** Of `changedFiles`: verified by CI (the line or `integration.ci`) or by a check the plugin detected. */
+    verified: number;
+    verifiedBy: { ci: number; check: number };
+    /** Of `changedFiles`: CI red (the line, or `integration.ci` failure): never verified. */
+    ciRed: number;
+    /** verified ÷ changedFiles; null with none. */
+    verifiedShare: number | null;
+  };
+  /**
+   * M-40 (missions PRD; delivery line design §6.2–§6.4, §13;
+   * `eval-metrics/delivery-line.ts`): (a) Worker turns a plugin delivery
+   * started while the request's newest Worker report before them was
+   * `blocked` naming items by id and that wait was unsettled — each item's
+   * settle time rebuilt from the stores (the registry keeps only the current
+   * wait); (b) the share of Worker tokens read in turns that end with a
+   * `blocked` report (the last report the Worker sent in the turn).
+   * Targets: 0; ≤ 10 %.
+   */
+  m40: {
+    registryIncluded: boolean;
+    decisionsIncluded: boolean;
+    /** Worker turns in scope. */
+    workerTurns: number;
+    /** The upper bound: turns a plugin delivery started after a blocked report naming ids, whether its wait was met or not. */
+    afterBlocked: number;
+    /** Of `afterBlocked`: the wait was unsettled when the turn started. */
+    startedWhileWaiting: number;
+    /** Of `afterBlocked`: not judged — an item these stores cannot settle (a link, an unknown question or request) decides it. */
+    notJudged: number;
+    /** Tokens read in the `startedWhileWaiting` turns. */
+    tokensReadWhileWaiting: number;
+    /** `startedWhileWaiting` by the first inbound message's marker (`BM-DELIVERY <kind>`, `BM-UPDATES`, a notice marker, `other`). */
+    byMarker: Record<string, number>;
+    /** Worker tokens read over the Worker turns in scope with usage. */
+    workerTokensRead: number;
+    /** Worker turns with usage whose last report of their own is `blocked`. */
+    blockedEndTurns: number;
+    blockedEndTokensRead: number;
+    /** blockedEndTokensRead ÷ workerTokensRead; null with none. */
+    blockedEndShare: number | null;
+  };
+  /**
+   * M-42 (missions PRD; delivery line design §6.6, §13;
+   * `eval-metrics/delivery-line.ts`): compactions and handoffs asked in the
+   * window and dropped `no-safe-point`; `afterCeiling` those that had waited
+   * at least `ceilingMs` when they ended (the time ceiling; the token figure
+   * is not stored). Target: 0 after the ceiling.
+   */
+  m42: {
+    compactionsIncluded: boolean;
+    handoffsIncluded: boolean;
+    /** `MAINTENANCE_WAIT_MS` per kind. */
+    ceilingMs: { compact: number; handoff: number };
+    compactions: { entries: number; dropped: number; afterCeiling: number };
+    handoffs: { entries: number; dropped: number; afterCeiling: number };
+  };
+  /**
    * Context and tokens (autonomy design §G.2 Derived): tokens read per turn,
    * per request by role and per agent, a context figure per turn, and the
    * compaction and handoff candidates the §G.7 defaults would have raised.
@@ -668,6 +865,8 @@ export interface EvalMetrics {
     invalidProposals: number;
     /** Stored decisions that did not validate. */
     invalidDecisions: number;
+    /** Stored `m:` decisions (`missions/<missionId>.decisions.json`) that did not validate (M-41). */
+    invalidMissionDecisions: number;
     invalidStallEntries: number;
     /** Wake records that did not validate. */
     invalidWakes: number;
@@ -678,6 +877,10 @@ export interface EvalMetrics {
     invalidInterventions: number;
     /** Danger log entries that did not validate (A-13). */
     invalidDangerEntries: number;
+    /** Request registry entries that did not validate (M-36, M-40). */
+    invalidRequestEntries: number;
+    /** Compaction and handoff entries that did not validate (M-42). */
+    invalidMaintenanceEntries: number;
     effectfulWithoutTime: number;
     /** `rm -rf` of a target that cannot be judged: a variable, or a path while the workspace directory is unknown. */
     rmTargetsNotJudged: number;

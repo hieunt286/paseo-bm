@@ -15,8 +15,10 @@
  *   not an intervention of the Orchestrator's and is not logged as one.
  *   Called where decisions open: the materialiser (`q:`), `bm_ask_owner`
  *   (`o:`) and the fallback incidents (`f:`, when their delivery can run).
- *   The subject `review-budget` is never answered by a precedent (design
- *   §16.8): one grant covers exactly the scope it states.
+ *   A decision a precedent may not answer (`precedentEligibility`, delivery
+ *   line design §7.4: a code subject such as `review-cap` or the retired
+ *   `review-budget`, an `ownerOnly` fact, a prepared change, an override or a
+ *   held request) is left as it came: the same check refuses saving one.
  * - **Suggested only** (a fallback incident's decision whose options the
  *   precedent names none of): the decision stays open and nothing is written;
  *   its card shows the precedent as a suggestion (`client/chat-card-precedent.ts`).
@@ -28,9 +30,11 @@
  * Never throws: a failure is one log line, and a decision it could not
  * resolve simply stays open for the owner.
  */
-import { REVIEW_BUDGET_SUBJECT, answerDecision, decisionClassOf, type Decision } from "../shared/decisions";
+import { answerDecision, decisionClassOf, type Decision } from "../shared/decisions";
+import { whyIneligible } from "../shared/question-subjects";
 import { precedentReasonOf, precedentResolutionOf, precedentsContradictedBy, type Precedent } from "../shared/precedents";
 import { createDecisionStore, type DecisionStore } from "./decision-store";
+import { repoKeyOf } from "./placements";
 import { createPrecedentStore } from "./precedent-store";
 import { errorText } from "./rpc-kit";
 
@@ -73,10 +77,10 @@ function activePrecedentsOf(workspaceId: string, deps: PrecedentResolveDeps): Pr
 export function resolveByPrecedent(decision: Decision, deps: PrecedentResolveDeps): PrecedentResolveResult {
   const log = deps.log ?? defaultLog;
   const unchanged = (precedent: Precedent | null): PrecedentResolveResult => ({ decision, resolved: false, precedent });
-  if (decision.status !== "open" || decision.subject === null) return unchanged(null);
-  // Design §16.8: one answer to a review budget covers exactly the scope it states, so no precedent answers it.
-  if (decision.subject === REVIEW_BUDGET_SUBJECT) return unchanged(null);
-  const resolution = precedentResolutionOf(decision, activePrecedentsOf(decision.workspaceId, deps), deps.now);
+  // Delivery line design §7.4: the one eligibility check a save is refused by, so saving and applying cannot disagree.
+  if (decision.status !== "open" || whyIneligible(decision.subject, decision) !== null) return unchanged(null);
+  // Delivery line design §3.1: a placement's decision is matched as its repo's; it is answered where it is stored.
+  const resolution = precedentResolutionOf({ ...decision, workspaceId: repoKeyOf(deps.home, decision.workspaceId) }, activePrecedentsOf(decision.workspaceId, deps), deps.now);
   if (resolution === null) return unchanged(null);
   if (resolution.kind === "suggest") return unchanged(resolution.precedent);
   const { precedent, answer } = resolution;
@@ -120,7 +124,7 @@ export function supersedePrecedentsBy(decision: Decision, deps: PrecedentResolve
   const log = deps.log ?? defaultLog;
   try {
     const store = createPrecedentStore(deps.home);
-    const contradicted = precedentsContradictedBy(decision, store.active(deps.now, decision.workspaceId), deps.now);
+    const contradicted = precedentsContradictedBy({ ...decision, workspaceId: repoKeyOf(deps.home, decision.workspaceId) }, store.active(deps.now, decision.workspaceId), deps.now);
     if (contradicted.length === 0) return [];
     return store.supersede(
       contradicted.map((precedent) => precedent.id),

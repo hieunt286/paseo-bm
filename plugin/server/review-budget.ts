@@ -7,9 +7,10 @@
  * one place that gets it right: `reviewCallsOf`, the same figure the Dashboard
  * shows. The guardrail stays behavioural — this module only TELLS the Manager,
  * and since design delta 20260924-qa-ledger §6 the notice is for information
- * only: the Worker is the one that asks the user before a review beyond its
- * budget, and a second question from the Manager about the same calls asked
- * the user twice (2026-09-23T05:59Z). Nothing here stops an agent.
+ * only: one side asks — since delivery line design §5.4 paseo-bm itself, once,
+ * at the request's review cap — and a second question from the Manager about
+ * the same calls asked the user twice (2026-09-23T05:59Z). Nothing here stops
+ * an agent.
  *
  * Two properties this module must never lose (review b2):
  * - It only ever tells the Manager about an overrun a Worker's or Reviewer's
@@ -40,17 +41,17 @@
  * Since ADR-027 a bound Worker's review tools refuse every call past its
  * request's ceiling (design §16.8, `review-tools.ts`); this notice still goes
  * to the Manager for an overrun on every request, bound ones included, by the
- * same comparison (`overrunOf`, `overReviewCeiling`) — except to the Main of an
+ * same comparison (`overrunOf`, `overReviewCap`) — except to the Main of an
  * open mission (mission runtime design §4.3, §6.1, ADR-033 decision 5): the
  * notice asked nothing of it, and the review tools hold the caps.
  */
 import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import type { Tier } from "../shared/contracts";
-import { DEFAULT_COORDINATION_SETTINGS, reviewBudgetOf, type ReviewBudget } from "../shared/coordination";
-import { overReviewCeiling, reviewCeilingOf } from "../shared/orchestrator-rules";
+import { DEFAULT_COORDINATION_SETTINGS } from "../shared/coordination";
+import { REVIEW_MILESTONES_MAX, overReviewCap, reviewCapOf } from "../shared/orchestrator-rules";
 import type { RuleReviewGrant } from "../shared/rule-input";
-import { readReviewBudget } from "./coordination-rpc";
+import { readCoordinationSettings } from "./coordination-rpc";
 import type { DashboardPaseo } from "./paseo-directory";
 import { BUDGET_NOTICE_MARKER } from "./notices";
 import { roleOfProvider } from "./agent-role";
@@ -61,35 +62,21 @@ import { requestTraceOf } from "./request-trace";
 import { ruleReviewGrantOf } from "./review-tools";
 import { isMissionMain } from "./main-channel";
 
-/**
- * Total review calls per request, by tier, by default (PRD delta
- * 20260924-worker-autonomy, REQ-037d): one implementation batch — a review and
- * one re-review — at every tier, plus the documents-and-beads batch a Large
- * request reviews before it implements. Replaces 1 / 4 / 6, which paid for
- * three batches of a Large request and a Small request with no re-review.
- *
- * Since bead `7gxw.12` (autonomy design §C.4, §G.7; change-008 C6) the budget
- * in effect is the owner's, in Settings → Coordination (`review.*Budget`,
- * `readReviewBudget`); these are its defaults.
- */
-export const REVIEW_BUDGET: ReviewBudget = reviewBudgetOf(DEFAULT_COORDINATION_SETTINGS);
-
 /** First word of the notice; `roles/manager.md` tells the Manager what to do with it. */
 export { BUDGET_NOTICE_MARKER } from "./notices";
 
 /**
- * The fixed notice the Manager receives, word for word from design delta
- * 20260924-qa-ledger §6, which replaces the "ask the user whether to continue
- * or cancel" of delta 20260917c §4.7: one side asks, and it is the Worker, which
- * sends `blocked` before any review beyond its budget (worker.md "Reviewing").
- * The Manager still never cancels on the notice alone. `roles/manager.md` pins
- * the same instruction.
+ * The fixed notice the Manager receives (design delta 20260924-qa-ledger §6,
+ * which replaces the "ask the user whether to continue or cancel" of delta
+ * 20260917c §4.7): one side asks, and since delivery line design §5.4 it is
+ * paseo-bm, once, at the request's review cap. The Manager still never
+ * cancels on the notice alone.
  */
 export function budgetNotice(over: BudgetOverrun): string {
   return (
     `${BUDGET_NOTICE_MARKER} requestId: ${over.requestId}\n` +
-    `The Worker has used ${over.calls} review calls; the ${over.tier} budget is ${over.budget}. ` +
-    "For your information only: the Worker asks the user itself before any review beyond its budget, so do not ask the user about it. " +
+    `The Worker has used ${over.calls} review calls; the ${over.tier} review cap is ${over.budget}. ` +
+    "For your information only: paseo-bm asks the owner itself, once, at the request's review cap, so do not ask the user about it. " +
     "Tell the user in one line. Do not cancel on this notice alone; if the user asks you to stop the Worker, cancel its run."
   );
 }
@@ -103,24 +90,28 @@ export interface BudgetOverrun {
 }
 
 /**
- * The overrun of one reconstructed request against `reviewBudget` (the
- * defaults unless given), or `null` when it is within budget, or when its
- * tier, its call count, its request id or its Manager is not known — an
- * unknown number never produces a notice.
+ * The overrun of one reconstructed request against its review cap (delivery
+ * line design §5.3: `reviewCapOf` with the owner's `review` settings, the
+ * defaults unless given), or `null` when it is within it, or when its tier,
+ * its call count, its request id or its Manager is not known — an unknown
+ * number never produces a notice.
  *
- * With the request's grants (design §16.8; `ruleReviewGrantOf`, as the
- * Orchestrator's rule and the review tools read them) the ceiling is the
- * budget plus its `{ calls: n }` grants, and the tool calls of the batches
- * whose `{ untilClean }` grant is still live are left out of the comparison
- * (`overReviewCeiling`). The notice still names the whole count.
+ * With the request's grants and batches (design §16.8; `ruleReviewGrantOf`,
+ * as the Orchestrator's rule and the review tools read them) the cap counts
+ * its milestone batches (one without them), and the ceiling is the cap plus
+ * its `{ calls: n }` grants (`overReviewCap`; no call is exempt, delivery line
+ * design §5.6). The notice names the whole count, and the ceiling as its `budget`.
  */
-export function overrunOf(trace: ReconstructedTrace, reviewBudget: ReviewBudget = REVIEW_BUDGET, grant: RuleReviewGrant | null = null): BudgetOverrun | null {
+export function overrunOf(
+  trace: ReconstructedTrace,
+  review: { readonly callsPerBatch: number } = DEFAULT_COORDINATION_SETTINGS.review,
+  grant: RuleReviewGrant | null = null,
+): BudgetOverrun | null {
   if (trace.requestId === null || trace.tier === null || trace.reviewCalls === null) return null;
   if (trace.managerAgentId === null) return null;
-  const base = reviewBudget[trace.tier];
-  if (base === undefined) return null;
-  const budget = reviewCeilingOf(base, grant?.calls ?? 0);
-  if (!overReviewCeiling(trace.reviewCalls, grant?.exempt ?? 0, budget)) return null;
+  if (!Object.prototype.hasOwnProperty.call(REVIEW_MILESTONES_MAX, trace.tier)) return null;
+  const budget = reviewCapOf(trace.tier, grant?.milestones ?? 1, review) + (grant?.calls ?? 0);
+  if (!overReviewCap(trace.reviewCalls, budget)) return null;
   return {
     requestId: trace.requestId,
     tier: trace.tier,
@@ -200,12 +191,12 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
       [key, over] = flushed;
     } else {
       // The same rebuild the Orchestrator's rules read (request-trace.ts), against
-      // the owner's budget in the same data folder as the traces (§G.7).
+      // the owner's review cap in the same data folder as the traces (delivery line design §5.3).
       const home = dirname(deps.location.tracesDir);
       const found = await requestTraceOf(deps, workspaceId, agent.id);
-      // Design §16.8: the request's grants, from the registry the rebuild read beside the traces.
+      // Design §16.8: the request's grants and batches, from the registry the rebuild read beside the traces.
       const grant = found?.request === null || found?.request === undefined ? null : ruleReviewGrantOf(found.request);
-      over = found === null ? undefined : (overrunOf(found.trace, readReviewBudget({ home, log }), grant) ?? undefined);
+      over = found === null ? undefined : (overrunOf(found.trace, readCoordinationSettings({ home, log }).review, grant) ?? undefined);
       if (over === undefined) return "within";
       // Mission runtime design §4.3, §6.1: a mission's Main is not told; the review tools hold the caps.
       if (isMissionMain(home, over.managerAgentId)) return "ignored";

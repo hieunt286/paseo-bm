@@ -32,17 +32,23 @@ import {
   GOVERNOR_SETTINGS,
   HANDOFF_MAX_PER_REQUEST,
   HANDOFF_REQUEST_TOKENS,
-  REVIEW_BUDGET_KEYS,
-  REVIEW_LARGE_BUDGET,
-  REVIEW_MEDIUM_BUDGET,
-  REVIEW_SMALL_BUDGET,
+  MAINTENANCE_CEILING_FACTOR,
+  RETIRED_COORDINATION_KEYS,
+  REVIEW_CALLS_PER_BATCH,
+  REVIEW_MAX_REREVIEWS,
+  ROLLOVER_BEADS,
+  ROLLOVER_CEILING_FACTOR,
+  ROLLOVER_TOKENS,
+  ROLLOVER_CONTEXT_TOKENS,
+  ROLLOVER_TURNS,
+  atMaintenanceCeiling,
   compactCrossingOf,
   compactionOnFor,
   coordinationChangeSchema,
   coordinationRuleOf,
   coordinationSettingsOf,
   handoffCrossingOf,
-  reviewBudgetOf,
+  liveCoordinationChangeSchema,
   type CoordinationSettings,
 } from "../plugin/shared/coordination";
 import { WORKER, at, turn } from "./fixtures/orchestrator-traces";
@@ -288,10 +294,22 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       "main.contextShare",
       "main.contextTokens",
       "main.hardShare",
-      // Bead 7gxw.12: the review budget per tier comes last.
-      "review.smallBudget",
-      "review.mediumBudget",
-      "review.largeBudget",
+      // Delivery line design §5.2: the re-reviews of one batch.
+      "review.maxRereviews",
+      // Delivery line design §5.3: the calls one milestone batch is paid for in the request's cap.
+      "review.callsPerBatch",
+      // Delivery line design §2.6: size rollover.
+      "rollover.enabled",
+      "rollover.beads",
+      "rollover.turns",
+      "rollover.tokens",
+      // ADR-036, delivery line design §17.3: the Worker turn's own context.
+      "rollover.contextTokens",
+      "rollover.ceilingFactor",
+      // Delivery line design §6.6: the maintenance ceiling.
+      "maintenance.ceilingFactor",
+      // ADR-036, delivery line design §17.1: CI, off by default.
+      "integration.ci",
       // Missions Phase 2: the governor's thresholds and window (missions design §9.2, §9.3).
       ...GOVERNOR_SETTINGS.map((name) => `governor.${name}`),
     ]);
@@ -303,7 +321,10 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       compact: { enabled: true, managerTokensPerTurn: 390_000, workerTokensPerTurn: 5_700_000, contextShare: 0.5, maxPerAgent: 2 },
       handoff: { enabled: true, requestTokens: 150_000_000, maxPerRequest: 2 },
       main: { compact: true, contextShare: 0.6, contextTokens: 150_000, hardShare: 0.85 },
-      review: { smallBudget: 2, mediumBudget: 2, largeBudget: 4 },
+      review: { maxRereviews: 3, callsPerBatch: 3 },
+      rollover: { enabled: true, beads: 15, turns: 40, tokens: 50_000_000, contextTokens: 250_000, ceilingFactor: 2 },
+      maintenance: { ceilingFactor: 2 },
+      integration: { ci: "off" },
       governor: DEFAULT_COORDINATION_SETTINGS.governor,
       guard: { compact: { countsFrom: null, switchedOff: null }, handoff: { countsFrom: null, switchedOff: null } },
     });
@@ -324,19 +345,19 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
     expect(HANDOFF_MAX_PER_REQUEST).toEqual({ min: 1, max: 5, default: 2, whole: true });
     for (const key of numberKeys) {
       const { min, max, default: fallback, whole } = COORDINATION_BOUNDS[key];
-      const ok = (value: unknown) => coordinationChangeSchema.safeParse({ key, value }).success;
+      const ok = (value: unknown) => liveCoordinationChangeSchema.safeParse({ key, value }).success;
       for (const value of [min, fallback, max]) expect(ok(value), `${key} ${value}`).toBe(true);
       const step = whole ? 1 : 0.01;
       for (const value of [min - step, max + step, String(fallback), null, true, Number.NaN, Number.POSITIVE_INFINITY]) expect(ok(value), `${key} ${String(value)}`).toBe(false);
       expect(ok(min + 0.5), `${key} fraction`).toBe(!whole);
     }
-    expect(coordinationChangeSchema.safeParse({ key: "compact.contextShare", value: 0.55 }).success).toBe(true);
+    expect(liveCoordinationChangeSchema.safeParse({ key: "compact.contextShare", value: 0.55 }).success).toBe(true);
   });
 
   it("switches each mechanism with true or false only", () => {
     for (const key of ["compact.enabled", "handoff.enabled"]) {
-      for (const value of [true, false]) expect(coordinationChangeSchema.safeParse({ key, value }).success).toBe(true);
-      for (const value of [1, 0, "true", null]) expect(coordinationChangeSchema.safeParse({ key, value }).success).toBe(false);
+      for (const value of [true, false]) expect(liveCoordinationChangeSchema.safeParse({ key, value }).success).toBe(true);
+      for (const value of [1, 0, "true", null]) expect(liveCoordinationChangeSchema.safeParse({ key, value }).success).toBe(false);
     }
   });
 
@@ -351,51 +372,128 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
   });
 });
 
-// Bead 7gxw.12 (autonomy design §C.4, §G.7; change-008 C6): the review budget per tier, changed only by the owner.
-describe("the review budget per tier: keys, defaults and bounds, in the store and the owner's RPCs", () => {
-  const KEYS = ["review.smallBudget", "review.mediumBudget", "review.largeBudget"] as const;
-
-  it("defaults to 2 / 2 / 4, whole numbers from 2 to 8 — never below one review and its re-review", () => {
-    expect(REVIEW_SMALL_BUDGET).toEqual({ min: 2, max: 8, default: 2, whole: true });
-    expect(REVIEW_MEDIUM_BUDGET).toEqual({ min: 2, max: 8, default: 2, whole: true });
-    expect(REVIEW_LARGE_BUDGET).toEqual({ min: 2, max: 8, default: 4, whole: true });
-    expect(reviewBudgetOf(DEFAULT_COORDINATION_SETTINGS)).toEqual({ Small: 2, Medium: 2, Large: 4 });
-    expect(REVIEW_BUDGET_KEYS).toEqual({ Small: "review.smallBudget", Medium: "review.mediumBudget", Large: "review.largeBudget" });
-    for (const key of KEYS) expect(coordinationRuleOf(key)).toBe(`${key} must be a whole number from 2 to 8`);
+// Delivery line design §2.6: the size rollover settings.
+describe("the rollover settings: keys, defaults and bounds (delivery line design §2.6)", () => {
+  it("defaults to on, 15 beads, 40 turns, 50M tokens and a factor of 2, each in its bounds", () => {
+    expect([ROLLOVER_BEADS, ROLLOVER_TURNS, ROLLOVER_TOKENS, ROLLOVER_CONTEXT_TOKENS, ROLLOVER_CEILING_FACTOR]).toEqual([
+      { min: 3, max: 100, default: 15, whole: true },
+      { min: 10, max: 500, default: 40, whole: true },
+      { min: 10_000_000, max: 1_000_000_000, default: 50_000_000, whole: true },
+      { min: 100_000, max: 900_000, default: 250_000, whole: true },
+      { min: 1.5, max: 5, default: 2, whole: false },
+    ]);
+    expect(coordinationRuleOf("rollover.enabled")).toBe("rollover.enabled must be true (on) or false (off)");
+    expect(coordinationRuleOf("rollover.ceilingFactor")).toBe("rollover.ceilingFactor must be a number from 1.5 to 5");
+    for (const value of [true, false]) expect(liveCoordinationChangeSchema.safeParse({ key: "rollover.enabled", value }).success).toBe(true);
+    expect(liveCoordinationChangeSchema.safeParse({ key: "rollover.enabled", value: 1 }).success).toBe(false);
   });
 
-  it("refuses 1 and 9 with E_COORDINATION_INVALID and writes nothing; saves 2 and 8; the file stays version 1", () => {
-    for (const key of KEYS) {
-      for (const value of [1, 9, 2.5]) {
+  it("reads a file an older build wrote at the defaults, and each rollover key on its own", () => {
+    writeFile({ version: 1, review: { maxRereviews: 2 } });
+    expect(store().read().rollover).toEqual(DEFAULT_COORDINATION_SETTINGS.rollover);
+    writeFile({ version: 1, rollover: { enabled: false, beads: 2, turns: 30, ceilingFactor: 3.5 } });
+    expect(store().read().rollover).toEqual({ enabled: false, beads: 15, turns: 30, tokens: 50_000_000, contextTokens: 250_000, ceilingFactor: 3.5 });
+    expect(codeOf(() => handleCoordinationSet({ key: "rollover.tokens", value: 9_999_999 }, deps))).toBe("E_COORDINATION_INVALID");
+    // ADR-036 §17.3: rollover.contextTokens in 100k to 900k; out of its bounds, read at its default.
+    for (const value of [99_999, 900_001]) expect(codeOf(() => handleCoordinationSet({ key: "rollover.contextTokens", value }, deps))).toBe("E_COORDINATION_INVALID");
+    writeFile({ version: 1, rollover: { contextTokens: 50_000 } });
+    expect(store().read().rollover.contextTokens).toBe(250_000);
+    writeFile({ version: 1, rollover: { contextTokens: 400_000 } });
+    expect(store().read().rollover.contextTokens).toBe(400_000);
+  });
+});
+
+// Delivery line design §6.6: the maintenance ceiling.
+describe("the maintenance ceiling setting (delivery line design §6.6)", () => {
+  it("defaults to a factor of 2 in 1.5 to 5; an older file reads it at its default, and it is judged against a crossing", () => {
+    expect(MAINTENANCE_CEILING_FACTOR).toEqual({ min: 1.5, max: 5, default: 2, whole: false });
+    expect(coordinationRuleOf("maintenance.ceilingFactor")).toBe("maintenance.ceilingFactor must be a number from 1.5 to 5");
+    writeFile({ version: 1, rollover: { beads: 20 } });
+    expect(store().read().maintenance).toEqual({ ceilingFactor: 2 });
+    writeFile({ version: 1, maintenance: { ceilingFactor: 9 } });
+    expect(store().read().maintenance).toEqual({ ceilingFactor: 2 });
+    writeFile({ version: 1, maintenance: { ceilingFactor: 2.5 } });
+    expect(store().read().maintenance).toEqual({ ceilingFactor: 2.5 });
+    expect(codeOf(() => handleCoordinationSet({ key: "maintenance.ceilingFactor", value: 1.4 }, deps))).toBe("E_COORDINATION_INVALID");
+    const settings = DEFAULT_COORDINATION_SETTINGS;
+    expect(atMaintenanceCeiling({ figure: "requestTokens", value: 299_999_999, threshold: 150_000_000 }, settings)).toBe(false);
+    expect(atMaintenanceCeiling({ figure: "requestTokens", value: 300_000_000, threshold: 150_000_000 }, settings)).toBe(true);
+    expect(atMaintenanceCeiling(null, settings)).toBe(false);
+  });
+});
+
+// Delivery line design §5.6: review.maxRereviews and review.callsPerBatch are the review settings; the review budget per tier is retired.
+describe("the review settings: keys, defaults and bounds; the retired review budget ignored, dropped and refused", () => {
+  const NEW = ["review.maxRereviews", "review.callsPerBatch"] as const;
+
+  it("defaults to 3 re-reviews and 3 calls per milestone batch, each a whole number in its bounds", () => {
+    // Delivery line design §5.2: the re-reviews of one batch, 1 to 6, 3 by default.
+    expect(REVIEW_MAX_REREVIEWS).toEqual({ min: 1, max: 6, default: 3, whole: true });
+    expect(coordinationRuleOf("review.maxRereviews")).toBe("review.maxRereviews must be a whole number from 1 to 6");
+    // Delivery line design §5.3: the calls of one milestone batch in the cap, 2 to 6, 3 by default.
+    expect(REVIEW_CALLS_PER_BATCH).toEqual({ min: 2, max: 6, default: 3, whole: true });
+    expect(coordinationRuleOf("review.callsPerBatch")).toBe("review.callsPerBatch must be a whole number from 2 to 6");
+    expect(DEFAULT_COORDINATION_SETTINGS.review).toEqual({ maxRereviews: 3, callsPerBatch: 3 });
+    // The retired keys are no setting: no rule, not among the keys.
+    expect(RETIRED_COORDINATION_KEYS).toEqual(["review.smallBudget", "review.mediumBudget", "review.largeBudget"]);
+    for (const key of RETIRED_COORDINATION_KEYS) {
+      expect(coordinationRuleOf(key)).toBeNull();
+      expect(COORDINATION_KEYS as readonly string[]).not.toContain(key);
+    }
+  });
+
+  it("bounds the new keys: refuses one step outside with E_COORDINATION_INVALID and writes nothing; saves the bounds; the file stays version 1", () => {
+    for (const key of NEW) {
+      const { min, max } = COORDINATION_BOUNDS[key];
+      for (const value of [min - 1, max + 1, 2.5]) {
         expect(codeOf(() => handleCoordinationSet({ key, value }, deps)), `${key} ${value}`).toBe("E_COORDINATION_INVALID");
         expect(existsSync(file()), `${key} ${value}`).toBe(false);
       }
     }
-    handleCoordinationSet({ key: "review.largeBudget", value: 8 }, deps);
-    handleCoordinationSet({ key: "review.smallBudget", value: 2 }, deps);
+    handleCoordinationSet({ key: "review.maxRereviews", value: 6 }, deps);
+    handleCoordinationSet({ key: "review.callsPerBatch", value: 2 }, deps);
     const before = fileBytes();
-    expect(() => handleCoordinationSet({ key: "review.mediumBudget", value: 1 }, deps)).toThrow("review.mediumBudget must be a whole number from 2 to 8; nothing was saved");
+    expect(() => handleCoordinationSet({ key: "review.maxRereviews", value: 0 }, deps)).toThrow("review.maxRereviews must be a whole number from 1 to 6; nothing was saved");
     expect(fileBytes()).toBe(before);
     const body = JSON.parse(fileBytes()!) as { version: number; review: unknown };
     expect(body.version).toBe(COORDINATION_FILE_VERSION);
     expect(COORDINATION_FILE_VERSION).toBe(1);
-    expect(body.review).toEqual({ smallBudget: 2, mediumBudget: 2, largeBudget: 8 });
-    expect(reviewBudgetOf(readCoordinationSettings(deps))).toEqual({ Small: 2, Medium: 2, Large: 8 });
+    expect(body.review).toEqual({ maxRereviews: 6, callsPerBatch: 2 });
+    expect(readCoordinationSettings(deps).review).toEqual({ maxRereviews: 6, callsPerBatch: 2 });
   });
 
-  it("reads an older file without the keys as 2 / 2 / 4, and each stored budget on its own", () => {
+  it("refuses an old review.*Budget key with E_COORDINATION_INVALID, whatever its value, and writes nothing", () => {
+    for (const key of RETIRED_COORDINATION_KEYS) {
+      for (const value of [2, 4, 8]) {
+        expect(codeOf(() => handleCoordinationSet({ key, value }, deps)), `${key} ${value}`).toBe("E_COORDINATION_INVALID");
+        expect(codeOf(() => store().set({ key, value })), `${key} ${value}`).toBe("E_COORDINATION_INVALID");
+      }
+      expect(() => handleCoordinationSet({ key, value: 4 }, deps)).toThrow(
+        `${key} no longer exists: review.maxRereviews and review.callsPerBatch set the review cap; nothing was saved`,
+      );
+    }
+    expect(existsSync(file())).toBe(false);
+    // A decision stored with one still parses (shared/decisions.ts reads the wide schema); only a live change is ever applied.
+    expect(coordinationChangeSchema.safeParse({ key: "review.largeBudget", value: 6 }).success).toBe(true);
+    expect(liveCoordinationChangeSchema.safeParse({ key: "review.largeBudget", value: 6 }).success).toBe(false);
+  });
+
+  it("ignores an older file's review budget on read and drops it on the next write; each new key is read on its own", () => {
     writeFile({ version: 1, advice: { everyFinished: 7 }, compact: { enabled: false }, handoff: { maxPerRequest: 3 } });
-    expect(reviewBudgetOf(store().read())).toEqual({ Small: 2, Medium: 2, Large: 4 });
-    writeFile({ version: 1, review: { smallBudget: 3, mediumBudget: 9, largeBudget: "6" } });
-    expect(store().read().review).toEqual({ smallBudget: 3, mediumBudget: 2, largeBudget: 4 });
-    // The next write keeps what was read, in bounds, and the version.
-    store().set({ key: "review.largeBudget", value: 6 });
-    expect(JSON.parse(fileBytes()!)).toMatchObject({ version: 1, review: { smallBudget: 3, mediumBudget: 2, largeBudget: 6 } });
+    expect(store().read().review).toEqual({ maxRereviews: 3, callsPerBatch: 3 });
+    writeFile({ version: 1, review: { smallBudget: 3, mediumBudget: 5, largeBudget: 6, maxRereviews: 9, callsPerBatch: 4 } });
+    expect(store().read().review).toEqual({ maxRereviews: 3, callsPerBatch: 4 });
+    expect(coordinationSettingsOf({ review: { smallBudget: 3, largeBudget: 8 } }).review).toEqual({ maxRereviews: 3, callsPerBatch: 3 });
+    // The next write keeps what was read, in bounds, and the version; the old keys are gone.
+    store().set({ key: "review.maxRereviews", value: 2 });
+    const body = JSON.parse(fileBytes()!) as { version: number; review: Record<string, unknown> };
+    expect(body).toMatchObject({ version: 1 });
+    expect(body.review).toEqual({ maxRereviews: 2, callsPerBatch: 4 });
   });
 });
 
 describe("the compaction and handoff settings in the store and the owner's RPCs", () => {
-  const values: Record<string, { value: number | boolean; read: (settings: CoordinationSettings) => unknown }> = {
+  const values: Record<string, { value: number | boolean | string; read: (settings: CoordinationSettings) => unknown }> = {
     "compact.enabled": { value: false, read: (settings) => settings.compact.enabled },
     "compact.managerTokensPerTurn": { value: 500_000, read: (settings) => settings.compact.managerTokensPerTurn },
     "compact.workerTokensPerTurn": { value: 8_000_000, read: (settings) => settings.compact.workerTokensPerTurn },
@@ -408,9 +506,16 @@ describe("the compaction and handoff settings in the store and the owner's RPCs"
     "main.contextShare": { value: 0.7, read: (settings) => settings.main.contextShare },
     "main.contextTokens": { value: 200_000, read: (settings) => settings.main.contextTokens },
     "main.hardShare": { value: 0.9, read: (settings) => settings.main.hardShare },
-    "review.smallBudget": { value: 3, read: (settings) => settings.review.smallBudget },
-    "review.mediumBudget": { value: 5, read: (settings) => settings.review.mediumBudget },
-    "review.largeBudget": { value: 8, read: (settings) => settings.review.largeBudget },
+    "review.maxRereviews": { value: 5, read: (settings) => settings.review.maxRereviews },
+    "review.callsPerBatch": { value: 4, read: (settings) => settings.review.callsPerBatch },
+    "rollover.enabled": { value: false, read: (settings) => settings.rollover.enabled },
+    "rollover.beads": { value: 20, read: (settings) => settings.rollover.beads },
+    "rollover.turns": { value: 60, read: (settings) => settings.rollover.turns },
+    "rollover.tokens": { value: 80_000_000, read: (settings) => settings.rollover.tokens },
+    "rollover.contextTokens": { value: 300_000, read: (settings) => settings.rollover.contextTokens },
+    "rollover.ceilingFactor": { value: 2.5, read: (settings) => settings.rollover.ceilingFactor },
+    "maintenance.ceilingFactor": { value: 3, read: (settings) => settings.maintenance.ceilingFactor },
+    "integration.ci": { value: "on", read: (settings) => settings.integration.ci },
     ...Object.fromEntries(
       GOVERNOR_SETTINGS.map((name) => [`governor.${name}`, { value: GOVERNOR_BOUNDS[name].default + 1, read: (settings: CoordinationSettings) => settings.governor[name] }]),
     ),
@@ -428,6 +533,20 @@ describe("the compaction and handoff settings in the store and the owner's RPCs"
       for (const [other, { read: readOther }] of others) expect(readOther(output.settings), `${key} → ${other}`).toBe(readOther(DEFAULT_COORDINATION_SETTINGS));
       expect(output.settings.advice).toEqual(DEFAULT_COORDINATION_SETTINGS.advice);
     }
+  });
+
+  it("integration.ci (ADR-036): off by default and in a file without it; off or on only, refused otherwise with its rule", () => {
+    expect(handleCoordinationSettings(deps).settings.integration).toEqual({ ci: "off" });
+    expect(coordinationSettingsOf({ version: 1, integration: { ci: "maybe" } }).integration).toEqual({ ci: "off" });
+    expect(coordinationSettingsOf({ version: 1, integration: { ci: "on" } }).integration).toEqual({ ci: "on" });
+    expect(handleCoordinationSet({ key: "integration.ci", value: "on" }, deps).settings.integration).toEqual({ ci: "on" });
+    expect(handleCoordinationSet({ key: "integration.ci", value: "off" }, deps).settings.integration).toEqual({ ci: "off" });
+    const before = fileBytes();
+    for (const value of [true, 1, "yes", null]) {
+      expect(coordinationSetRpc.input.safeParse({ key: "integration.ci", value }).success, String(value)).toBe(false);
+      expect(() => handleCoordinationSet({ key: "integration.ci", value }, deps)).toThrow('integration.ci must be "off" or "on"; nothing was saved');
+    }
+    expect(fileBytes()).toBe(before);
   });
 
   it("refuses each field out of its bounds with its rule and E_COORDINATION_INVALID, writing nothing", () => {

@@ -378,7 +378,7 @@ Detail (ADR-023, change-013; ADR-025, change-014): nothing checks agreement — 
 
 ### B.5 Delegation
 
-*Since 2026-10-09 (ADR-028; base design §7.17.8 (a)):* a delegated `review-budget` question is answered by the policy as it opens when its recommended option's grant fits the request tier's budget, and the policy grants a request at most that budget in total.
+*Since 2026-10-09 (ADR-028; base design §7.17.8 (a)):* a delegated `review-budget` question is answered by the policy as it opens when its recommended option's grant fits the request tier's budget, and the policy grants a request at most that budget in total. *Since 2026-10-20 (ADR-035 decision 4):* retired. Reviews converge under a computed cap, and past the cap paseo-bm asks the owner once (delivery line design §5). `cost` delegation no longer applies to reviews.
 
 When a decision opens in a `delegate` cell, a `decision.opened` event asks the Orchestrator to decide it with `bm_decide { decisionId, optionKey, reason }`; it is delivered exactly as an owner answer would be (A.6). The Orchestrator is the only predictor (ADR-025 decision 5): nothing answers by the recommended option, and `resolveAtOpen` (`server/policy-resolve.ts`) applies precedents only (§B.6). Autopilot and **Allow…** are retired (§B.8).
 
@@ -521,7 +521,7 @@ Settled by Claude under the owner's delegation ([change-003](../archive/plans/pa
     - Reviews with no batch or an unknown blocking count (builds before Phase 1) are reported as unknown.
   - **Family (C.5)** (confirmed). A family is the model's vendor: Claude Code is Anthropic and Codex is OpenAI. Any other base provider takes the vendor prefix of its model id (`anthropic/…`, `openai/…`, `google/…`), else the base provider id. "Signed in" means `available: true` from `providers.listAvailable` (`availableProviders`, `server/role-choices.ts`).
     - The rule is one pure function in `plugin/shared/`, used by `setup-roles.ts` and by Settings → Agents (`client/settings-roles-model.ts`).
-  - **The review budget** (changed, change-008 C6). It becomes three Coordination settings (§G.7). §G.4's `review.budget` is a `coordination.set` on one of them.
+  - **The review budget** (changed, change-008 C6). It becomes three Coordination settings (§G.7). §G.4's `review.budget` is a `coordination.set` on one of them. *Since 2026-10-20:* the settings are `review.maxRereviews` and `review.callsPerBatch` (delivery line design §5.6).
 
 ## Part D — Phase 4: the action boundary (ADR-019, gated by a spike)
 
@@ -605,6 +605,12 @@ Settled by Claude under the owner's delegation ([change-003](../archive/plans/pa
   - *After the Phase 4 live check* ([run note](../archive/operations/paseo-bm-phase4-live-check-20261001.md)): `bm.boundary` is set at `agent.created` from the prompt's facts line, else from the creation hook's in-memory record (alias and folder, 120 s, oldest first; `server/created-boundary.ts`), and the `boundary-off` check reads the facts line while an agent has no label. Codex `CodexMcpElicitation` is read by `metadata.serverName` and the one tool quoted in its description: `paseo` / `paseo-bm` tools allowed by name, `create_agent` held as `security`, anything else unreadable. A denied call never raises `danger` (a Codex denial entry and its twin, a call waiting on its permission, a failed call whose held decision was denied or withdrawn — `shared/denied-calls.ts`) and never counts in A-6 (each call id once). `BM-SETTINGS` tells each creator the child mode of its own project's boundary. The Codex column of `BOUNDARY_MODES` stays: Paseo's MCP tools reach the plugin as permission requests and paseo-bm's `bm_report` runs without one; none of `ALLOWED_BY_NAME` ever reached the plugin as a request. Latency request → answer: Claude p90 33 ms, Codex p90 29 ms.
 - **D.3 Detection** stays for every role the boundary does not cover: every Worker and Reviewer in a project whose boundary is off (the default, §D.5), OpenCode, Pi, Copilot and other providers not measured, a role whose profile mode the owner hand-set, and an agent created without the boundary (§D.2). The `worker-watch` signals stay as Inbox alerts, documented as detection (REQ-142): they fire after the action ran. The user-facing docs say which roles are held before they run and which are only watched.
 
+- *Since 2026-10-21 (ADR-035 decision 3):* in a mission's worktree, the boundary reads the placement (`BoundaryContext.mission`).
+  - A commit on the mission branch is free.
+  - A push of that branch and `glab`/`gh` merge-request create and update are covered only by the owner's one integration grant per mission and repository (`allowed-integration`, journaled).
+  - Off-branch writes are held, and anything outside the worktree is `outside-workspace`.
+  - Every `glab` command is now classified.
+  - Details are in delivery line design §4.2 and §4.3.
 - **D.4 Decided when the plan was converted (2026-09-30)** ([change-003](../archive/plans/paseo-bm-plan-autonomy-change-003-decisions-at-conversion.md); confirmed against the spike by [change-009](../archive/plans/paseo-bm-plan-autonomy-change-009-phase4-start.md); §D.2 holds the detail).
   - **Held requests.** A held request is the decision `h:<agentId>:<requestId>` (`h` for held; `p:` is taken by precedent ids). A live grant of the same request whose effects include the held effect allows it and is spent (grants are one use). A `delegate` cell of the held effect's class allows it with `authority: policy:<class>`.
   - **Unreadable or uncommitted requests.** A request whose command or path cannot be read is held. `commit` is not held. A Codex file change is read through its pending timeline item before it is judged unreadable.
@@ -670,7 +676,7 @@ Settled by Claude under the owner's delegation ([change-003](../archive/plans/pa
 
 *Re-checked at the Phase 6 start against Phase 5 as built and the Phase 4 live check and its fixes ([change-012](../archive/plans/paseo-bm-plan-autonomy-change-012-phase6-start.md)). The phase also holds the programme's end: the combined field period (bead `i8fc.6`, change-006), open since 2026-10-01, and the programme evaluation (`i8fc.5`, evaluation design §6–§7), not run yet. The programme was released in 0.5.0 before both closed, by the owner's decision (0.5.0 release notes).*
 
-- **F.1 Collision detection first:** a `writers-observed` signal — two agents of one workspace with edit/write evidence on the same file in overlapping turns — as an Inbox alert and an event; measured in the replay. Since 2026-10-09 a file a shell command writes (an output redirection or `tee`, such as `cat > f <<EOF`) counts as written too (`shellWrittenPathsOf`, missions design §17).
+- **F.1 Collision detection first:** a `writers-observed` signal — two agents of one workspace with edit/write evidence on the same file in overlapping turns — as an Inbox alert and an event; measured in the replay. *Since 2026-10-21 (ADR-035):* each mission writes in its own worktree on its own branch, so the WP-603 "per-Worker worktrees" admission is settled per mission. `writers-observed` watches inside a placement, and overlap between missions surfaces as a merge (delivery line design §3, §4.7). Since 2026-10-09 a file a shell command writes (an output redirection or `tee`, such as `cat > f <<EOF`) counts as written too (`shellWrittenPathsOf`, missions design §17).
 - **F.2 Admission:** a candidate specialist (security reviewer, independent tester, read-only scout, design committee of two model families, per-Worker worktrees, a cheaper model for a role) is written as a one-page spec — the error class it catches, the replay/suite evidence that the class is missed today, its token budget, its evaluation scenario — and enters as a change-delta of the Phase 6 plan only when the owner accepts the evidence.
 
 - **F.3 Decided when the plan was converted (2026-09-30)** ([change-003](../archive/plans/paseo-bm-plan-autonomy-change-003-decisions-at-conversion.md)).
@@ -816,7 +822,7 @@ Every `bm_decide` answer is an `answer` to the Worker that asked, with trigger `
 - `precedent.save`
 - `autonomy.set` (a delegable cell)
 - `coordination.set` (a threshold or cadence of G.7)
-- `review.budget`: a `coordination.set` on one of the review-budget keys of §G.7 (`review.smallBudget`, `review.mediumBudget`, `review.largeBudget`), not a separate kind (change-008 C6)
+- `review.budget`: a `coordination.set` on one of the review keys of §G.7, not a separate kind (change-008 C6). Since 2026-10-20 those keys are `review.maxRereviews` and `review.callsPerBatch`; the old `review.*Budget` keys are refused
 
 With no finding worth acting on, it writes a note; the wake still counts as acted on.
 
@@ -942,7 +948,13 @@ Stored in `<data>/coordination/settings.json` (`version: 1`, the store rules) an
 - **A judgement wake.** The Orchestrator may leave it with a `bm_note`, which A-7 counts as acted on.
 - **Its trigger** in the intervention log is `threshold.crossed`, added to `INTERVENTION_TRIGGERS` (the store stays `version: 1`).
 
-**The review budget** (change-008 C6).
+**The review budget** (change-008 C6). *Since 2026-10-20 this subsection is history.* The review cap of ADR-035 decision 4 replaces it:
+- the settings `review.maxRereviews` (1–6, 3) and `review.callsPerBatch` (2–6, 3);
+- the Runtime facts line "Review: up to N re-reviews per batch while blocking findings fall; cap per request: Small 3, Medium 6, Large 12 calls.";
+- the Settings review card with two steppers and the computed caps;
+- advice on the new keys (delivery line design §5.6).
+
+The text below describes the earlier budget.
 - **What they hold:** the three `review.*Budget` settings are the review calls per request of each tier, `REVIEW_BUDGET`'s numbers until the owner changes them.
 - **Who reads them:** `review-budget.ts` (the budget notice and the stall pass's `review.over-budget`). A new Worker gets them in its `## Runtime facts`, and worker.md's budget line points there, within its budget. An existing Worker keeps the budget it started with.
 - **Bounds:** never below one review and its re-review (§G.8).
@@ -1017,3 +1029,5 @@ Rows up to 2026-10-02 are archived in [paseo-bm-autonomy-revision-history-to-202
 | 2026-10-10 | Claude (owner's decision) | `bm_predict` retired (missions design §19): a note where this document first names it |
 | 2026-10-10 | Claude (owner's delegation) | §G.4/§G.7: the advice cadence retired (no wake since ADR-029; `mission.review` replaces it); the Coordination copy names paseo-bm and the Main (missions design §19) |
 | 2026-10-10 | Claude (owner's request) | §A.8: a mission Worker's `danger` goes to its Main first and reaches the governor at any level; one `BM-EVENTS` message per mission (ADR-032, missions design §20) |
+| 2026-10-20 | Claude (as built, ADR-035 Phase 6) | §B.5 review-budget delegation retired; §G.4, §G.7 the review settings are `review.maxRereviews` and `review.callsPerBatch` (delivery line design §5) |
+| 2026-10-21 | Claude (as built, ADR-035 Phase 8) | §D the boundary in a mission worktree and the integration grant; §F.1 per-mission worktrees settle WP-603's admission (delivery line design §3, §4) |

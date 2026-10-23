@@ -992,6 +992,25 @@ describe("the action boundary's held requests in the watch (§D.2, change-009 C7
     expect(signalsOf(entries, { grants: [{ at: at(24), effects: ["publish"] }] })).toEqual(["danger"]);
   });
 
+  it("danger: the owner's integration grant covers a push of the mission branch only, while it holds (delivery line design §4.3)", () => {
+    const mission = { directory: WORKSPACE_DIRECTORY, branch: "m/ABC/app", target: "develop", remote: "origin" as const };
+    const granted = { mission, grantedAt: at(24), revokedAt: null };
+    const ran = (command: string) => [...healthyTurn(), shellCall(command, at(24, 10))];
+    // Covered: the mission branch to origin, its merge request.
+    expect(signalsOf(ran("git push -u origin m/ABC/app"), { integration: granted })).toEqual([]);
+    expect(signalsOf(ran("glab mr create --target-branch develop --fill"), { integration: granted })).toEqual([]);
+    // A push anywhere else still raises danger while granted; so does merging, and a push with something else effectful.
+    expect(signalsOf(ran("git push origin main"), { integration: granted })).toEqual(["danger"]);
+    expect(signalsOf(ran("git push -f origin m/ABC/app"), { integration: granted })).toEqual(["danger"]);
+    expect(signalsOf(ran("glab mr merge 12"), { integration: granted })).toEqual(["danger"]);
+    expect(signalsOf(ran("git push -u origin m/ABC/app && npm publish"), { integration: granted })).toEqual(["danger"]);
+    // Without the grant, before it, or after its revoke: a push is a danger (the boundary off, rule 1 and danger guard it).
+    expect(signalsOf(ran("git push -u origin m/ABC/app"))).toEqual(["danger"]);
+    expect(signalsOf(ran("git push -u origin m/ABC/app"), { integration: { ...granted, grantedAt: at(24, 20) } })).toEqual(["danger"]);
+    expect(signalsOf(ran("git push -u origin m/ABC/app"), { integration: { ...granted, revokedAt: at(24, 5) } })).toEqual(["danger"]);
+    expect(signalsOf(ran("git push -u origin m/ABC/app"), { integration: { ...granted, revokedAt: at(24, 30) } })).toEqual([]);
+  });
+
   /**
    * Live check 2026-10-01 F3: a Codex push held, denied with `paseo permit
    * deny` (its `h:` withdrawn) and never run raised `danger` 6 s later. Paseo

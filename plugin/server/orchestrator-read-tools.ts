@@ -58,9 +58,10 @@ import {
   type ServerToolResult,
   type ToolContext,
 } from "./orchestrator-tool-context";
+import { repoKeysIn } from "./placements";
 import { isPluginHomeIn } from "./plugin-homes";
 import { buildRequestContent, cutText } from "./request-render";
-import { firstLine, recentTracesOf, recentWorkspacesOf, requestKeyOf, waitingSinceOf, workspaceTracesOf } from "./request-trace";
+import { firstLine, recentTracesOf, recentWorkspacesOf, requestKeyOf, waitingSinceOf, workspaceTracesOf, type WorkspaceTraces } from "./request-trace";
 import { readWorkspaceMeta } from "./trace-store";
 import { AGENT_MESSAGES_LIMIT, AGENT_MESSAGES_SUMMARY, PROJECTS_SINCE_HOURS, REQUEST_SUMMARY_MAX_CHARS, type ReadDetail } from "../shared/bm-tools";
 import { UNSETTLED_STATUSES, type Decision } from "../shared/decisions";
@@ -102,10 +103,11 @@ export const PROJECT_OPEN_DECISIONS_LIMIT = 10;
  * `PROJECT_OPEN_DECISIONS_LIMIT`, the question on one redacted line. None
  * when the store cannot be read.
  */
-function openDecisionsOf(workspaceId: string, context: ToolContext): { total: number; entries: Array<Record<string, unknown>> } {
+function openDecisionsOf(workspaceIds: readonly string[], context: ToolContext): { total: number; entries: Array<Record<string, unknown>> } {
   let open: Decision[];
   try {
-    open = createDecisionStore(context.home).list({ workspaceId, statuses: UNSETTLED_STATUSES });
+    const store = createDecisionStore(context.home);
+    open = workspaceIds.flatMap((workspaceId) => store.list({ workspaceId, statuses: UNSETTLED_STATUSES }));
   } catch {
     return { total: 0, entries: [] };
   }
@@ -140,15 +142,26 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
   // The plugin's own homes are not projects (missions design §3.1).
   const candidates = recentWorkspacesOf(context.location, since, running).filter(({ workspaceId }) => !isPluginHomeIn(workspaceId, listed, context.home));
 
+  // Delivery line design §3.1: a mission placement is no project of its own; its requests show under its repo.
+  const keyOf = repoKeysIn(context.home);
+  const members = new Map<string, string[]>();
+  for (const { workspaceId } of candidates) members.set(keyOf(workspaceId), [...(members.get(keyOf(workspaceId)) ?? []), workspaceId]);
+
   const projects: Array<{ lastActivityAt: string | null } & Record<string, unknown>> = [];
   let leftOut = false;
-  for (const { workspaceId } of candidates) {
-    const { agents, traces } = await workspaceTracesOf(
-      { location: context.location, paseo: context.paseo, home: context.home, allAgents },
-      workspaceId,
-    );
+  for (const [workspaceId, places] of members) {
+    const agents: WorkspaceTraces["agents"] = new Map();
+    const traces: WorkspaceTraces["traces"] = [];
+    /** The workspace each trace was read from: the repo's, or one of its placements. */
+    const placeOf = new Map<WorkspaceTraces["traces"][number], string>();
+    for (const place of places) {
+      const read = await workspaceTracesOf({ location: context.location, paseo: context.paseo, home: context.home, allAgents }, place);
+      for (const [id, facts] of read.agents) agents.set(id, facts);
+      for (const trace of read.traces) placeOf.set(trace, place);
+      traces.push(...read.traces);
+    }
     const recent = recentTracesOf(traces, since);
-    if (recent.length === 0 && !running.has(workspaceId)) continue;
+    if (recent.length === 0 && !places.some((place) => running.has(place))) continue;
     const directory = directoryIn(listed, workspaceId);
     const meta = readWorkspaceMeta(context.location, workspaceId);
     // The repo's Mains live in the Missions home (missions design §6).
@@ -167,7 +180,7 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
         if (waitingSinceOf(trace) !== null) waitingOnOwner += 1;
       }
       if (recent.length > 0 || notes > 0) leftOut = true;
-      const openDecisions = openDecisionsOf(workspaceId, context);
+      const openDecisions = openDecisionsOf(places, context);
       projects.push({
         workspaceId,
         label: meta?.lastKnownName ?? (directory === null ? workspaceId : basename(directory)),
@@ -177,10 +190,10 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
           requests: recent.length,
           byState,
           waitingOnOwner,
-          openStalls: openStalls.filter((stall) => stall.workspaceId === workspaceId).length,
+          openStalls: openStalls.filter((stall) => stall.workspaceId !== null && places.includes(stall.workspaceId)).length,
           notes,
           openDecisions: openDecisions.total,
-          openLinks: peerLinks.filter((link) => isLiveLink(link) && (link.from.workspaceId === workspaceId || link.to.workspaceId === workspaceId)).length,
+          openLinks: peerLinks.filter((link) => isLiveLink(link) && (keyOf(link.from.workspaceId) === workspaceId || keyOf(link.to.workspaceId) === workspaceId)).length,
         },
         openDecisions: openDecisions.entries,
       });
@@ -194,11 +207,14 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
       managers,
       // The Orchestrator's own memory of the project (design §6B.4, §6B.6), oldest first.
       notes: notesOf(workspaceId, context),
-      links: linkViewsOf(peerLinks, workspaceId).slice(0, PROJECT_LINK_LIMIT),
+      links: linkViewsOf(peerLinks, workspaceId, keyOf).slice(0, PROJECT_LINK_LIMIT),
       requests: recent.slice(0, PROJECT_REQUEST_LIMIT).map(({ trace, lastActivityAt }) => {
         const key = requestKeyOf(trace);
+        const place = placeOf.get(trace) ?? workspaceId;
         return {
           requestId: trace.requestId,
+          // The placement it runs in, for bm_request (absent: the repo's own).
+          ...(place === workspaceId ? {} : { workspaceId: place }),
           traceId: trace.traceId,
           request: firstLine(trace.requestText, context.env),
           managerId: trace.managerAgentId,
@@ -207,7 +223,7 @@ export async function bmProjects(input: { sinceHours?: number; detail?: ReadDeta
           lastActivityAt,
           waitingSince: waitingSinceOf(trace),
           stalls: openStalls
-            .filter((stall) => stall.workspaceId === workspaceId && stall.subject === key)
+            .filter((stall) => stall.workspaceId === place && stall.subject === key)
             .map((stall) => ({ situation: stall.detail ?? "stalled", since: stall.since })),
         };
       }),

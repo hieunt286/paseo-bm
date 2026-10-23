@@ -612,7 +612,7 @@ export interface StartOptions {
    * endpoint's Paseo handle and data folder by default.
    */
   missionTools?: ServerTools;
-  /** Decisions a bound Worker's `bm_questions` opened: their `decision.opened` events (the event bus). */
+  /** Decisions a bound Worker's `bm_questions` or review tools (the review-cap decision) opened: their `decision.opened` events (the event bus). */
   onDecisionsOpened?: (opened: readonly Decision[], paseo: unknown) => unknown;
   /** Where a Main's `bm_answer_worker` answers go (missions design §4): the delivery the owner's answers take. */
   onDecisionsSettled?: OnDecisionsSettled;
@@ -718,6 +718,7 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
   const delivering =
     options.delivering ??
     createDeliveringTools({
+      binder: () => binder,
       paseo: () => paseoHandle,
       home: () => home,
       log,
@@ -758,7 +759,15 @@ export function startAgentTools(options: StartOptions = {}): AgentToolsEndpoint 
   const worker = joinServerTools(
     joinServerTools(
       joinServerTools(baseWorker, delivering.worker),
-      options.reviewTools ?? createReviewTools({ binder: () => binder, paseo: () => paseoHandle, home: () => home, log }),
+      options.reviewTools ??
+        createReviewTools({
+          binder: () => binder,
+          paseo: () => paseoHandle,
+          home: () => home,
+          log,
+          // Delivery line design §5.4: the review-cap decision opens outside a recorded turn, as bm_questions' do.
+          ...(options.onDecisionsOpened === undefined ? {} : { onOpened: options.onDecisionsOpened }),
+        }),
     ),
     joinServerTools(peer.worker, memory.worker),
   );

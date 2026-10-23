@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
+import { createRequestRegistry } from "../plugin/server/request-registry";
 import { WORKER_CLOSING, managerHandover, workerHandover } from "../plugin/server/fallback-handover";
 import { createCompactionStore } from "../plugin/server/compaction-store";
 import { DECISIONS_DIR_NAME, clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
@@ -193,7 +194,7 @@ describe("workerHandover", () => {
         "beadsClosed: none",
         "beadsReady: bm-a.1",
         "reviewFindingsOpen: b1: none",
-        "reviewCalls: 2 of 2",
+        "reviewCalls: 2 of 3",
         "skillsUsed: feature-workflow, polishing-beads",
         // Written before the decided field existed: nothing recorded.
         "decided: none",
@@ -292,13 +293,18 @@ describe("workerHandover", () => {
     const { paseo } = daemonWith([], ["agent-rev-1", "agent-rev-2"]);
     const switched = incident({ id: "fb-00000000000b", role: "reviewer", agentId: "agent-rev-1", parentId: WORKER, status: "switched", replacementId: "agent-rev-2" });
 
-    expect(await workerHandover(incident(), { paseo, location, incidents: [switched] })).toContain("\nreviewCalls: 1 of 2\n");
+    expect(await workerHandover(incident(), { paseo, location, incidents: [switched] })).toContain("\nreviewCalls: 1 of 3\n");
     // Without them — none given and no install home the fake can name, or `null` — counted as before.
-    expect(await workerHandover(incident(), { paseo, location })).toContain("\nreviewCalls: 2 of 2\n");
-    expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 2\n");
-    // Bead 7gxw.12: against the owner's budget in Settings → Coordination, beside the traces (autonomy design §G.7).
-    createCoordinationStore(home).set({ key: "review.mediumBudget", value: 5 });
+    expect(await workerHandover(incident(), { paseo, location })).toContain("\nreviewCalls: 2 of 3\n");
+    expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 3\n");
+    // Delivery line design §5.3: against the request's review cap — the owner's callsPerBatch in Settings →
+    // Coordination, beside the traces — plus its grants in the request registry.
+    createCoordinationStore(home).set({ key: "review.callsPerBatch", value: 5 });
     expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 5\n");
+    const registry = createRequestRegistry(home);
+    registry.register(incident().workspaceId, REQ, { source: "tool" });
+    registry.addGrant(incident().workspaceId, REQ, { decisionId: `q:${REQ}:Q1`, calls: 5, untilCleanBatch: null });
+    expect(await workerHandover(incident(), { paseo, location, incidents: null })).toContain("\nreviewCalls: 2 of 10\n");
   });
 });
 

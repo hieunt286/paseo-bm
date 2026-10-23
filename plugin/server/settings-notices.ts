@@ -29,6 +29,7 @@ import { listAllAgents, roleOfAgent, type BmRole } from "./agent-role";
 import { createBindingStore } from "./agent-bindings";
 import { readAutonomyPolicy } from "./autonomy-rpc";
 import { SETTINGS_NOTICE_MARKER } from "./notices";
+import { repoKeysIn } from "./placements";
 import { enqueue as defaultEnqueue, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
 import { RUNTIME_FACTS_HEADING, dataHomeOf, modeFactsOf, runtimeFactsText } from "./role-instructions";
 import type { BoundarySwitch } from "./role-mode";
@@ -93,6 +94,37 @@ export function managerIdNotice(managerId: string): string {
     managerIdLine(managerId),
     "Do not reply to this message; carry on with what you were doing.",
   ].join("\n");
+}
+
+/**
+ * The `BM-SETTINGS` notice that refreshes a placement Worker's `Integration:`
+ * line when the owner's integration grant changes (delivery line design
+ * §3.4, §4.3), word for word (agent-facing, so English).
+ */
+export function integrationNotice(line: string): string {
+  return [
+    `${SETTINGS_NOTICE_MARKER} The owner changed what your mission branch may do. This replaces the "Integration:" line under "${RUNTIME_FACTS_HEADING}":`,
+    line,
+    "Do not reply to this message; carry on with what you were doing.",
+  ].join("\n");
+}
+
+/**
+ * Sends `text` as a `BM-SETTINGS` notice to every live Worker in the
+ * placement workspace `workspaceId` (delivery line design §4.3). Returns how
+ * many were sent or queued. Never throws.
+ */
+export async function notifyPlacementWorkers(workspaceId: string, text: string, paseo: SettingsPaseo, deps: Pick<SettingsNoticeDeps, "enqueue" | "log"> = {}): Promise<number> {
+  try {
+    const agents = await listAllAgents((options) => paseo.agents.list(options), { includeArchived: false });
+    const send = deps.enqueue ?? defaultEnqueue;
+    const targets = agents.filter((agent) => !agent.archivedAt && agent.workspaceId === workspaceId && roleOfAgent(agent)?.role === "worker");
+    const outcomes = await Promise.all(targets.map((agent) => send(agent.id, SETTINGS_NOTICE_MARKER, text, paseo)));
+    return outcomes.filter((outcome) => outcome === "sent" || outcome === "queued").length;
+  } catch (error) {
+    (deps.log ?? ((message: string) => console.warn(message)))(`[paseo-bm] telling the Workers of ${workspaceId} about their integration line failed: ${error instanceof Error ? error.message : String(error)}`);
+    return 0;
+  }
 }
 
 /** The SDK slice this module uses; `PaseoApi` is structurally assignable. */
@@ -174,7 +206,9 @@ export async function notifyChildFactChange(
       if (!perProject || typeof workspaceId !== "string" || workspaceId === "") return false;
       if (policyOn === undefined) {
         const policy = readAutonomyPolicy({ log });
-        policyOn = (id) => boundaryOf(policy, id) !== null;
+        // Delivery line design §3.1: an agent in a placement is told its repo's switch.
+        const keyOf = repoKeysIn(dataHomeOf());
+        policyOn = (id) => boundaryOf(policy, keyOf(id)) !== null;
       }
       return policyOn(workspaceId);
     };

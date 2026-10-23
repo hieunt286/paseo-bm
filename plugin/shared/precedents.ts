@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DECISION_ID_PATTERN, SUBJECT_PATTERN, carriesPreparedChange, decisionKindOf, type Decision } from "./decisions";
+import { whyIneligible } from "./question-subjects";
 import { timeOrZero } from "./time";
 
 /**
@@ -154,17 +155,16 @@ export function precedentTextOf(decision: Pick<Decision, "answer" | "options">):
 /**
  * Why an answered decision cannot become a precedent, or null when it can:
  * it must be answered by the owner (not by the Orchestrator, the policy or a
- * precedent) and carry a subject, without which nothing could match it (§B.9).
+ * precedent) and carry a subject, without which nothing could match it (§B.9),
+ * and be eligible (`precedentEligibility`, delivery line design §7.4): no code
+ * subject, prepared change, `ownerOnly` fact, override or held request.
  */
-export function whyNotPrecedent(decision: Pick<Decision, "id" | "status" | "answer" | "subject" | "options">): string | null {
+export function whyNotPrecedent(decision: Pick<Decision, "id" | "status" | "answer" | "subject" | "options" | "ownerOnly">): string | null {
   if (decision.status !== "answered" || decision.answer === null) {
     return `decision ${decision.id} is ${decision.status}; only an answered decision becomes a precedent`;
   }
   if (decision.answer.by !== "owner") return `decision ${decision.id} was not answered by you; only your own answer becomes a precedent`;
-  if (decision.subject === null) return `decision ${decision.id} has no subject, so no later question could match it`;
-  // Autonomy design §G.4: a change of your settings, not an answer to stand for a subject.
-  if (carriesPreparedChange(decision)) return `decision ${decision.id} is about your settings; it is not an answer that stands for later questions`;
-  return null;
+  return whyIneligible(decision.subject, decision);
 }
 
 function refusal(detail: string): { refusal: PrecedentRefusal } {
@@ -206,6 +206,11 @@ export function checkPrecedentSaveInput(input: unknown): { input: PrecedentSaveI
   if (checked.text !== undefined) {
     const text = checkedText(checked.text);
     if ("refusal" in text) return text;
+  }
+  // Delivery line design §7.4: a subject no precedent answers is refused here, in Settings and in a prepared change alike.
+  if (checked.subject !== undefined) {
+    const why = whyIneligible(checked.subject);
+    if (why !== null) return refusal(why);
   }
   if (checked.decisionId === undefined) {
     if (checked.subject === undefined) return refusal("a precedent written in Settings needs a subject");
@@ -300,11 +305,9 @@ export type PrecedentResolution =
  * Null when no active precedent bears on it, or it is not `open`. Pure.
  */
 export function precedentResolutionOf(decision: Decision, precedents: readonly Precedent[], now: Date): PrecedentResolution | null {
-  // Autonomy design §B.7: the owner's override corrects what a precedent or the policy answered; none answers it.
-  // §D.2: nor a held request, which only the owner allows (change-009 C6).
-  if (decisionKindOf(decision.id) === "override" || decisionKindOf(decision.id) === "held") return null;
-  // Autonomy design §G.4: a prepared change of the owner's settings is theirs alone; no precedent answers or suggests it.
-  if (decision.status !== "open" || carriesPreparedChange(decision)) return null;
+  // Delivery line design §7.4: the eligibility a save is checked by — no code subject, override (§B.7), held request
+  // (§D.2), prepared change (§G.4) or `ownerOnly` fact — so saving and applying cannot disagree.
+  if (decision.status !== "open" || whyIneligible(decision.subject, decision) !== null) return null;
   const precedent = precedentFor(decision, precedents, now);
   if (precedent === null) return null;
   const answer = precedentAnswerOf(decision, precedent);
@@ -331,6 +334,20 @@ export function precedentsContradictedBy(decision: Decision, precedents: readonl
     out.push(precedent);
   }
   return out;
+}
+
+/** A precedent as `precedents.list` serves it: `inert` names why it answers nothing (delivery line design §7.4). */
+export const listedPrecedentSchema = precedentSchema.extend({ inert: z.string().min(1).optional() });
+export type ListedPrecedent = z.infer<typeof listedPrecedentSchema>;
+
+/**
+ * A stored precedent with `inert: <why>` when its subject is one no precedent
+ * answers (delivery line design §7.4): it stays stored, computed each time,
+ * never written.
+ */
+export function listedPrecedentOf(precedent: Precedent): ListedPrecedent {
+  const why = whyIneligible(precedent.subject);
+  return why === null ? precedent : { ...precedent, inert: why };
 }
 
 /** The precedents a parsed file body holds: each entry read on its own, a malformed one skipped alone. */

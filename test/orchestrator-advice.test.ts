@@ -11,7 +11,7 @@ import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-
 import type { BmEvent } from "../plugin/server/event-bus";
 import { checkInterventions } from "../plugin/server/intervention-store";
 import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrator-decisions";
-import { FINDINGS_NOTE, findingsText, type FindingsReport } from "../plugin/server/orchestrator-findings";
+import { FINDINGS_NOTE, findingsText, reviewConvergenceOf, type ConvergenceReview, type FindingsReport } from "../plugin/server/orchestrator-findings";
 import { createOrchestratorTools, type OrchestratorToolsDeps } from "../plugin/server/orchestrator-tools";
 import type { ServerToolResult } from "../plugin/server/orchestrator-tool-context";
 import { resolveAtOpen } from "../plugin/server/policy-resolve";
@@ -23,9 +23,9 @@ import { AUTONOMY_MODES, decideRefusalOf, modeOf } from "../plugin/shared/autono
 import { FINDINGS_MAX_CHARS, ORCHESTRATOR_SERVER_TOOLS } from "../plugin/shared/bm-tools";
 import { alertKeyOf } from "../plugin/shared/alerts";
 import { ADVICE_EVERY_FINISHED, DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
-import { answerDecision, carriesPreparedChange, type Decision } from "../plugin/shared/decisions";
+import { answerDecision, carriesPreparedChange, decisionSchema, type Decision } from "../plugin/shared/decisions";
 import { whyNotPrecedent } from "../plugin/shared/precedents";
-import { PREPARED_CHANGE_FIELDS, preparedChangeCheckOf, preparedChangeTextOf } from "../plugin/shared/prepared-changes";
+import { PREPARED_CHANGE_FIELDS, preparedChangeCheckOf, preparedChangeOfInput, preparedChangeTextOf } from "../plugin/shared/prepared-changes";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo } from "./helpers/fake-paseo";
 import { MANAGER, WORKER, WORKSPACE_DIRECTORY, WORKSPACE_ID, at, msg, report, turn } from "./fixtures/orchestrator-traces";
@@ -584,9 +584,25 @@ describe("bm_findings { workspaceId } (design §G.4)", () => {
     expect(byKind("agreement")).toEqual([{ finding: "agreement", class: "preference", predictor: "recommended", agreement: 1, answers: 20, reversals: 0, mode: "owner", act: "autonomy.set" }]);
     expect(byKind("intervention-below-target")).toEqual([{ finding: "intervention-below-target", kind: "advice", met: 1, missed: 3, share: 0.25, target: 0.8, act: "coordination.set" }]);
     expect(byKind("blocked-rounds")).toEqual([expect.objectContaining({ finding: "blocked-rounds", rounds: 2, requestsBlocked: 1, perRequest: 1 })]);
-    // With the tier's review budget and the setting that changes it (bead 7gxw.12, §G.4's review.budget).
+    // Delivery line design §5.6: the pass shares and unconverged batches per tier, with the tier's cap, against review.callsPerBatch and review.maxRereviews.
     expect(byKind("reviews")).toEqual([
-      { finding: "reviews", tier: "Medium", requests: 1, batches: 1, reviewsPerBatch: 1, blockingFindings: 2, blockingPerBatch: 2, budget: 2, key: "review.mediumBudget", act: "coordination.set" },
+      {
+        finding: "reviews",
+        tier: "Medium",
+        requests: 1,
+        batches: 1,
+        reviewsPerBatch: 1,
+        blockingFindings: 2,
+        blockingPerBatch: 2,
+        firstRoundPassShare: 0,
+        rereviews: 0,
+        rereviewPassShare: null,
+        unconvergedBatches: 0,
+        cap: 6,
+        "review.callsPerBatch": 3,
+        "review.maxRereviews": 3,
+        act: "coordination.set",
+      },
     ]);
     expect(byKind("stalls")).toEqual([{ finding: "stalls", "idle-unfinished": 1, "review-over-budget": 1, stuck: 1 }]);
     expect(byKind("heavy-request")[0]).toMatchObject({ finding: "heavy-request", requestId: R1, turns: 4, finished: true });
@@ -678,7 +694,11 @@ describe("coordination.set on the compaction and handoff keys (design §G.4, §G
     expect(await refused(change("compact.contextShare", 0.95))).toContain("- input.options[0].change.value: compact.contextShare must be a number from 0.1 to 0.9");
     expect(await refused(change("handoff.maxPerRequest", 9))).toContain("- input.options[0].change.value: handoff.maxPerRequest must be a whole number from 1 to 5");
     expect(await refused(change("compact.enabled", 1))).toContain("- input.options[0].change.value: compact.enabled must be true (on) or false (off)");
-    expect(await refused({ kind: "coordination.set", key: "compact.enabled", value: "off" })).toContain("- input.options[0].change.value: must be a number or a boolean");
+    // A word is a value since integration.ci (ADR-036): on a switch it is still refused, by the switch's rule.
+    expect(await refused({ kind: "coordination.set", key: "compact.enabled", value: "off" })).toContain("- input.options[0].change.value: compact.enabled must be true (on) or false (off)");
+    expect(await refused({ kind: "coordination.set", key: "integration.ci", value: "maybe" })).toContain('- input.options[0].change.value: integration.ci must be "off" or "on"');
+    expect(await refused({ kind: "coordination.set", key: "integration.ci", value: true })).toContain('- input.options[0].change.value: integration.ci must be "off" or "on"');
+    expect(await refused({ kind: "coordination.set", key: "integration.ci", value: "off" })).toContain("- input.options[0].change: it would change nothing: integration.ci is off already");
     expect(await refused(change("compact.enabled", true))).toContain("- input.options[0].change: it would change nothing: compact.enabled is true already");
     expect(await refused({ kind: "coordination.set", key: "compact.tokensPerTurn", value: 390_000 })).toContain("- input.options[0].change.key: must be one of advice.everyFinished, compact.enabled");
     // The tool's face names every key and its rule.
@@ -734,43 +754,53 @@ describe("coordination.set on the compaction and handoff keys (design §G.4, §G
   });
 });
 
-// Bead 7gxw.12 (design §C.4, §G.4, §G.7; change-008 C6): §G.4's review.budget is a coordination.set on a review-budget key —
-// proposed by the Orchestrator, applied only by the owner's own answer.
-describe("coordination.set on the review budget per tier (design §G.4's review.budget)", () => {
-  const budgetNow = () => readCoordinationSettings({ home, log: () => {} }).review;
+// Delivery line design §5.6: the advice on reviews is a coordination.set on review.callsPerBatch or review.maxRereviews —
+// proposed by the Orchestrator, applied only by the owner's own answer. The retired review.*Budget keys apply nothing.
+describe("coordination.set on the review settings (delivery line design §5.6)", () => {
+  const reviewNow = () => readCoordinationSettings({ home, log: () => {} }).review;
   const option = (label: string, key: string, value: number, recommended = true) => ({ label, effects: ["none"], recommended, change: { kind: "coordination.set", key, value } });
 
-  it("says in the owner's words what each tier's change sets", () => {
+  it("says in the owner's words what each change sets; a retired key's says it sets nothing", () => {
     const text = (key: string, value: number) => preparedChangeTextOf({ kind: "coordination.set", change: { key, value } as never });
-    expect(text("review.smallBudget", 3)).toBe("sets the review budget of a Small request to 3 review calls (review.smallBudget 3)");
-    expect(text("review.mediumBudget", 4)).toBe("sets the review budget of a Medium request to 4 review calls (review.mediumBudget 4)");
-    expect(text("review.largeBudget", 6)).toBe("sets the review budget of a Large request to 6 review calls (review.largeBudget 6)");
+    expect(text("review.maxRereviews", 2)).toBe("sets at most 2 re-reviews per batch (review.maxRereviews 2)");
+    expect(text("review.maxRereviews", 1)).toBe("sets at most 1 re-review per batch (review.maxRereviews 1)");
+    expect(text("review.callsPerBatch", 4)).toBe("sets 4 review calls per milestone batch (review.callsPerBatch 4)");
+    expect(text("review.largeBudget", 6)).toBe("sets nothing: review.largeBudget no longer exists (review.largeBudget 6)");
+    // A retired key is no change to prepare, whatever its value.
+    expect(preparedChangeOfInput({ kind: "coordination.set", key: "review.largeBudget", value: 6 })).toEqual({
+      problems: [expect.stringMatching(/^key: review\.largeBudget no longer exists; must be one of advice\.everyFinished, /)],
+    });
   });
 
-  it("asks with a review budget, changing nothing yet; refuses 1 and 9 with the key's rule, and a change that changes nothing", async () => {
+  it("asks with a review setting, changing nothing yet; refuses a value out of bounds, a change that changes nothing, and a retired key", async () => {
     const { tools } = toolsWith();
-    const id = await asked(tools, [option("Large: 6 review calls", "review.largeBudget", 6), KEEP]);
-    expect(stored(id).question).toContain("\n\nChoosing a sets the review budget of a Large request to 6 review calls (review.largeBudget 6).");
-    expect(budgetNow()).toEqual({ smallBudget: 2, mediumBudget: 2, largeBudget: 4 });
+    const id = await asked(tools, [option("4 calls per batch", "review.callsPerBatch", 4), KEEP]);
+    expect(stored(id).question).toContain("\n\nChoosing a sets 4 review calls per milestone batch (review.callsPerBatch 4).");
+    expect(reviewNow()).toEqual({ maxRereviews: 3, callsPerBatch: 3 });
     expect(existsSync(join(home, "coordination"))).toBe(false);
     const refused = async (key: string, value: number) => {
       const result = await ask(tools, [option("Do it", key, value), KEEP]);
       expect(result.ok, `${key} ${value}`).toBe(false);
       return result.text;
     };
-    expect(await refused("review.largeBudget", 1)).toContain("- input.options[0].change.value: review.largeBudget must be a whole number from 2 to 8");
-    expect(await refused("review.smallBudget", 9)).toContain("- input.options[0].change.value: review.smallBudget must be a whole number from 2 to 8");
-    expect(await refused("review.largeBudget", 4)).toContain("- input.options[0].change: it would change nothing: review.largeBudget is 4 already");
+    expect(await refused("review.callsPerBatch", 1)).toContain("- input.options[0].change.value: review.callsPerBatch must be a whole number from 2 to 6");
+    expect(await refused("review.maxRereviews", 7)).toContain("- input.options[0].change.value: review.maxRereviews must be a whole number from 1 to 6");
+    expect(await refused("review.maxRereviews", 3)).toContain("- input.options[0].change: it would change nothing: review.maxRereviews is 3 already");
+    // A retired key is not among the tool's keys: refused before anything is checked.
+    const retired = await refused("review.largeBudget", 6);
+    expect(retired).toContain("- input.options[0].change.key: must be one of advice.everyFinished,");
+    expect(retired).not.toContain("review.largeBudget,");
     const schema = ORCHESTRATOR_SERVER_TOOLS.find((face) => face.name === "bm_ask_owner")!.inputSchema.properties!["options"]!.items!.properties!["change"]!;
-    expect(schema.properties!["key"]!.enum).toEqual(expect.arrayContaining(["review.smallBudget", "review.mediumBudget", "review.largeBudget"]));
-    expect(schema.properties!["value"]!.description).toContain("review.largeBudget must be a whole number from 2 to 8");
+    expect(schema.properties!["key"]!.enum).toEqual(expect.arrayContaining(["review.maxRereviews", "review.callsPerBatch"]));
+    expect(schema.properties!["key"]!.enum).not.toEqual(expect.arrayContaining(["review.largeBudget"]));
+    expect(schema.properties!["value"]!.description).toContain("review.callsPerBatch must be a whole number from 2 to 6");
   });
 
-  it("applies review.largeBudget only on the owner's own answer: not the policy's, not bm_decide's", async () => {
+  it("applies review.callsPerBatch only on the owner's own answer: not the policy's, not bm_decide's", async () => {
     createAutonomyStore(home).set({ workspaceId: WORKSPACE_ID, class: "reversible-technical", mode: "delegate", confirmed: true }, NOW.toISOString());
     const { tools, paseo } = toolsWith();
     const { answer, notices } = answering();
-    const id = await asked(tools, [option("Large: 6 review calls", "review.largeBudget", 6), KEEP]);
+    const id = await asked(tools, [option("4 calls per batch", "review.callsPerBatch", 4), KEEP]);
     // The Orchestrator cannot answer it, even on a class the owner delegated to it.
     expect((await tools.call("bm_decide", { decisionId: id, optionKey: "a", reason: "Large requests re-review often." })).ok).toBe(false);
     // An answer that is not the owner's applies nothing.
@@ -778,10 +808,69 @@ describe("coordination.set on the review budget per tier (design §G.4's review.
     if (!owner.ok) throw new Error(owner.message);
     const byPolicy: Decision = { ...owner.decision, answer: { ...owner.decision.answer!, by: "policy", predictor: "recommended" } };
     expect(applyPreparedChange(byPolicy, { home, now: NOW })).toMatchObject({ applied: false, reason: "only the owner's own answer applies a change of the owner's settings" });
-    expect(budgetNow().largeBudget).toBe(4);
+    expect(reviewNow().callsPerBatch).toBe(3);
 
     await answer({ id, optionKey: "a" }, paseo);
-    expect(budgetNow()).toEqual({ smallBudget: 2, mediumBudget: 2, largeBudget: 6 });
-    expect(notices()[0]).toContain("\nchange: applied by the plugin — it sets the review budget of a Large request to 6 review calls (review.largeBudget 6); send nothing for it\n");
+    expect(reviewNow()).toEqual({ maxRereviews: 3, callsPerBatch: 4 });
+    expect(notices()[0]).toContain("\nchange: applied by the plugin — it sets 4 review calls per milestone batch (review.callsPerBatch 4); send nothing for it\n");
+  });
+
+  it("a decision stored with a retired review.*Budget change still parses, and the owner's answer applies nothing: this setting no longer exists", async () => {
+    const { tools } = toolsWith();
+    const id = await asked(tools, [option("4 calls per batch", "review.callsPerBatch", 4), KEEP]);
+    const owner = answerDecision(stored(id), { via: "inbox", optionKey: "a", at: NOW.toISOString() });
+    if (!owner.ok) throw new Error(owner.message);
+    const legacy: Decision = {
+      ...owner.decision,
+      options: owner.decision.options.map((entry) => (entry.key === "a" ? { ...entry, action: { kind: "coordination.set", change: { key: "review.largeBudget", value: 6 } } } : entry)),
+    };
+    expect(decisionSchema.safeParse(JSON.parse(JSON.stringify(legacy))).success).toBe(true);
+    expect(applyPreparedChange(legacy, { home, now: NOW })).toEqual({
+      applied: false,
+      text: "sets nothing: review.largeBudget no longer exists (review.largeBudget 6)",
+      reason: "this setting no longer exists",
+    });
+    expect(existsSync(join(home, "coordination"))).toBe(false);
+    expect(reviewNow()).toEqual({ maxRereviews: 3, callsPerBatch: 3 });
+  });
+});
+
+// Delivery line design §5.2, §5.6: how a tier's batches converged, as the advice reports it.
+describe("reviewConvergenceOf", () => {
+  const review = (batchId: string | null, minute: number, verdict: string | null, blockingCount: number | null, requestId = "req-20261020T090000Z"): ConvergenceReview => ({
+    requestId,
+    batchId,
+    at: new Date(Date.UTC(2026, 9, 20, 9, minute)).toISOString(),
+    verdict,
+    blockingCount,
+  });
+
+  it("counts first rounds that passed, re-reviews that passed, and the batches the rule stopped", () => {
+    const reviews = [
+      // b1 passes at once.
+      review("b1", 0, "pass", 0),
+      // b2 converges: 3 → 1 → pass.
+      review("b2", 1, "changes-required", 3),
+      review("b2", 2, "changes-required", 1),
+      review("b2", 3, "pass", 0),
+      // b3 stops converging: 2 → 2 after its second re-review.
+      review("b3", 4, "changes-required", 3),
+      review("b3", 5, "changes-required", 2),
+      review("b3", 6, "changes-required", 2),
+      // b4 has its 3 re-reviews, still blocking (out of time order on purpose).
+      review("b4", 10, "changes-required", 1),
+      review("b4", 7, "changes-required", 4),
+      review("b4", 8, "changes-required", 3),
+      review("b4", 9, "changes-required", 2),
+      // The same batch id in another request is another batch; one first round, not yet re-reviewed: not stopped.
+      review("b1", 11, "changes-required", 2, "req-20261020T100000Z"),
+      // Without a batch or a verdict a review is left out.
+      review(null, 12, "pass", 0),
+      review("b5", 13, null, null),
+    ];
+    expect(reviewConvergenceOf(reviews, 3)).toEqual({ batches: 5, firstRoundPassed: 1, rereviews: 7, rereviewsPassed: 1, unconverged: 2 });
+    // With more re-reviews allowed, b4 still converges (4 → 3 → 2 → 1); b3 has stopped all the same.
+    expect(reviewConvergenceOf(reviews, 4).unconverged).toBe(1);
+    expect(reviewConvergenceOf([], 3)).toEqual({ batches: 0, firstRoundPassed: 0, rereviews: 0, rereviewsPassed: 0, unconverged: 0 });
   });
 });

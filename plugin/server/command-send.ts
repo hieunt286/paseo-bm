@@ -19,9 +19,11 @@
  *    allowance is open; a handoff (`coordination:handoff`, autonomy design
  *    §G.6) only while the owner's Settings → Coordination has handoff on; a
  *    governor command (`governor:<step>`, missions design §9.4) only to the
- *    current Main of an open mission, its loop guard counted per mission
- *    (`commandsSentForMission`: 12 in 24 hours). A refusal sends and records
- *    nothing.
+ *    current Main of an open mission, its loop guard counted per mission in
+ *    the pool of its kind (`commandsSentForMission`, delivery line design
+ *    §8.1: code nudges, re-plans, arbitrations and others, each with its
+ *    `governor.quota*` per 24 hours; no kind spends another's). A refusal
+ *    sends and records nothing.
  * 2. **Delivered** through the notice queue (`command:<id>`, or the kind the
  *    caller names), or — an interrupt — sent at once. A target that cannot be
  *    reached records nothing.
@@ -29,7 +31,8 @@
  *    (`proposals.json`, source `chat`, its secrets masked) under its id, which
  *    is what the loop guard counts; the intervention it is, if any, is logged
  *    with that id (`interventionOfCommand`); a Worker's Manager gets the
- *    `copy: yes` block through the queue.
+ *    `copy: yes` block through the queue. A governor command is stored with
+ *    its mission, its step and who wrote it (`by`): its pool.
  *
  * The loop guard counts every delivered command. It refuses every one but the
  * prepared command of the owner's own answer, which it counts and never
@@ -49,8 +52,19 @@ import { commandKindOf } from "./orchestrator-state";
 import { createOrchestratorStore, type OrchestratorStoreDeps } from "./orchestrator-store";
 import { missionOfRequest } from "./orchestrator-tool-context";
 import { undeclaredCategoriesOf, undeclaredRefusalOf } from "../shared/decision-gate";
-import { isSentCommand, type Proposal } from "../shared/orchestrator";
-import { COORDINATION_HANDOFF_AUTHORITY, commandBlockOf, commandInputProblems, commandOf, isGovernorAuthority, type CommandInput } from "../shared/orchestrator-command";
+import { isSentCommand, type GovernorBy, type GovernorPool, type Proposal } from "../shared/orchestrator";
+import {
+  COORDINATION_HANDOFF_AUTHORITY,
+  GOVERNOR_AUTHORITY_PREFIX,
+  commandBlockOf,
+  commandInputProblems,
+  commandOf,
+  isGovernorAuthority,
+  type CommandAuthority,
+  type CommandInput,
+  type GovernorStep,
+} from "../shared/orchestrator-command";
+import type { GovernorSetting, GovernorSettings } from "../shared/coordination";
 import { createMissionStore } from "./mission-store";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { errorText } from "./rpc-kit";
@@ -63,8 +77,38 @@ export const COMMAND_LIMIT_WINDOW_HOURS = 24;
 /** Why a command was refused at the loop guard (design §6A). */
 export const COMMAND_LIMIT_MESSAGE = `you sent ${COMMAND_LIMIT_PER_REQUEST} commands for this request in ${COMMAND_LIMIT_WINDOW_HOURS} hours; ask the owner with bm_ask_owner`;
 
-/** Why a governor command was refused at the loop guard (missions design §9.4): 12 per mission in 24 hours. */
-export const MISSION_COMMAND_LIMIT_MESSAGE = `the governor sent ${COMMAND_LIMIT_PER_REQUEST} commands to this mission's Main in ${COMMAND_LIMIT_WINDOW_HOURS} hours; ask the owner with bm_ask_owner`;
+export { GOVERNOR_POOLS, type GovernorBy, type GovernorPool } from "../shared/orchestrator";
+
+/** The `governor.*` setting that holds each pool's quota. */
+export const GOVERNOR_POOL_QUOTA: Readonly<Record<GovernorPool, GovernorSetting>> = {
+  codeNudge: "quotaCodeNudge",
+  replan: "quotaReplan",
+  arbitrate: "quotaArbitrate",
+  other: "quotaOther",
+};
+
+/** A pool in the words of the refusal. */
+export const GOVERNOR_POOL_WORDS: Readonly<Record<GovernorPool, string>> = { codeNudge: "code-nudge", replan: "re-plan", arbitrate: "arbitration", other: "other" };
+
+/**
+ * The pool a governor command counts in (§8.1): a code nudge, a re-plan, an
+ * arbitration; anything else — a model's nudge, an entry stored before the
+ * pools — counts in `other`. Pure.
+ */
+export function governorPoolOf(entry: { governorStep?: GovernorStep | undefined; by?: GovernorBy | undefined }): GovernorPool {
+  if (entry.governorStep === "nudge") return entry.by === "code" ? "codeNudge" : "other";
+  return entry.governorStep ?? "other";
+}
+
+/** The step of a `governor:<step>` authority; null for any other. Pure. */
+export function governorStepOf(authority: CommandAuthority | null | undefined): GovernorStep | null {
+  return isGovernorAuthority(authority) ? (authority.slice(GOVERNOR_AUTHORITY_PREFIX.length) as GovernorStep) : null;
+}
+
+/** Why a governor command was refused at its pool (delivery line design §8.3); the tool adds the final period. */
+export function missionPoolSpentMessage(pool: GovernorPool, until: Date): string {
+  return `This mission's ${GOVERNOR_POOL_WORDS[pool]} commands are spent until ${until.toISOString()}; paseo-bm puts the figures in the Main's daily digest. Nothing was sent`;
+}
 
 /** Why `bm_direct_worker` refused an interrupt (design §6B.4, ADR-016 decision 2). */
 export const INTERRUPT_REFUSED_MESSAGE =
@@ -96,14 +140,47 @@ export function commandsSentFor(
   ).length;
 }
 
+/** When a stored command went: its `settledAt`, else its `at`. */
+const sentAtOf = (entry: Proposal): number => timeOrZero(entry.settledAt ?? entry.at);
+
+/** The governor commands of this mission in the 24 hours before `now`, of one pool when named. Pure. */
+function missionCommandsOf(commands: readonly Proposal[], missionId: string, now: Date, pool?: GovernorPool): Proposal[] {
+  const since = now.getTime() - COMMAND_LIMIT_WINDOW_HOURS * 3_600_000;
+  return commands.filter((entry) => isSentCommand(entry) && entry.missionId === missionId && sentAtOf(entry) > since && (pool === undefined || governorPoolOf(entry) === pool));
+}
+
 /**
  * How many governor commands the commands store holds for this mission in the
- * 24 hours before `now` (missions design §9.4): the loop guard of a command to
- * a Main counts per mission, whichever Main got it. Pure.
+ * 24 hours before `now` (missions design §9.4) — of one pool when `pool` is
+ * named (delivery line design §8.1): the loop guard of a command to a Main
+ * counts per mission, whichever Main got it. Pure.
  */
-export function commandsSentForMission(commands: readonly Proposal[], missionId: string, now: Date): number {
-  const since = now.getTime() - COMMAND_LIMIT_WINDOW_HOURS * 3_600_000;
-  return commands.filter((entry) => isSentCommand(entry) && entry.missionId === missionId && timeOrZero(entry.settledAt ?? entry.at) > since).length;
+export function commandsSentForMission(commands: readonly Proposal[], missionId: string, now: Date, pool?: GovernorPool): number {
+  return missionCommandsOf(commands, missionId, now, pool).length;
+}
+
+/**
+ * Until when this mission's `pool` is spent (§8.3): the moment its count in
+ * the window falls under `quota` again; null while it has room. Pure.
+ */
+export function poolSpentUntil(commands: readonly Proposal[], missionId: string, pool: GovernorPool, now: Date, quota: number): Date | null {
+  const times = missionCommandsOf(commands, missionId, now, pool)
+    .map(sentAtOf)
+    .sort((a, b) => a - b);
+  if (times.length < quota) return null;
+  return new Date(times[times.length - quota]! + COMMAND_LIMIT_WINDOW_HOURS * 3_600_000);
+}
+
+/** Until when this mission's `pool` is spent now, against the owner's `governor.quota*`; null while it has room. Reads only. */
+export function missionPoolSpentUntil(
+  home: string,
+  missionId: string,
+  pool: GovernorPool,
+  now: Date,
+  options: { store?: OrchestratorStoreDeps; settings?: GovernorSettings; log?: (message: string) => void } = {},
+): Date | null {
+  const settings = options.settings ?? readCoordinationSettings({ home, ...(options.log === undefined ? {} : { log: options.log }) }).governor;
+  return poolSpentUntil(createOrchestratorStore(home, options.store).listCommands(), missionId, pool, now, settings[GOVERNOR_POOL_QUOTA[pool]]);
 }
 
 /** True when the loop guard has no room left for this request (or project) now. Reads only. */
@@ -163,6 +240,8 @@ export interface CommandSend {
    * `governor:<step>` authority; ignored otherwise.
    */
   missionId?: string;
+  /** Who wrote a governor command (delivery line design §8.1): `code` for the ladder's nudge; `model` by default. */
+  governorBy?: GovernorBy;
   /** A Worker's Manager, who gets the `copy: yes` block (`copyRecipientOf`); null for none. */
   copyTo: string | null;
   /** Checks the text against its declared effects: every command the Orchestrator sends itself. */
@@ -222,7 +301,7 @@ function delivered(outcome: string): outcome is "sent" | "queued" {
 
 /** What the checks of a send read (`commandRefusalOf`). */
 export type CommandCheck = Pick<CommandSend, "home" | "now" | "workspaceId" | "command" | "backstop" | "backstopText" | "loopGuard" | "interrupt" | "store" | "log"> &
-  Partial<Pick<CommandSend, "targetId" | "missionId">>;
+  Partial<Pick<CommandSend, "targetId" | "missionId" | "governorBy">>;
 
 /** Why a governor command cannot go to `targetId` (missions design §9.4): only the current Main of an open mission gets one. Reads only. */
 function governorTargetRefusalOf(home: string, missionId: string | undefined, targetId: string | undefined): string | null {
@@ -259,9 +338,10 @@ export function commandRefusalOf(spec: CommandCheck): string | null {
   }
   // The loop guard: an Orchestrator and a Manager answering each other stop here, before anything is sent.
   if (governor) {
-    // Missions design §9.4: per mission, whichever Main got the commands.
-    const sent = commandsSentForMission(createOrchestratorStore(home, spec.store).listCommands(), spec.missionId!, now);
-    if (spec.loopGuard === "refuse" && sent >= COMMAND_LIMIT_PER_REQUEST) return MISSION_COMMAND_LIMIT_MESSAGE;
+    // Missions design §9.4, delivery line design §8.1: per mission, whichever Main got the commands, in the pool of its kind.
+    const pool = governorPoolOf({ governorStep: governorStepOf(command.authority)!, by: spec.governorBy ?? "model" });
+    const until = spec.loopGuard === "refuse" ? missionPoolSpentUntil(home, spec.missionId!, pool, now, { ...(spec.store === undefined ? {} : { store: spec.store }), log }) : null;
+    if (until !== null) return missionPoolSpentMessage(pool, until);
   } else if (spec.loopGuard === "refuse" && loopGuardFull(home, workspaceId, command.requestId ?? null, now, spec.store)) return COMMAND_LIMIT_MESSAGE;
   if (spec.interrupt !== undefined && spec.interrupt.open !== true) return INTERRUPT_REFUSED_MESSAGE;
   return null;
@@ -297,6 +377,7 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
     }
     outcome = "sent";
   } else {
+    // Delivery line design §6.4: every BM-COMMAND is on the wake gate's always-at-once list (`AT_ONCE_KINDS`), so it is never held.
     const queued = await enqueueNotice({ home, queue, targetId: spec.targetId, kind, text, paseo: spec.paseo });
     if (!delivered(queued)) return { ok: false, stage: "delivery", reason: `${role} ${spec.targetId} could not be reached` };
     outcome = queued;
@@ -320,7 +401,9 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
       sentText: masked(text),
       outcome,
       ...(command.to === "worker" ? { to: "worker" as const, workerId: spec.targetId } : {}),
-      ...(isGovernorAuthority(command.authority) && spec.missionId !== undefined ? { missionId: spec.missionId } : {}),
+      ...(isGovernorAuthority(command.authority) && spec.missionId !== undefined
+        ? { missionId: spec.missionId, governorStep: governorStepOf(command.authority)!, by: spec.governorBy ?? "model" }
+        : {}),
     });
   } catch (error) {
     unrecorded = errorText(error);

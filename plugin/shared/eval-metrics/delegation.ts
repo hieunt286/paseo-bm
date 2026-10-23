@@ -36,7 +36,7 @@ import type { EvalMetrics, EvalUnknowns, OverrideCounts, ReversalRate } from "./
  * request, or of a request no record shows, when it was asked in the window
  * (as the Orchestrator's decisions are scoped for A-2).
  */
-function decisionInScope(scope: EvalScope, decision: Decision): boolean {
+export function decisionInScope(scope: EvalScope, decision: Pick<Decision, "requestId" | "askedAt">): boolean {
   if (decision.requestId !== null && scope.byRequest.has(decision.requestId)) return scope.included.has(decision.requestId);
   return within(timeOrNull(decision.askedAt), scope.bounds);
 }

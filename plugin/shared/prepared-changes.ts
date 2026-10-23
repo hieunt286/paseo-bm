@@ -1,11 +1,12 @@
 import { cellOf, type AutonomyPolicy } from "./autonomy";
 import {
   COORDINATION_KEYS,
-  coordinationChangeSchema,
   coordinationRuleOf,
   coordinationValueOf,
-  type CoordinationChange,
+  isRetiredCoordinationKey,
+  liveCoordinationChangeSchema,
   type CoordinationSettings,
+  type StoredCoordinationChange,
 } from "./coordination";
 import {
   PREPARED_CHANGE_KINDS,
@@ -30,8 +31,11 @@ import { DEFAULT_PRECEDENT_DAYS, PRECEDENT_SCOPE_ALL, checkPrecedentSaveInput, s
  *   class (ADR-025).
  * - `coordination.set { key, value }`: one Settings → Coordination setting
  *   (§G.7), in its bounds: the advice cadence, and since Phase 3 the
- *   compaction and handoff switches and thresholds and the review budget per
- *   tier (§G.4's `review.budget`, change-008 C6).
+ *   compaction and handoff switches and thresholds, the Main's compaction,
+ *   the review settings (`review.maxRereviews`, `review.callsPerBatch`;
+ *   delivery line design §5.6) and the governor's thresholds. A change on a
+ *   retired key (`review.*Budget`) is refused when asked; one stored before
+ *   the key was retired applies nothing: "this setting no longer exists".
  *
  * The plugin applies one only on the owner's own answer
  * (`decisions.ts` `carriesPreparedChange`), through the same code the
@@ -67,6 +71,10 @@ export function preparedChangeOfInput(input: PreparedChangeInput): { change: Pre
     if (field !== "kind" && !fields.required.includes(field) && !fields.optional.includes(field)) problems.push(`${field}: is not a field of ${kind}`);
   }
   if (problems.length > 0) return { problems };
+  // Delivery line design §5.6: a retired key is no setting to prepare, though a stored decision may still carry one.
+  if (kind === "coordination.set" && isRetiredCoordinationKey(input["key"])) {
+    return { problems: [`key: ${String(input["key"])} no longer exists; must be one of ${COORDINATION_KEYS.join(", ")}`] };
+  }
   const candidate = kind === "coordination.set" ? { kind, change: { key: input["key"], value: input["value"] } } : input;
   const parsed = preparedActionSchema.safeParse(candidate);
   if (parsed.success && isPreparedChange(parsed.data)) return { change: parsed.data };
@@ -89,7 +97,7 @@ function grouped(value: number): string {
 }
 
 /** What a coordination setting's change sets, in the owner's words, then its key and value. */
-function coordinationChangeText(change: CoordinationChange): string {
+function coordinationChangeText(change: StoredCoordinationChange): string {
   const exact = `(${change.key} ${String(change.value)})`;
   switch (change.key) {
     case "advice.everyFinished":
@@ -110,10 +118,29 @@ function coordinationChangeText(change: CoordinationChange): string {
       return `sets the handoff threshold to ${grouped(change.value)} tokens read per request ${exact}`;
     case "handoff.maxPerRequest":
       return `sets at most ${change.value} handoff${change.value === 1 ? "" : "s"} per request ${exact}`;
+    case "review.maxRereviews":
+      return `sets at most ${change.value} re-review${change.value === 1 ? "" : "s"} per batch ${exact}`;
+    case "review.callsPerBatch":
+      return `sets ${change.value} review call${change.value === 1 ? "" : "s"} per milestone batch ${exact}`;
     case "review.smallBudget":
-      return `sets the review budget of a Small request to ${change.value} review calls ${exact}`;
     case "review.mediumBudget":
-      return `sets the review budget of a Medium request to ${change.value} review calls ${exact}`;
+    case "review.largeBudget":
+      // Delivery line design §5.6: a decision stored before the review budgets were retired.
+      return `sets nothing: ${change.key} no longer exists ${exact}`;
+    case "rollover.enabled":
+      return `turns size rollover ${change.value ? "on" : "off"} ${exact}`;
+    case "rollover.beads":
+    case "rollover.turns":
+    case "rollover.tokens":
+      return `rolls a request over at ${grouped(change.value)} ${change.key === "rollover.beads" ? "beads closed" : change.key === "rollover.turns" ? "turns" : "tokens read"} ${exact}`;
+    case "rollover.contextTokens":
+      return `rolls a request over when its Worker's context reaches ${grouped(change.value)} tokens ${exact}`;
+    case "rollover.ceilingFactor":
+      return `asks a rollover now at ${change.value}× a rollover figure ${exact}`;
+    case "maintenance.ceilingFactor":
+      return `runs a compaction or handoff without waiting for a safe point at ${change.value}× its threshold ${exact}`;
+    case "integration.ci":
+      return `turns CI ${change.value} ${exact}`;
     case "main.compact":
       return `turns a Main's in-place compaction ${change.value ? "on" : "off"} ${exact}`;
     case "main.contextShare":
@@ -122,8 +149,6 @@ function coordinationChangeText(change: CoordinationChange): string {
       return `compacts a Main at ${grouped(change.value)} tokens of context when its window is not known ${exact}`;
     case "main.hardShare":
       return `creates a new Main only above ${Math.round(change.value * 100)}% of its window after a compaction ${exact}`;
-    case "review.largeBudget":
-      return `sets the review budget of a Large request to ${change.value} review calls ${exact}`;
     default:
       // Missions design §9.2: one of the governor's thresholds.
       return `sets the governor's ${change.key.slice("governor.".length)} to ${grouped(change.value)} ${exact}`;
@@ -178,6 +203,7 @@ export function preparedChangeCheckOf(change: PreparedChange, facts: PreparedCha
   switch (change.kind) {
     case "precedent.save": {
       const scope = change.scope === "all" ? PRECEDENT_SCOPE_ALL : facts.workspaceId;
+      // Settings' own checks, eligibility included (delivery line design §7.4): a subject no precedent answers is refused with the same why.
       const checked = checkPrecedentSaveInput({
         scope,
         subject: change.subject,
@@ -196,7 +222,9 @@ export function preparedChangeCheckOf(change: PreparedChange, facts: PreparedCha
       return { unchanged: change.mode === "delegate" ? `${change.class} is delegated to the Orchestrator in this project already` : `${change.class} is ${change.mode} in this project already` };
     }
     case "coordination.set": {
-      const valid = coordinationChangeSchema.safeParse(change.change);
+      // Delivery line design §5.6: a change stored on a retired key applies nothing.
+      if (isRetiredCoordinationKey(change.change.key)) return { refusal: "this setting no longer exists" };
+      const valid = liveCoordinationChangeSchema.safeParse(change.change);
       if (!valid.success) {
         const key: unknown = (change.change as { key?: unknown }).key;
         return { refusal: coordinationRuleOf(key) ?? `${JSON.stringify(key ?? null)} is not a coordination setting` };

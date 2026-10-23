@@ -6,6 +6,7 @@ import {
   ASK_NOTICE_MARKER,
   INTERRUPTED_NOTICE_MARKER,
   REPLACED_NOTICE_MARKER,
+  ROLLOVER_NOTICE_MARKER,
   STATE_NOTICE_MARKER,
   WORKER_STOP_NOTICE,
   WORKER_STOP_NOTICE_MARKER,
@@ -14,6 +15,7 @@ import {
 } from "../plugin/server/notices";
 import { interruptedNoticeText } from "../plugin/server/interruption-watch";
 import { askNoticeOf } from "../plugin/server/decision-ask";
+import { rolloverNoticeOf } from "../plugin/server/rollover";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-request";
 
@@ -91,6 +93,13 @@ describe("isPluginNotice", () => {
     expect(noticeMarkerOf("BM-ASK\ndecisionId: x")).toBe(ASK_NOTICE_MARKER);
     expect(isPluginNotice("BM-ASKED x")).toBe(false);
     expect(isPluginNotice("BM-ASK-ME")).toBe(false);
+  });
+
+  it("knows BM-ROLLOVER soft and now as a whole word, so a size rollover notice is never the owner's words (delivery line design §2.6)", () => {
+    expect(ROLLOVER_NOTICE_MARKER).toBe("BM-ROLLOVER");
+    expect(noticeMarkerOf(rolloverNoticeOf("soft", "req-20261020T100000Z", "16 beads closed"))).toBe(ROLLOVER_NOTICE_MARKER);
+    expect(isPluginNotice(rolloverNoticeOf("now", "req-20261020T100000Z", "80 turns"))).toBe(true);
+    expect(isPluginNotice("BM-ROLLOVERS are fine")).toBe(false);
   });
 
   it("is not fooled by a non-string", () => {

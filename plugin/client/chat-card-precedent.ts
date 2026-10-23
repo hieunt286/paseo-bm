@@ -17,6 +17,7 @@ import {
   whyNotPrecedent,
   type Precedent,
 } from "../shared/precedents";
+import { isCodeSubject } from "../shared/question-subjects";
 import { shorten } from "../shared/text";
 import type { DecisionChoice, DecisionUi } from "./chat-card-decision";
 import { codedReason } from "./errors";
@@ -79,7 +80,9 @@ export function precedentFormOf(decision: Decision): NonNullable<PrecedentUi["fo
 /**
  * What the card offers for saving its answer as a precedent: nothing unless
  * the decision is answered by the owner and carries a subject (a precedent
- * without one could match nothing, §B.9).
+ * without one could match nothing, §B.9) a precedent may answer
+ * (`whyNotPrecedent`, delivery line design §7.4) — so the card never promises
+ * an answer the plugin would not give.
  */
 export function precedentOfferView(decision: Decision | null, ui: PrecedentUi): PrecedentOfferView | null {
   if (decision === null || whyNotPrecedent(decision) !== null) return null;
@@ -170,16 +173,23 @@ export interface PrecedentSuggestionView {
 
 export const USE_PRECEDENT_LABEL = "Use this answer";
 
-/** What an open decision's card suggests from the precedents of its project (`precedents.list`); null when none bears on it. */
+/**
+ * What an open decision's card suggests from the precedents of its project
+ * (`precedents.list`); null when none bears on it. A decision of a mission
+ * placement is matched as its repo's (`repoKey`, delivery line design §3.1).
+ */
 export function precedentSuggestionView(
   decision: Decision | null,
   precedents: readonly Precedent[] | undefined,
   ui: DecisionUi,
   now: Date,
+  repoKey?: string,
 ): PrecedentSuggestionView | null {
   // Autonomy design §B.7: an override corrects what a precedent answered; it never suggests one back.
   if (decision === null || decision.status !== "open" || precedents === undefined || decisionKindOf(decision.id) === "override") return null;
-  const precedent = precedentFor(decision, precedents, now);
+  // Delivery line design §7.4: a precedent on a code subject is inert; the card does not offer it.
+  if (isCodeSubject(decision.subject)) return null;
+  const precedent = precedentFor(repoKey === undefined ? decision : { ...decision, workspaceId: repoKey }, precedents, now);
   if (precedent === null) return null;
   const choice = precedentAnswerOf(decision, precedent);
   const canPick = ui.confirming === null && ui.words === null && !("words" in choice && decisionKindOf(decision.id) === "fallback");

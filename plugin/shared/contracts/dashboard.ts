@@ -184,6 +184,16 @@ export const traceSummarySchema = z.object({
    * values.
    */
   verification: traceVerificationSchema.optional(),
+  /**
+   * The request's chain (delivery line design §2.2, §2.7): the request it
+   * continues, the chain's first, the one that continues it, and its place in
+   * the chain (2 for the first continuation). Each absent when it does not
+   * apply; optional and additive, from the request registry.
+   */
+  continuationOf: z.string().optional(),
+  chainRootId: z.string().optional(),
+  continuedBy: z.string().optional(),
+  chainPosition: z.number().int().positive().optional(),
 });
 
 /** Timing of one agent inside a trace (design §7.1). */
@@ -494,10 +504,14 @@ export const tracesWorkspacesRpc = defineRpc({
         lastKnownDirectory: z.string().nullable(),
         lastSeenAt: z.string().nullable(),
         bytes: z.number().int().nonnegative(),
+        /** A mission placement's repo key (delivery line design §3.1): its history nests under that repo; absent for a repo. */
+        repoKey: workspaceIdSchema.optional(),
       }),
     ),
     /** The listed plugin homes (missions design §3.1), which no project list shows; absent from an older server. */
     homes: z.array(workspaceIdSchema).optional(),
+    /** Each mission placement's repo key (delivery line design §3.1): a placement nests under its repo, never a project; absent when none. */
+    placements: z.record(workspaceIdSchema, workspaceIdSchema).optional(),
   }),
 });
 

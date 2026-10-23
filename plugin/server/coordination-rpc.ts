@@ -24,7 +24,7 @@ import {
   type CoordinationSettingsOutput,
 } from "../shared/contracts";
 import { alertKeyOf } from "../shared/alerts";
-import { DEFAULT_COORDINATION_SETTINGS, coordinationChangeSchema, reviewBudgetOf, type CoordinationSettings, type ReviewBudget } from "../shared/coordination";
+import { DEFAULT_COORDINATION_SETTINGS, liveCoordinationChangeSchema, type CoordinationSettings } from "../shared/coordination";
 import { createAlertStore } from "./alert-store";
 import { createCoordinationStore, invalidCoordinationChange } from "./coordination-store";
 import { coded, errorText, logOf, readOr, requireDataHome, type RpcHomeDeps, type RpcLogDeps } from "./rpc-kit";
@@ -34,21 +34,12 @@ export type CoordinationRpcDeps = RpcHomeDeps & RpcLogDeps & { now?: () => Date 
 
 /**
  * The settings in effect, for the plugin's own readers (the governor's
- * window of the event bus, the review budget). No usable data folder, or a store that
+ * window of the event bus, the review settings). No usable data folder, or a store that
  * cannot be read, reads as the defaults: the unreadable store costs one log
  * line. Never throws.
  */
 export function readCoordinationSettings(deps: CoordinationRpcDeps = {}): CoordinationSettings {
   return readOr(deps, "the coordination settings", DEFAULT_COORDINATION_SETTINGS, (home) => createCoordinationStore(home).read());
-}
-
-/**
- * The owner's review budget per tier (§G.7, change-008 C6) in effect: what the
- * budget notice, the stall pass, a fallback handover and a new Worker's
- * Runtime facts read. An unreadable store reads 2 / 2 / 4. Never throws.
- */
-export function readReviewBudget(deps: CoordinationRpcDeps = {}): ReviewBudget {
-  return reviewBudgetOf(readCoordinationSettings(deps));
 }
 
 /** `coordination.settings`: reads only. */
@@ -61,7 +52,8 @@ export function handleCoordinationSettings(deps: CoordinationRpcDeps = {}): Coor
  * at, so a refusal never depends on the machine; every refusal writes nothing.
  */
 export function handleCoordinationSet(input: unknown, deps: CoordinationRpcDeps = {}): CoordinationSetOutput {
-  const change = coordinationChangeSchema.safeParse(input);
+  // A retired key (delivery line design §5.6) is refused here, as any unknown one: E_COORDINATION_INVALID.
+  const change = liveCoordinationChangeSchema.safeParse(input);
   if (!change.success) throw invalidCoordinationChange(input);
   const home = requireDataHome(deps, "save");
   const store = createCoordinationStore(home, deps.now === undefined ? {} : { now: deps.now });

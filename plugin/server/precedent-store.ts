@@ -42,6 +42,7 @@ import {
 } from "../shared/precedents";
 import { AUTONOMY_DIR_NAME } from "./autonomy-store";
 import { capBy, createJsonFileStore } from "./data-files";
+import { repoKeyOf } from "./placements";
 import { timeOrZero } from "../shared/time";
 
 export const PRECEDENTS_FILE = "precedents.json";
@@ -64,7 +65,7 @@ export interface PrecedentStore {
   readonly path: string;
   /** Every readable precedent, in file order. Throws only on a symlink. */
   read(): Precedent[];
-  /** The active precedents, newest first: of one workspace and the global ones, or all of them. */
+  /** The active precedents, newest first: of one workspace's repo (delivery line design §3.1) and the global ones, or all of them. */
   active(now: Date, workspaceId?: string): Precedent[];
   /** The precedent with this id, active or not; null when none. */
   get(id: string): Precedent | null;
@@ -133,7 +134,7 @@ export function createPrecedentStore(home: string, deps: PrecedentStoreDeps = {}
 
     active(now, workspaceId) {
       const entries = load();
-      return workspaceId === undefined ? activePrecedents(entries, now) : activeFor(entries, workspaceId, now);
+      return workspaceId === undefined ? activePrecedents(entries, now) : activeFor(entries, repoKeyOf(home, workspaceId), now);
     },
 
     get(id) {

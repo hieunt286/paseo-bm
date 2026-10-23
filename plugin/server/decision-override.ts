@@ -29,7 +29,7 @@ import { DashboardError, type DecisionsOverrideInput, type DecisionsOverrideOutp
 import { overrideDecisionOf, overrideIdOf, overrideRefusalOf } from "../shared/decision-override";
 import { challengerOf } from "../shared/autonomy";
 import { OVERRIDE_ID_PREFIX, ownerViewOfDecision, recordReversal, type Decision } from "../shared/decisions";
-import { currentPolicy } from "./autonomy-store";
+import { effectivePolicy } from "./placements";
 import { createDecisionStore } from "./decision-store";
 import type { DecisionRpcDeps } from "./decision-rpc";
 import { READ_FAILED, coded, dataHome, logOf, requireDataHome } from "./rpc-kit";
@@ -48,7 +48,8 @@ export type DecisionOverrideDeps = DecisionRpcDeps & {
  */
 export function ownerViewsOf(deps: DecisionRpcDeps): (decision: Decision) => Decision {
   const home = dataHome(deps);
-  const policy = home === null ? null : currentPolicy(home, (reason) => logOf(deps)(`[paseo-bm] could not read the autonomy policy; no proposal is shown: ${reason}`));
+  // Delivery line design §3.1: a placement's decision follows its repo's prediction switch.
+  const policy = home === null ? null : effectivePolicy(home, (reason) => logOf(deps)(`[paseo-bm] could not read the autonomy policy; no proposal is shown: ${reason}`));
   return (decision) => ownerViewOfDecision(decision, policy !== null && challengerOf(policy, decision.workspaceId));
 }
 

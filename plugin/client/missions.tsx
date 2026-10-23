@@ -7,8 +7,11 @@
  * reads `missions.list`, `mission.get` and `memory.list` every
  * `WORK_POLL_MS` while the view shows, and sends the owner's changes:
  * `mission.change` (Rename, Close mission, "+ Add"), `autonomy.set-mission-level`
- * (the level cells; 3 and 4 confirmed in place), `mission.ensure` (Open Main)
- * and `missions.create` (New mission).
+ * (the level cells; 3 and 4 confirmed in place), `mission.ensure` (Open Main),
+ * `mission.integration.revoke` (a repo's Revoke, confirmed in place; delivery
+ * line design §4.9, `delivery-line.html` artboards I and J),
+ * `mission.integration.ask` (a repo's "Ask me again", §4.3) and
+ * `missions.create` (New mission).
  *
  * A phone (`layout.compact`) shows the artboards' phone layout: the page's
  * chips (Contracts, Journal, Plan, Project memory) open each part in place,
@@ -18,16 +21,18 @@
  * modal (confirmations are `ConfirmBlock`s in place), accessibility roles and
  * labels on every pressable.
  */
-import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
+import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Pressable, ScrollView, Text, TextInput, View, type TextStyle, type ViewStyle } from "react-native";
+import { Linking, Pressable, ScrollView, Text, TextInput, View, type TextStyle, type ViewStyle } from "react-native";
 import {
   autonomySetMissionLevelRpc,
   memoryListRpc,
   missionChangeRpc,
   missionEnsureRpc,
   missionGetRpc,
+  missionIntegrationAskRpc,
+  missionIntegrationRevokeRpc,
   missionsCreateRpc,
   missionsListRpc,
   type MissionChangeInput,
@@ -51,6 +56,7 @@ import {
   missionPageOf,
   nameAndCodeErrors,
   renameInputOf,
+  revokeIntegrationDialog,
   toggleRepo,
   type MemoryView,
   type MissionCardView,
@@ -64,12 +70,9 @@ import { toneColor, type Badge, type Tone } from "./tone";
 import { Button, ConfirmBlock, KindBar, RoleMark, ToneText, type Styles, type Theme } from "./ui";
 import { WORK_POLL_MS } from "./work-model";
 import { newMissionRequests } from "./surface-view";
+import { PROJECTS_FOOTNOTE, projectPickerOf, toggled, workspaceIdsOf, type MissionProject, type ProjectIndex, type ProjectPickerView } from "./mission-projects";
 
-/** A listed project, by its own name (plugin homes left out by the launcher). */
-export interface MissionProject {
-  id: string;
-  name: string;
-}
+export type { MissionProject } from "./mission-projects";
 
 export const MISSIONS_QUERY_KEYS = {
   list: ["paseo-bm", "missions", "list"] as const,
@@ -99,16 +102,16 @@ const CARD_FILL: ViewStyle = { position: "relative", flexGrow: 1 };
 // Small pieces, as the artboards' CSS draws them.
 // ---------------------------------------------------------------------------
 
-/** The artboards' chip: 12px text on surface2, a 1px border, an optional 7px square in a tone. */
-function MissionChip({ text, mark, muted = false, onPress, a11y, theme }: { text: string; mark?: Tone | null; muted?: boolean; onPress?: () => void; a11y?: string; theme: Theme }) {
+/** The artboards' chip: 12px text on surface2, a 1px border, an optional 7px square in a tone; `tone` colours the text ("+ Add", artboard N). */
+function MissionChip({ text, mark, muted = false, tone, expanded, onPress, a11y, theme }: { text: string; mark?: Tone | null; muted?: boolean; tone?: Tone; expanded?: boolean; onPress?: () => void; a11y?: string; theme: Theme }) {
   const { colors } = theme;
   const body = (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 2, paddingHorizontal: 8, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS, backgroundColor: colors.surface2 }}>
       {mark === undefined || mark === null ? null : <View style={{ width: 7, height: 7, backgroundColor: toneColor(theme, mark) }} />}
-      <Text style={{ fontSize: 12, color: muted ? colors.foregroundMuted : colors.foreground }}>{text}</Text>
+      <Text style={{ fontSize: 12, color: tone !== undefined ? toneColor(theme, tone) : muted ? colors.foregroundMuted : colors.foreground }}>{text}</Text>
     </View>
   );
-  return onPress === undefined ? body : <Pressable accessibilityRole="button" accessibilityLabel={a11y ?? text} onPress={onPress}>{body}</Pressable>;
+  return onPress === undefined ? body : <Pressable accessibilityRole="button" accessibilityLabel={a11y ?? text} {...(expanded === undefined ? {} : { accessibilityState: { expanded } })} onPress={onPress}>{body}</Pressable>;
 }
 
 function Small({ children, tone = "plain", theme, style, mono = false }: { children: ReactNode; tone?: Tone; theme: Theme; style?: TextStyle; mono?: boolean }) {
@@ -197,6 +200,51 @@ function Field({ label, value, onChange, a11y, mono = false, multiline = false, 
           ...(multiline ? { height: 64, textAlignVertical: "top" as const } : {}),
         }}
       />
+    </View>
+  );
+}
+
+/** "Find a project…" (`mission-projects.html`, the artboards' `.input`): filters the list by name and folder. */
+function ProjectFilter({ value, onChange, editable, theme, style }: { value: string; onChange: (text: string) => void; editable: boolean; theme: Theme; style: ViewStyle }) {
+  const { colors } = theme;
+  return (
+    <TextInput
+      value={value}
+      onChangeText={onChange}
+      placeholder="Find a project…"
+      placeholderTextColor={colors.foregroundMuted}
+      accessibilityLabel="Find a project"
+      editable={editable}
+      style={{ borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface0, borderRadius: RADIUS, paddingVertical: 8, paddingHorizontal: 10, color: colors.foreground, fontSize: 13, ...style }}
+    />
+  );
+}
+
+/** The project rows (`mission-projects.html`, `.plist`): a checkbox, the bold name, the folder in mono below it. */
+function ProjectRows({ view, onToggle, disabled, theme }: { view: ProjectPickerView; onToggle: (id: string) => void; disabled: boolean; theme: Theme }) {
+  const { colors } = theme;
+  if (view.empty !== null) return <Small tone="muted" theme={theme}>{view.empty}</Small>;
+  return (
+    <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS }}>
+      {view.rows.map((row, index) => (
+        <Pressable
+          key={row.id}
+          accessibilityRole="checkbox"
+          accessibilityLabel={`${row.name}, ${row.path}`}
+          accessibilityState={{ checked: row.checked, disabled }}
+          disabled={disabled}
+          onPress={() => onToggle(row.id)}
+          style={{ flexDirection: "row", alignItems: "flex-start", gap: 10, paddingVertical: 9, paddingHorizontal: 12, ...(index === view.rows.length - 1 ? {} : { borderBottomWidth: 1, borderBottomColor: colors.border }) }}
+        >
+          <View style={{ width: 16, height: 16, marginTop: 2, borderWidth: 1, borderRadius: RADIUS, alignItems: "center", justifyContent: "center", borderColor: row.checked ? colors.accent : colors.border, backgroundColor: row.checked ? colors.accent : "transparent" }}>
+            {row.checked ? <Text style={{ fontSize: 11, lineHeight: 14, color: colors.accentForeground }}>✓</Text> : null}
+          </View>
+          <View style={{ flexShrink: 1 }}>
+            <Text style={{ fontSize: 13, fontWeight: "600", color: colors.foreground }}>{row.name}</Text>
+            <Text style={{ fontSize: 11, color: colors.foregroundMuted, fontFamily: MONO }}>{row.path}</Text>
+          </View>
+        </Pressable>
+      ))}
     </View>
   );
 }
@@ -394,14 +442,17 @@ export interface PageUi {
   part: PagePart | null;
   rename: { name: string; code: string } | null;
   adding: boolean;
-  confirm: { kind: "close" } | { kind: "level"; level: MissionLevel } | null;
+  /** "+ Add"'s panel (artboard N): what is ticked and "Find a project…". */
+  addChosen: readonly string[];
+  addFilter: string;
+  confirm: { kind: "close" } | { kind: "level"; level: MissionLevel } | { kind: "revoke"; repo: string } | null;
   /** What runs now ("Opening…", "Saving…"); null when nothing. */
   busy: string | null;
   error: string | null;
   notice: string | null;
 }
 
-export const PAGE_UI_IDLE: PageUi = { allCriteria: false, menu: false, part: null, rename: null, adding: false, confirm: null, busy: null, error: null, notice: null };
+export const PAGE_UI_IDLE: PageUi = { allCriteria: false, menu: false, part: null, rename: null, adding: false, addChosen: [], addFilter: "", confirm: null, busy: null, error: null, notice: null };
 
 export interface MissionPageActions {
   back: () => void;
@@ -409,13 +460,18 @@ export interface MissionPageActions {
   ui: (change: Partial<PageUi>) => void;
   saveRename: () => void;
   close: () => void;
-  addRepo: (workspaceId: string) => void;
+  /** Adds the projects ticked in "+ Add"'s panel. */
+  addRepos: (ids: readonly string[]) => void;
   level: (level: MissionLevel) => void;
   confirmLevel: () => void;
   memory: (workspaceId: string) => void;
   openAgent?: (agentId: string) => void;
   /** Opens the Inbox, where an open question's card is answered (mission runtime design §7). */
   openInbox?: () => void;
+  /** Revokes push and merge request for a repo, once confirmed (delivery line design §4.3). */
+  revoke?: (repo: string) => void;
+  /** Opens a fresh integration card for a repo after not now or a revoke (delivery line design §4.3). */
+  askAgain?: (repo: string) => void;
 }
 
 export interface MissionPageBodyProps {
@@ -540,6 +596,23 @@ function PageForms({ page, ui, on, styles, theme }: Pick<MissionPageBodyProps, "
   );
 }
 
+/** "+ Add"'s panel (`mission-projects.html`, artboard N): the projects not in the mission, Cancel and Add. */
+function AddPanel({ addable, ui, on, styles, theme }: Pick<MissionPageBodyProps, "addable" | "ui" | "on" | "styles" | "theme">) {
+  const { colors } = theme;
+  const view = projectPickerOf({ projects: addable, chosen: ui.addChosen, filter: ui.addFilter, compact: false, empty: "Every listed project is in this mission already." });
+  const busy = ui.busy !== null;
+  return (
+    <View style={{ marginTop: 6, padding: 10, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS, backgroundColor: colors.surface2 }}>
+      {view.filterShown ? <ProjectFilter value={ui.addFilter} onChange={(addFilter) => on.ui({ addFilter })} editable={!busy} theme={theme} style={{ marginBottom: 6 }} /> : null}
+      <ProjectRows view={view} onToggle={(id) => on.ui({ addChosen: toggled(ui.addChosen, id) })} disabled={busy} theme={theme} />
+      <View style={{ ...FORM_ACTIONS, marginTop: 8 }}>
+        <Button label="Cancel" kind="secondary" disabled={busy} onPress={() => on.ui({ adding: false, addChosen: [], addFilter: "" })} styles={styles} textStyle={BUTTON_TEXT} />
+        <Button label={ui.busy === "Adding…" ? "Adding…" : "Add"} kind="primary" accessibilityLabel="Add the chosen projects to the mission" accessibilityState={{ disabled: busy || ui.addChosen.length === 0, busy }} disabled={busy || ui.addChosen.length === 0} onPress={() => on.addRepos(ui.addChosen)} styles={styles} textStyle={BUTTON_TEXT} />
+      </View>
+    </View>
+  );
+}
+
 /** The charter card; `full` is the wide page's (non-goals, criteria, "+ Add"). */
 function CharterCard({ page, ui, addable, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "ui" | "addable" | "compact" | "on" | "styles" | "theme">) {
   const { charter } = page;
@@ -551,7 +624,7 @@ function CharterCard({ page, ui, addable, compact, on, styles, theme }: Pick<Mis
         <MissionChip key={repo.workspaceId} text={repo.name} onPress={() => on.memory(repo.workspaceId)} a11y={`${repo.name}. Open its project memory`} theme={theme} />
       ))}
       {compact || !page.open ? null : (
-        <Button label="+ Add" kind="secondary" accessibilityLabel="Add a repository to the mission" accessibilityState={{ expanded: ui.adding }} onPress={() => on.ui({ adding: !ui.adding })} styles={styles} style={{ paddingVertical: 3, paddingHorizontal: 8 }} textStyle={BUTTON_TEXT} />
+        <MissionChip text="+ Add" tone="info" expanded={ui.adding} onPress={() => on.ui({ adding: !ui.adding, addChosen: [], addFilter: "" })} a11y="Add a repository to the mission" theme={theme} />
       )}
     </View>
   );
@@ -574,14 +647,7 @@ function CharterCard({ page, ui, addable, compact, on, styles, theme }: Pick<Mis
       <View>
         <Small tone="muted" theme={theme}>Repositories</Small>
         {repos}
-        {!ui.adding ? null : (
-          <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 6 }}>
-            {addable.length === 0 ? <Small tone="muted" theme={theme}>Every listed project is in this mission already.</Small> : null}
-            {addable.map((project) => (
-              <MissionChip key={project.id} text={`+ ${project.name}`} muted onPress={() => on.addRepo(project.id)} a11y={`Add ${project.name} to the mission`} theme={theme} />
-            ))}
-          </View>
-        )}
+        {!ui.adding ? null : <AddPanel addable={addable} ui={ui} on={on} styles={styles} theme={theme} />}
       </View>
       {charter.nonGoals === null ? null : (
         <View>
@@ -703,6 +769,168 @@ function WorkersCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyP
   );
 }
 
+const REPO_COLUMNS = [1.2, 2.5, 1.6, 1.2, 1.7] as const;
+/** The small Revoke and Answer buttons of a table cell. */
+const CELL_BUTTON: ViewStyle = { paddingVertical: 3, paddingHorizontal: 8 };
+
+/**
+ * The Repositories card (delivery line design §4.9, artboards I and J): each
+ * repo's mission branch and its state, its merge request and CI (no CI while
+ * `integration.ci` is off, ADR-036), and push and merge request with Revoke (confirmed in place) or Answer (the Inbox).
+ */
+function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "ui" | "compact" | "on" | "styles" | "theme">) {
+  const repositories = page.repositories;
+  if (repositories === null) return null;
+  const { colors } = theme;
+  const pending = ui.confirm?.kind === "revoke" ? ui.confirm.repo : null;
+  const ask = (repo: string) => on.ui({ confirm: { kind: "revoke", repo }, menu: false, rename: null });
+  const confirmOf = (row: (typeof repositories.rows)[number]) =>
+    pending !== row.workspaceId || on.revoke === undefined ? null : (
+      <View key="confirm" style={{ paddingVertical: 8 }}>
+        <ConfirmBlock dialog={revokeIntegrationDialog(page.code, row)} busy={ui.busy !== null} busyLabel="Revoking…" onConfirm={() => on.revoke!(row.workspaceId)} onCancel={() => on.ui({ confirm: null })} styles={styles} theme={theme} />
+      </View>
+    );
+  const canRevoke = (row: (typeof repositories.rows)[number]) => row.push.action === "revoke" && on.revoke !== undefined && page.open;
+  const canAnswer = (row: (typeof repositories.rows)[number]) => row.push.action === "answer" && on.openInbox !== undefined;
+  const canAsk = (row: (typeof repositories.rows)[number]) => row.push.action === "ask" && on.askAgain !== undefined && page.open;
+  const mrLink = (row: (typeof repositories.rows)[number], label: string) =>
+    row.mr === null ? null : (
+      <Text accessibilityRole="link" accessibilityLabel={`Open merge request ${row.mr.short} of ${row.name}`} onPress={() => void Linking.openURL(row.mr!.url)} style={{ color: toneColor(theme, row.mr.tone) }}>
+        {label}
+      </Text>
+    );
+  if (compact) {
+    return (
+      <Card styles={styles} theme={theme}>
+        <Text style={styles.sectionLabel}>Repositories</Text>
+        {repositories.rows.map((row, index) => (
+          <View key={row.workspaceId} style={{ gap: 6, marginTop: index === 0 ? 0 : 6 }}>
+            <Text style={{ fontSize: 12, color: colors.foreground }}>
+              <Text style={{ fontWeight: "700" }}>{row.name}</Text>
+              {` · ${row.counts}`}
+              {row.dirty === null ? null : (
+                <>
+                  {" · "}
+                  <Text style={{ color: toneColor(theme, row.dirty.tone) }}>{row.dirty.text}</Text>
+                </>
+              )}
+            </Text>
+            {/* Artboard J: the branch line carries the merge request and CI; a repo with neither leaves it out. */}
+            {row.mr === null && row.ci === null ? null : (
+              <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>
+                <Text style={{ fontFamily: MONO }}>{row.shortBranch}</Text>
+                {` → ${row.target}`}
+                {row.mr === null ? null : (
+                  <>
+                    {" · "}
+                    {mrLink(row, row.mr.short)}
+                  </>
+                )}
+                {row.ci === null ? null : (
+                  <>
+                    {" · "}
+                    <Text style={{ color: toneColor(theme, row.ci.tone) }}>{row.ci.text}</Text>
+                  </>
+                )}
+              </Text>
+            )}
+            {row.push.phone === null ? null : (
+              <Text style={{ fontSize: 12, color: colors.foreground }}>
+                <Text style={{ color: toneColor(theme, row.push.tone) }}>{row.push.phone}</Text>
+                {canRevoke(row) ? (
+                  <>
+                    {" · "}
+                    <Text accessibilityRole="button" accessibilityLabel={`Revoke push and merge request for ${row.name}`} onPress={() => ask(row.workspaceId)} style={{ color: toneColor(theme, "info") }}>
+                      Revoke
+                    </Text>
+                  </>
+                ) : canAnswer(row) ? (
+                  <>
+                    {" · "}
+                    <Text accessibilityRole="button" accessibilityLabel={`Answer push and merge request for ${row.name} in the Inbox`} onPress={on.openInbox} style={{ color: toneColor(theme, "info") }}>
+                      Answer
+                    </Text>
+                  </>
+                ) : canAsk(row) ? (
+                  <>
+                    {" · "}
+                    <Text accessibilityRole="button" accessibilityLabel={`Ask me again about push and merge request for ${row.name}`} onPress={ui.busy !== null ? undefined : () => on.askAgain!(row.workspaceId)} style={{ color: toneColor(theme, "info") }}>
+                      Ask me again
+                    </Text>
+                  </>
+                ) : null}
+              </Text>
+            )}
+            {confirmOf(row)}
+          </View>
+        ))}
+      </Card>
+    );
+  }
+  return (
+    <Card styles={styles} theme={theme}>
+      <View style={SPREAD_ROW}>
+        <Text style={styles.sectionLabel}>Repositories</Text>
+        <Small tone="muted" theme={theme}>{repositories.meta}</Small>
+      </View>
+      <View>
+        <TableRow header cells={["Repository", "Branch → integration", "State", repositories.mrHeader, "Push & merge request"]} flex={REPO_COLUMNS} theme={theme} />
+        {repositories.rows.map((row) => (
+          <View key={row.workspaceId}>
+            <TableRow
+              flex={REPO_COLUMNS}
+              theme={theme}
+              cells={[
+                row.name,
+                <Text key="branch" style={{ fontSize: 13, color: colors.foreground }}>
+                  <Text style={{ fontFamily: MONO, fontSize: 12 }}>{row.branch}</Text>
+                  {" → "}
+                  <Text style={{ fontFamily: MONO, fontSize: 12 }}>{row.target}</Text>
+                </Text>,
+                <View key="state">
+                  <Text style={{ fontSize: 13, color: colors.foreground }}>
+                    {row.counts}
+                    {row.dirty === null ? null : (
+                      <>
+                        {" · "}
+                        <Text style={{ color: toneColor(theme, row.dirty.tone) }}>{row.dirty.text}</Text>
+                      </>
+                    )}
+                  </Text>
+                  {row.lastCommit === null ? null : <Small tone="muted" theme={theme}>{row.lastCommit}</Small>}
+                </View>,
+                <Text key="mr" style={{ fontSize: 13, color: colors.foregroundMuted }}>
+                  {row.mr === null ? "no merge request yet" : mrLink(row, row.mr.text)}
+                  {row.ci === null ? null : (
+                    <>
+                      {" · "}
+                      <Text style={{ color: toneColor(theme, row.ci.tone) }}>{row.ci.text}</Text>
+                    </>
+                  )}
+                </Text>,
+                <View key="push" style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                  <Small tone={row.push.tone} theme={theme} style={row.push.action === "answer" ? { fontSize: 13 } : undefined}>{row.push.text}</Small>
+                  {canRevoke(row) ? (
+                    <Button label="Revoke" kind="secondary" accessibilityLabel={`Revoke push and merge request for ${row.name}`} disabled={ui.busy !== null} onPress={() => ask(row.workspaceId)} styles={styles} style={CELL_BUTTON} textStyle={BUTTON_TEXT} />
+                  ) : canAnswer(row) ? (
+                    <Button label="Answer" kind="secondary" accessibilityLabel={`Answer push and merge request for ${row.name} in the Inbox`} onPress={() => on.openInbox?.()} styles={styles} style={CELL_BUTTON} textStyle={BUTTON_TEXT} />
+                  ) : canAsk(row) ? (
+                    <Button label="Ask me again" kind="secondary" accessibilityLabel={`Ask me again about push and merge request for ${row.name}`} disabled={ui.busy !== null} onPress={() => on.askAgain!(row.workspaceId)} styles={styles} style={CELL_BUTTON} textStyle={BUTTON_TEXT} />
+                  ) : null}
+                </View>,
+              ]}
+            />
+            {confirmOf(row)}
+          </View>
+        ))}
+      </View>
+      <Small tone="muted" theme={theme}>
+        ↑ commits on the mission branch not yet in the integration branch · ↓ commits of the integration branch not yet merged into it. Merging stays on GitLab. A worktree is removed only by you, when the mission closes.
+      </Small>
+    </Card>
+  );
+}
+
 const MAIN_COLUMNS = [1.6, 0.7, 0.7, 2.6, 0.6] as const;
 
 function MainMark({ short, theme, muted = false }: { short: string; theme: Theme; muted?: boolean }) {
@@ -812,11 +1040,15 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
         <Text style={styles.sectionLabel}>In flight</Text>
         {flight.requests.length === 0 ? <Small tone="muted" theme={theme}>Nothing in flight.</Small> : null}
         {active.map((request) => (
-          <Text key={request.requestId} style={{ fontSize: 12, color: colors.foreground }}>
-            <Text style={{ fontWeight: "700" }}>{request.topic}</Text>
-            {" · "}
-            <Text style={{ color: toneColor(theme, request.state.tone) }}>{request.phoneState}</Text>
-          </Text>
+          <View key={request.requestId}>
+            <Text style={{ fontSize: 12, color: colors.foreground }}>
+              <Text style={{ fontWeight: "700" }}>{request.topic}</Text>
+              {" · "}
+              <Text style={{ color: toneColor(theme, request.state.tone) }}>{request.phoneState}</Text>
+            </Text>
+            {/* Delivery line design §2.7 (artboard J): the request it continues. */}
+            {request.phoneChain === null ? null : <Small tone="muted" theme={theme}>{request.phoneChain}</Small>}
+          </View>
         ))}
         {flight.restLine === null ? null : <Small tone="muted" theme={theme}>{flight.restLine}</Small>}
         {yours.map((question) => (
@@ -854,14 +1086,38 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
               flex={FLIGHT_COLUMNS}
               theme={theme}
               cells={[
-                <Text key="request" style={{ fontSize: 13, color: request.active ? colors.foreground : colors.foregroundMuted }}>
-                  <Text style={{ fontFamily: MONO, fontSize: 12 }}>{request.request}</Text>
-                  {` ${request.topic}`}
-                </Text>,
+                <View key="request">
+                  <Text style={{ fontSize: 13, color: request.active ? colors.foreground : colors.foregroundMuted }}>
+                    <Text style={{ fontFamily: MONO, fontSize: 12 }}>{request.request}</Text>
+                    {` ${request.topic}`}
+                  </Text>
+                  {/* Delivery line design §2.7 (artboard I): the request it continues, and its place in the chain. */}
+                  {request.chain === null ? null : (
+                    <Small tone="muted" theme={theme}>
+                      {"continues "}
+                      <Text style={{ fontFamily: MONO }}>{request.chain.request}</Text>
+                      {request.chain.position === null ? null : ` · ${request.chain.position}`}
+                    </Small>
+                  )}
+                </View>,
                 text(request.repo, !request.active),
                 <WorkerCell key="worker" worker={request.worker} workerId={request.workerId} openAgent={on.openAgent} theme={theme} />,
-                <Text key="state" style={{ fontSize: 13, color: toneColor(theme, request.state.tone) }}>{request.state.text}</Text>,
-                <Small key="report" tone="muted" theme={theme}>{request.lastReport}</Small>,
+                <Text key="state" style={{ fontSize: 13, color: toneColor(theme, request.state.tone) }}>
+                  {request.state.text}
+                  {request.next === null ? null : <Text style={{ color: colors.foregroundMuted }}>{` ${request.next}`}</Text>}
+                </Text>,
+                <Small key="report" tone="muted" theme={theme}>
+                  {/* Delivery line design §4.6 (artboard I): the commit in mono. */}
+                  {request.commit === null ? (
+                    request.lastReport
+                  ) : (
+                    <>
+                      {request.lastReport.slice(0, request.lastReport.indexOf(request.commit))}
+                      <Text style={{ fontFamily: MONO }}>{request.commit}</Text>
+                      {request.lastReport.slice(request.lastReport.indexOf(request.commit) + request.commit.length)}
+                    </>
+                  )}
+                </Small>,
               ]}
             />
           ))}
@@ -995,6 +1251,7 @@ export function MissionPageBody(props: MissionPageBodyProps) {
         <PageForms {...props} />
         <MainsCard {...props} />
         <Grid gap={10}>{stats}</Grid>
+        <RepositoriesCard {...props} />
         <InFlightCard {...props} />
         <CharterCard {...props} />
         <Card styles={styles} theme={theme}>
@@ -1025,6 +1282,7 @@ export function MissionPageBody(props: MissionPageBodyProps) {
         {[<CharterCard key="charter" {...props} />, <LevelCard key="level" {...props} />]}
       </Grid>
       <WorkersCard {...props} />
+      <RepositoriesCard {...props} />
       <InFlightCard {...props} />
       <Grid gap={12}>
         {[<ContractsCard key="contracts" {...props} />, <JournalCard key="journal" {...props} />]}
@@ -1043,6 +1301,9 @@ export interface NewMissionFormProps {
   /** Shown once the owner pressed Create. */
   errors: readonly string[];
   projects: readonly MissionProject[];
+  /** "Find a project…" as typed. */
+  filter: string;
+  onFilter: (filter: string) => void;
   /** Level 3 or 4 chosen and waiting for its confirmation: Create waits for it too. */
   confirming: MissionLevel | null;
   busy: boolean;
@@ -1058,8 +1319,9 @@ export interface NewMissionFormProps {
   theme: Theme;
 }
 
-export function NewMissionForm({ draft, errors, projects, confirming, busy, error, onDraft, onLevel, onConfirmLevel, onCancelLevel, onCancel, onCreate, compact, styles, theme }: NewMissionFormProps) {
+export function NewMissionForm({ draft, errors, projects, filter, onFilter, confirming, busy, error, onDraft, onLevel, onConfirmLevel, onCancelLevel, onCancel, onCreate, compact, styles, theme }: NewMissionFormProps) {
   const { colors } = theme;
+  const picker = projectPickerOf({ projects, chosen: draft.repos, filter, compact, empty: "No project is listed yet." });
   return (
     <View style={{ gap: compact ? 8 : 12 }}>
       <Text accessibilityRole="header" style={{ fontSize: compact ? 18 : 20, fontWeight: "600", color: colors.foreground }}>
@@ -1070,19 +1332,16 @@ export function NewMissionForm({ draft, errors, projects, confirming, busy, erro
         <Field label="Short code" value={draft.code} onChange={(code) => onDraft({ ...draft, code: codeAsTyped(code) })} a11y="Short code" mono editable={!busy} theme={theme} style={{ flex: 1 }} />
       </View>
       <Field label="Goal (the Main can draft the rest of the charter with you)" value={draft.goal} onChange={(goal) => onDraft({ ...draft, goal })} a11y="Goal" multiline editable={!busy} theme={theme} />
+      {/* The projects (`mission-projects.html`, artboards L and M): one row per Paseo project, named as its sidebar names it. */}
       <View>
-        <Small tone="muted" theme={theme}>Repositories</Small>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
-          {projects.length === 0 ? <Small tone="muted" theme={theme}>No project is listed yet.</Small> : null}
-          {projects.map((project) => {
-            const on = draft.repos.includes(project.id);
-            return (
-              <Pressable key={project.id} accessibilityRole="checkbox" accessibilityLabel={project.name} accessibilityState={{ checked: on }} disabled={busy} onPress={() => onDraft(toggleRepo(draft, project.id))}>
-                <MissionChip text={project.name} mark={on ? "info" : null} muted={!on} theme={theme} />
-              </Pressable>
-            );
-          })}
+        <View style={SPREAD_ROW}>
+          <Small tone="muted" theme={theme}>{picker.header}</Small>
+          <Small tone="info" theme={theme}>{picker.chosen}</Small>
         </View>
+        {picker.filterShown ? <ProjectFilter value={filter} onChange={onFilter} editable={!busy} theme={theme} style={{ marginVertical: 6 }} /> : <View style={{ height: 6 }} />}
+        <ProjectRows view={picker} onToggle={(id) => onDraft(toggleRepo(draft, id))} disabled={busy} theme={theme} />
+        {picker.more === null ? null : <Small tone="muted" theme={theme} style={{ marginTop: 4 }}>{picker.more}</Small>}
+        <Small tone="muted" theme={theme} style={{ marginTop: compact ? 4 : 6 }}>{PROJECTS_FOOTNOTE}</Small>
       </View>
       <View style={{ gap: 4 }}>
         <Small tone="muted" theme={theme}>Mission level</Small>
@@ -1189,14 +1448,18 @@ interface NewForm {
   confirming: MissionLevel | null;
   creating: boolean;
   error: string | null;
+  /** "Find a project…" as typed. */
+  filter: string;
 }
 
 /** How New mission opens, again after Cancel and after a mission is made. */
-const NEW_FORM_IDLE: NewForm = { draft: EMPTY_MISSION_DRAFT, tried: false, confirming: null, creating: false, error: null };
+const NEW_FORM_IDLE: NewForm = { draft: EMPTY_MISSION_DRAFT, tried: false, confirming: null, creating: false, error: null, filter: "" };
 
 export interface MissionsScreenProps extends PluginSurfaceProps {
-  /** The listed projects (plugin homes left out), for New mission and "+ Add". */
+  /** The listed projects (`missionProjectsOf`: one per Paseo project, plugin homes left out), for New mission and "+ Add". */
   projects: readonly MissionProject[];
+  /** Every listed workspace's project and its name, which names a mission's repositories. */
+  repoIndex?: ProjectIndex;
   /** The surface's status strip. */
   status?: ReactNode;
   /** Opens the Inbox, where the In flight card's "Answer" leads (mission runtime design §7). */
@@ -1204,7 +1467,7 @@ export interface MissionsScreenProps extends PluginSurfaceProps {
 }
 
 /** The Missions section: the list, a mission's page, New mission, a project's memory. */
-export function MissionsScreen({ theme, layout, navigation, projects, status, onOpenInbox }: MissionsScreenProps) {
+export function MissionsScreen({ theme, layout, navigation, projects, repoIndex, status, onOpenInbox }: MissionsScreenProps) {
   const compact = layout.compact;
   const styles = useMemo(() => dashboardStyles(theme, compact), [theme, compact]);
   const queryClient = useQueryClient();
@@ -1214,7 +1477,10 @@ export function MissionsScreen({ theme, layout, navigation, projects, status, on
   const ensureMission = useRpc(missionEnsureRpc);
   const createMission = useRpc(missionsCreateRpc);
   const setMissionLevel = useRpc(autonomySetMissionLevelRpc);
+  const revokeIntegration = useRpc(missionIntegrationRevokeRpc);
+  const askIntegration = useRpc(missionIntegrationAskRpc);
   const openAgent = navigation?.openAgent;
+  const paseo = usePaseo();
 
   const [place, setPlace] = useState<Place>({ view: "list" });
   const [closedShown, setClosedShown] = useState(false);
@@ -1235,7 +1501,14 @@ export function MissionsScreen({ theme, layout, navigation, projects, status, on
   const missionId = place.view === "page" ? place.missionId : "";
   const page = useQuery({ queryKey: MISSIONS_QUERY_KEYS.page(missionId), queryFn: () => getMission({ missionId }), ...pollWhile(place.view === "page") });
 
-  const nameOf: NameOf = (id) => projects.find((project) => project.id === id)?.name ?? null;
+  // A repository by its project's name, as Paseo's sidebar names it (`mission-projects.html`).
+  const nameOf: NameOf = (id) => repoIndex?.get(id)?.name ?? projects.find((project) => project.id === id)?.name ?? null;
+  /** The chosen projects' workspace ids: a project with no workspace at its folder gets one opened there. */
+  const workspacesOf = async (ids: readonly string[]): Promise<string[]> => {
+    const opened = await workspaceIdsOf(ids, projects, (cwd) => paseo.workspaces.open({ cwd }));
+    if (opened.some((id, index) => id !== ids[index])) void queryClient.invalidateQueries({ queryKey: ["paseo-bm", "launcher", "workspaces"] });
+    return opened;
+  };
   const now = new Date();
   const openPage = (id: string, start: Partial<PageUi> = {}) => {
     setUi({ ...PAGE_UI_IDLE, ...start });
@@ -1277,7 +1550,7 @@ export function MissionsScreen({ theme, layout, navigation, projects, status, on
       setForm({ ...form, tried: true, creating: true, error: null });
       void (async () => {
         try {
-          const created = await createMission(createInputOf(draft));
+          const created = await createMission({ ...createInputOf(draft), repos: await workspacesOf(draft.repos) });
           const id = created.missionId;
           if (id === null) throw new Error("the server made no mission of this name and code");
           const notices: string[] = [created.toolsNotice, created.setupNotice].filter((line): line is string => typeof line === "string" && line !== "");
@@ -1303,6 +1576,8 @@ export function MissionsScreen({ theme, layout, navigation, projects, status, on
         draft={draft}
         errors={form.tried ? errors : []}
         projects={projects}
+        filter={form.filter}
+        onFilter={(filter) => setForm({ ...form, filter })}
         confirming={form.confirming}
         busy={form.creating}
         error={form.error}
@@ -1351,7 +1626,7 @@ export function MissionsScreen({ theme, layout, navigation, projects, status, on
         <MissionPageBody
           page={view}
           ui={ui}
-          addable={addableReposOf(projects, view.charter.repos)}
+          addable={addableReposOf(projects, view.charter.repos, (id) => repoIndex?.get(id)?.projectId ?? null)}
           compact={compact}
           status={status}
           styles={styles}
@@ -1367,7 +1642,8 @@ export function MissionsScreen({ theme, layout, navigation, projects, status, on
               else run("Saving…", "Could not rename the mission", change(input), { rename: null });
             },
             close: () => run("Closing…", "Could not close the mission", change({ missionId: view.missionId, close: true }), { confirm: null }),
-            addRepo: (workspaceId) => run("Adding…", "Could not add the repository", change({ missionId: view.missionId, addRepos: [workspaceId] }), { adding: false }),
+            addRepos: (ids) =>
+              run("Adding…", "Could not add the repository", async () => changeMission({ missionId: view.missionId, addRepos: await workspacesOf(ids) }), { adding: false, addChosen: [], addFilter: "" }),
             level: (level) => {
               if (level === view.level.level) return;
               if (levelNeedsConfirmation(level)) patch({ confirm: { kind: "level", level }, rename: null });
@@ -1378,6 +1654,8 @@ export function MissionsScreen({ theme, layout, navigation, projects, status, on
               if (pending !== null) run("Saving…", "Could not set the mission level", () => setMissionLevel({ missionId: view.missionId, level: pending, confirmed: true }), { confirm: null });
             },
             memory: (workspaceId) => setPlace({ view: "memory", workspaceId, repos: view.charter.repos, back: { view: "page", missionId: view.missionId, code: view.code } }),
+            revoke: (repo) => run("Revoking…", "Could not revoke push and merge request", () => revokeIntegration({ missionId: view.missionId, repo }), { confirm: null }),
+            askAgain: (repo) => run("Asking…", "Could not ask again", () => askIntegration({ missionId: view.missionId, repo })),
             ...(openAgent === undefined ? {} : { openAgent: (agentId: string) => openAgent({ agentId }) }),
             ...(onOpenInbox === undefined ? {} : { openInbox: onOpenInbox }),
           }}

@@ -5,11 +5,11 @@
  *
  * | Tool | Caller | Does |
  * |---|---|---|
- * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; `finished` is refused while a review call of the request has no verdict delivered (`batchesAwaitingVerdict`); `finished` expires the request's unsettled questions; `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; the registry's `tier` and `finishedAt`, and a mission request's roster state (`noteRosterReport`), follow it |
+ * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; any report on a finished bound request is refused, naming its continuation (delivery line design §2.3); `finished` is refused while a review call of the request has no verdict delivered (`batchesAwaitingVerdict`); `finished` expires the request's unsettled questions; `finished` with `remaining` after a `BM-ROLLOVER` opens a size continuation before the report goes, and at the `now` figure leaves its questions open and moves its live links to it (delivery line design §2.6); `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; a placement's `finished` that changed files is refused without its `integration` commit, and its delivery gains the line of what read-only git confirmed (`line-state.ts`, delivery line design §4.4, §4.6); the registry's `tier` and `finishedAt`, and a mission request's roster state (`noteRosterReport`), follow it |
  * | `bm_questions` | bound Worker | opens each question through the materialiser's shared open path (`openQuestions`), numbered after the request's highest `Qn` |
  * | `bm_review` | bound Reviewer | builds and checks the `BM-REVIEW`, stores a `review` record for its batch, delivers it to its Worker |
  * | `bm_answers` | bound Manager | checks each `Qn` is an open question of a request of its own and proposes the answers for its current turn (`proposed-answers.ts`); the materialiser settles them at the turn's end only with the owner's own message in it |
- * | `bm_tell_worker` | bound Manager | stores a `message` record in the request's repo (the request index's, missions design §4) and delivers `Continue <requestId>.`, the owner's words and their source to the request's sole live Worker; with `peerLink` the request takes that open link (a bound Worker only) and the message carries its `peer:` block and rules |
+ * | `bm_tell_worker` | bound Manager | stores a `message` record in the request's repo (the request index's, missions design §4) and delivers `Continue <requestId>.`, the owner's words and their source to the request's sole live Worker — the head of its chain's (`chainHeadOf`); with `peerLink` the request takes that open link (a bound Worker only) and the message carries its `peer:` block and rules. A finished or stopped bound request gets its continuation instead (`openContinuation`, delivery line design §2.4) |
  *
  * **Peer links** (design §7.17.3): `finished` of a request that carries a
  * `taken` or `answered` link needs `forPeer`; `waitingOnPeers` (blocked only)
@@ -22,6 +22,20 @@
  * link the request asked that is still `open` (no request took it).
  * A `stopped` report sent in the first turn after a Paseo cut carries
  * `CUT_NOTE_LINE` (§7.17.8 g).
+ *
+ * **Structured waits** (delivery line design §6.2, §6.3, `waits.ts`):
+ * `waitingOnRequests` names requests paseo-bm knows and `waitingOnBatches`
+ * batches whose verdict is owed; in the `before` step `blocked` sets the
+ * registry's `waiting` (a `req-…` id of `waitingFor` promoted) and any other
+ * report clears it; `finished` or `stopped` settles the waits on the request
+ * and on the requests it continues, and a reply on a carried link the
+ * asker's wait on that link. The wake gate (delivery line design §6.4,
+ * `wake-gate.ts`): a wait the ended request meets is released after the
+ * report, its fact first (`releaseSettledWaits`); what is held for the
+ * reporting Worker is released when its report left no wait unmet
+ * (`releaseHeldOf`). A `bm_tell_worker` the gate holds answers
+ * `delivery: "held"` and names what the Worker waits on (`heldTellText`);
+ * with `now: true` it passes the gate.
  *
  * An unbound caller never reaches `bm_report`, `bm_review` or `bm_answers`
  * here: the endpoint answers it with the pure builders (`agent-tools.ts`).
@@ -38,17 +52,18 @@
  *
  * Nothing here throws into the endpoint: a failure is one refusal line.
  */
-import { PENDING_TTL_MS, createBindingStore, liveBindingOf, type ToolCaller } from "./agent-bindings";
+import { PENDING_TTL_MS, createBindingStore, liveBindingOf, type AgentBinder, type ToolCaller } from "./agent-bindings";
+import { endedPhaseOf, openContinuation, rolloverTextOf } from "./continuation";
 import { openLinkOf, unboundPeerReason } from "./create-worker";
 import { CUT_NOTE_LINE, followsPaseoCut } from "./interruption-watch";
-import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
+import { LIVE_PAGE_LIMIT, readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { noteFollowUp, noteRosterReport, requestIndexOf } from "./mission-roster";
 import { createMissionStore } from "./mission-store";
 import { createPeerLinkStore, type PeerLink } from "./peer-links";
 import { peerBriefOf, peerReplyText, titleIn } from "./peer-tools";
-import { answersKindOf, soleWorkerOfRequest } from "./decision-delivery";
-import { expireQuestionsOf, openQuestions, type OpenContext, type OpenableQuestion } from "./decision-materialiser";
-import { createDecisionStore, type DecisionStore } from "./decision-store";
+import { answersKindOf, soleWorkerOfRequest, verdictTargetOf } from "./decision-delivery";
+import { expireQuestionsOf, highestQuestionOf, openQuestions, type OpenContext, type OpenableQuestion } from "./decision-materialiser";
+import { createDecisionStore } from "./decision-store";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import type { NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
@@ -56,23 +71,37 @@ import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
 import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
-import { createRequestRegistry, isEmptyCreateCall, newestCallOf, type RegisteredRequest, type ReviewCall } from "./request-registry";
+import { createRequestRegistry, finishedRequestRefusal, isBoundRequest, isEmptyCreateCall, newestCallOf, noteReviewResult, type RegisteredRequest, type ReviewCall } from "./request-registry";
 import { reasonOf } from "./role-choices";
 import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type DeliveryState } from "./tool-kit";
+import { chainHeadOf, locateRequest, settleLinkWait, settleRequestWaits, waitingForReport, type SettledWait } from "./waits";
+import { gatedWaitOf, heldTellText, releaseHeldOf, releaseSettledWaits } from "./wake-gate";
+import { openIntegrationCardIfNeeded } from "./integration-grant";
+import { committedOf, finishedLineOf, liveChecksOf, verifiedOf, type TimelineEntries } from "./line-state";
+import { integrationCiOf } from "./coordination-store";
+import { placementEntryOf, placementOfWorkspace } from "./placements";
+import type { GitRunner } from "./repo-tool";
+import type { ReportCiState } from "../shared/contracts";
 import { timeOrZero } from "../shared/time";
 import {
   BOUND_ANSWERS_TOOL,
   BOUND_REPORT_TOOL,
   BOUND_REVIEW_TOOL,
+  DELIVERING_LIMITS,
   QUESTIONS_FACE,
   TELL_WORKER_FACE,
+  actHeaderOf,
   boundReportTool,
   questionsRules,
   schemaIssues,
   type AgentTool,
+  type MessageRefs,
   type QuestionsInput,
 } from "../shared/bm-tools";
-import { decisionKindOf, isAnswerable, ownerOnlyRefusalText, questionDecisionId, type Decision } from "../shared/decisions";
+import { refsRefusals } from "./message-refs";
+import { isAnswerable, ownerOnlyRefusalText, questionDecisionId, type Decision } from "../shared/decisions";
+import { reportSummaryOf, type WakeOn } from "../shared/waits";
+import { parseReports } from "../shared/bm-report";
 
 const QUESTIONS_TOOL = QUESTIONS_FACE.name;
 const TELL_WORKER_TOOL = TELL_WORKER_FACE.name;
@@ -105,12 +134,16 @@ export interface DeliveringToolDeps {
   turnStartOf?: (agentId: string) => string | null;
   /** The request's sole live Worker; `soleWorkerOfRequest` by default. */
   workerOf?: (input: { workspaceId: string; requestId: string; home: string }, paseo: DashboardPaseo) => Promise<string | null>;
+  /** The binder of the endpoint, for a continuation's new Worker (delivery line design §2.4); unbound Workers when absent. */
+  binder?: () => AgentBinder;
   /**
    * Stops a Worker's running Reviewers when it reports `stopped` (design §7.9):
    * the Worker no longer cancels them itself, and a stop typed in its chat
    * reaches no Stop-button hook. `stopRunningReviewers` by default.
    */
   stopReviewers?: (paseo: unknown, workerId: string, workspaceId: string) => Promise<unknown>;
+  /** How the placement's read-only git runs (delivery line design §4.5); `runGit` by default. */
+  git?: GitRunner;
 }
 
 export interface DeliveringTools {
@@ -212,6 +245,17 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     return items;
   };
 
+  /** The newest pages of an agent's live timeline, newest first (`liveChecksOf`); none when it cannot be read. */
+  const timelinePagesOf = async (paseo: unknown, agentId: string): Promise<TimelineEntries[]> => {
+    const pages: TimelineEntries[] = [];
+    try {
+      await readTimelinePages(paseo as LiveTimelinePaseo, agentId, { pages: 3, limit: LIVE_PAGE_LIMIT }, (entries) => pages.push(entries));
+    } catch {
+      // None: the checks read as not detected.
+    }
+    return pages;
+  };
+
   /** One `pending` `peer-reply` in the answering side's outbox, noted on its link (§7.17.4); a `finished` one answers the link once delivered. */
   const storeReply = (
     link: PeerLink,
@@ -246,22 +290,44 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     if (worker.parentId === null) return refused("paseo-bm does not know the Manager that created you, so it cannot deliver your report; tell the owner in one line and stop. Nothing was stored or sent.");
-    const { phase, tier, waitingOn, waitingOnPeers = [], forPeer } = withoutNulls(input) as {
+    const managerId = worker.parentId;
+    const { phase, tier, waitingOn, waitingOnPeers = [], waitingOnRequests = [], waitingOnBatches = [], waitingFor, wakeOn, forPeer, buildAndTests, filesChanged, blockers, remaining = [], integration } = withoutNulls(input) as {
       phase: string;
       tier: { level: "Small" | "Medium" | "Large" };
       waitingOn?: string[];
       waitingOnPeers?: string[];
+      waitingOnRequests?: string[];
+      waitingOnBatches?: string[];
+      waitingFor?: string;
+      wakeOn?: WakeOn;
       forPeer?: string;
+      buildAndTests?: string;
+      filesChanged?: string[];
+      blockers?: string;
+      remaining?: string[];
+      integration?: { branch: string; commit: string; pushed: boolean; mr?: string; ci?: ReportCiState };
     };
     const requestId = worker.requestId;
+    const registered = createRequestRegistry(home, { log }).get(worker.workspaceId, requestId);
+    // Delivery line design §2.3: a finished bound request is final; its work goes on as its continuation.
+    if (isBoundRequest(registered) && registered.finishedAt !== null) return refused(finishedRequestRefusal(registered));
+    // Delivery line design §2.6: `finished` with `remaining` after a rollover notice is a size finish, and opens the
+    // continuation; at the hard figure (`now`) the request's questions and links carry over to it.
+    const sized = phase === "finished" && remaining.length > 0 && isBoundRequest(registered) ? registered.rolloverAsked : undefined;
+    const carry = sized?.level === "now";
     if (phase === "finished") {
       // A review the request has running ends before `finished` (F3); `stopped` and `blocked` are never held for it.
-      const waiting = batchesAwaitingVerdict(createRequestRegistry(home, { log }).get(worker.workspaceId, requestId), createOutbox(home, { now }).list(worker.workspaceId), now());
+      const waiting = batchesAwaitingVerdict(registered, createOutbox(home, { now }).list(worker.workspaceId), now());
       if (waiting.length > 0) {
         return refused(
           [...waiting.map((batchId) => `a review of batch ${batchId} has no verdict yet: wait for its delivery, then report finished`), "Nothing was stored or sent."].join("\n"),
         );
       }
+    }
+    // Delivery line design §4.4: a placement's request finishes with the commit of the files it changed.
+    const place = phase === "finished" ? placementOfWorkspace(home, worker.workspaceId) : null;
+    if (place !== null && (filesChanged ?? []).length > 0 && integration === undefined) {
+      return fixThese("bm_report", [`input.integration.commit: commit on ${place.branch} and report its sha`]);
     }
     const store = createDecisionStore(home, { log });
     // Only open questions of this request: the owner can still answer them.
@@ -275,12 +341,19 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
         notOpen.map((id) => `input.waitingOn: ${id} is not an open question of ${requestId}; ask it with bm_questions, or leave it out`),
       );
     }
+    // Delivery line design §6.2: a request paseo-bm knows, and a batch of this request whose verdict is still owed.
+    const awaited = waitingOnBatches.length === 0 ? [] : batchesAwaitingVerdict(registered, createOutbox(home, { now }).list(worker.workspaceId), now());
+    const waitIssues = [
+      ...waitingOnRequests.filter((id) => locateRequest(home, id, worker.workspaceId) === null).map((id) => `input.waitingOnRequests: ${id} is not a request paseo-bm knows; name it in waitingFor, or leave it out`),
+      ...waitingOnBatches.filter((id) => !awaited.includes(id)).map((id) => `input.waitingOnBatches: batch ${id} has no review awaiting its verdict; leave it out`),
+    ];
+    if (waitIssues.length > 0) return fixThese("bm_report", waitIssues);
     // The links this request answers (§7.17.3), and the live ones it asked.
     const links = createPeerLinkStore(home, { now });
     const carried = links.linksOfRequest(worker.workspaceId, requestId, "answerer").filter((link) => link.state === "taken" || link.state === "answered");
     const asked = new Set(links.liveLinksFrom(worker.workspaceId, requestId).map((link) => link.linkId));
     const peerIssues = [
-      ...(phase === "finished" && carried.length > 0 && forPeer === undefined
+      ...(phase === "finished" && !carry && carried.length > 0 && forPeer === undefined
         ? [`input.forPeer: request ${requestId} answers link ${carried.map((link) => link.linkId).join(", ")}: write what that project needs to know`]
         : []),
       ...waitingOnPeers.filter((id) => !asked.has(id)).map((id) => `input.waitingOnPeers: ${id} is not a live link your request asked; leave it out`),
@@ -293,24 +366,37 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       if ("ok" in named) return named;
       text = named.text;
     }
+    // Delivery line design §4.6: the Main's delivery says what the plugin confirmed of the commit, from read-only git.
+    if (place !== null && integration !== undefined) {
+      const committed = await committedOf(home, place, integration.commit, deps.git === undefined ? {} : { git: deps.git });
+      // ADR-036 (§17.1): with CI off, verified is a check detected in the Worker's own turns, read live.
+      const ci = integrationCiOf(home);
+      const checks =
+        ci === "off" && committed.committed
+          ? liveChecksOf(await timelinePagesOf(paseo, worker.agentId), worker.agentId, { buildAndTests: buildAndTests ?? null, filesChanged: filesChanged ?? [], beadsClosed: [] }, place.directory ?? null)
+          : null;
+      const verified = verifiedOf({ ci, committed: committed.committed, integration, aheadOfOrigin: committed.line?.aheadOfOrigin ?? null, checks });
+      text = `${text}\n\n${finishedLineOf(committed, place.branch, verified)}`;
+    }
     // §7.17.8 (g): the Manager reads a stop in the first turn after a Paseo cut as no stop of the owner's.
     if (phase === "stopped" && (await followsPaseoCut(worker.agentId, () => recentItemsOf(paseo, worker.agentId)))) text = `${text}\n\n${CUT_NOTE_LINE}`;
     const outbox = createOutbox(home, { now, ...deps.outbox });
     const replies: OutboxRecord[] = [];
+    const settledWaits: SettledWait[] = [];
     const at = now().toISOString();
     const stored = await storeThenDeliver(
       home,
       worker.workspaceId,
       { kind: "report", requestId, from: worker.agentId, to: worker.parentId, text },
       paseo,
-      () => {
+      async (record) => {
         try {
           links.clearWaiting(worker.workspaceId, requestId);
           if (phase === "blocked" && waitingOnPeers.length > 0) links.setWaiting(worker.workspaceId, requestId, waitingOnPeers, at);
         } catch (error) {
           log(`[paseo-bm] could not note the wait of request ${requestId} on its links: ${reasonOf(error)}`);
         }
-        if (phase === "finished") {
+        if (phase === "finished" && !carry) {
           // A finished request asks no more: an ask nobody took yet is withdrawn; a taken one still gets its reply.
           for (const link of links.liveLinksFrom(worker.workspaceId, requestId).filter((entry) => entry.state === "open")) {
             try {
@@ -320,20 +406,40 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
             }
           }
         }
-        if (phase === "finished" || phase === "blocked" || phase === "stopped") {
+        if ((phase === "finished" && !carry) || phase === "blocked" || phase === "stopped") {
           const blockers = text.split("\n").find((entry) => entry.startsWith("blockers: ")) ?? "";
           const body = phase === "finished" ? forPeer! : [blockers, forPeer ?? ""].filter((entry) => entry !== "").join("\n");
-          for (const link of carried) replies.push(...storeReply(link, { workspaceId: worker.workspaceId, requestId, agentId: worker.agentId, phase, body, title: titleIn(listed, worker.workspaceId) }, outbox, links));
+          for (const link of carried) {
+            const reply = storeReply(link, { workspaceId: worker.workspaceId, requestId, agentId: worker.agentId, phase, body, title: titleIn(listed, worker.workspaceId) }, outbox, links);
+            replies.push(...reply);
+            // Delivery line design §6.3: the reply settles the asker's wait on the link.
+            if (reply.length > 0) settleLinkWait(home, link, { kind: "message", side: "answerer", text: body }, at, log);
+          }
         }
         // A finished request no longer waits on its questions (§A.3); a stopped one expires nothing.
-        if (phase === "finished") expireQuestionsOf({ store, workspaceId: worker.workspaceId, log }, requestId, at);
+        if (phase === "finished" && !carry) expireQuestionsOf({ store, workspaceId: worker.workspaceId, log }, requestId, at);
         try {
           createRequestRegistry(home, { log }).noteReport(worker.workspaceId, requestId, { tier: tier.level, phase, at });
         } catch (error) {
           log(`[paseo-bm] could not note the report of request ${requestId} in the registry: ${reasonOf(error)}`);
         }
+        // Delivery line design §6.2: blocked sets the request's structured wait; any other report clears it.
+        try {
+          const wait = phase === "blocked" ? waitingForReport(home, { workspaceId: worker.workspaceId, requestId, recordId: record.id, at }, { waitingOn, waitingOnPeers, waitingOnRequests, waitingOnBatches, waitingFor, wakeOn }, DELIVERING_LIMITS.waitingOnRequests) : null;
+          createRequestRegistry(home, { log }).setWaiting(worker.workspaceId, requestId, wait);
+        } catch (error) {
+          log(`[paseo-bm] could not note the wait of request ${requestId} in the registry: ${reasonOf(error)}`);
+        }
+        // Delivery line design §6.3: an ended request settles the waits on it and on the requests it continues;
+        // a size finish's work goes on, so its waits settle when its chain's head ends.
+        if ((phase === "finished" && sized === undefined) || phase === "stopped") settledWaits.push(...settleRequestWaits(home, worker.workspaceId, requestId, phase, reportSummaryOf(phase, { forPeer, buildAndTests, filesChanged, blockers }), at, log));
         // Missions design §2.3: a mission request's roster state follows its reports.
         noteRosterReport(home, requestId, phase, log, text);
+        // Delivery line design §4.3: a placement's first finished with a commit asks the owner, once, for push and merge request.
+        if (phase === "finished" && integration !== undefined) {
+          const entry = placementEntryOf(home, worker.workspaceId);
+          if (entry !== null) openIntegrationCardIfNeeded(home, entry.missionId, entry.repo, { now: now(), log, requestId });
+        }
         if (phase === "finished" || phase === "stopped") {
           try {
             clearDroppedAlert(home, worker.workspaceId, requestId, null, { now });
@@ -343,16 +449,29 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
           // Design §16.8: an ended request's off-tool Reviewer alerts end with it.
           clearOffToolAlertsOfRequest(home, worker.workspaceId, requestId, { now });
         }
+        // Delivery line design §2.6, §2.7: the size continuation opens before the report goes, so its delivery names it.
+        const prev = sized === undefined ? null : locateRequest(home, requestId, worker.workspaceId);
+        if (sized === undefined || prev === null) return;
+        const final = parseReports(text, { agentId: worker.agentId, at })[0];
+        const opened = await openContinuation(
+          home,
+          prev,
+          { reason: "size", text: await rolloverTextOf(home, prev, remaining, paseo), figure: sized.figure, managerId: prev.request.managerId ?? managerId, ...(final === undefined ? {} : { report: final }) },
+          { paseo, ...(deps.binder === undefined ? {} : { binder: deps.binder() }), log, now },
+        );
+        if ("ok" in opened) log(`[paseo-bm] could not open the size continuation of request ${requestId}: ${opened.text}`);
+        else if (carry) links.moveRequest(worker.workspaceId, requestId, opened);
       },
     );
     if ("ok" in stored) return stored;
-    if (replies.length > 0) {
-      // After the report, in order; not awaited: deliverRecord never rejects.
-      const delivery = outboxDepsOf(home, { ...deps, now, log }, paseo);
-      void (async () => {
-        for (const reply of replies) await deliverRecord(worker.workspaceId, reply, delivery);
-      })();
-    }
+    // After the report, in order; not awaited: none of these rejects.
+    const delivery = outboxDepsOf(home, { ...deps, now, log }, paseo);
+    void (async () => {
+      for (const reply of replies) await deliverRecord(worker.workspaceId, reply, delivery);
+      // Delivery line design §6.4: a wait the ended request met wakes its Worker, the fact first; this Worker's held items go once it waits on nothing unmet.
+      await releaseSettledWaits(home, settledWaits, delivery);
+      await releaseHeldOf({ workspaceId: worker.workspaceId, requestId, workerId: worker.agentId }, delivery);
+    })();
     if (phase === "stopped") {
       // Not awaited: the report is answered at once; a failure costs one log line.
       const stop = deps.stopReviewers ?? ((handle, workerId, workspaceId) => stopRunningReviewers(handle as StopPaseo, workerId, workspaceId));
@@ -364,13 +483,6 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
   // -------------------------------------------------------------------------
   // bm_questions (bound Worker).
   // -------------------------------------------------------------------------
-
-  /** The highest `Qn` the request's questions use; 0 for none. */
-  const highestQuestion = (store: DecisionStore, workspaceId: string, requestId: string): number =>
-    store
-      .list({ workspaceId, requestId })
-      .filter((decision) => decisionKindOf(decision.id) === "question")
-      .reduce((highest, decision) => Math.max(highest, Number(decision.id.slice(decision.id.lastIndexOf(":Q") + 2)) || 0), 0);
 
   const answerTextOf = (decision: Decision): string | undefined => {
     const answer = decision.answer;
@@ -402,7 +514,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if (unknown.length > 0) return fixThese(QUESTIONS_TOOL, unknown);
 
     // Numbered after the request's highest Qn, and opened at once: nothing reads the store in between.
-    const first = highestQuestion(store, worker.workspaceId, requestId) + 1;
+    const first = highestQuestionOf(store, worker.workspaceId, requestId) + 1;
     const openable: OpenableQuestion[] = typed.questions.map((question, index) => ({
       id: `Q${first + index}`,
       text: question.text,
@@ -415,7 +527,6 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
         text: option.text,
         recommended: option.recommended === true,
         effects: option.effects,
-        ...(option.grant === undefined ? {} : { grant: option.grant.calls !== undefined ? { calls: option.grant.calls } : { untilClean: option.grant.untilClean! } }),
       })),
     }));
     const at = now().toISOString();
@@ -477,11 +588,15 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     if (reviewer.parentId === null) return refused("paseo-bm does not know the Worker that created you, so it cannot deliver your review; make the BM-REVIEW block your final answer. Nothing was stored or sent.");
+    // Delivery line design §6.4: the request's current Worker, when a handoff replaced the one that opened the batch.
+    const to = await verdictTargetOf({ workspaceId: reviewer.workspaceId, requestId: reviewer.requestId, home }, reviewer.parentId, paseo);
+    // Delivery line design §5.2: the batch's result is recorded with the record, before the Worker is woken.
     const stored = await storeThenDeliver(
       home,
       reviewer.workspaceId,
-      { kind: "review", requestId: reviewer.requestId, batchId: reviewer.batchId, from: reviewer.agentId, to: reviewer.parentId, text: built.text },
+      { kind: "review", requestId: reviewer.requestId, batchId: reviewer.batchId, from: reviewer.agentId, to, text: built.text },
       paseo,
+      (record) => noteReviewResult(home, reviewer.workspaceId, record, log),
     );
     if ("ok" in stored) return stored;
     return answered({ recordId: stored.record.id, delivery: stored.delivery });
@@ -556,15 +671,36 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const input = withoutNulls(raw);
     const shape = schemaIssues(TELL_WORKER_FACE.inputSchema, input);
     if (shape.length > 0) return fixThese(TELL_WORKER_TOOL, shape);
-    const { requestId, text, source, peerLink } = input as { requestId: string; text: string; source?: string; peerLink?: string };
+    const { requestId: given, text: words, source, peerLink, now: atOnce = false, refs } = input as { requestId: string; text: string; source?: string; peerLink?: string; now?: boolean; refs?: MessageRefs };
     const home = deps.home();
     const nothing = "Nothing was sent.";
-    const request = managersRequest(home, manager.workspaceId, requestId, manager.agentId, nothing);
-    if ("ok" in request) return request;
+    const asked = managersRequest(home, manager.workspaceId, given, manager.agentId, nothing);
+    if ("ok" in asked) return asked;
+    // Delivery line design §9.1: every id it names exists; they go on a `refs:` line after the words.
+    const unknown = refsRefusals(home, refs, [asked.missionId ?? requestIndexOf(home, given)?.missionId, manager.missionId]);
+    if (unknown.length > 0) return refused([...unknown, nothing].join("\n"));
+    const refsLine = actHeaderOf(null, refs);
+    const text = refsLine === null ? words : `${words.replace(/\r\n/g, "\n").trim()}\n${refsLine}`;
+    // Delivery line design §2.7: a continued request's work goes on at the head of its chain.
+    const head = chainHeadOf(home, given, asked.workspaceId) ?? { workspaceId: asked.workspaceId, request: asked };
+    const requestId = head.request.requestId;
     // The request's repo: a Main's Worker lives there, not in the Main's home (missions design §4).
-    const workspaceId = request.workspaceId;
+    const workspaceId = head.workspaceId;
     const paseo = paseoOf();
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
+    // Delivery line design §2.4: a finished (or stopped) bound request is final; more work opens its continuation.
+    const ended = endedPhaseOf(home, head.request);
+    if (ended !== null) {
+      const opened = await openContinuation(
+        home,
+        head,
+        { reason: "follow-up", text, figure: `a follow-up after ${ended}`, managerId: manager.agentId, ...(source === undefined ? {} : { source }), ...(peerLink === undefined ? {} : { peerLink }) },
+        { paseo, ...(deps.binder === undefined ? {} : { binder: deps.binder() }), log, now },
+      );
+      if ("ok" in opened) return opened;
+      return answered({ requestId: opened.requestId, continuationOf: requestId, workerId: opened.workerId, delivery: "sent", opened: "follow-up", ...(opened.peerLinkNotTaken === undefined ? {} : { peerLinkNotTaken: opened.peerLinkNotTaken }) });
+    }
+    const moved = requestId === given ? {} : { requestId };
     let workerId: string | null;
     try {
       workerId = await (deps.workerOf ?? soleWorkerOfRequest)({ workspaceId, requestId, home }, paseo as DashboardPaseo);
@@ -591,11 +727,22 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       const taken = createPeerLinkStore(home, { now }).takeLink(peerLink!, { workspaceId, requestId, workerId: to, managerId: manager.agentId });
       if (!taken.ok) log(`[paseo-bm] request ${requestId} could not take link ${peerLink}: ${taken.reasons.join("; ")}`);
     };
-    const stored = await storeThenDeliver(home, workspaceId, { kind: "message", requestId, from: manager.agentId, to: workerId, text: message }, paseo, peerLink === undefined ? undefined : take);
+    const stored = await storeThenDeliver(
+      home,
+      workspaceId,
+      { kind: "message", requestId, from: manager.agentId, to: workerId, text: message, ...(atOnce ? { atOnce: true } : {}) },
+      paseo,
+      peerLink === undefined ? undefined : take,
+    );
     if ("ok" in stored) return stored;
     // Mission runtime design §2.3: a follow-up reopens the request in its mission, and is its history.
     noteFollowUp(home, requestId, text, now().toISOString(), log);
-    return answered({ workerId, delivery: stored.delivery });
+    if (stored.delivery === "held") {
+      // Delivery line design §6.4: what the Worker waits on, by id.
+      const wait = gatedWaitOf(home, workerId, { workspaceId, requestId });
+      return answered({ ...moved, workerId, delivery: stored.delivery, ...(wait === null ? {} : { note: heldTellText(wait.waiting) }) });
+    }
+    return answered({ ...moved, workerId, delivery: stored.delivery });
   };
 
   // -------------------------------------------------------------------------

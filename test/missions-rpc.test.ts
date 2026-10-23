@@ -286,6 +286,8 @@ describe("mission.get (§10.4)", () => {
     const { fake, web } = await fixture();
     const page = missionGetRpc.output.parse(await handleMissionGet({ missionId: web.missionId }, fake.paseo, deps()));
     expect(page.summary.code).toBe("WEB");
+    // ADR-036 (§17.1): the owner's integration.ci, off by default, so the repo rows show no CI.
+    expect(page.summary.ci).toBe("off");
     expect(page.charter).toEqual({
       goal: "Website goal",
       nonGoals: ["No redesign"],
@@ -481,9 +483,9 @@ describe("memory.list (§10.4)", () => {
 });
 
 describe("registerMissionsRpcs", () => {
-  it("registers the four contracts", () => {
+  it("registers the five contracts", () => {
     const handle = vi.fn();
     registerMissionsRpcs({ handle } as never);
-    expect(handle.mock.calls.map(([contract]) => (contract as { name: string }).name)).toEqual(["missions.list", "mission.get", "mission.change", "memory.list"]);
+    expect(handle.mock.calls.map(([contract]) => (contract as { name: string }).name)).toEqual(["missions.list", "mission.get", "mission.change", "mission.integration.revoke", "mission.integration.ask", "memory.list"]);
   });
 });

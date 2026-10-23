@@ -35,6 +35,10 @@
  *   the mission whose Main answers it. "A project cannot ask itself" holds for
  *   `project` and `ask-main`; the chain rule for `project` only.
  *
+ * - **Repo keys** (delivery line design §3.1): `to.workspaceId` and a chain's
+ *   workspaces are repo keys, written so and compared through `repoKeyOf`;
+ *   `from.workspaceId` is the asking request's placement.
+ *
  * Readers never throw; a store that cannot be read reads as empty. Changes
  * throw only when the file cannot be written; a change the rules refuse is a
  * result with one line per reason.
@@ -50,6 +54,8 @@ import { isPluginHomeIn } from "./plugin-homes";
 import { REQUEST_ID_PATTERN } from "./request-registry";
 import { timeOrZero } from "../shared/time";
 import { journalLinkEvent, type LinkEvent } from "./mission-events";
+import { MAX_MESSAGE_REFS, MESSAGE_ACTS, refIdsOf, type MessageAct, type MessageRefs } from "../shared/bm-tools";
+import { repoKeyOf } from "./placements";
 
 /** The links' folder in the data folder (§7.17.1); the cleanup button deletes it (§7.13.7). */
 export const PEERS_DIR_NAME = "peers";
@@ -95,6 +101,16 @@ const messageSchema = z.object({
   kind: z.enum(PEER_MESSAGE_KINDS),
   phase: z.enum(["finished", "blocked", "stopped"]).nullable(),
   gist: z.string().max(MAX_PEER_GIST),
+  /** What the message does (delivery line design §9.1); absent on an older message: an `answer`. */
+  act: z.enum(MESSAGE_ACTS).optional(),
+  /** What it names by id (delivery line design §9.1); absent: none. */
+  refs: z
+    .object({
+      contracts: z.array(z.string()).max(MAX_MESSAGE_REFS).optional(),
+      records: z.array(z.string()).max(MAX_MESSAGE_REFS).optional(),
+      decisions: z.array(z.string()).max(MAX_MESSAGE_REFS).optional(),
+    })
+    .optional(),
 });
 
 const linkSchema = z.object({
@@ -179,12 +195,16 @@ export function capPeerLinks(links: readonly PeerLink[]): PeerLink[] {
   return links.filter((_, index) => !drop.has(index));
 }
 
-/** The links `{ workspaceId, requestId }` carries on `side`: the ones it asked (`asker`) or took (`answerer`). Pure. */
-export function linksOfRequestIn(links: readonly PeerLink[], workspaceId: string, requestId: string, side: PeerSide): PeerLink[] {
+/** A workspace's repo key (`repoKeyOf` of one data folder); a pure reader without one compares ids as they are. */
+export type RepoKeyOf = (workspaceId: string) => string;
+const asGiven: RepoKeyOf = (workspaceId) => workspaceId;
+
+/** The links `{ workspaceId, requestId }` carries on `side`: the ones it asked (`asker`) or took (`answerer`, by repo key). Pure. */
+export function linksOfRequestIn(links: readonly PeerLink[], workspaceId: string, requestId: string, side: PeerSide, keyOf: RepoKeyOf = asGiven): PeerLink[] {
   return links.filter((link) =>
     side === "asker"
       ? link.from.workspaceId === workspaceId && link.from.requestId === requestId
-      : link.to.workspaceId === workspaceId && link.to.requestId === requestId,
+      : keyOf(link.to.workspaceId) === keyOf(workspaceId) && link.to.requestId === requestId,
   );
 }
 
@@ -209,11 +229,12 @@ export function linkViewOf(link: PeerLink, workspaceId: string, asked = link.fro
   };
 }
 
-/** The links of `workspaceId`, both ways, newest first, as `linkViewOf` shows them. Pure. */
-export function linkViewsOf(links: readonly PeerLink[], workspaceId: string): Array<ReturnType<typeof linkViewOf>> {
+/** The links of `workspaceId`'s repo, both ways, newest first, as `linkViewOf` shows them. Pure. */
+export function linkViewsOf(links: readonly PeerLink[], workspaceId: string, keyOf: RepoKeyOf = asGiven): Array<ReturnType<typeof linkViewOf>> {
+  const repo = keyOf(workspaceId);
   return links
-    .filter((link) => link.from.workspaceId === workspaceId || link.to.workspaceId === workspaceId)
-    .map((link) => linkViewOf(link, workspaceId))
+    .filter((link) => keyOf(link.from.workspaceId) === repo || keyOf(link.to.workspaceId) === repo)
+    .map((link) => linkViewOf(link, workspaceId, keyOf(link.from.workspaceId) === repo))
     .reverse();
 }
 
@@ -255,29 +276,33 @@ export interface NewPeerLink {
 export function chainFor(
   links: readonly PeerLink[],
   from: Pick<PeerLink["from"], "workspaceId" | "requestId">,
-  targetWorkspaceId: string,
+  targetWorkspace: string,
   route: PeerLinkRoute = "project",
+  keyOf: RepoKeyOf = asGiven,
 ): { ok: true; chain: PeerLink["chain"] } | { ok: false; reasons: string[] } {
   const reasons: string[] = [];
-  if ((route === "project" || route === "ask-main") && targetWorkspaceId === from.workspaceId) reasons.push("a project cannot ask itself; ask another project");
+  // Delivery line design §3.1: projects are repo keys, so a placement asking its own repo asks itself.
+  const own = keyOf(from.workspaceId);
+  const targetWorkspaceId = keyOf(targetWorkspace);
+  if ((route === "project" || route === "ask-main") && targetWorkspaceId === own) reasons.push("a project cannot ask itself; ask another project");
   const requestId = from.requestId;
-  if (requestId === null) return reasons.length > 0 ? { ok: false, reasons } : { ok: true, chain: { workspaces: [from.workspaceId], depth: 1 } };
+  if (requestId === null) return reasons.length > 0 ? { ok: false, reasons } : { ok: true, chain: { workspaces: [own], depth: 1 } };
   const live = linksOfRequestIn(links, from.workspaceId, requestId, "asker").filter(isLiveLink);
   if (live.length >= MAX_LIVE_LINKS_PER_REQUEST) {
     reasons.push(`request ${requestId} already has ${live.length} live links (at most ${MAX_LIVE_LINKS_PER_REQUEST}); close one with bm_peer_reply close: true first`);
   }
-  if (route !== "project") return reasons.length > 0 ? { ok: false, reasons } : { ok: true, chain: { workspaces: [from.workspaceId], depth: 1 } };
-  const carried = linksOfRequestIn(links, from.workspaceId, requestId, "answerer").filter((link) => isLiveLink(link) && routeOf(link) === "project");
-  const workspaces = [...new Set([...carried.flatMap((link) => link.chain.workspaces.filter((id) => id !== from.workspaceId)), from.workspaceId])];
+  if (route !== "project") return reasons.length > 0 ? { ok: false, reasons } : { ok: true, chain: { workspaces: [own], depth: 1 } };
+  const carried = linksOfRequestIn(links, from.workspaceId, requestId, "answerer", keyOf).filter((link) => isLiveLink(link) && routeOf(link) === "project");
+  const workspaces = [...new Set([...carried.flatMap((link) => link.chain.workspaces.map(keyOf).filter((id) => id !== own)), own])];
   const depth = carried.length === 0 ? 1 : Math.max(...carried.map((link) => link.chain.depth)) + 1;
   if (depth > MAX_PEER_CHAIN_DEPTH) {
     reasons.push(`this ask would be link ${depth} of a chain of projects (at most ${MAX_PEER_CHAIN_DEPTH}); answer what you can on the link you carry with bm_peer_reply`);
   }
-  if (targetWorkspaceId !== from.workspaceId && workspaces.includes(targetWorkspaceId)) {
+  if (targetWorkspaceId !== own && workspaces.includes(targetWorkspaceId)) {
     // The link the target asked this request, else the newest whose chain holds it.
     const back =
-      carried.find((link) => link.from.workspaceId === targetWorkspaceId) ??
-      [...carried].reverse().find((link) => link.chain.workspaces.includes(targetWorkspaceId));
+      carried.find((link) => keyOf(link.from.workspaceId) === targetWorkspaceId) ??
+      [...carried].reverse().find((link) => link.chain.workspaces.map(keyOf).includes(targetWorkspaceId));
     reasons.push(`project ${targetWorkspaceId} is already in this chain of asks; reply on link ${back?.linkId ?? "(unknown)"} with bm_peer_reply instead`);
   }
   return reasons.length > 0 ? { ok: false, reasons } : { ok: true, chain: { workspaces, depth } };
@@ -308,6 +333,14 @@ export interface NewPeerMessage {
   phase?: PeerMessage["phase"];
   /** The message; masked and cut to `MAX_PEER_GIST` characters. */
   text: string;
+  /** Its act and refs (delivery line design §9.1); kept only when given. */
+  act?: MessageAct;
+  refs?: MessageRefs;
+}
+
+/** A link message's act (delivery line design §9.1, §11): an older message without one is an `answer`. Pure. */
+export function actOf(message: Pick<PeerMessage, "act">): MessageAct {
+  return message.act ?? "answer";
 }
 
 export interface PeerLinkStore {
@@ -352,6 +385,12 @@ export interface PeerLinkStore {
   setWaiting(workspaceId: string, requestId: string, linkIds: readonly string[], at: string): PeerLink[];
   /** Any report of the request: clears `waitingSince` on the links it asked; returns how many changed. Throws when the file cannot be written. */
   clearWaiting(workspaceId: string, requestId: string): number;
+  /**
+   * Delivery line design §2.6: a size rollover at the hard figure moves the
+   * request's live links, asked and taken, to its continuation `to` and its
+   * Worker; returns those moved. Throws when the file cannot be written.
+   */
+  moveRequest(workspaceId: string, requestId: string, to: { requestId: string; workerId: string }): PeerLink[];
 }
 
 /** The peer link store of the data folder `home`. Creating it touches nothing on disk. */
@@ -359,6 +398,7 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
   const now = deps.now ?? (() => new Date());
   const newId = deps.newId ?? newLinkId;
   const env = deps.env ?? process.env;
+  const keyOf: RepoKeyOf = (workspaceId) => repoKeyOf(home, workspaceId);
   const tell = (event: LinkEvent, result: PeerLinkResult, changed: boolean): PeerLinkResult => {
     if (!result.ok || !changed) return result;
     try {
@@ -422,13 +462,13 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
     path: file.path,
     list,
     get: (linkId) => list().find((link) => link.linkId === linkId) ?? null,
-    linksOfRequest: (workspaceId, requestId, side) => linksOfRequestIn(list(), workspaceId, requestId, side),
+    linksOfRequest: (workspaceId, requestId, side) => linksOfRequestIn(list(), workspaceId, requestId, side, keyOf),
     liveLinksFrom: (workspaceId, requestId) => linksOfRequestIn(list(), workspaceId, requestId, "asker").filter(isLiveLink),
     createLink(init) {
       let result: PeerLinkResult = { ok: false, reasons: ["the link was not written"] };
       file.update((current) => {
         const route = init.route ?? "project";
-        const chain = chainFor(current.links, init.from, init.to.workspaceId, route);
+        const chain = chainFor(current.links, init.from, init.to.workspaceId, route, keyOf);
         if (!chain.ok) {
           result = chain;
           return null;
@@ -444,7 +484,7 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
           kind: init.kind,
           ...(route === "project" ? {} : { route, missionId: init.missionId ?? null }),
           from: { ...init.from },
-          to: { workspaceId: init.to.workspaceId, managerId: init.to.managerId, requestId: init.to.requestId ?? null, workerId: init.to.workerId ?? null },
+          to: { workspaceId: keyOf(init.to.workspaceId), managerId: init.to.managerId, requestId: init.to.requestId ?? null, workerId: init.to.workerId ?? null },
           chain: chain.chain,
           waitingSince: null,
           text: redactText(init.text, env).slice(0, MAX_PEER_TEXT),
@@ -463,7 +503,7 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
     },
     takeLink(linkId, by) {
       const result = change(linkId, (link) => {
-        if (link.to.workspaceId !== by.workspaceId) return { reasons: [`link ${linkId} asks another project (${link.to.workspaceId}), not this one`] };
+        if (keyOf(link.to.workspaceId) !== keyOf(by.workspaceId)) return { reasons: [`link ${linkId} asks another project (${link.to.workspaceId}), not this one`] };
         if (link.state === "closed") return { reasons: [`link ${linkId} is closed`] };
         if (link.to.requestId !== null && link.to.requestId !== by.requestId) {
           return { reasons: [`link ${linkId} is taken by request ${link.to.requestId}`] };
@@ -481,7 +521,7 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
     turnToWorker(linkId, to) {
       const result = change(linkId, (link) => {
         if (routeOf(link) !== "ask-main" || link.state !== "open") return { reasons: [`link ${linkId} is not an open ask of a Worker to its Main`] };
-        return { ...link, route: "worker", state: "taken", to: { ...to }, takenAt: now().toISOString() };
+        return { ...link, route: "worker", state: "taken", to: { ...to, workspaceId: keyOf(to.workspaceId) }, takenAt: now().toISOString() };
       });
       return tell("taken", result, changedLast);
     },
@@ -498,6 +538,8 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
           kind: message.kind,
           phase: message.phase ?? null,
           gist: gistOf(message.text, env),
+          ...(message.act === undefined ? {} : { act: message.act }),
+          ...(refIdsOf(message.refs).length === 0 ? {} : { refs: message.refs }),
         });
         return { ...link, messages: [...link.messages, entry].slice(-MAX_PEER_MESSAGES) };
       });
@@ -542,6 +584,26 @@ export function createPeerLinkStore(home: string, deps: PeerLinkDeps = {}): Peer
         return cleared === 0 ? null : { links };
       });
       return cleared;
+    },
+    moveRequest(workspaceId, requestId, to) {
+      const moved: PeerLink[] = [];
+      file.update((current) => {
+        const links = current.links.map((link) => {
+          if (!isLiveLink(link)) return link;
+          const asked = link.from.workspaceId === workspaceId && link.from.requestId === requestId;
+          const taken = keyOf(link.to.workspaceId) === keyOf(workspaceId) && link.to.requestId === requestId;
+          if (!asked && !taken) return link;
+          const next = {
+            ...link,
+            ...(asked ? { from: { ...link.from, requestId: to.requestId, agentId: link.from.role === "worker" ? to.workerId : link.from.agentId } } : {}),
+            ...(taken ? { to: { ...link.to, requestId: to.requestId, workerId: to.workerId } } : {}),
+          };
+          moved.push(next);
+          return next;
+        });
+        return moved.length === 0 ? null : { links };
+      });
+      return moved;
     },
   };
 }

@@ -45,8 +45,15 @@ All stores follow `data-files.ts` (`createJsonFileStore`: `0700` folders, `0600`
     confirmedAt: string | null },  // the owner confirmed the charter
   plan: { text: string /* ≤ 20,000 */, updatedAt: string | null },
   contracts: Array<{ id: string /* C1… */, title: string, providerRepo: string, consumerRepos: string[],
-                     text: string /* ≤ 4,000 */, version: number, updatedAt: string, source: string }> }
+                     text: string /* ≤ 4,000 */, version: number, updatedAt: string, source: string,
+                     status?: "proposed" | "agreed" | "superseded" | "withdrawn" /* absent = agreed */,
+                     agreedBy?: Array<{ side, agentId, version, at }> }> }
 ```
+
+*Since 2026-10-21* ([delivery line design](paseo-bm-delivery-line.md) §9.2):
+- A new contract, or a new version of one, is `proposed` unless the Main states `agreed`.
+- An `agree` on a link at the current version is recorded in `agreedBy`. When both sides of the link have agreed, the contract becomes `agreed` and a journal `contract` line is written.
+- A status-only change keeps the version.
 
 - Text fields are masked with `redactText`.
 - **Index.** `missions/index.json` keeps `{ missionId, code, name, state, mainId, repos }` per mission, rewritten with each mission write, for lists and code lookups. A missing or stale index is rebuilt from the mission files.
@@ -117,6 +124,13 @@ A link gains `route: "project" | "ask-main" | "worker" | "mission"` (the existin
 The "a project cannot ask itself" rule applies to `project` and `ask-main` only. The chain rule applies to `project` only.
 
 ## 3. The home and the Main
+
+
+*Since 2026-10-21* ([delivery line design](paseo-bm-delivery-line.md) §9.1):
+- **Acts and references.** A link message carries an `act` (`ask`, `answer`, `agree`, `ack`, `close`, `supersede`) and `refs` to contract versions, records and decisions, each checked.
+- **`ack` and `close` start no turn.** They are stored, shown in the receiver's state, and put at the head of its next delivery.
+- **Waits.** An `ack` settles no wait. A `close` from the answering side settles one as a reply does.
+- **State.** The Main's `BM-STATE` and a Worker's compaction brief show each link's latest message, not its first ask.
 
 ### 3.1 The home: the Mission-List project, a workspace per mission ([ADR-034](../adr/ADR-034-each-mission-has-its-own-workspace.md))
 
@@ -313,10 +327,10 @@ Recomputed on each recorded turn of a mission's agents and on the 60-second pass
 | **overengineering** | process documents (`isProcessDocumentPath`) written by the mission, against the charter's done criteria count | > 3 per criterion |
 | | beads created per finished request | > 15 |
 | | tier raised after `received` | 2 requests |
-| | review budget exhausted | 2 requests |
+| | review cap reached (`reviewCapReached`: even a new milestone batch would be refused); batches stopped by the convergence rule in 24 h (`unconvergedBatches`) | 2 requests; 2 batches (both `governor.reviewExhausted`) |
 | | open owner approvals (documents in Review or Draft, open `q:`/`o:` cards) | > 8 |
-| **drift** | the Main's turns since a done criterion last changed state | > 40 turns |
-| | finished requests since a done criterion last changed state | > 6 |
+| **drift** | the Main's turns started by the owner or a Worker report (trace `trigger`) since a done criterion was last **met with evidence** (`metAt`) | > 40 turns |
+| | finished requests since a done criterion was last met with evidence | > 6 |
 | | requests or links in repos outside the charter | 1 |
 | **stuck** | stalls, unanswered links (`peer-unanswered`), cards older than 24 h | each |
 | **budget** | requests, Workers, review calls or days against `charter.budget` | ≥ 100% |
@@ -332,14 +346,28 @@ Recomputed on each recorded turn of a mission's agents and on the 60-second pass
 | 3 re-plan | the model, woken | The figure still holds after the window (default 30 minutes and 5 more Main turns). The governor reads the mission and sends `bm_govern { step: "replan" }` |
 | 4 escalate or stop | the model | It escalates with `bm_ask_owner`, or stops a Worker (`bm_direct_worker` stop) on real risk |
 
-- A figure back under its threshold resets the family to 0, with a journal line.
+- A figure back under its threshold resets the family to 0, with a journal line, only after it stays under for `governor.windowMinutes` (30 by default; `underSince`). Crossing again restarts the wait (delivery line design §8.4).
+- **A spent code-nudge pool** holds the family at its step (`held: { pool, until }`, one journal line, no retry). The figures go into a daily digest to the Main: a `message` from `plugin`, at most once per 24 h, kept in `governor.json` `digests` (delivery line design §8.3).
+- **Step 4's `bm_ask_owner`** about a mission's process is the only way the governor reaches the owner. Below step 4 it is refused, except in two cases:
+  - the owner wrote to the Orchestrator in the last 2 hours;
+  - the ask is about a goal change or a split.
 - The intervention log (A-12) records each step 2–4 with its outcome check.
 
 ### 9.4 Commands to a Main
 
 `bm_govern { missionId, step: "nudge" | "replan" | "arbitrate", text ≤ 4,000, figures? }` builds a `BM-COMMAND` with `from: orchestrator`, `authority: governor:<step>`, `effects: none` and `to:` the mission's current Main, and sends it through `command-send.ts`.
 - The authority is structural, like `coordination:handoff`.
-- The loop guard counts per mission: 12 per 24 h.
+- The loop guard counts per mission in four pools per 24 h (delivery line design §8.1). One kind never spends another's pool:
+
+  | Pool | Setting | Default |
+  |---|---|---|
+  | Code nudges | `governor.quotaCodeNudge` | 6 |
+  | Re-plans | `governor.quotaReplan` | 3 |
+  | Arbitrations | `governor.quotaArbitrate` | 4 |
+  | Other | `governor.quotaOther` | 4 |
+
+- A command entry carries `governorStep` and `by` (code or model).
+- A repeat `bm_arbitrate` of an area already decided returns the standing arbitration, and a repeat re-plan with figures no worse returns the standing re-plan. Neither sends or spends anything.
 - A command addressed by mission is delivered to whichever Main holds the mission when it is sent.
 
 ### 9.5 Compaction and handoff in code
@@ -349,9 +377,10 @@ The safe-point runners of `compaction.ts` and `handoff.ts` run by themselves whe
 ### 9.6 Arbitration and splits
 
 - **Conflicts** are detected in code as `mission.conflict { missions, workspaceId, area, evidence }`. Their sources are:
-  - two open charters with the same repo and overlapping file areas written in the last 7 days;
-  - a writer collision between Workers of two missions;
+  - *since 2026-10-20 (ADR-035):* two open missions whose placements of one repo change the same files against the integration branch. This is read-only `git diff --name-only origin/<target>...<branch>`, cached once a minute (`line-watch.ts`). It is an early "expect a merge conflict" signal, and it replaces the charters' written areas.
   - a `project` or `mission` link from one mission into another's area.
+
+  Writer collisions between Workers of two missions cannot happen any more: each mission writes its own branch in its own worktree (delivery line design §3, §4.7). `writers-observed` still watches inside one placement.
 
   They wake the governor, which reads both missions and answers with `bm_arbitrate { missions, area, owner: missionId, reason }`. That writes `orchestrator/arbitrations.json`, adds a journal line to both missions and sends a `governor:arbitrate` command to both Mains. A call that changes a goal is an `m:` decision of the losing mission (§4.1), the `arbitration` prepared change applied on the owner's tap.
 - **Splits:** `bm_create_main { fromMissionId, name, code, goal, repos, requestIds?, reason }`.
@@ -403,7 +432,7 @@ The owner approved the mockup on 2026-10-10 ([`mockups/missions-screen.html`](mo
 | Contracts | id and title; "provider → consumers"; "v<version> · <time>" |
 | Journal | the newest lines, "HH:MM <text>" (desktop 5, phone sub-view 20) |
 | Plan | the plan text, "updated <time> by the Main · read-only" |
-| New mission (E) | Name (≤ 80), Short code (`MISSION_CODE_PATTERN`), Goal, repositories as toggle chips (selected: accent square; others muted; plugin homes left out), mission level `Segmented` with its sentence; "Cancel", "Create and open Main" |
+| New mission (E; since 2026-10-21 its Projects part is [mission-projects.html](mockups/mission-projects.html) artboards L and M) | Name (≤ 80), Short code (`MISSION_CODE_PATTERN`), Goal; **Projects** — one row per Paseo project (not per workspace), named as Paseo's sidebar names it (`projectCustomName` or `projectDisplayName`), its folder shortened underneath, a checkbox, "N chosen", "Find a project…" past 6 projects (phone: 4 rows then "+ N more"). The value is the project's root workspace (its main checkout), opened by the form when none is open; paseo-bm's homes, mission placements and worktree-only projects are left out. Mission level `Segmented` with its sentence; "Cancel", "Create and open Main" |
 | Project memory (F) | "Memory · <repo>", "<n> entries"; a row per entry: kind chip, text, source ("owner, Q2 · <date>", "Worker <id 7>", "owner · all projects") |
 
 ### 10.3 Words
@@ -729,3 +758,7 @@ Every stored change is additive. An older build ignores the wake fields and `dan
 | 2026-10-10 | Claude (owner's request to review and simplify) | §19: four reviews of Phases 1–3; 13 defects fixed (mission core 6, governor 3, client 1, docs 2, the replaced Main's Worker creation among them); retired-wake builders and the grant machinery removed; lookups and helpers shared; §16–§18 claims corrected |
 | 2026-10-10 | Claude (owner's request: every recommendation of the assessment) | §20: one governor, a mission per wake with its brief, a disposable conversation (4 missions, 10 wakes or a day), `danger` to the Main first (`BM-SIGNAL`, governor backup at 3 minutes, no repo-level gate for a mission's Worker), project notes into project memory, A-13 with the danger log ([ADR-032](../adr/ADR-032-one-governor-a-mission-per-wake.md)); §9.1, §9.7 and §15 rows updated. `design-ready`: PASS (Claude under the owner's delegation) |
 | 2026-10-12 | Claude (owner request; ADR-034) | §3.1: the home is the Mission-List project, one workspace per mission, Mains created there, the earlier shared home kept as a Missions place. §3.3: "New mission" opens the New mission form; an unassigned Main lives in the root; a `bm-manager` opened in a mission's workspace is that mission's |
+| 2026-10-20 | Claude (as built, ADR-035 Phase 6) | §9.2 review-cap figures, drift by trigger and `metAt`; §9.3 reset after the quiet window, held families and the daily digest, the step-4 gate; §9.4 four command pools, free repeats (delivery line design §5, §8) |
+| 2026-10-21 | Claude (as built, ADR-035 Phase 8) | §9.6 the conflict source is the overlap of mission branches' diffs; writer collisions between missions retired (delivery line design §3, §4.7, §4.9) |
+| 2026-10-21 | Claude (as built, ADR-035 Phase 9) | §2.1 contracts' status and agreements; §2.6 typed link messages (delivery line design §9) |
+| 2026-10-21 | hieu.nt10 (owner request and approval; written by Claude) | §10.2 New mission and the mission page's "+ Add" choose Paseo projects, not workspaces (workspace titles were chat titles and one repository showed once per workspace); repositories are named by their project's name everywhere on the mission page; mockup [mission-projects.html](mockups/mission-projects.html) artboards L, M, N approved as is |

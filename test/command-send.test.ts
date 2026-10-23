@@ -7,9 +7,11 @@ import {
   COMMAND_LIMIT_PER_REQUEST,
   HANDOFF_OFF_MESSAGE,
   INTERRUPT_REFUSED_MESSAGE,
-  MISSION_COMMAND_LIMIT_MESSAGE,
   commandRefusalOf,
   commandsSentForMission,
+  governorPoolOf,
+  missionPoolSpentMessage,
+  poolSpentUntil,
   sendCommand,
 } from "../plugin/server/command-send";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
@@ -161,21 +163,78 @@ describe("a governor command (missions design §9.4): only to the mission's curr
     expect(check()).toBe("mission PAY is closed");
   });
 
-  it("counts 12 commands per mission in 24 hours, apart from other missions and projects, and stores the mission on each", async () => {
+  it("counts each pool per mission in 24 hours (delivery line design §8.1): no kind spends another's, and other missions are apart", async () => {
     missionOf("PAY", "mis-0000000001", "main-1");
     missionOf("SHIP", "mis-0000000002", "main-2");
     const enqueue = vi.fn(async () => "sent" as const);
     let n = 0;
-    const send = (missionId: string, targetId: string) =>
-      sendCommand({ home, now: NOW, paseo: fakePaseo().paseo as never, workspaceId: "home-ws", command: nudge, targetId, missionId, copyTo: null, backstop: false, loopGuard: "refuse", intervention: null, queue: { enqueue }, store: { newId: () => `cmd-${++n}`, now: () => NOW }, redactEnv: {} });
-    for (let i = 0; i < COMMAND_LIMIT_PER_REQUEST; i += 1) expect((await send("mis-0000000001", "main-1")).ok).toBe(true);
-    expect(await send("mis-0000000001", "main-1")).toEqual({ ok: false, stage: "check", reason: MISSION_COMMAND_LIMIT_MESSAGE });
-    expect((await send("mis-0000000002", "main-2")).ok).toBe(true);
+    const of = (step: "nudge" | "replan" | "arbitrate"): CommandInput => ({ ...nudge, authority: governorAuthorityOf(step) });
+    const send = (missionId: string, targetId: string, step: "nudge" | "replan" | "arbitrate", by?: "code" | "model") =>
+      sendCommand({
+        home,
+        now: NOW,
+        paseo: fakePaseo().paseo as never,
+        workspaceId: "home-ws",
+        command: of(step),
+        targetId,
+        missionId,
+        ...(by === undefined ? {} : { governorBy: by }),
+        copyTo: null,
+        backstop: false,
+        loopGuard: "refuse",
+        intervention: null,
+        queue: { enqueue },
+        store: { newId: () => `cmd-${++n}`, now: () => NOW },
+        redactEnv: {},
+      });
+    const until = new Date(NOW.getTime() + 24 * 3_600_000);
+    // The defaults: 6 code nudges, 3 re-plans, 4 arbitrations, 4 others.
+    for (const [step, by, quota, pool] of [
+      ["nudge", "code", 6, "codeNudge"],
+      ["replan", undefined, 3, "replan"],
+      ["arbitrate", undefined, 4, "arbitrate"],
+      ["nudge", "model", 4, "other"],
+    ] as const) {
+      for (let i = 0; i < quota; i += 1) expect((await send("mis-0000000001", "main-1", step, by)).ok, `${pool} ${i}`).toBe(true);
+      expect(await send("mis-0000000001", "main-1", step, by)).toEqual({ ok: false, stage: "check", reason: missionPoolSpentMessage(pool, until) });
+    }
+    // Another mission's pools are its own.
+    expect((await send("mis-0000000002", "main-2", "replan")).ok).toBe(true);
     const commands = createOrchestratorStore(home).listCommands();
-    expect(commandsSentForMission(commands, "mis-0000000001", NOW)).toBe(COMMAND_LIMIT_PER_REQUEST);
+    expect(commandsSentForMission(commands, "mis-0000000001", NOW)).toBe(17);
+    expect(commandsSentForMission(commands, "mis-0000000001", NOW, "codeNudge")).toBe(6);
+    expect(commandsSentForMission(commands, "mis-0000000001", NOW, "replan")).toBe(3);
+    expect(commandsSentForMission(commands, "mis-0000000001", NOW, "arbitrate")).toBe(4);
+    expect(commandsSentForMission(commands, "mis-0000000001", NOW, "other")).toBe(4);
     expect(commandsSentForMission(commands, "mis-0000000002", NOW)).toBe(1);
     expect(commandsSentForMission(commands, "mis-0000000001", new Date(NOW.getTime() + 24 * 3_600_000 + 1))).toBe(0);
-    expect(commands.every((entry) => entry.missionId !== undefined)).toBe(true);
-    expect(MISSION_COMMAND_LIMIT_MESSAGE).toBe("the governor sent 12 commands to this mission's Main in 24 hours; ask the owner with bm_ask_owner");
+    // Each entry keeps its mission, its step and who wrote it; `model` when the caller names none.
+    expect(commands.find((entry) => entry.id === "cmd-1")).toMatchObject({ missionId: "mis-0000000001", governorStep: "nudge", by: "code" });
+    expect(commands.find((entry) => entry.id === "cmd-7")).toMatchObject({ missionId: "mis-0000000001", governorStep: "replan", by: "model" });
+    expect(missionPoolSpentMessage("replan", until)).toBe(
+      "This mission's re-plan commands are spent until 2026-10-10T12:00:00.000Z; paseo-bm puts the figures in the Main's daily digest. Nothing was sent",
+    );
+  });
+
+  it("counts an entry stored before the pools in other, and frees a pool when its oldest counted entry leaves the window", () => {
+    const store = createOrchestratorStore(home, { now: () => new Date(NOW.getTime() - 3 * 3_600_000) });
+    store.appendCommand({ workspaceId: "home-ws", managerId: "main-1", requestId: null, situation: "", command: "Re-plan.", reason: "", sentText: "Re-plan.", outcome: "sent", missionId: "mis-0000000001" });
+    const [old] = store.listCommands();
+    expect(old!.governorStep).toBeUndefined();
+    expect(governorPoolOf(old!)).toBe("other");
+    expect(governorPoolOf({ governorStep: "nudge" })).toBe("other");
+    expect(governorPoolOf({ governorStep: "nudge", by: "code" })).toBe("codeNudge");
+    expect(governorPoolOf({ governorStep: "arbitrate", by: "model" })).toBe("arbitrate");
+    const later = createOrchestratorStore(home, { now: () => new Date(NOW.getTime() - 3_600_000) });
+    for (let i = 0; i < 3; i += 1) {
+      later.appendCommand({ workspaceId: "home-ws", managerId: "main-1", requestId: null, situation: "", command: "c", reason: "", sentText: "c", outcome: "sent", missionId: "mis-0000000001" });
+    }
+    const commands = createOrchestratorStore(home).listCommands();
+    expect(poolSpentUntil(commands, "mis-0000000001", "other", NOW, 5)).toBeNull();
+    // Four in the pool, a quota of 4: room again once the oldest (3 hours ago) leaves.
+    expect(poolSpentUntil(commands, "mis-0000000001", "other", NOW, 4)).toEqual(new Date(NOW.getTime() + 21 * 3_600_000));
+    // A quota of 2: the second oldest must leave, an hour ago plus a day.
+    expect(poolSpentUntil(commands, "mis-0000000001", "other", NOW, 2)).toEqual(new Date(NOW.getTime() + 23 * 3_600_000));
+    expect(poolSpentUntil(commands, "mis-0000000001", "replan", NOW, 1)).toBeNull();
   });
 });

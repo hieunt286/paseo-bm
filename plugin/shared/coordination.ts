@@ -1,5 +1,4 @@
 import { z } from "zod";
-import type { Tier } from "./contracts";
 import type { TokenCoverage } from "./eval-metrics/tokens";
 
 /**
@@ -7,9 +6,10 @@ import type { TokenCoverage } from "./eval-metrics/tokens";
  * Orchestrator coordinates a project's agents. Phase 2 has one setting, how
  * often it advises (`advice.everyFinished`); Phase 3 adds the compaction and
  * handoff fields to the same file (bead `7gxw.9`, change-008 C2), and the
- * review budget per tier (bead `7gxw.12`, change-008 C6), each with its own
- * member in `coordinationChangeSchema`; Missions Phase 2 adds the governor's
- * thresholds, `governor.*` (missions design §9.2, §9.3).
+ * review settings (delivery line design §5.6: `review.maxRereviews` and
+ * `review.callsPerBatch`, which replaced the review budget per tier), each
+ * with its own member in `coordinationChangeSchema`; Missions Phase 2 adds
+ * the governor's thresholds, `governor.*` (missions design §9.2, §9.3).
  *
  * Kept in `<data folder>/coordination/settings.json`
  * (`server/coordination-store.ts`) and read and set by the owner's RPCs
@@ -76,18 +76,71 @@ export const MAIN_CONTEXT_SHARE: CoordinationBounds = { min: 0.3, max: 0.9, defa
 export const MAIN_CONTEXT_TOKENS: CoordinationBounds = { min: 50_000, max: 2_000_000, default: 150_000, whole: true };
 export const MAIN_HARD_SHARE: CoordinationBounds = { min: 0.35, max: 0.95, default: 0.85, whole: false };
 
-// ── Phase 3: the review budget per tier (§C.4, §G.7; change-008 C6) ────────
-// The review calls one request may make before the Worker asks the owner for
-// another: one implementation batch — a review and its re-review — at every
-// tier, plus the batch a Large request reviews before it implements. Never
-// below one review and its re-review (§G.8: no review traded for tokens).
+// ── The review settings (delivery line design §5.2, §5.3, §5.6) ────────────
+// Two figures replace the review budget per tier: how many re-reviews a batch
+// may have while it converges, and what each milestone batch adds to the
+// request's cap (`reviewCapOf`, `shared/orchestrator-rules.ts`). The old
+// `review.smallBudget`, `review.mediumBudget` and `review.largeBudget` are
+// ignored on read, dropped by the next write and refused by
+// `coordination.set` (`RETIRED_COORDINATION_KEYS`); `version` stays 1.
 
-/** `review.smallBudget`: the review calls of a Small request. */
-export const REVIEW_SMALL_BUDGET: CoordinationBounds = { min: 2, max: 8, default: 2, whole: true };
-/** `review.mediumBudget`: the review calls of a Medium request. */
-export const REVIEW_MEDIUM_BUDGET: CoordinationBounds = { min: 2, max: 8, default: 2, whole: true };
-/** `review.largeBudget`: the review calls of a Large request. */
-export const REVIEW_LARGE_BUDGET: CoordinationBounds = { min: 2, max: 8, default: 4, whole: true };
+/**
+ * `review.maxRereviews`: the re-reviews one batch may have while its blocking
+ * findings fall (delivery line design §5.2). At the field rates K = 3 leaves
+ * 2.6 % of batches unconverged by chance.
+ */
+export const REVIEW_MAX_REREVIEWS: CoordinationBounds = { min: 1, max: 6, default: 3, whole: true };
+/**
+ * `review.callsPerBatch`: the review calls one milestone batch is paid for in
+ * the request's cap (delivery line design §5.3: `reviewCapOf`). The default is
+ * the p92 calls of one batch at the field rates.
+ */
+export const REVIEW_CALLS_PER_BATCH: CoordinationBounds = { min: 2, max: 6, default: 3, whole: true };
+
+// ── Size rollover (delivery line design §2.6) ───────────────────────────────
+// A request rolls over to a continuation at these figures; the defaults come
+// from the field's first `finished` (2026-10-15 → 20). `rollover.enabled` is
+// the owner's switch; at `ceilingFactor` × a figure the notice is `now`.
+
+/** `rollover.beads`: beads closed in the request. */
+export const ROLLOVER_BEADS: CoordinationBounds = { min: 3, max: 100, default: 15, whole: true };
+/** `rollover.turns`: the request's recorded Worker turns. */
+export const ROLLOVER_TURNS: CoordinationBounds = { min: 10, max: 500, default: 40, whole: true };
+/** `rollover.tokens`: the request's tokens read. */
+export const ROLLOVER_TOKENS: CoordinationBounds = { min: 10_000_000, max: 1_000_000_000, default: 50_000_000, whole: true };
+/**
+ * `rollover.contextTokens` (ADR-036, delivery line design §17.3): the Worker's
+ * real context at a recorded turn's end — that turn's own `contextUsed`, never
+ * a sum over turns.
+ */
+export const ROLLOVER_CONTEXT_TOKENS: CoordinationBounds = { min: 100_000, max: 900_000, default: 250_000, whole: true };
+/** `rollover.ceilingFactor`: where the soft rollover becomes `now`. */
+export const ROLLOVER_CEILING_FACTOR: CoordinationBounds = { min: 1.5, max: 5, default: 2, whole: false };
+
+// ── The maintenance ceiling (delivery line design §6.6) ─────────────────────
+
+/**
+ * `maintenance.ceilingFactor`: a pending compaction or handoff whose figure
+ * reaches this × its threshold runs at the next turn end without the
+ * safe-point and quiet-queue checks (`atMaintenanceCeiling`).
+ */
+export const MAINTENANCE_CEILING_FACTOR: CoordinationBounds = { min: 1.5, max: 5, default: 2, whole: false };
+
+// ── CI (ADR-036, delivery line design §17.1) ────────────────────────────────
+
+/**
+ * `integration.ci`: `off` (the default) — a pipeline is never evidence nor
+ * shown, the report's `ci` is ignored, the governor has no `ciRed`, and
+ * verified is a check paseo-bm detected; `on` — ADR-035 decision 3's reading
+ * of CI (delivery line design §4.5, §4.6).
+ */
+export const INTEGRATION_CI_MODES = ["off", "on"] as const;
+export type IntegrationCi = (typeof INTEGRATION_CI_MODES)[number];
+
+/** Whether the owner's settings read CI (`integration.ci` on); off for settings without it. */
+export function ciUsed(settings: { integration?: { ci: IntegrationCi } } | null | undefined): boolean {
+  return settings?.integration?.ci === "on";
+}
 
 // ── Missions Phase 2: the governor's thresholds (missions design §9.2, §9.3) ──
 // The defaults are the design's table. Each figure crosses at its threshold
@@ -128,12 +181,30 @@ export const GOVERNOR_BOUNDS = {
   outsideCharter: { min: 1, max: 50, default: 1, whole: true },
   /** stuck: an open card older than this many hours counts. */
   cardAgeHours: { min: 1, max: 168, default: 24, whole: true },
+  // The line's figures (delivery line design §4.9).
+  /** mess: hours a mission's worktree stayed dirty with no live Worker after its last finished request, reached. */
+  uncommittedHours: { min: 1, max: 168, default: 4, whole: true },
+  /** stuck: hours a mission branch stayed ahead of its integration branch with no merge request, reached. */
+  unpushedHours: { min: 1, max: 720, default: 24, whole: true },
+  /** stuck: minutes a merge request's CI stayed red, reached. */
+  ciRedMinutes: { min: 5, max: 1_440, default: 30, whole: true },
+  /** drift: commits a mission branch is behind its integration branch, reached. */
+  behindCommits: { min: 5, max: 1_000, default: 50, whole: true },
   /** budget: the share of a `charter.budget` field used, in percent, reached. */
   budgetPercent: { min: 50, max: 200, default: 100, whole: true },
   /** The ladder (§9.3): minutes after a nudge before a re-plan is due … */
   windowMinutes: { min: 5, max: 1_440, default: 30, whole: true },
   /** … and the Main's turns after it, both. */
   windowTurns: { min: 1, max: 100, default: 5, whole: true },
+  // The command pools, per mission in 24 hours (delivery line design §8.1): no kind spends another's.
+  /** Code nudges (the ladder's step 2). */
+  quotaCodeNudge: { min: 1, max: 50, default: 6, whole: true },
+  /** Re-plans (`bm_govern` step `replan`). */
+  quotaReplan: { min: 1, max: 20, default: 3, whole: true },
+  /** Arbitrations, charged to each mission told. */
+  quotaArbitrate: { min: 1, max: 20, default: 4, whole: true },
+  /** Every other governor command (model nudges, and entries stored before the pools). */
+  quotaOther: { min: 1, max: 20, default: 4, whole: true },
 } as const satisfies Record<string, CoordinationBounds>;
 export type GovernorSetting = keyof typeof GOVERNOR_BOUNDS;
 /** Every governor setting, in the order of the design's table. */
@@ -186,10 +257,24 @@ const mainSchema = z.object({
 });
 
 const reviewSchema = z.object({
-  smallBudget: boundedSchema(REVIEW_SMALL_BUDGET),
-  mediumBudget: boundedSchema(REVIEW_MEDIUM_BUDGET),
-  largeBudget: boundedSchema(REVIEW_LARGE_BUDGET),
+  maxRereviews: boundedSchema(REVIEW_MAX_REREVIEWS),
+  callsPerBatch: boundedSchema(REVIEW_CALLS_PER_BATCH),
 });
+
+const rolloverSchema = z.object({
+  enabled: z.boolean(),
+  beads: boundedSchema(ROLLOVER_BEADS),
+  turns: boundedSchema(ROLLOVER_TURNS),
+  tokens: boundedSchema(ROLLOVER_TOKENS),
+  contextTokens: boundedSchema(ROLLOVER_CONTEXT_TOKENS),
+  ceilingFactor: boundedSchema(ROLLOVER_CEILING_FACTOR),
+});
+
+const maintenanceSchema = z.object({
+  ceilingFactor: boundedSchema(MAINTENANCE_CEILING_FACTOR),
+});
+
+const integrationSchema = z.object({ ci: z.enum(INTEGRATION_CI_MODES) });
 
 /**
  * What the plugin keeps beside a mechanism's switch for the A-12 guard
@@ -218,6 +303,9 @@ export const coordinationSettingsSchema = z.object({
   handoff: handoffSchema,
   main: mainSchema,
   review: reviewSchema,
+  rollover: rolloverSchema,
+  maintenance: maintenanceSchema,
+  integration: integrationSchema,
   governor: governorSchema,
   guard: z.object({ compact: switchGuardSchema, handoff: switchGuardSchema }),
 });
@@ -242,19 +330,31 @@ export const DEFAULT_COORDINATION_SETTINGS: CoordinationSettings = {
   },
   main: { compact: true, contextShare: MAIN_CONTEXT_SHARE.default, contextTokens: MAIN_CONTEXT_TOKENS.default, hardShare: MAIN_HARD_SHARE.default },
   review: {
-    smallBudget: REVIEW_SMALL_BUDGET.default,
-    mediumBudget: REVIEW_MEDIUM_BUDGET.default,
-    largeBudget: REVIEW_LARGE_BUDGET.default,
+    maxRereviews: REVIEW_MAX_REREVIEWS.default,
+    callsPerBatch: REVIEW_CALLS_PER_BATCH.default,
   },
+  rollover: { enabled: true, beads: ROLLOVER_BEADS.default, turns: ROLLOVER_TURNS.default, tokens: ROLLOVER_TOKENS.default, contextTokens: ROLLOVER_CONTEXT_TOKENS.default, ceilingFactor: ROLLOVER_CEILING_FACTOR.default },
+  maintenance: { ceilingFactor: MAINTENANCE_CEILING_FACTOR.default },
+  integration: { ci: "off" },
   governor: Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [name, GOVERNOR_BOUNDS[name].default])) as Record<GovernorSetting, number>,
   guard: { compact: NO_GUARD, handoff: NO_GUARD },
 };
 
 /**
- * One change: a setting by its key and its new value, in bounds. This is what
- * `coordination.set` takes and what a decision's prepared change carries.
+ * The settings this build no longer has (delivery line design §5.6): a stored
+ * file's values for them are ignored and dropped by the next write,
+ * `coordination.set` refuses them, and a stored prepared change on one applies
+ * nothing ("this setting no longer exists").
  */
-export const coordinationChangeSchema = z.discriminatedUnion("key", [
+export const RETIRED_COORDINATION_KEYS = ["review.smallBudget", "review.mediumBudget", "review.largeBudget"] as const;
+export type RetiredCoordinationKey = (typeof RETIRED_COORDINATION_KEYS)[number];
+
+/** True when `key` names a setting this build no longer has. */
+export function isRetiredCoordinationKey(key: unknown): key is RetiredCoordinationKey {
+  return typeof key === "string" && (RETIRED_COORDINATION_KEYS as readonly string[]).includes(key);
+}
+
+const liveChangeMembers = [
   z.object({ key: z.literal("advice.everyFinished"), value: adviceEveryFinishedSchema }),
   z.object({ key: z.literal("compact.enabled"), value: z.boolean() }),
   z.object({ key: z.literal("compact.managerTokensPerTurn"), value: compactSchema.shape.managerTokensPerTurn }),
@@ -268,13 +368,41 @@ export const coordinationChangeSchema = z.discriminatedUnion("key", [
   z.object({ key: z.literal("main.contextShare"), value: mainSchema.shape.contextShare }),
   z.object({ key: z.literal("main.contextTokens"), value: mainSchema.shape.contextTokens }),
   z.object({ key: z.literal("main.hardShare"), value: mainSchema.shape.hardShare }),
-  z.object({ key: z.literal("review.smallBudget"), value: reviewSchema.shape.smallBudget }),
-  z.object({ key: z.literal("review.mediumBudget"), value: reviewSchema.shape.mediumBudget }),
-  z.object({ key: z.literal("review.largeBudget"), value: reviewSchema.shape.largeBudget }),
+  z.object({ key: z.literal("review.maxRereviews"), value: reviewSchema.shape.maxRereviews }),
+  z.object({ key: z.literal("review.callsPerBatch"), value: reviewSchema.shape.callsPerBatch }),
+  z.object({ key: z.literal("rollover.enabled"), value: z.boolean() }),
+  z.object({ key: z.literal("rollover.beads"), value: rolloverSchema.shape.beads }),
+  z.object({ key: z.literal("rollover.turns"), value: rolloverSchema.shape.turns }),
+  z.object({ key: z.literal("rollover.tokens"), value: rolloverSchema.shape.tokens }),
+  z.object({ key: z.literal("rollover.contextTokens"), value: rolloverSchema.shape.contextTokens }),
+  z.object({ key: z.literal("rollover.ceilingFactor"), value: rolloverSchema.shape.ceilingFactor }),
+  z.object({ key: z.literal("maintenance.ceilingFactor"), value: maintenanceSchema.shape.ceilingFactor }),
+  z.object({ key: z.literal("integration.ci"), value: integrationSchema.shape.ci }),
   ...GOVERNOR_SETTINGS.map((name) => z.object({ key: z.literal(`governor.${name}` as GovernorKey), value: boundedSchema(GOVERNOR_BOUNDS[name]) as z.ZodNumber })),
-]);
-export type CoordinationChange = z.infer<typeof coordinationChangeSchema>;
+] as const;
+
+/**
+ * One change of a setting this build has: its key and its new value, in
+ * bounds. This is what `coordination.set` takes, what `applyCoordinationChange`
+ * applies and what `bm_ask_owner` may prepare.
+ */
+export const liveCoordinationChangeSchema = z.discriminatedUnion("key", [...liveChangeMembers]);
+export type CoordinationChange = z.infer<typeof liveCoordinationChangeSchema>;
 export type CoordinationKey = CoordinationChange["key"];
+
+/**
+ * A change as a decision's prepared change is stored (`shared/decisions.ts`)
+ * and as the `coordination.set` RPC is called: a live change, or one on a
+ * retired key with any number, so that a decision stored before the key was
+ * retired still parses (delivery line design §5.6). Only the live ones are
+ * ever applied: `coordination.set` refuses a retired key with
+ * `E_COORDINATION_INVALID`, and its prepared change applies nothing.
+ */
+export const coordinationChangeSchema = z.discriminatedUnion("key", [
+  ...liveChangeMembers,
+  ...RETIRED_COORDINATION_KEYS.map((key) => z.object({ key: z.literal(key), value: z.number() })),
+]);
+export type StoredCoordinationChange = z.infer<typeof coordinationChangeSchema>;
 
 /** Every setting's key, in the order Settings shows them. */
 export const COORDINATION_KEYS: readonly CoordinationKey[] = [
@@ -291,9 +419,19 @@ export const COORDINATION_KEYS: readonly CoordinationKey[] = [
   "main.contextShare",
   "main.contextTokens",
   "main.hardShare",
-  "review.smallBudget",
-  "review.mediumBudget",
-  "review.largeBudget",
+  "review.maxRereviews",
+  "review.callsPerBatch",
+  // Delivery line design §2.6: size rollover.
+  "rollover.enabled",
+  "rollover.beads",
+  "rollover.turns",
+  "rollover.tokens",
+  "rollover.contextTokens",
+  "rollover.ceilingFactor",
+  // Delivery line design §6.6: the maintenance ceiling.
+  "maintenance.ceilingFactor",
+  // ADR-036, delivery line design §17.1: CI, off by default.
+  "integration.ci",
   // Missions Phase 2: the governor's thresholds come last (missions design §9.2).
   ...GOVERNOR_SETTINGS.map((name): GovernorKey => `governor.${name}`),
 ];
@@ -303,8 +441,15 @@ export function governorSettingOf(key: GovernorKey): GovernorSetting {
   return key.slice("governor.".length) as GovernorSetting;
 }
 
+/** The keys whose value is true (on) or false (off). */
+type SwitchKey = "compact.enabled" | "handoff.enabled" | "main.compact" | "rollover.enabled";
+const isSwitchKey = (key: CoordinationKey): key is SwitchKey => key === "compact.enabled" || key === "handoff.enabled" || key === "main.compact" || key === "rollover.enabled";
+
+/** The keys whose value is one of a few words. */
+type ChoiceKey = "integration.ci";
+
 /** The keys whose value is a number, with their bounds. */
-export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, "compact.enabled" | "handoff.enabled" | "main.compact">, CoordinationBounds>> = {
+export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, SwitchKey | ChoiceKey>, CoordinationBounds>> = {
   "advice.everyFinished": { ...ADVICE_EVERY_FINISHED, whole: true },
   "compact.managerTokensPerTurn": COMPACT_MANAGER_TOKENS_PER_TURN,
   "compact.workerTokensPerTurn": COMPACT_WORKER_TOKENS_PER_TURN,
@@ -315,9 +460,14 @@ export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, "comp
   "main.contextShare": MAIN_CONTEXT_SHARE,
   "main.contextTokens": MAIN_CONTEXT_TOKENS,
   "main.hardShare": MAIN_HARD_SHARE,
-  "review.smallBudget": REVIEW_SMALL_BUDGET,
-  "review.mediumBudget": REVIEW_MEDIUM_BUDGET,
-  "review.largeBudget": REVIEW_LARGE_BUDGET,
+  "review.maxRereviews": REVIEW_MAX_REREVIEWS,
+  "review.callsPerBatch": REVIEW_CALLS_PER_BATCH,
+  "rollover.beads": ROLLOVER_BEADS,
+  "rollover.turns": ROLLOVER_TURNS,
+  "rollover.tokens": ROLLOVER_TOKENS,
+  "rollover.contextTokens": ROLLOVER_CONTEXT_TOKENS,
+  "rollover.ceilingFactor": ROLLOVER_CEILING_FACTOR,
+  "maintenance.ceilingFactor": MAINTENANCE_CEILING_FACTOR,
   ...(Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [`governor.${name}`, GOVERNOR_BOUNDS[name]])) as Record<GovernorKey, CoordinationBounds>),
 };
 
@@ -333,16 +483,17 @@ function isCoordinationKey(key: unknown): key is CoordinationKey {
  */
 export function coordinationRuleOf(key: unknown): string | null {
   if (!isCoordinationKey(key)) return null;
-  if (key === "compact.enabled" || key === "handoff.enabled" || key === "main.compact") return `${key} must be true (on) or false (off)`;
+  if (isSwitchKey(key)) return `${key} must be true (on) or false (off)`;
+  if (key === "integration.ci") return `${key} must be "off" or "on"`;
   const bounds = COORDINATION_BOUNDS[key];
   const kind = bounds.whole ? "a whole number" : "a number";
   return `${key} must be ${kind} from ${bounds.min}${key === "advice.everyFinished" ? " (off)" : ""} to ${bounds.max}`;
 }
 
 /** The current value of one setting. */
-export function coordinationValueOf(settings: CoordinationSettings, key: CoordinationKey): number | boolean {
+export function coordinationValueOf(settings: CoordinationSettings, key: CoordinationKey): number | boolean | IntegrationCi {
   const [group, field] = key.split(".") as [keyof Omit<CoordinationSettings, "guard">, string];
-  return (settings[group] as Record<string, number | boolean>)[field]!;
+  return (settings[group] as Record<string, number | boolean | IntegrationCi>)[field]!;
 }
 
 function objectOf(value: unknown): Record<string, unknown> | null {
@@ -378,6 +529,9 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
   const handoff = objectOf(root?.["handoff"]);
   const main = objectOf(root?.["main"]);
   const review = objectOf(root?.["review"]);
+  const rollover = objectOf(root?.["rollover"]);
+  const maintenance = objectOf(root?.["maintenance"]);
+  const integration = objectOf(root?.["integration"]);
   const governor = objectOf(root?.["governor"]);
   const guard = objectOf(root?.["guard"]);
   const shape = { compact: compactSchema.shape, handoff: handoffSchema.shape, review: reviewSchema.shape };
@@ -403,11 +557,19 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
       contextTokens: valueOr(mainSchema.shape.contextTokens, main?.["contextTokens"], defaults.main.contextTokens),
       hardShare: valueOr(mainSchema.shape.hardShare, main?.["hardShare"], defaults.main.hardShare),
     },
+    // The retired `smallBudget`, `mediumBudget` and `largeBudget` are not read (delivery line design §5.6).
     review: {
-      smallBudget: valueOr(shape.review.smallBudget, review?.["smallBudget"], defaults.review.smallBudget),
-      mediumBudget: valueOr(shape.review.mediumBudget, review?.["mediumBudget"], defaults.review.mediumBudget),
-      largeBudget: valueOr(shape.review.largeBudget, review?.["largeBudget"], defaults.review.largeBudget),
+      maxRereviews: valueOr(shape.review.maxRereviews, review?.["maxRereviews"], defaults.review.maxRereviews),
+      callsPerBatch: valueOr(shape.review.callsPerBatch, review?.["callsPerBatch"], defaults.review.callsPerBatch),
     },
+    // Delivery line design §2.6: absent from a file an older build wrote, so at its defaults.
+    rollover: Object.fromEntries(
+      (Object.keys(rolloverSchema.shape) as Array<keyof CoordinationSettings["rollover"]>).map((name) => [name, valueOr(rolloverSchema.shape[name] as z.ZodType<unknown>, rollover?.[name], defaults.rollover[name])]),
+    ) as CoordinationSettings["rollover"],
+    // Delivery line design §6.6: absent from a file an older build wrote, so at its default.
+    maintenance: { ceilingFactor: valueOr(maintenanceSchema.shape.ceilingFactor, maintenance?.["ceilingFactor"], defaults.maintenance.ceilingFactor) },
+    // ADR-036: absent from a file an older build wrote, so off.
+    integration: { ci: valueOr(integrationSchema.shape.ci, integration?.["ci"], defaults.integration.ci) },
     governor: Object.fromEntries(
       GOVERNOR_SETTINGS.map((name) => [name, valueOr(governorSchema.shape[name], governor?.[name], defaults.governor[name])]),
     ) as Record<GovernorSetting, number>,
@@ -450,14 +612,23 @@ export function applyCoordinationChange(settings: CoordinationSettings, change: 
       return { ...settings, handoff: { ...settings.handoff, requestTokens: change.value } };
     case "handoff.maxPerRequest":
       return { ...settings, handoff: { ...settings.handoff, maxPerRequest: change.value } };
-    case "review.smallBudget":
-      return { ...settings, review: { ...settings.review, smallBudget: change.value } };
-    case "review.mediumBudget":
-      return { ...settings, review: { ...settings.review, mediumBudget: change.value } };
-    case "review.largeBudget":
-      return { ...settings, review: { ...settings.review, largeBudget: change.value } };
+    case "review.maxRereviews":
+      return { ...settings, review: { ...settings.review, maxRereviews: change.value } };
+    case "review.callsPerBatch":
+      return { ...settings, review: { ...settings.review, callsPerBatch: change.value } };
     case "main.compact":
       return { ...settings, main: { ...settings.main, compact: change.value } };
+    case "rollover.enabled":
+    case "rollover.beads":
+    case "rollover.turns":
+    case "rollover.tokens":
+    case "rollover.contextTokens":
+    case "rollover.ceilingFactor":
+      return { ...settings, rollover: { ...settings.rollover, [change.key.slice("rollover.".length)]: change.value } };
+    case "maintenance.ceilingFactor":
+      return { ...settings, maintenance: { ceilingFactor: change.value } };
+    case "integration.ci":
+      return { ...settings, integration: { ci: change.value } };
     case "main.contextShare":
       return { ...settings, main: { ...settings.main, contextShare: change.value } };
     case "main.contextTokens":
@@ -486,21 +657,6 @@ export function switchOffCoordination(
     [mechanism]: { ...settings[mechanism], enabled: false },
     guard: { ...settings.guard, [mechanism]: { ...settings.guard[mechanism], switchedOff: { at, met: figures.met, checked: figures.checked } } },
   };
-}
-
-/** The review calls one request may make, per tier (§G.7). */
-export type ReviewBudget = Readonly<Record<Tier, number>>;
-
-/** Each tier's review-budget setting, in the order Settings shows them. */
-export const REVIEW_BUDGET_KEYS: Readonly<Record<Tier, "review.smallBudget" | "review.mediumBudget" | "review.largeBudget">> = {
-  Small: "review.smallBudget",
-  Medium: "review.mediumBudget",
-  Large: "review.largeBudget",
-};
-
-/** The review budget the owner's settings hold: what the budget notice, the stall pass and a new Worker read. */
-export function reviewBudgetOf(settings: Pick<CoordinationSettings, "review">): ReviewBudget {
-  return { Small: settings.review.smallBudget, Medium: settings.review.mediumBudget, Large: settings.review.largeBudget };
 }
 
 /** Whether the owner's settings let an agent on `provider` (a base provider id: claude, codex, opencode) be compacted. */
@@ -602,4 +758,13 @@ export function mainCompactionOnFor(settings: Pick<CoordinationSettings, "main">
 export function handoffCrossingOf(requestTokensRead: number | null, settings: Pick<CoordinationSettings, "handoff">): ThresholdCrossing | null {
   const threshold = settings.handoff.requestTokens;
   return requestTokensRead !== null && requestTokensRead >= threshold ? { figure: "requestTokens", value: requestTokensRead, threshold } : null;
+}
+
+/**
+ * Whether a pending compaction's or handoff's figure is at the maintenance
+ * ceiling (delivery line design §6.6): at least `maintenance.ceilingFactor` ×
+ * its threshold. False with no crossing. Pure.
+ */
+export function atMaintenanceCeiling(crossing: ThresholdCrossing | null, settings: Pick<CoordinationSettings, "maintenance">): boolean {
+  return crossing !== null && crossing.value >= settings.maintenance.ceilingFactor * crossing.threshold;
 }

@@ -50,6 +50,7 @@ import { commandKindOf } from "./orchestrator-state";
 import { findOrchestratorAgent, type OrchestratorAgentPaseo } from "./orchestrator-agent";
 import type { OrchestratorStoreDeps } from "./orchestrator-store";
 import { belongsToProject, commandManagerIdOf, workingAgents, type OrchestratorToolsPaseo } from "./orchestrator-tool-context";
+import { changeEffect, deliveryEffect } from "./effects";
 import { applyPreparedChange, type PreparedChangeResult } from "./prepared-changes";
 import { firstLine } from "./request-trace";
 import { dataHomeOf } from "./role-instructions";
@@ -87,15 +88,10 @@ export function answerNoticeOf(decision: Decision, failure: string | null = null
   if (answer?.by === "policy") lines.push(`policy: ${answer.class ?? decisionClassOf(decision)} is delegated to the ${policyPredictorOf(decision) === "recommended" ? "recommended option" : "Orchestrator"} in this project; the owner was not asked`);
   // Autonomy design §B.7: the owner's override corrects an answer made for them; it replaces that answer.
   if (decisionKindOf(decision.id) === "override") lines.push(`overrides: ${decision.supersedes ?? "unknown"}, answered earlier for the owner; this answer replaces that one`);
-  if (failure !== null) lines.push(`delivery: the prepared command was not delivered (${failure}); nothing was sent`);
+  // Delivery line design §7.3: each effect line comes from what was done (`effects.ts`).
+  if (failure !== null) lines.push(`delivery: ${deliveryEffect({ what: "the prepared command", outcome: "failed", why: failure }).sentence}`);
   // Autonomy design §G.4: the prepared change of the owner's settings the plugin applied on this answer, or why not.
-  if (change !== null) {
-    lines.push(
-      change.applied
-        ? `change: applied by the plugin — it ${change.text}${change.wrote ? "" : " (it was so already)"}; send nothing for it`
-        : `change: not applied (${change.reason}); nothing was changed — tell the owner, and set nothing yourself`,
-    );
-  }
+  if (change !== null) lines.push(`change: ${changeEffect(change, { for: "agent" }).sentence}`);
   lines.push("This is the owner's answer, delivered by the paseo-bm plugin. Act on it now; tell the owner in one line what you did.");
   if (option === null && answer?.words != null) lines.push("", answer.words);
   return lines.join("\n");
@@ -234,13 +230,7 @@ export function createOrchestratorDecisionDelivery(deps: OrchestratorDeliveryDep
         // Autonomy design §G.4: the chosen option's prepared change of the owner's settings, applied on the owner's
         // own answer only (`applyPreparedChange` reads `by: owner`) and before any delivery: it needs no Paseo handle.
         const change = applyPreparedChange(stored, { home, now: now(), log });
-        if (change !== null) {
-          log(
-            change.applied
-              ? `[paseo-bm] decision ${stored.id}: the owner's answer ${change.wrote ? "applied" : "found already applied"}: it ${change.text}`
-              : `[paseo-bm] decision ${stored.id}: the owner's answer could not apply its change (${change.reason}); nothing was changed`,
-          );
-        }
+        if (change !== null) log(changeEffect(change, { for: "log", decisionId: stored.id }).sentence);
         let delivery: DecisionDelivery;
         if (!isDeliveryPaseo(paseo)) {
           log(`[paseo-bm] decision ${decision.id} was answered, but there is no Paseo connection to deliver it.`);

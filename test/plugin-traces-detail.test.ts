@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reconstructTraces, type AgentFacts } from "../plugin/server/traces";
@@ -760,6 +760,29 @@ describe("read RPC handlers", () => {
     expect(result.traces[0]).toMatchObject({ requestId: "req-A", workerIds: ["w1"], state: "completed" });
     expect(result.truncated).toBe(false);
     expect(result.store.workspaceBytes).toBeGreaterThan(0);
+  });
+
+  it("carries each request's chain from the registry (delivery line design §2.7)", async () => {
+    const ROOT = "req-20261020T105259Z";
+    const HEAD = "req-20261020T124012Z";
+    const location = { tracesDir: join(home, "traces") };
+    await appendRecord(location, record({ requestId: ROOT, turnId: "t-root", sent: [msg("Review and propose the feature")] }));
+    await appendRecord(location, record({ requestId: HEAD, turnId: "t-head", at: "2026-09-16T11:00:00.000Z", startedAt: "2026-09-16T11:00:00.000Z", endedAt: "2026-09-16T11:00:20.000Z", sent: [msg("Widget flows W13", "2026-09-16T11:00:00.000Z")] }));
+    await appendRecord(location, record({ requestId: "req-A", turnId: "t-other", at: "2026-09-16T12:00:00.000Z", sent: [msg("unrelated", "2026-09-16T12:00:00.000Z")] }));
+    clearTraceStoreCache();
+    const entry = (requestId: string, over: Record<string, unknown>) => ({ requestId, workspaceId: WS, createdAt: "2026-09-16T10:00:00.000Z", source: "tool", managerId: MANAGER, workerIds: [], tier: "Small", finishedAt: null, reviews: { batches: [], grants: [] }, ...over });
+    mkdirSync(join(home, "requests"), { recursive: true });
+    writeFileSync(
+      join(home, "requests", `${WS}.json`),
+      JSON.stringify({ schemaVersion: 1, requests: [entry(ROOT, { continuedBy: HEAD, rollover: { reason: "size", figure: "beads 15", at: "2026-09-16T10:59:00.000Z" } }), entry(HEAD, { continuationOf: ROOT, chainRootId: ROOT })] }),
+    );
+    const result = await handleTracesList({ workspaceId: WS }, daemonWith([]));
+    const byId = new Map(result.traces.map((row) => [row.requestId, row]));
+    expect(byId.get(HEAD)).toMatchObject({ continuationOf: ROOT, chainRootId: ROOT, chainPosition: 2 });
+    expect(byId.get(HEAD)).not.toHaveProperty("continuedBy");
+    expect(byId.get(ROOT)).toMatchObject({ continuedBy: HEAD });
+    expect(byId.get(ROOT)).not.toHaveProperty("chainPosition");
+    for (const key of ["continuationOf", "chainRootId", "continuedBy", "chainPosition"]) expect(byId.get("req-A"), key).not.toHaveProperty(key);
   });
 
   it("caps the page at the agreed limit", async () => {

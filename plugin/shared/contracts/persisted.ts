@@ -147,6 +147,10 @@ export const reportPhaseSchema = z.enum([
  * required to be tolerant, and a field it could not read becomes "unknown"
  * rather than breaking the trace (REQ-050a).
  */
+/** The CI of a report's commit as the Worker read it (delivery line design §4.4): `glab ci status`, or none yet. */
+export const REPORT_CI_STATES = ["none", "pending", "success", "failure", "not-run"] as const;
+export type ReportCiState = (typeof REPORT_CI_STATES)[number];
+
 export const parsedReportSchema = z.object({
   agentId: agentIdSchema,
   at: z.string(),
@@ -175,6 +179,32 @@ export const parsedReportSchema = z.object({
    * the report the plugin asked it for; absent otherwise.
    */
   handoffNote: z.string().optional(),
+  /** What a size rollover's `finished` leaves to its continuation (delivery line design §2.6); absent otherwise. */
+  remaining: z.array(z.string()).optional(),
+  /**
+   * The report's git fields (delivery line design §4.4): the mission branch,
+   * the commit, whether it is pushed, the merge request and its CI, as the
+   * Worker read them. Absent on a report that names none, as on every report
+   * written before them.
+   */
+  integration: z
+    .object({
+      branch: z.string().optional(),
+      commit: z.string().optional(),
+      pushed: z.boolean().optional(),
+      mr: z.string().optional(),
+      ci: z.enum(REPORT_CI_STATES).optional(),
+    })
+    .optional(),
+  /**
+   * What a bound Worker's blocked report waits on by id (delivery line design
+   * §6.2), read from its `blockers` line: other requests and its own batches,
+   * and `wakeOn: "any"` when the first settled item is enough. Absent when
+   * the report names none, as on every report written before them.
+   */
+  waitingOnRequests: z.array(z.string()).optional(),
+  waitingOnBatches: z.array(z.string()).optional(),
+  wakeOn: z.enum(["all", "any"]).optional(),
   unparsedFields: z.array(z.string()),
   /**
    * Bead-id list fields the parser could not fully read (delta 20260917 §5.1):
@@ -267,6 +297,9 @@ export const traceRuntimeSchema = z.object({
   boundary: z.enum(["on", "off"]).optional(),
 });
 
+/** What started a turn (delivery line design §8.4): `turnTriggerOf`, `shared/eval-metrics/mains.ts`. */
+export const turnTriggerSchema = z.enum(["owner", "report", "plugin", "agent"]);
+
 /** One line of `events-<YYYYMM>.jsonl`: everything one agent turn produced. */
 export const traceRecordSchema = z.object({
   v: z.number().int().positive(),
@@ -306,6 +339,14 @@ export const traceRecordSchema = z.object({
    * written before it has none, and that reads as unknown, never zero.
    */
   toolCalls: z.number().int().nonnegative().optional(),
+  /**
+   * What started the turn (delivery line design §8.4), from its first inbound
+   * message: the owner's words, a report delivery, anything else the plugin
+   * sent, or another agent; null when the turn had no inbound message.
+   * Optional like `runtime`: a record written before it has none, and the
+   * governor's drift counts it as before; `v` stays 1.
+   */
+  trigger: turnTriggerSchema.nullable().optional(),
 });
 
 export type Evidence = z.infer<typeof evidenceSchema>;
@@ -317,6 +358,7 @@ export type ParsedReport = z.infer<typeof parsedReportSchema>;
 export type ParsedReview = z.infer<typeof parsedReviewSchema>;
 export type ReportPhase = z.infer<typeof reportPhaseSchema>;
 export type TraceRecord = z.infer<typeof traceRecordSchema>;
+export type TurnTrigger = z.infer<typeof turnTriggerSchema>;
 export type TraceRuntime = z.infer<typeof traceRuntimeSchema>;
 export type TraceStoreMeta = z.infer<typeof traceStoreMetaSchema>;
 export type TraceWorkspaceMeta = z.infer<typeof traceWorkspaceMetaSchema>;

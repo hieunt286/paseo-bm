@@ -27,8 +27,17 @@
  *   A-5, A-6);
  * - `orchestrator/proposals.json`, `orchestrator/stalls.json`,
  *   `orchestrator/wakes.json` (A-7), `orchestrator/interventions.json`
- *   (A-12) and the times of `orchestrator/notes/<workspaceId>.json`, when
- *   present.
+ *   (A-12), `orchestrator/dangers.json` (A-13) and the times of
+ *   `orchestrator/notes/<workspaceId>.json`, when present;
+ * - the Missions places' ids (A-14: `ui/missions-home.json`,
+ *   `missions/index.json`, each `missions/<missionId>.json`), the missions'
+ *   `m:` decisions and their rosters' request ids (M-39, M-41), and the
+ *   placements' workspaces, missions and repo keys (M-37, M-38);
+ * - the request registry's chain fields and batch results
+ *   (`requests/<workspaceId>.json`), the rollover figures of
+ *   `coordination/settings.json`, and the times and endings of
+ *   `orchestrator/compactions.json` and `handoffs/<id>.json` (M-36, M-40,
+ *   M-42).
  *
  * The output holds numbers only — no message text, no path — plus the window,
  * the filters, the workspace ids and labels, and the ids of the heaviest
@@ -252,6 +261,18 @@ interface Selection {
   decisions: unknown[] | undefined;
   wakes: unknown[] | undefined;
   interventions: unknown[] | undefined;
+  dangers: unknown[] | undefined;
+  /** The Missions places (A-14) and the missions' decisions and requests (M-41): handed on as the store read them. */
+  missionsWorkspaceIds: string[];
+  missionDecisions: unknown[] | undefined;
+  missionRequests: StoreRead["missionRequests"];
+  /** M-37, M-38: the placements as read. */
+  placements: StoreRead["placements"];
+  /** M-36, M-40, M-42: the registry and the settings as read; the compactions and handoffs of the workspaces kept. */
+  requests: StoreRead["requests"];
+  coordinationSettings: unknown;
+  compactions: unknown[] | undefined;
+  handoffs: unknown[] | undefined;
   /** Records left out by `--version x.y.z` because they carry no version. */
   recordsWithoutVersion: number;
   /** Orchestrator entries left out by `--version x.y.z`: outside the version's span, or of a request of another version. */
@@ -268,7 +289,8 @@ interface Selection {
  * decision of a request that only another version recorded is left out.
  */
 function select(store: StoreRead, options: ReplayOptions, workspaceIds: ReadonlySet<string> | null): Selection {
-  let { records, proposals, stalls, notes, decisions, wakes, interventions } = selectWorkspaces(store, workspaceIds);
+  const selected = selectWorkspaces(store, workspaceIds);
+  let { records, proposals, stalls, notes, decisions, wakes, interventions, dangers, missionDecisions, compactions, handoffs } = selected;
   let recordsWithoutVersion = 0;
   let orchestratorEntriesNotAttributed = 0;
 
@@ -306,8 +328,33 @@ function select(store: StoreRead, options: ReplayOptions, workspaceIds: Readonly
     }
     if (wakes !== undefined) wakes = keep(wakes, (entry) => inSpan(fieldOf(entry, "at")));
     if (interventions !== undefined) interventions = keep(interventions, (entry) => inSpan(fieldOf(entry, "at")));
+    if (dangers !== undefined) dangers = keep(dangers, (entry) => inSpan(fieldOf(entry, "raisedAt")));
+    if (missionDecisions !== undefined) missionDecisions = keep(missionDecisions, (entry) => inSpan(fieldOf(entry, "askedAt")));
+    if (compactions !== undefined) compactions = keep(compactions, (entry) => inSpan(fieldOf(entry, "requestedAt")));
+    if (handoffs !== undefined) handoffs = keep(handoffs, (entry) => inSpan(fieldOf(entry, "requestedAt")));
   }
-  return { records, proposals, stalls, notes, decisions, wakes, interventions, recordsWithoutVersion, orchestratorEntriesNotAttributed };
+  // The Missions places and the missions' requests were dropped here before (the field review's "Missions home unknown"): they pass as read.
+  const { missionsWorkspaceIds, missionRequests, placements, requests, coordinationSettings } = selected;
+  return {
+    records,
+    proposals,
+    stalls,
+    notes,
+    decisions,
+    wakes,
+    interventions,
+    dangers,
+    missionsWorkspaceIds,
+    missionDecisions,
+    missionRequests,
+    placements,
+    requests,
+    coordinationSettings,
+    compactions,
+    handoffs,
+    recordsWithoutVersion,
+    orchestratorEntriesNotAttributed,
+  };
 }
 
 // ── The report ──────────────────────────────────────────────────────────────
@@ -417,6 +464,9 @@ function flatten(value: unknown, path = ""): Array<[string, unknown]> {
 
 const share = (part: number, whole: number | null): string => (whole === null || whole === 0 ? "unknown" : `${Math.round((100 * part) / whole)} %`);
 
+/** M-37's mission pairs printed in its headline row; the JSON carries them all. */
+export const M37_PAIRS_SHOWN = 10;
+
 /** Candidate rows printed per kind; the JSON carries them all. */
 export const MARKDOWN_CANDIDATE_ROWS = 20;
 
@@ -490,8 +540,8 @@ const percent = (rate: number | null): string => (rate === null ? "unknown" : `$
 /** The `Every metric` rows left to their own section: A-4 and the delegated and owner parts of A-5, per class. */
 const DELEGATION_PATH = /^(?:a4|a5\.delegated|a5\.owner)\./;
 
-/** `writers-observed` per workspace: a column of "By workspace", not rows of "Every metric" (autonomy design §F.1). */
-const WRITERS_BY_WORKSPACE_PATH = /^supplementary\.writersObserved\.byWorkspace\./;
+/** `writers-observed` per workspace: a column of "By workspace", not rows of "Every metric" (autonomy design §F.1); M-37's mission pairs, in its headline row. */
+const WRITERS_BY_WORKSPACE_PATH = /^(?:supplementary\.writersObserved\.byWorkspace\.|m37\.pairs$)/;
 
 /**
  * A-4 and A-5 of delegated decisions per class (evaluation design §4), the
@@ -664,6 +714,52 @@ export function renderMarkdown(report: ReplayReport): string {
   const mains = metrics.a14;
   lines.push(
     `| A-14 Main turns: owner share · by trigger · batched | ${mains.homeKnown ? `${formatValue(mains.ownerShare)} · ${MAIN_TRIGGERS.map((trigger) => `${trigger} ${mains.byTrigger[trigger]}`).join(" / ")} · ${mains.batched}` : "Missions home unknown"} |`,
+  );
+  // Delivery line design §13: M-39, the owner's cards about review per request; M-41, the owner's cards that are not product decisions.
+  const review = metrics.m39;
+  lines.push(
+    `| M-39 owner cards about review (review-cap, review-budget): per request max / mean · requests with them, over one · cards (review-cap / below the cap: review-budget) · without a request | ${
+      review.decisionsIncluded
+        ? `${formatValue(review.maxPerRequest)} / ${formatValue(review.meanPerRequest)} · ${review.requests}, ${review.requestsOverOne} · ${review.cards} (${review.reviewCap} / ${review.belowCap}) · ${review.withoutRequest}`
+        : "decisions not read"
+    } |`,
+  );
+  const cards = metrics.m41;
+  lines.push(
+    `| M-41 owner cards that are not product decisions: share · not product / cards · duplicates of an open q: / governor process (o: of a process class, ladder step not stored) / review | ${
+      cards.decisionsIncluded
+        ? `${percent(cards.share)} · ${cards.notProduct} / ${cards.cards} · ${cards.byKind.duplicate} / ${cards.byKind.governorProcess} / ${cards.byKind.review}${cards.missionDecisionsIncluded ? "" : " (mission decisions not read)"}${cards.missionCardsWithoutRequests > 0 ? ` (${cards.missionCardsWithoutRequests} m: cards without their mission's requests)` : ""}`
+        : "decisions not read"
+    } |`,
+  );
+  // Delivery line design §13: M-36, the tokens a request reads; M-40, Worker turns while a wait by id is unsettled and the tokens of turns that end blocked; M-42, maintenance dropped after its ceiling.
+  const size = metrics.m36;
+  lines.push(
+    `| M-36 tokens read per request, all its turns: largest (request) · largest chain (its requests) · p50 / p95 · over the ceiling of ${size.ceilingTokens} (rollover.ceilingFactor × rollover.tokens${size.settingsIncluded ? "" : ", defaults"}) / requests | ${
+      size.largest === null
+        ? "no request with usage"
+        : `${size.largest.tokensRead} (${size.largest.requestId}) · ${formatValue(size.largestChain?.tokensRead)} (${formatValue(size.largestChain?.requests)}) · ${formatValue(size.p50)} / ${formatValue(size.p95)} · ${size.overCeiling} / ${size.requests}${size.registryIncluded ? "" : " (registry not read: each request its own chain)"}`
+    } |`,
+  );
+  // Delivery line design §13: M-37, files written by two missions in one workspace; M-38, committed and verified finishes.
+  const shared = metrics.m37;
+  const pairsShown = shared.pairs.slice(0, M37_PAIRS_SHOWN).map((pair) => `${pair.missions[0]} + ${pair.missions[1]} in ${pair.workspaceId}${pair.placement ? " (placement)" : ""}: ${pair.files}`);
+  lines.push(
+    `| M-37 files written by Workers of two missions in one workspace (a placement, or the shared checkout before placements): files (in placements) · mission pairs (the ${M37_PAIRS_SHOWN} with most files) · mission requests with Worker files, requests with files in no mission | ${shared.files} (${shared.inPlacements}) · ${shared.pairs.length}${pairsShown.length === 0 ? "" : ` (${pairsShown.join("; ")})`} · ${shared.requests}, ${shared.requestsWithoutMission}${shared.missionsIncluded ? "" : " (mission rosters not read)"}${shared.placementsIncluded ? "" : " (placements not read)"} |`,
+  );
+  const line = metrics.m38;
+  lines.push(
+    `| M-38 finished mission requests: changed files and no commit on the mission branch / changed files (judged by the Main's finished line / by the report's commit) · of those verified by CI or a detected check: share (verified / changed files; CI / check) · CI red · finished | ${line.uncommitted} / ${line.changedFiles} (${line.committedBy.line} / ${line.committedBy.report}) · ${percent(line.verifiedShare)} (${line.verified} / ${line.changedFiles}; ${line.verifiedBy.ci} / ${line.verifiedBy.check}) · ${line.ciRed} · ${line.finished}${line.missionsIncluded ? "" : " (mission rosters not read)"} |`,
+  );
+  const waits = metrics.m40;
+  lines.push(
+    `| M-40 Worker turns a plugin delivery started while a wait by id was unsettled (settle times rebuilt from the stores; a link's reply or a dead item is not stored) · not judged · upper bound (after a blocked report naming ids) · tokens read in them · Worker tokens read in turns that end with a blocked report: share (tokens / Worker tokens) | ${waits.startedWhileWaiting} · ${waits.notJudged} · ${waits.afterBlocked} · ${waits.tokensReadWhileWaiting} · ${percent(waits.blockedEndShare)} (${waits.blockedEndTokensRead} / ${waits.workerTokensRead})${waits.decisionsIncluded ? "" : " (decisions not read)"} |`,
+  );
+  const upkeep = metrics.m42;
+  const upkeepPart = (included: boolean, figures: EvalMetrics["m42"]["compactions"]): string =>
+    included ? `${figures.dropped} / ${figures.entries}, ${figures.afterCeiling}` : "not read";
+  lines.push(
+    `| M-42 maintenance dropped no-safe-point: compactions dropped / asked, after the ${Math.round(upkeep.ceilingMs.compact / 60_000)}-min ceiling · handoffs dropped / asked, after the ${Math.round(upkeep.ceilingMs.handoff / 60_000)}-min ceiling (the time ceiling; the token figure is not stored) | ${upkeepPart(upkeep.compactionsIncluded, upkeep.compactions)} · ${upkeepPart(upkeep.handoffsIncluded, upkeep.handoffs)} |`,
     "",
   );
 
