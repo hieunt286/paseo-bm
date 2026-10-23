@@ -6,6 +6,28 @@ export interface ReleaseNote { version: string; summary: string; sections: reado
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    "version": "0.6.0",
+    "summary": "A delivery line for missions. Each mission now works on its own branch, in its own worktree of each repository, and its Workers commit there; pushing and opening the merge request takes your yes once per mission and repository. A request ends at its first finished, and more work continues in a fresh Worker. No agent waits on a CI pipeline any more, a re-review checks only the diff of the fixes, and a waiting Worker is woken only for what it waits on. You get fewer cards, and each says what was really done.",
+    "sections": [
+      "What changed",
+      "A branch per mission",
+      "Bounded requests",
+      "No agent waits on machines",
+      "Review by milestone",
+      "Fewer, clearer cards",
+      "The governor",
+      "Typed messages",
+      "Screens",
+      "Agent roles",
+      "What to know when upgrading",
+      "Rollback",
+      "Evidence",
+      "Sources"
+    ],
+    "prereleases": [],
+    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.6.0/docs/releases/paseo-bm-release-notes-0.6.0.md"
+  },
+  {
     "version": "0.5.6",
     "summary": "Work by mission instead of by repository. A mission is one goal you name — \"Ship card payments\" — with its own Main: a Beads Manager that works across every repository the goal needs, creates and links the Workers in each, keeps what is in flight, and asks you only what is yours to decide. Missions live in a Mission-List project in Paseo, one workspace per mission, and a new Missions screen shows each one. The Orchestrator becomes the governor of the missions' process. Projects can also ask each other through the plugin.",
     "sections": [
