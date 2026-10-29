@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -16,7 +16,13 @@ import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 const NOW = new Date("2026-10-25T10:00:00.000Z");
 const REPO = "wks_repo";
 
+beforeEach(() => {
+  vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+  vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   clearJsonFileCache();
   removeDataFolders();
 });
@@ -38,6 +44,12 @@ function world() {
   const root = join(base, "repo");
   mkdirSync(root, { recursive: true });
   git(root, "init", "-q", "-b", "main");
+  // mergeGit creates merge commits itself; commitIn's per-call identity is
+  // not inherited. Keep the fixture's identity in its own repository and
+  // refuse Git's host-dependent identity guessing, as a clean CI runner does.
+  git(root, "config", "user.useConfigOnly", "true");
+  git(root, "config", "user.name", "Lane merge test");
+  git(root, "config", "user.email", "lane-merge@example.invalid");
   commitIn(root, "a.txt", "a\n", "init");
   const lane1Dir = join(base, "lane1");
   const lane2Dir = join(base, "lane2");
