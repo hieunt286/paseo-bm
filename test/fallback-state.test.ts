@@ -52,7 +52,7 @@ function daemonWith(options: { windows?: Windows; available?: string[]; bases?: 
     },
     config: { providers: Object.fromEntries(Object.entries(bases).map(([id, base]) => [id, { extends: base }])) },
   });
-  return { paseo: fake.paseo, listUsage: fake.api.providers.listUsage };
+  return { paseo: fake.paseo, listUsage: fake.api.providers.listUsage, setTimeline: fake.setTimeline };
 }
 
 let root: string;
@@ -371,6 +371,45 @@ describe("registerFallbackDetection", () => {
       { paseo },
     );
     expect(readIncidents(home).incidents).toMatchObject([{ agentId: WORKER, class: "L1", resetsAt: "2026-09-22T15:00:00.000Z", status: "pending" }]);
+    expect(listUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["failed", "completed", "history"] as const)("offers the Codex fallback after Claude's weekly-limit reply (%s turn)", async (delivery) => {
+    const kind = delivery === "failed" ? "failed" : "completed";
+    const message = "You've hit your weekly limit · resets Oct 28 at 10am (Asia/Saigon)";
+    saveChain("ask", [CODEX]);
+    const { paseo, listUsage, setTimeline } = daemonWith({
+      windows: [{ id: "seven_day", usedPct: 100, resetsAt: "2026-10-28T03:00:00.000Z" }],
+      snapshots: {
+        [WORKER]: { id: WORKER, labels: { "bm.role": "worker", "bm.requestId": REQ }, lastUsage: { outputTokens: 0 } },
+      },
+    });
+    const timeline = [{ type: "user_message", text: "Continue." }, { type: "assistant_message", text: message }];
+    const fetched = [
+      { type: "tool_call", callId: "paseo-agent-message:incoming", name: "agent_message", status: "completed", error: null, agentMessage: { event: "message", sender: { id: MANAGER, title: "Main" }, text: "Continue." }, detail: { type: "plain_text", text: "Continue.", icon: "bot" } },
+      timeline[1],
+    ];
+    setTimeline(WORKER, fetched.map((item) => ({ item, turnId: "t-weekly", timestamp: NOW().toISOString() })));
+    const fake = host();
+    registerFallbackDetection(fake.value as never, { log, now: NOW, home: () => home });
+    await fake.handlers[0]!(
+      {
+        agent: { id: WORKER, provider: "bm-worker/claude-opus-5", workspaceId: WORKSPACE },
+        turnId: "t-weekly",
+        outcome: kind === "failed" ? { kind, error: { message } } : { kind },
+        timeline: delivery === "history" ? [] : timeline,
+      },
+      { paseo },
+    );
+    expect(readIncidents(home).incidents).toMatchObject([{
+      agentId: WORKER,
+      class: "L1",
+      signal: kind,
+      message,
+      resetsAt: "2026-10-28T03:00:00.000Z",
+      candidate: { alias: "bm-worker-fallback-1", baseProvider: "codex", model: CODEX.model },
+      status: "pending",
+    }]);
     expect(listUsage).toHaveBeenCalledTimes(1);
   });
 

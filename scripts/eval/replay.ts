@@ -37,7 +37,9 @@
  *   (`requests/<workspaceId>.json`), the rollover figures of
  *   `coordination/settings.json`, and the times and endings of
  *   `orchestrator/compactions.json` and `handoffs/<id>.json` (M-36, M-40,
- *   M-42).
+ *   M-42);
+ * - the outbox's records, `outbox/<workspaceId>.json`, without their text
+ *   (M-44: the wait of each tell to a Worker).
  *
  * The output holds numbers only — no message text, no path — plus the window,
  * the filters, the workspace ids and labels, and the ids of the heaviest
@@ -273,6 +275,8 @@ interface Selection {
   coordinationSettings: unknown;
   compactions: unknown[] | undefined;
   handoffs: unknown[] | undefined;
+  /** M-44: the outbox records of the workspaces kept. */
+  outbox: unknown[] | undefined;
   /** Records left out by `--version x.y.z` because they carry no version. */
   recordsWithoutVersion: number;
   /** Orchestrator entries left out by `--version x.y.z`: outside the version's span, or of a request of another version. */
@@ -290,7 +294,7 @@ interface Selection {
  */
 function select(store: StoreRead, options: ReplayOptions, workspaceIds: ReadonlySet<string> | null): Selection {
   const selected = selectWorkspaces(store, workspaceIds);
-  let { records, proposals, stalls, notes, decisions, wakes, interventions, dangers, missionDecisions, compactions, handoffs } = selected;
+  let { records, proposals, stalls, notes, decisions, wakes, interventions, dangers, missionDecisions, compactions, handoffs, outbox } = selected;
   let recordsWithoutVersion = 0;
   let orchestratorEntriesNotAttributed = 0;
 
@@ -332,6 +336,7 @@ function select(store: StoreRead, options: ReplayOptions, workspaceIds: Readonly
     if (missionDecisions !== undefined) missionDecisions = keep(missionDecisions, (entry) => inSpan(fieldOf(entry, "askedAt")));
     if (compactions !== undefined) compactions = keep(compactions, (entry) => inSpan(fieldOf(entry, "requestedAt")));
     if (handoffs !== undefined) handoffs = keep(handoffs, (entry) => inSpan(fieldOf(entry, "requestedAt")));
+    if (outbox !== undefined) outbox = keep(outbox, (entry) => inSpan(fieldOf(entry, "createdAt")));
   }
   // The Missions places and the missions' requests were dropped here before (the field review's "Missions home unknown"): they pass as read.
   const { missionsWorkspaceIds, missionRequests, placements, requests, coordinationSettings } = selected;
@@ -352,6 +357,7 @@ function select(store: StoreRead, options: ReplayOptions, workspaceIds: Readonly
     coordinationSettings,
     compactions,
     handoffs,
+    outbox,
     recordsWithoutVersion,
     orchestratorEntriesNotAttributed,
   };
@@ -732,7 +738,7 @@ export function renderMarkdown(report: ReplayReport): string {
         : "decisions not read"
     } |`,
   );
-  // Delivery line design §13: M-36, the tokens a request reads; M-40, Worker turns while a wait by id is unsettled and the tokens of turns that end blocked; M-42, maintenance dropped after its ceiling.
+  // Delivery line design §13: M-36, the tokens a request reads; M-40, Worker turns while a wait by id is unsettled and the tokens of turns that end blocked; M-42, maintenance dropped after its ceiling; M-44, the wait of a tell to a Worker.
   const size = metrics.m36;
   lines.push(
     `| M-36 tokens read per request, all its turns: largest (request) · largest chain (its requests) · p50 / p95 · over the ceiling of ${size.ceilingTokens} (rollover.ceilingFactor × rollover.tokens${size.settingsIncluded ? "" : ", defaults"}) / requests | ${
@@ -760,6 +766,14 @@ export function renderMarkdown(report: ReplayReport): string {
     included ? `${figures.dropped} / ${figures.entries}, ${figures.afterCeiling}` : "not read";
   lines.push(
     `| M-42 maintenance dropped no-safe-point: compactions dropped / asked, after the ${Math.round(upkeep.ceilingMs.compact / 60_000)}-min ceiling · handoffs dropped / asked, after the ${Math.round(upkeep.ceilingMs.handoff / 60_000)}-min ceiling (the time ceiling; the token figure is not stored) | ${upkeepPart(upkeep.compactionsIncluded, upkeep.compactions)} · ${upkeepPart(upkeep.handoffsIncluded, upkeep.handoffs)} |`,
+  );
+  const tells = metrics.m44;
+  lines.push(
+    `| M-44 tells to Workers: waited until delivered p50 / p90 minutes · delivered / tells · steered into a running turn · turns Paseo replaced · still queued | ${
+      tells.outboxIncluded
+        ? `${formatValue(tells.waitMinutes.p50)} / ${formatValue(tells.waitMinutes.p90)} · ${tells.delivered} / ${tells.tells} · ${tells.steered} · ${tells.replaced} · ${tells.queuedAtEnd}`
+        : "outbox not read"
+    } |`,
     "",
   );
 

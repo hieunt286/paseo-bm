@@ -44,6 +44,7 @@ import {
 } from "../shared/decisions";
 import { assertNoSymlink, capBy, createJsonFileStore, type JsonFileStore } from "./data-files";
 import { createMemoryStore } from "./memory-store";
+import { requestIndexOf } from "./mission-roster";
 import { errorText } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN, assertWorkspaceId } from "./trace-store";
 import { settleQuestionWait } from "./waits";
@@ -186,7 +187,8 @@ function rememberOwnerAnswer(home: string, previous: Decision, next: Decision, l
       kind: "decision",
       text: `${next.question} — the owner: ${said ?? ""}`,
       source,
-      by: { role: "plugin", agentId: null, missionId: null },
+      // Delivery line design §18.1: the answer belongs to its request's mission, when it has one.
+      by: { role: "plugin", agentId: null, missionId: next.requestId === undefined || next.requestId === null ? null : (requestIndexOf(home, next.requestId)?.missionId ?? null) },
       supersedes: earlier,
     });
     if (!added.ok) log(`[paseo-bm] the owner's answer to ${next.id} was not added to the project memory: ${added.reasons.join("; ")}`);

@@ -17,6 +17,7 @@ import { createBindingStore } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
+import { createMissionRoster } from "../plugin/server/mission-roster";
 
 /**
  * Delta 20260921 §4.4.7 (REQ-065 d): "Switch" creates the replacement Worker on
@@ -104,7 +105,7 @@ function daemonWith(options: { oldLabels?: Record<string, string>; reviewers?: A
     config: options.injectIntoAgents === undefined ? {} : { mcp: { injectIntoAgents: options.injectIntoAgents } },
     created: options.create ?? (() => ({ id: NEW })),
   });
-  return { paseo: fake.paseo, create: fake.api.agents.create, sent: fake.sends };
+  return { paseo: fake.paseo, create: fake.api.agents.create, sent: fake.sends, fake };
 }
 
 let root: string;
@@ -135,6 +136,25 @@ afterEach(() => {
 });
 
 describe("switch (Worker)", () => {
+  it("keeps a mission replacement in the request's repo workspace rather than the Main's", async () => {
+    write([incident()]);
+    createMissionRoster(home).add("mis-1234567890", { requestId: REQ, workspaceId: "wks_1", topic: "Fix the repo", workerId: OLD });
+    const { paseo, create, fake } = daemonWith();
+    await switcher().action(incident(), paseo, { home });
+    expect(create).not.toHaveBeenCalled();
+    expect(fake.creates).toMatchObject([{ workspaceId: "wks_1", options: { parent: MANAGER, config: { provider: "bm-worker-fallback-1/gpt-5.6-sol" } } }]);
+    expect(createMissionRoster(home).get("mis-1234567890", REQ)?.workerIds).toEqual([OLD, NEW]);
+  });
+
+  it("refuses a mission fallback when the host cannot create in its repo workspace", async () => {
+    write([incident()]);
+    createMissionRoster(home).add("mis-1234567890", { requestId: REQ, workspaceId: "wks_1", topic: "Fix the repo", workerId: OLD });
+    const { paseo, create } = daemonWith();
+    (paseo as { workspaces?: unknown }).workspaces = undefined;
+    await expect(switcher().action(incident(), paseo, { home })).rejects.toMatchObject({ code: "E_FALLBACK_CREATE_FAILED" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("creates exactly one Worker with the exact config, cwd, parent, title, labels and prompt, then records switched", async () => {
     write([incident()]);
     const { paseo, create } = daemonWith();

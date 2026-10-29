@@ -142,6 +142,15 @@ afterEach(() => {
 });
 
 describe("workerHandover", () => {
+  it("keeps the original brief delivered as a Paseo agent message before later user follow-ups", async () => {
+    const original = "BM-BRIEF worker requestId: req-20260922T020000Z\nThe owner's request, verbatim:\n> Fix the backend contract.";
+    const message = { type: "tool_call", name: "agent_message", callId: "paseo-agent-message:original", agentMessage: { event: "message", sender: { id: MANAGER }, text: original } };
+    const fake = daemonWith([message, { type: "user_message", text: "Later peer-link notice" }]);
+    const text = await workerHandover(incident(), { paseo: fake.paseo, location });
+    expect(text.endsWith(`\n${original}`)).toBe(true);
+    expect(text).not.toContain("Later peer-link notice");
+  });
+
   it("fills every field from the latest report, the review count and the first message the Worker received", async () => {
     await appendRecord(location, turn({ requestId: REQ, reports: [report("2026-09-22T02:01:00.000Z")] }));
     await appendRecord(

@@ -67,6 +67,8 @@ import { resolveDataHome, type DataHomeDeps } from "./data-home";
 import { GOVERNOR_FAMILIES, GOVERNOR_FIGURE_IDS, familyFiguresOf, figureText, storedFigureIdOf, type GovernorFamily, type GovernorFigure } from "../shared/governor-figures";
 
 import { governorFiguresOf, readGovernorSnapshot, type ListedAgent } from "./governor-figures";
+import { retryPendingMerges } from "./lane-merge";
+import { checkLaneOverlaps } from "./lane-overlap";
 import { refreshLines, type LinePaseo } from "./line-watch";
 import { interventionOfGovern, recordIntervention } from "./intervention-store";
 import { requestIndexOf } from "./mission-roster";
@@ -588,8 +590,12 @@ export function createGovernor(deps: GovernorDeps = {}): Governor {
       try {
         const open = createMissionStore(home).list().filter((entry) => entry.state === "open");
         if (open.length === 0) return [];
+        // Delivery line design §19.2: a lane's merge git refused is tried again, at most every 10 minutes.
+        await retryPendingMerges(home, { now, log });
         // Delivery line design §4.9: the lines are read here, at most once a minute each; a turn's recomputation reads them as they are.
         await refreshLines(home, { now, paseo: paseo as unknown as LinePaseo, log });
+        // Delivery line design §19.3: two lanes of one repo changing the same files are told to the Main.
+        await checkLaneOverlaps(home, { now, log, paseo: paseo as unknown as NoticePaseo });
         const agents = (await agentsOf(paseo)).bm;
         const outcomes: GovernorOutcome[] = [];
         for (const entry of open) {

@@ -29,7 +29,8 @@
 ```
 plugin/
   index.client.tsx            registers surface, sidebar, 3 Command Center items, settings screen,
-                              2 timeline transformer + 1 renderer, 3 workspace panel, header button
+                              2 timeline transformer + 1 renderer, 3 workspace panel, header button,
+                              composer pill
     client/launcher.tsx         surface "Beads Manager": section router (Inbox · Projects · Settings ·
                                 Tools & skills), status strip, running dot
     client/surface-view.ts      the surface's views, back links and Command Center hand-offs (pure)
@@ -54,6 +55,7 @@ plugin/
     client/beads-screen.tsx     the Beads board (kanban, filters, detail, actions)
     client/beads-tab.tsx        workspace panel "Beads": the workspace's project page
     client/beads-header-button.ts  "Beads" button on the workspace header
+    client/beads-composer-pill.ts  "Beads" pill above each bm-* agent's composer (the phone's way in)
     client/tree.tsx             panel "Beads agents", a project's Agents tab     client/agent-tree.ts   its logic
     client/chat-card.tsx        chat cards v2 and the live DecisionCard (rendering)
                                 client/chat-card-{parse,events,parties,frame,decision,precedent,markdown}.ts
@@ -634,11 +636,13 @@ Many colours on one list tire the eyes, so **everywhere a bead is shown** (the B
 - Column titles use `sectionTitle` without colour. The `StatusTabs` row is buttons: the selected tab in the `button` style (accent background), the others `secondaryButton`, like the section tabs and a project's tabs; that colour says which tab is open, not a bead's status. `workSummary.tone`: `running` → `plain`, otherwise `muted`.
 - Outside the places where beads are shown, colours stay as they are: RPC error lines (red), warnings (yellow), active filter chips and "+N more" (accent), Metrics, chat cards, the Delete button.
 
-## 14. The "Beads" tab and the header button
+## 14. The "Beads" tab, the header button and the composer pill
 
 - **Panel** `client.addWorkspacePanel({ id: BEADS_TAB_PANEL_ID ("bm-beads"), title: "Beads", icon: "ListChecks", context: "workspace", Component: BeadsTabPanel })`, registered before the "Beads agents" panel; no `locations` declared (default `["workspace"]`). Paseo puts every `context: "workspace"` panel into the "+" menu of the tab bar and the "New tab" screen.
 - `BeadsTabPanel`: the workspace's **project page** of Projects (`ProjectPage`, §11.3) — Overview · Requests · Beads · Metrics · Agents — opened on Beads (`BEADS_TAB_INITIAL`, owner decision Q2), with `label: null`: no ←, no title, no status strip, no Chat. A workspace panel cannot open the surface, so the page is drawn in the tab (experience concept §3: the Beads tab opens Projects on its project). Its data sits in the React Query cache under the Projects keys, so the tab and the surface share one read; two "Beads" tabs of the same workspace share the cache, each keeping its own tab; reopening an old tab or opening a new tab is Paseo's business.
 - **Paseo 0.8's mobile app has no "+"** (the mobile tab bar only lists open tabs; `onCreateNewTab` is only handed to `WorkspaceDesktopTabsRow` and `SplitContainer`). The mobile entry point is the **header button**: `registerBeadsHeaderButtons(client)` (`beads-header-button.ts`) reads `client.paseo.workspaces.list({})` at start, every `BEADS_HEADER_POLL_MS` = 15,000 ms and whenever `workspaces.subscribe` reports an update (one read at a time; on error the buttons are kept; a client without `paseo` does not break loading). `planHeaderButtons(shown, listed)` → `{ add, remove }` by the open workspaces (no `archivingAt`). One `client.addHeaderButton({ id: BEADS_HEADER_BUTTON_ID ("bm-beads-open"), workspaceId, button })` per workspace, an icon-only button `ListChecks`, title "Open the Beads tab: this workspace's requests, beads and agents", pressing → `client.openPanel("bm-beads", { workspaceId })`. In the narrow form (`useIsCompactFormFactor` or width < 1100 px) Paseo shows the **first** plugin button directly on the header and later buttons in the "more" menu; desktop shows them on the right of the header. Paseo keys header buttons by `id` + `workspaceId` (a duplicate `id` within one workspace is an error), so every workspace uses the same `id`. `addButton(workspaceId)` takes the workspace as a parameter and does not capture the loop variable: on Hermes (mobile) every closure created in a loop sees the last value. The timer is `unref`ed; cleanup removes every button.
+- **Paseo 0.12's mobile header draws no plugin header buttons** *(found 2026-10-25)*. On a phone the workspace header is `CompactWorkspaceHeader` (the tab switcher and the mobile menu), which renders no `PluginHeaderButtons`, so the header button shows only on desktop. The "New tab" launcher of 0.12 does list `context: "workspace"` plugin panels on a phone ("Beads", "Beads agents").
+- **The composer pill** (owner decision 2026-10-25: "a Beads button at the composer"): `registerBeadsComposerPills(client)` (`beads-composer-pill.ts`) follows `client.paseo.agents.list({})` the same way — at start, every `BEADS_PILL_POLL_MS` = 15,000 ms and on `agents.subscribe`; one read at a time; on error the pills are kept. `planComposerPills(shown, listed)` → `{ add, remove }`: one pill per live bm-* agent (provider `bm-…`, no `archivedAt`, a `workspaceId`), keyed `agentId@workspaceId`. Each is `client.addComposerPill({ id: BEADS_COMPOSER_PILL_ID ("bm-beads-pill"), workspaceId, agentId, button })`, `ListChecks` with the label "Beads" and the header button's title, pressing → `client.openPanel("bm-beads", { workspaceId })`. Paseo draws it above that agent's composer on desktop and phone. A host without `addComposerPill` gets none. The agent and workspace are parameters, not loop variables (Hermes).
 - **The "Beads agents" panel** (`tree.tsx`, logic in `agent-tree.ts`, registered after the "Beads" panel): the Manager → Worker → Reviewer tree from `agents.list` (base design §7.3), refreshed every `AGENT_TREE_POLL_MS` = 5,000 ms while the panel is shown; an agent that has been replaced reads `<role> · replaced by <id>`.
 
 ## 15. Chat
@@ -793,3 +797,4 @@ Rows up to 2026-10-02 are archived in [paseo-bm-dashboard-revision-history-to-20
 | 2026-10-05 | hieu.nt10 (owner decisions; written by Codex) | §11.3–11.4 and §19: sidebar Inbox badge, Settings/sidebar update indicators, and the daily cached/manual npm version-check contract (REQ-173). |
 | 2026-10-10 | hieu.nt10 (owner decision; written by Claude) | §11.4 release notes in one shape: one summary, the section headings and the folded prereleases per version; the full notes stay in `docs/releases` (the client catalog 140 KB → 7 KB) |
 | 2026-10-10 | Claude (owner's delegation) | §11 Autonomy: the words follow ADR-029 — "Main" where a Worker's question is decided or proposed; the decision card's proposal is the Main's (`prediction.main`), an older Orchestrator one still shown |
+| 2026-10-25 | hieu.nt10 (owner decision; written by Claude) | §14: Paseo 0.12's mobile header draws no plugin header buttons; a "Beads" composer pill above each bm-* agent's composer opens the Beads tab on a phone |

@@ -11,13 +11,14 @@ import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-st
 import { MISSION_DECISION_ID_PATTERN, createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { contractStatusOf, createMissionStore } from "../plugin/server/mission-store";
-import { MISSION_NOT_BOUND_MESSAGE, NOT_A_MAIN_MESSAGE, applyFreeUpdate, applyMissionChange, createMissionTools, type FreeMissionUpdate } from "../plugin/server/mission-tools";
+import { MISSION_JOURNAL_SHOWN, MISSION_NOT_BOUND_MESSAGE, MISSION_SETTLED_SHOWN, NOT_A_MAIN_MESSAGE, applyFreeUpdate, applyMissionChange, createMissionTools, type FreeMissionUpdate } from "../plugin/server/mission-tools";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
 import { createOutbox } from "../plugin/server/outbox";
 import { clearProposedMissionStarts, proposedMissionStartOf } from "../plugin/server/proposed-mission-starts";
 import { decisionsListRpc } from "../plugin/shared/contracts";
 import { DECISION_ID_PATTERN, answerDecision } from "../plugin/shared/decisions";
 import { at, msg, turn } from "./fixtures/orchestrator-traces";
+import { makeDecision } from "./helpers/decisions";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
 import { fakeCli } from "./helpers/fake-cli";
 
@@ -161,6 +162,88 @@ describe("bm_mission (§4)", () => {
     expect(read["level"]).toEqual({ level: 2, delegated: ["proceed", "staffing"], owner: ["scope-repo", "answer-technical", "answer-effects", "split"] });
     expect(read["journal"]).toEqual([expect.objectContaining({ kind: "note", text: "hello" })]);
     expect(read["ownerCards"]).toEqual([]);
+    expect(read).not.toHaveProperty("settledMore");
+    expect(read).not.toHaveProperty("request");
+  });
+
+  /** A roster of `settled` settled requests, then one active one; returns the settled ids oldest first. */
+  function rosterOf(missionId: string, settled: number): string[] {
+    const roster = createMissionRoster(home);
+    const ids: string[] = [];
+    for (let n = 0; n < settled; n += 1) {
+      const requestId = `req-20261009T10${String(n).padStart(2, "0")}00Z`;
+      roster.add(missionId, { requestId, workspaceId: "wks-a", topic: `topic ${n}`, workerId: `wkr-${n}` });
+      roster.setState(missionId, requestId, n % 2 === 0 ? "finished" : "stopped");
+      ids.push(requestId);
+    }
+    roster.add(missionId, { requestId: "req-20261009T110000Z", workspaceId: "wks-a", topic: "live one", workerId: "wkr-live" });
+    return ids;
+  }
+
+  it("shows each active request in full and each settled one as a line, the newest MISSION_SETTLED_SHOWN with settledMore (delivery line design §18.3)", async () => {
+    const { json } = await setup();
+    const { mission, who } = missionOf();
+    const ids = rosterOf(mission.missionId, MISSION_SETTLED_SHOWN + 5);
+    const read = await json("bm_mission", {}, who);
+    const requests = read["requests"] as Array<Record<string, unknown>>;
+    const lines = requests.filter((request) => request["state"] !== "active");
+    expect(lines.map((line) => line["requestId"])).toEqual(ids.slice(-MISSION_SETTLED_SHOWN));
+    expect(lines[0]).toEqual({ requestId: ids[5], repo: { workspaceId: "wks-a", folder: "/repo/api" }, topic: "topic 5", state: "stopped", workerId: "wkr-5" });
+    for (const line of lines) expect(Object.keys(line).sort()).toEqual(["repo", "requestId", "state", "topic", "workerId"]);
+    expect(read["settledMore"]).toBe(5);
+    expect(requests.filter((request) => request["state"] === "active")).toEqual([
+      { requestId: "req-20261009T110000Z", repo: { workspaceId: "wks-a", folder: "/repo/api" }, topic: "live one", state: "active", workerId: "wkr-live", phase: null, report: null, openQuestions: [] },
+    ]);
+  });
+
+  it("always shows a settled request with a question still open, with that question (review of ADR-037)", async () => {
+    const { json } = await setup();
+    const { mission, who } = missionOf();
+    const ids = rosterOf(mission.missionId, MISSION_SETTLED_SHOWN + 5);
+    // The oldest settled request is past the newest 20, but its question is still open.
+    createDecisionStore(home).open(makeDecision({ workspaceId: "wks-a", requestId: ids[1]! }));
+    const read = await json("bm_mission", {}, who);
+    const lines = (read["requests"] as Array<Record<string, unknown>>).filter((request) => request["state"] !== "active");
+    const kept = lines.find((line) => line["requestId"] === ids[1])!;
+    expect(kept["openQuestions"]).toEqual([expect.objectContaining({ id: `q:${ids[1]}:Q1` })]);
+    expect(lines).toHaveLength(MISSION_SETTLED_SHOWN + 1);
+    expect(read["settledMore"]).toBe(4);
+  });
+
+  it("has no settledMore when every settled request is shown", async () => {
+    const { json } = await setup();
+    const { mission, who } = missionOf();
+    rosterOf(mission.missionId, MISSION_SETTLED_SHOWN);
+    const read = await json("bm_mission", {}, who);
+    expect((read["requests"] as unknown[]).length).toBe(MISSION_SETTLED_SHOWN + 1);
+    expect(read).not.toHaveProperty("settledMore");
+  });
+
+  it("requestId adds that request in full, settled or not; an unknown one is refused", async () => {
+    const { json, call } = await setup();
+    const { mission, who } = missionOf();
+    const ids = rosterOf(mission.missionId, MISSION_SETTLED_SHOWN + 5);
+    const oldest = await json("bm_mission", { requestId: ids[0] }, who);
+    expect(oldest["request"]).toEqual({ requestId: ids[0], repo: { workspaceId: "wks-a", folder: "/repo/api" }, topic: "topic 0", state: "finished", workerId: "wkr-0", phase: null, report: null, openQuestions: [] });
+    expect(oldest["settledMore"]).toBe(5);
+    expect((await json("bm_mission", { requestId: "req-20261009T110000Z" }, who))["request"]).toMatchObject({ state: "active", topic: "live one", openQuestions: [] });
+    expect(await call("bm_mission", { requestId: "req-20991231T000000Z" }, who)).toEqual({
+      ok: false,
+      text: `Request req-20991231T000000Z is not one of mission WEB (bm_mission lists them). Nothing was read or changed.`,
+    });
+  });
+
+  it("shows the newest MISSION_JOURNAL_SHOWN journal lines, and up to 50 when journal asks", async () => {
+    const { json, call } = await setup();
+    const { mission, who } = missionOf();
+    const store = createMissionStore(home);
+    for (let n = 0; n < 60; n += 1) store.appendJournal(mission.missionId, { kind: "note", by: "plugin", text: `line ${n}` });
+    expect(MISSION_JOURNAL_SHOWN).toBe(20);
+    const texts = async (input: Record<string, unknown>) => ((await json("bm_mission", input, who))["journal"] as Array<{ text: string }>).map((line) => line.text);
+    expect(await texts({})).toEqual(Array.from({ length: 20 }, (_, n) => `line ${n + 40}`));
+    expect(await texts({ journal: 50 })).toEqual(Array.from({ length: 50 }, (_, n) => `line ${n + 10}`));
+    expect(await texts({ journal: 1 })).toEqual(["line 59"]);
+    for (const journal of [0, 51, 2.5]) expect((await call("bm_mission", { journal }, who)).ok, String(journal)).toBe(false);
   });
 });
 

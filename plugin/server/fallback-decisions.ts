@@ -26,8 +26,9 @@
  * - **Delegation** (autonomy design §B.5, ADR-025): where the owner's policy
  *   delegates `environment`, the decision stays open and the event bus asks
  *   the Orchestrator, whose `bm_decide` runs its option as the owner's would.
- *   A precedent and `bm_decide` are the only ways an incident is answered
- *   without the owner: the role's Auto switch was retired (ADR-022 decision 4).
+ *   ADR-040 assigns a mission request's delegated incident to its Main, told
+ *   through its durable channel and answered with `bm_answer_fallback`.
+ *   The role's Auto switch remains retired (ADR-022 decision 4).
  * - **A failed action** (autonomy design §A.8): an answered `f:` decision whose
  *   `delivery.outcome` is `failed` while its incident is still pending keeps a
  *   `fallback-failed` Inbox alert open, so the owner can act again; the alert

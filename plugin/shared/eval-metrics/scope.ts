@@ -52,6 +52,7 @@ export function emptyUnknowns(): EvalUnknowns {
     invalidDangerEntries: 0,
     invalidRequestEntries: 0,
     invalidMaintenanceEntries: 0,
+    invalidOutboxRecords: 0,
     effectfulWithoutTime: 0,
     rmTargetsNotJudged: 0,
     processWeightWithoutTier: 0,

@@ -6,7 +6,10 @@
  * actions sheet has a fixed list that plugins cannot extend, so the Beads tab
  * (`bm-beads`) had no way in on a phone. The workspace header does draw plugin
  * header buttons on mobile (the first one inline), and a button can open a
- * panel. On desktop the same button is a shortcut next to "+".
+ * panel. On desktop the same button is a shortcut next to "+". Paseo 0.12's
+ * mobile header (`CompactWorkspaceHeader`) no longer draws plugin header
+ * buttons, so the phone's way in is now the composer pill
+ * (`beads-composer-pill.ts`, dashboard design §14).
  *
  * A header button belongs to ONE workspace, so one is added per open workspace
  * and removed when the workspace goes, following the list: read now, every

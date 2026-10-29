@@ -36,7 +36,10 @@
  *   fields and batch results from `requests/<workspaceId>.json`, the rollover
  *   figures of `coordination/settings.json`, and the times and endings of
  *   `orchestrator/compactions.json` and `handoffs/<id>.json` — only those
- *   fields are kept (a handoff's note and brief never leave this function).
+ *   fields are kept (a handoff's note and brief never leave this function);
+ * - M-44 (delivery line design §19.10): every `outbox/<workspaceId>.json`
+ *   record's kind, sender, target, times, state and steer marks, with the
+ *   file's workspace id — never its text or reason.
  *
  * Moved here from the replay so the plugin can read with the very same code.
  */
@@ -51,6 +54,7 @@ import { COMPACTIONS_FILE, COMPACTIONS_FILE_VERSION } from "./compaction-store";
 import { COORDINATION_DIR_NAME, COORDINATION_SETTINGS_FILE } from "./coordination-store";
 import { DECISIONS_FILE_VERSION } from "./decision-store";
 import { HANDOFF_FILE_VERSION, HANDOFFS_DIR_NAME } from "./handoff-store";
+import { OUTBOX_DIR_NAME, OUTBOX_VERSION } from "./outbox";
 import { REQUEST_REGISTRY_VERSION, REQUESTS_DIR_NAME } from "./request-registry";
 import { dedupeRecords } from "./trace-store";
 
@@ -93,6 +97,8 @@ export interface StoreRead {
   compactions: unknown[] | undefined;
   /** Every `handoffs/<id>.json` → `handoff`, as its workspace, times and ending (M-42); `undefined` when there is no handoffs folder. */
   handoffs: unknown[] | undefined;
+  /** Every `outbox/<workspaceId>.json` → `records`, each as its kind, ends, times, state and steer marks, with the file's `workspaceId` (M-44); `undefined` when there is no outbox folder. */
+  outbox: unknown[] | undefined;
   unknowns: {
     /** Lines of `events-*.jsonl` that did not parse or validate (a blank last line is not one). */
     malformedLines: number;
@@ -115,6 +121,7 @@ const decisionFileSchema = z.object({ version: z.number(), entries: z.array(z.un
 const registryFileSchema = z.object({ schemaVersion: z.number(), requests: z.array(z.unknown()) });
 const compactionsFileSchema = z.object({ version: z.number(), entries: z.array(z.unknown()) });
 const handoffFileSchema = z.object({ version: z.number(), handoff: z.unknown() });
+const outboxFileSchema = z.object({ schemaVersion: z.number(), records: z.array(z.unknown()) });
 
 /** Only these fields of an object; anything else (a note, a brief, a reason) is left behind. */
 function pick(value: unknown, keys: readonly string[]): unknown {
@@ -124,6 +131,7 @@ function pick(value: unknown, keys: readonly string[]): unknown {
 }
 const REGISTRY_KEYS = ["requestId", "workspaceId", "continuationOf", "chainRootId", "continuedBy"] as const;
 const MAINTENANCE_KEYS = ["workspaceId", "requestId", "requestedAt", "endedAt", "ending"] as const;
+const OUTBOX_KEYS = ["id", "kind", "requestId", "from", "to", "createdAt", "state", "outcomeAt", "atOnce", "steeredAt", "replaced"] as const;
 
 /** A registry entry as the metrics read it: its chain fields, and each batch's id and result times. */
 function registryEntryOf(entry: unknown): unknown {
@@ -460,6 +468,26 @@ export function readStore(home: string): StoreRead {
     }
   }
 
+  // M-44: the outbox's records, without their text or reason; the file name is the workspace.
+  let outbox: unknown[] | undefined;
+  const outboxDir = join(home, OUTBOX_DIR_NAME);
+  const outboxFiles = listDir(outboxDir);
+  if (outboxFiles.kind === "bad") unknowns.unreadableFiles += 1;
+  if (outboxFiles.kind === "ok") {
+    outbox = [];
+    for (const name of outboxFiles.names.filter((candidate) => candidate.endsWith(".json"))) {
+      const file = readJson(join(outboxDir, name));
+      const frame = file.kind === "ok" ? outboxFileSchema.safeParse(file.value) : null;
+      // A file of another version is not this reader's to read, as the outbox's own reader says.
+      if (frame === null || !frame.success || frame.data.schemaVersion !== OUTBOX_VERSION) {
+        if (file.kind !== "absent") unknowns.unreadableFiles += 1;
+        continue;
+      }
+      const workspaceId = name.slice(0, -".json".length);
+      outbox.push(...frame.data.records.map((record) => (typeof record === "object" && record !== null ? { ...(pick(record, OUTBOX_KEYS) as object), workspaceId } : record)));
+    }
+  }
+
   return {
     records,
     workspaces,
@@ -478,6 +506,7 @@ export function readStore(home: string): StoreRead {
     coordinationSettings,
     compactions,
     handoffs,
+    outbox,
     unknowns,
   };
 }
@@ -500,6 +529,7 @@ export interface WorkspaceSelection {
   coordinationSettings: unknown;
   compactions: unknown[] | undefined;
   handoffs: unknown[] | undefined;
+  outbox: unknown[] | undefined;
 }
 
 /** A selection's metric inputs: the records, and each store file's entries, `undefined` when the file was not read. */
@@ -532,6 +562,7 @@ export function evalInputsOf(
   | "coordinationSettings"
   | "compactions"
   | "handoffs"
+  | "outbox"
 > {
   return {
     records: selection.records,
@@ -552,6 +583,7 @@ export function evalInputsOf(
     ...(selection.coordinationSettings === undefined ? {} : { coordinationSettings: selection.coordinationSettings }),
     ...(selection.compactions === undefined ? {} : { compactions: selection.compactions }),
     ...(selection.handoffs === undefined ? {} : { handoffs: selection.handoffs }),
+    ...(selection.outbox === undefined ? {} : { outbox: selection.outbox }),
   };
 }
 
@@ -578,7 +610,7 @@ const workspaceOfEntry = (entry: unknown): string | null => {
  * proposal, a decision, an intervention and a danger by its `workspaceId`, a note by
  * its file, a wake by any of the projects whose events it carried. A mission
  * (its `m:` decisions and its requests) is kept when one of its requests is of
- * the given workspaces. A compaction or handoff is kept by its `workspaceId`;
+ * the given workspaces. A compaction, handoff or outbox record is kept by its `workspaceId`;
  * the request registry, the placements and the settings pass whole (a chain
  * or an awaited request may be another workspace's).
  */
@@ -604,6 +636,7 @@ export function selectWorkspaces(store: StoreRead, workspaceIds: ReadonlySet<str
     coordinationSettings: store.coordinationSettings,
     compactions: store.compactions?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
     handoffs: store.handoffs?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
+    outbox: store.outbox?.filter((entry) => inWorkspace(workspaceOfEntry(entry))),
   };
 }
 

@@ -56,19 +56,37 @@ const mainLines = () => createMissionStore(home).journal(MISSION, 20).filter((li
 
 describe("the Main's figure (design §3.1, §3.2)", () => {
   const settings = DEFAULT_COORDINATION_SETTINGS;
-  it("crosses on its real context: the share of a reported window, else the context tokens; never the token sum", () => {
+  it("crosses on its real context: the share of a reported window or the context tokens, whichever first; never the token sum", () => {
     expect(mainContextCrossingOf({ context: { tokens: 110_000 }, contextShare: null }, settings)).toBeNull();
     expect(mainContextCrossingOf({ context: { tokens: 150_000 }, contextShare: null }, settings)).toEqual({ figure: "contextTokens", value: 150_000, threshold: 150_000 });
-    expect(mainContextCrossingOf({ context: { tokens: 590_000 }, contextShare: 0.59 }, settings)).toBeNull();
+    expect(mainContextCrossingOf({ context: { tokens: 59_000 }, contextShare: 0.59 }, settings)).toBeNull();
+    // Both hold: the share is named (delivery line design §18.4).
     expect(mainContextCrossingOf({ context: { tokens: 600_000 }, contextShare: 0.6 }, settings)).toEqual({ figure: "contextShare", value: 0.6, threshold: 0.6 });
+    expect(mainContextCrossingOf({ context: { tokens: 60_000 }, contextShare: 0.6 }, settings)).toEqual({ figure: "contextShare", value: 0.6, threshold: 0.6 });
     expect(mainContextCrossingOf({ context: null, contextShare: null }, settings)).toBeNull();
   });
 
-  it("the hard figure: hardShare of the window, else contextTokens ÷ contextShare × hardShare", () => {
+  it("a big window does not hide the tokens: 150,000 of 475,000 crosses on contextTokens (delivery line design §18.4)", () => {
+    const window = 475_000;
+    const at = (tokens: number) => ({ context: { tokens }, contextShare: tokens / window });
+    expect(mainContextCrossingOf(at(150_000), settings)).toEqual({ figure: "contextTokens", value: 150_000, threshold: 150_000 });
+    expect(mainContextCrossingOf(at(140_000), settings)).toBeNull();
+    // An earlier test pinned the share alone when a window was reported: 590,000 at 0.59 now crosses on its tokens.
+    expect(mainContextCrossingOf({ context: { tokens: 590_000 }, contextShare: 0.59 }, settings)).toEqual({ figure: "contextTokens", value: 590_000, threshold: 150_000 });
+  });
+
+  it("the hard figure: hardShare of the window or contextTokens ÷ contextShare × hardShare, whichever holds", () => {
     expect(mainContextHardOf({ context: { tokens: 0 }, contextShare: 0.84 }, settings)).toBe(false);
     expect(mainContextHardOf({ context: { tokens: 0 }, contextShare: 0.85 }, settings)).toBe(true);
     expect(mainContextHardOf({ context: { tokens: 212_499 }, contextShare: null }, settings)).toBe(false);
     expect(mainContextHardOf({ context: { tokens: 212_500 }, contextShare: null }, settings)).toBe(true);
+    // A big window: the share stays low, the tokens reach the hard figure.
+    expect(mainContextHardOf({ context: { tokens: 212_499 }, contextShare: 212_499 / 1_000_000 }, settings)).toBe(false);
+    expect(mainContextHardOf({ context: { tokens: 212_500 }, contextShare: 212_500 / 1_000_000 }, settings)).toBe(true);
+    // A high share setting cannot bring it next to the compaction figure: never below 1.25 × contextTokens (187,500).
+    const high = { ...settings, main: { ...settings.main, contextShare: 0.9, hardShare: 0.95 } };
+    expect(mainContextHardOf({ context: { tokens: 187_499 }, contextShare: null }, high)).toBe(false);
+    expect(mainContextHardOf({ context: { tokens: 187_500 }, contextShare: null }, high)).toBe(true);
   });
 });
 

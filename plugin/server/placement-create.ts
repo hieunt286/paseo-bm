@@ -46,7 +46,7 @@ import { MISSIONS_DIR_NAME, createMissionStore, journalQuietly, type Mission, ty
 import { listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { PLACEMENT_MODE_FILE_NAME, checkpointBaseOf, checkpointWaitOf, isCheckpointBranch, rootDiffersFrom } from "./checkpoint";
 import { createMissionRoster } from "./mission-roster";
-import { placementEntryOf } from "./placements";
+import { laneOf, placementEntryOf } from "./placements";
 import { GIT_READ_ONLY_PREFIX, runGit, type GitRunner } from "./repo-tool";
 import { createRequestRegistry } from "./request-registry";
 import { dataHome, errorText } from "./rpc-kit";
@@ -164,6 +164,15 @@ export function placementBriefLines(placement: Placement): string[] {
           : deps.cloned.length > 0
             ? `dependencies: cloned from the root (${deps.cloned.join(", ")})`
             : null;
+  // Delivery line design §19.2: a lane n ≥ 2 merges into the mission branch locally; it never pushes.
+  if (laneOf(placement) >= 2) {
+    return [
+      `worktree: ${placement.directory ?? "(not known)"} on branch ${placement.branch} (lane ${laneOf(placement)}; the mission branch is ${placement.base})`,
+      "commit: on this branch at finished and rollover",
+      `lane: at finished, merge ${placement.base} into ${placement.branch}, resolve conflicts, check what the merge touched, commit, then report finished; paseo-bm moves ${placement.base} forward. Never push this branch.`,
+      ...(dependencies === null ? [] : [dependencies]),
+    ];
+  }
   return [
     `worktree: ${placement.directory ?? "(not known)"} on branch ${placement.branch} (integration: ${placement.target})`,
     "commit: on this branch at finished and rollover",
@@ -209,11 +218,12 @@ function journal(ctx: Pick<Context, "home" | "mission" | "log" | "now">, text: s
  * promise that never rejects), or one line per reason — with `inRoot` while
  * the mission works in the repo's root until its checkpoint. Never throws.
  */
-export async function ensurePlacement(home: string, paseo: unknown, mission: Mission, repo: string, listed: readonly ListedWorkspace[], deps: PlacementDeps): Promise<PlacementResult> {
+/** The context a placement of `repo` is made in, or why there is none. */
+function contextOf(home: string, paseo: unknown, mission: Mission, repo: string, listed: readonly ListedWorkspace[], deps: PlacementDeps): Context | PlacementResult {
   const root = listed.find((entry) => entry.id === repo);
   if (root?.directory === undefined || root.directory === null) return fail(`paseo-bm could not read the folder of project ${repo} from Paseo; try again in a moment`);
   if (root.projectId === undefined) return fail(`paseo-bm could not read the Paseo project of ${repo}; try again in a moment`);
-  const ctx: Context = {
+  return {
     home,
     paseo: paseo as PlacementPaseo,
     mission,
@@ -225,8 +235,14 @@ export async function ensurePlacement(home: string, paseo: unknown, mission: Mis
     now: deps.now ?? (() => new Date()),
     log: deps.log,
   };
+}
+
+export async function ensurePlacement(home: string, paseo: unknown, mission: Mission, repo: string, listed: readonly ListedWorkspace[], deps: PlacementDeps): Promise<PlacementResult> {
+  const made = contextOf(home, paseo, mission, repo, listed, deps);
+  if ("ok" in made) return made;
+  const ctx = made;
   try {
-    const records = (mission.placements ?? []).filter((placement) => placement.repo === repo);
+    const records = (mission.placements ?? []).filter((placement) => placement.repo === repo && laneOf(placement) === 1);
     const current = records.at(-1);
     if (current === undefined) {
       // Delivery line design §4.8: a mission from before the cut-over branches from its repo's checkpoint; until it exists, its Workers work in the root.
@@ -291,11 +307,11 @@ async function recreate(ctx: Context, previous: Placement, records: readonly Pla
   return send(ctx, record(ctx, records.length, { branch, target, base, worktreeSlug, integration }, source));
 }
 
-/** A `creating` record and its exact body. */
-function record(ctx: Context, n: number, fields: Pick<Placement, "branch" | "target" | "base" | "worktreeSlug" | "integration">, source: Record<string, unknown>): Placement {
-  const requestKey = placementRequestKeyOf(ctx.mission.missionId, ctx.repo, n);
+/** A `creating` record and its exact body; `lane` (§19.1) names a lane n ≥ 2, its own request key and title. */
+function record(ctx: Context, n: number, fields: Pick<Placement, "branch" | "target" | "base" | "worktreeSlug" | "integration">, source: Record<string, unknown>, lane?: number): Placement {
+  const requestKey = lane === undefined ? placementRequestKeyOf(ctx.mission.missionId, ctx.repo, n) : laneRequestKeyOf(ctx.mission.missionId, ctx.repo, lane, n);
   // The title is part of the body: fixed here, renamed later with setTitle (§3.3 step 6).
-  const body = { requestId: requestKey, title: `${ctx.mission.code} · ${ctx.name}`, source };
+  const body = { requestId: requestKey, title: `${ctx.mission.code} · ${ctx.name}${lane === undefined ? "" : ` · ${lane}`}`, source };
   return {
     repo: ctx.repo,
     workspaceId: null,
@@ -306,6 +322,7 @@ function record(ctx: Context, n: number, fields: Pick<Placement, "branch" | "tar
     createdAt: ctx.now().toISOString(),
     deps: { cloned: [], at: null, note: null },
     requestBody: JSON.stringify(body),
+    ...(lane === undefined ? {} : { lane }),
   };
 }
 
@@ -453,6 +470,119 @@ async function prepareDependencies(ctx: Context, placement: Placement): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// Lanes (delivery line design §19.1, ADR-038).
+// ---------------------------------------------------------------------------
+
+/** The most live lanes a mission has in one repo, lane 1 included (§19.1; the owner's figure). */
+export const MAX_LANES = 7;
+
+/** The fixed creation `requestId` of a lane's `n`th record (0-based). Pure. */
+export const laneRequestKeyOf = (missionId: string, repo: string, lane: number, n: number): string => `bm-place-${missionId}-${repo}-lane${lane}${n === 0 ? "" : `-${n + 1}`}`;
+
+/** The states a lane is live in: it holds or may hold work. */
+const LIVE_STATES: ReadonlySet<Placement["state"]> = new Set(["creating", "ready"]);
+
+/** The newest record of each lane n ≥ 2 of `repo`, by lane number. Pure. */
+export function lanesOf(mission: Pick<Mission, "placements">, repo: string): Map<number, Placement> {
+  const lanes = new Map<number, Placement>();
+  for (const placement of mission.placements ?? []) if (placement.repo === repo && laneOf(placement) >= 2) lanes.set(laneOf(placement), placement);
+  return lanes;
+}
+
+/** Why a reused lane cannot be reset to the mission branch, or null once it is (§19.2 step 3). */
+async function resetLane(ctx: Context, lane: Placement, missionBranch: string): Promise<string | null> {
+  if (lane.directory === null) return "its folder is not known";
+  const status = await gitOut(ctx.git, lane.directory, ["status", "--porcelain"]);
+  if (status === null) return "git could not read it";
+  if (status.trim() !== "") return "it has uncommitted changes";
+  try {
+    await ctx.git(["switch", "-C", lane.branch, missionBranch], { cwd: lane.directory, maxBytes: 64 * 1024 });
+    return null;
+  } catch (error) {
+    return `git could not reset it: ${errorText(error)}`;
+  }
+}
+
+/**
+ * A lane of `repo` for a new piece of independent work (§19.1): lane 1 made
+ * first when it has none; then a free lane n ≥ 2 (its request merged, its tree
+ * clean, nothing live in it), reset to the mission branch's head; else a new
+ * lane while fewer than `MAX_LANES` are live; else one line naming each
+ * lane's work. Never throws.
+ */
+export async function ensureLane(home: string, paseo: unknown, mission: Mission, repo: string, listed: readonly ListedWorkspace[], deps: PlacementDeps): Promise<PlacementResult> {
+  const first = await ensurePlacement(home, paseo, mission, repo, listed, deps);
+  if (!first.ok) return first;
+  const made = contextOf(home, paseo, mission, repo, listed, deps);
+  if ("ok" in made) return made;
+  const ctx = made;
+  const missionBranch = first.placement.branch;
+  try {
+    const current = createMissionStore(home).get(mission.missionId) ?? mission;
+    const lanes = lanesOf(current, repo);
+    const busy = new Set(
+      createMissionRoster(home)
+        .list(mission.missionId)
+        .filter((entry) => entry.state === "active")
+        .map((entry) => entry.workspaceId),
+    );
+    const shown = (placement: Placement) => placement.workspaceId !== null && listed.some((entry) => entry.id === placement.workspaceId && !entry.archived);
+    const notReused: string[] = [];
+    for (const [number, lane] of [...lanes].sort((a, b) => a[0] - b[0])) {
+      const free = lane.state === "ready" && typeof lane.freeSince === "string" && shown(lane) && !busy.has(lane.workspaceId!);
+      if (!free) continue;
+      const why = await resetLane(ctx, lane, missionBranch);
+      if (why !== null) {
+        notReused.push(`lane ${number}: ${why}`);
+        continue;
+      }
+      // New work starts with nothing told: the overlaps told belonged to the lane's last request.
+      const fresh: Placement = { ...lane, freeSince: null, base: missionBranch };
+      delete fresh.overlapTold;
+      delete fresh.overlapToldAt;
+      const reused = save(home, mission.missionId, fresh, ctx.now);
+      journal(ctx, `Lane ${number} of ${ctx.name} (${lane.branch}) takes new work, reset to ${missionBranch}.`, lane.workspaceId ?? undefined);
+      return { ok: true, placement: reused, deps: Promise.resolve() };
+    }
+    const live = [...lanes].filter(([, lane]) => LIVE_STATES.has(lane.state) && (lane.state === "creating" || shown(lane)));
+    if (live.length + 1 >= MAX_LANES) {
+      const work = createMissionRoster(home)
+        .list(mission.missionId)
+        .filter((entry) => entry.state === "active");
+      const lines = [first.placement, ...live.map(([, lane]) => lane)].map((lane) => {
+        const doing = work.filter((entry) => entry.workspaceId === lane.workspaceId).map((entry) => `${entry.requestId} ${entry.topic.slice(0, 60)}`);
+        return `lane ${laneOf(lane)}: ${doing.join("; ") || (lane.freeSince ? "free but not reusable" : "no live request")}`;
+      });
+      return fail(
+        `mission ${mission.code} already has ${MAX_LANES} lanes in ${ctx.name} (${lines.join(" | ")})${notReused.length === 0 ? "" : `; not reused: ${notReused.join("; ")}`}: hold the request with after, or stop one`,
+      );
+    }
+    const taken = new Set(live.map(([number]) => number));
+    for (let number = 2; ; number += 1) {
+      if (taken.has(number)) continue;
+      const previous = lanes.get(number);
+      const branch = `${missionBranch}-${number}`;
+      const worktreeSlug = `${first.placement.worktreeSlug}-${number}`;
+      const records = (current.placements ?? []).filter((placement) => placement.repo === repo && laneOf(placement) === number).length;
+      const fields = { branch, target: first.placement.target, base: missionBranch, worktreeSlug, integration: null };
+      if (await hasRef(ctx.git, ctx.root.directory, `refs/heads/${branch}`)) {
+        // Preserve unmanaged or unmerged branches; their names do not consume a live lane.
+        if (previous === undefined) continue;
+        const merged = (await gitOut(ctx.git, ctx.root.directory, ["merge-base", "--is-ancestor", branch, missionBranch])) !== null;
+        if (!merged) continue;
+        await ctx.git(["branch", "-f", branch, missionBranch], { cwd: ctx.root.directory, maxBytes: 64 * 1024 });
+        const source = { kind: "worktree", cwd: ctx.root.directory, projectId: ctx.root.projectId, action: "checkout", refName: branch, worktreeSlug };
+        return await send(ctx, record(ctx, records, fields, source, number));
+      }
+      const source = { kind: "worktree", cwd: ctx.root.directory, projectId: ctx.root.projectId, action: "branch-off", baseBranch: missionBranch, branchName: branch, worktreeSlug };
+      return await send(ctx, record(ctx, records, fields, source, number));
+    }
+  } catch (error) {
+    return fail(`paseo-bm could not make a lane of mission ${mission.code} in ${ctx.name}: ${errorText(error)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Where a new Worker appears (`/bm-worker-new`, `manager.ensure { forNewRequest }`).
 // ---------------------------------------------------------------------------
 
@@ -484,7 +614,7 @@ export async function newWorkerPlaceOf(home: string, paseo: unknown, mission: Mi
   const here: NewWorkerPlace = { workerIn: "here", worktreeTitle: null };
   try {
     if (!placementModeOn(home) || placementEntryOf(home, workspaceId) !== null || !mission.charter.repos.includes(workspaceId)) return here;
-    const current = (mission.placements ?? []).filter((placement) => placement.repo === workspaceId).at(-1);
+    const current = (mission.placements ?? []).filter((placement) => placement.repo === workspaceId && laneOf(placement) === 1).at(-1);
     if (current?.state === "ready") return { workerIn: "worktree", worktreeTitle: placementTitleOf(current, mission.code) };
     const root = (await listedWorkspaces(paseo as DashboardPaseo))?.find((entry) => entry.id === workspaceId);
     if (root?.directory === undefined || root.directory === null) return { workerIn: "worktree", worktreeTitle: null };
@@ -522,7 +652,7 @@ export async function successorPlacementOf(
     const listed = await listedWorkspaces(paseo as DashboardPaseo);
     const root = listed?.find((entry) => entry.id === repo);
     if (listed === null || root?.directory === undefined || root.directory === null) return null;
-    const current = (mission.placements ?? []).filter((placement) => placement.repo === repo).at(-1);
+    const current = (mission.placements ?? []).filter((placement) => placement.repo === repo && laneOf(placement) === 1).at(-1);
     const base = current?.state === "ready" ? current.base : checkpointBaseOf(home, mission, repo);
     if (base === null || !isCheckpointBranch(base)) return null;
     // What the root's Worker did after the checkpoint is not in it: the request then finishes in place.

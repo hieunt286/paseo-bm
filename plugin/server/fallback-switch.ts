@@ -31,6 +31,8 @@ import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fall
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { workerHandover } from "./fallback-handover";
 import { readIncidents } from "./fallback-state";
+import { createMissionRoster, requestIndexOf } from "./mission-roster";
+import { createMissionStore } from "./mission-store";
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, agentToolsOff } from "./manager";
 import { setAgentLabels, type CliResult } from "./paseo-cli";
 import { asRecord, availableProviders, nonEmpty, reasonOf } from "./role-choices";
@@ -48,18 +50,20 @@ export const FALLBACK_WORKER_TITLE = "Beads Worker (fallback)";
 export const REPLACES_LABEL = "bm.replaces";
 
 /** The SDK slice a switch uses; `PaseoApi` is structurally assignable. */
+interface SwitchCreateOptions {
+  config: Record<string, unknown>;
+  parent?: string;
+  title: string;
+  labels: Record<string, string>;
+  prompt: string;
+}
+
 export interface SwitchPaseo {
   agents: {
-    create(options: {
-      config: Record<string, unknown>;
-      cwd: string;
-      parent?: string;
-      title: string;
-      labels: Record<string, string>;
-      prompt: string;
-    }): Promise<{ id: string }>;
+    create(options: SwitchCreateOptions & { cwd: string }): Promise<{ id: string }>;
     ref(agentId: string): { refresh(): Promise<{ agent?: unknown } | null> };
   };
+  workspaces?: { ref(workspaceId: string): { agents: { create(options: SwitchCreateOptions): Promise<{ id: string }> } } };
 }
 
 export interface SwitchDeps {
@@ -102,6 +106,12 @@ function noteReplacementWorker(home: string, incident: FallbackIncident, workerI
   try {
     sightRequestId({ workspaceId, requestId, role: "worker", agentId: incident.agentId, parentAgentId: incident.managerId }, { home, log });
     createRequestRegistry(home, { log }).addWorker(workspaceId, requestId, workerId);
+    const place = requestIndexOf(home, requestId);
+    if (place !== null) {
+      const roster = createMissionRoster(home);
+      const entry = roster.get(place.missionId, requestId);
+      if (entry !== null) roster.add(place.missionId, { requestId, workspaceId: place.workspaceId, topic: entry.topic, workerId });
+    }
   } catch (error) {
     log(`[paseo-bm] could not add Worker ${workerId} to request ${requestId}: ${reasonOf(error)}`);
   }
@@ -156,9 +166,13 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
       };
       const cwd = nonEmpty(snapshot?.["cwd"]);
       if (cwd === null) throw new DashboardError("E_FALLBACK_CREATE_FAILED", `the directory of Worker ${current.agentId} cannot be read`);
+      const place = current.requestId === null ? null : requestIndexOf(home, current.requestId);
+      // ADR-040: a pending incident may outlive its Main. The current Main owns the recovery.
+      const managerId = (place === null ? null : createMissionStore(home).get(place.missionId)?.mainId) ?? current.managerId;
+      const subject = { ...current, managerId, parentId: managerId };
 
       // 3. The handover, within its own budget.
-      const prompt = await handover(current, { paseo, location: await location(paseo).catch(() => null) });
+      const prompt = await handover(subject, { paseo, location: await location(paseo).catch(() => null) });
 
       // 4. The replacement Worker; the agent.create hook adds its instructions.
       const alias = candidate.alias;
@@ -178,13 +192,14 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
           base: candidate.baseProvider,
           workspaceId: current.workspaceId,
           requestId: current.requestId,
-          parentId: current.managerId,
+          parentId: managerId,
+          ...(place === null ? {} : { missionId: place.missionId }),
         };
         created = await createBound(
           deps.binder ?? NO_BINDER,
           binding,
-          (mcpServers) =>
-            api.agents.create({
+          (mcpServers) => {
+            const options: SwitchCreateOptions = {
               config: {
                 provider: `${alias}/${candidate.model}`,
                 ...(candidate.thinkingOptionId !== null ? { thinkingOptionId: candidate.thinkingOptionId } : {}),
@@ -192,8 +207,7 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
                 ...(featureValues !== undefined ? { featureValues } : {}),
                 ...(mcpServers !== undefined ? { mcpServers } : {}),
               },
-              cwd,
-              ...(current.managerId !== null ? { parent: current.managerId } : {}),
+              ...(managerId !== null ? { parent: managerId } : {}),
               title: FALLBACK_WORKER_TITLE,
               labels: {
                 "bm.role": "worker",
@@ -202,7 +216,11 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
                 [REPLACES_LABEL]: current.agentId,
               },
               prompt,
-            }),
+            };
+            if (place === null) return api.agents.create({ ...options, cwd });
+            if (typeof api.workspaces?.ref !== "function") throw new Error("this Paseo cannot create a fallback Worker in its request's workspace");
+            return api.workspaces.ref(place.workspaceId).agents.create(options);
+          },
           log,
         );
       } catch (error) {
@@ -210,7 +228,7 @@ export function createWorkerSwitch(deps: SwitchDeps = {}): FallbackAction {
       }
 
       // Design §16.4: the request keeps its id, and its registry entry gains the replacement as its newest Worker.
-      noteReplacementWorker(home, current, created.id, log);
+      noteReplacementWorker(home, subject, created.id, log);
 
       // 5. Mark the old Worker; the incident's replacementId excludes it even if this fails.
       try {

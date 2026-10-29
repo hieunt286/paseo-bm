@@ -231,7 +231,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
     keys(M, "reads the state with the status tools and bm_decisions", "`get_agent_status`", "`get_agent_activity`", "`bm_decisions`");
     keys(M, "a build or a test is a change", "a build, a test", "is a change");
     keys(M, "delegates now", "delegate now");
-    keys(M, "a follow-up through bm_tell_worker, a new request through bm_create_worker", "follow-up", "`bm_tell_worker`", "new request", "`bm_create_worker`");
+    keys(M, "words about a request's own work through bm_tell_worker", "own work", "`bm_tell_worker`");
+    keys(M, "new work through bm_create_worker", "is new work", "`bm_create_worker`");
     keys(M, "the Worker sizes it and asks what it needs", "the Worker sizes it");
     // ADR-027 amended: the Manager does not pull a question of its own ahead of the Worker.
     expect(M).not.toMatch(/short question first/);
@@ -260,7 +261,8 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
     keys(M, "context is facts, not how to do the work", "facts, never how to do the work");
     keys(M, "a collision is named in the brief", "another Worker writes the same files", "one fact names it");
     // Delivery line design §4.1 (bead bm-delivery-line-p8-1u4q.9): the tree is a placement's, not a repo's.
-    keys(M, "a placement's Workers share its tree; another mission's work is on its own branch", "another Worker writes the same files", "a placement's Workers share its tree", "another mission's work is on its own branch", "one fact names it");
+    // ADR-038: Workers of one lane share its tree; the brief names a shared file.
+    keys(M, "a lane's Workers share its tree; one fact names a shared file", "another Worker writes the same files", "a lane's Workers share its tree", "one fact names it");
     expect(M).not.toMatch(/one repo's Workers share/);
     // Design §16.12: the creation recipe leaves the role file; a bound Manager's text never teaches it.
     expect(M).not.toMatch(/create_agent|list_profiles|YYYYMMDDTHHMMSSZ|initialPrompt|settings\.modeId/);
@@ -976,14 +978,22 @@ describe("missions — the Main's file and the Worker's side (missions design §
     keys(M, "new work outside the goal: ask if it is a new mission; on yes bm_split_mission; the governor creates it, not the owner", "outside its goal", "ask the owner", "new mission", "on yes", "`bm_split_mission`", "governor creates it, not the owner");
     expect(M).not.toMatch(/create (it|the mission) (yourself|themselves)|in a new chat/);
     keys(M, "reads a file and git with bm_repo", "a file, git (`bm_repo`)");
-    keys(M, "curates the repos' memory with bm_memory", "memory with `bm_memory`", "with its source", "remove what no longer holds");
+    // ADR-037: memory holds only what outlasts the mission; paseo-bm retires the rest by rule.
+    keys(M, "keeps in bm_memory only what later Workers need beyond the mission", "`bm_memory` keeps only what", "later Workers in a repo need beyond this mission", "`scope: repo`", "a `subject` to replace one", "its source");
+    expect(M).not.toContain("remove what no longer holds");
     // Review R6: bm_repo is taught once.
     expect(M.match(/`bm_repo`/g)).toHaveLength(1);
   });
 
   it("gives work to Workers in the right repo, re-using the one on an area, splitting as staffing allows", () => {
     // Delivery line design §2.4: a finished or stopped request goes on as its continuation, which paseo-bm opens.
-    keys(M, "a follow-up goes to its request through bm_tell_worker; a finished or stopped one goes on as a new request paseo-bm staffs and briefs", "A follow-up goes to its request with `bm_tell_worker`", "its Worker while it", "`finished` or `stopped`", "new request that paseo-bm staffs and briefs");
+    // Delivery line design §19.12 (owner, 2026-10-25): only words about a running request's own work go to it; new work never to a busy Worker.
+    keys(M, "words about a running request's own work go to it with about current; a finished or stopped one goes on as a new request", "Words about a running request's own work", "`bm_tell_worker`", '`about: "current"`', "its Worker while it runs", "`finished` or `stopped`", "new request that paseo-bm staffs and briefs");
+    keys(M, "a new ask, a bug or a feature is new work, never a busy Worker's", "a new ask, a bug, a feature", "is new work, never a busy Worker's");
+    // ADR-038: independent work in a lane of its own, dependent work held by paseo-bm, overlaps stepped in on.
+    keys(M, "new work runs in a new lane", "`lane: \"new\"`", "its own lane, starting now", "up to 7 a repo");
+    keys(M, "dependent work is held with after and cancelled with bm_hold_cancel", "needs another request first", "`after`", "paseo-bm starts it", "`bm_hold_cancel` drops it");
+    keys(M, "a lane overlap is stepped in on at once", "`BM-SIGNAL overlap`", "step in at once", "one lane waits");
     expect(M).not.toMatch(/area a Worker holds/);
     keys(M, "a new Worker in the repo it changes", "`bm_create_worker` in the repo it changes", "`project`");
     keys(M, "parallel parts get a Worker each, within staffing", "side by side", "a Worker each", "`staffing`");
@@ -1014,7 +1024,9 @@ describe("missions — the Main's file and the Worker's side (missions design §
     keys(W, "in a mission an ask reaches its Main, who links the Worker on that work", "`bm_ask_project`", "in a mission it reaches your Main", "links you with the Worker on that work");
     keys(W, "ownerOnly for a fact only the owner knows", "`ownerOnly`", "only the owner can know", "a login", "account or user id", "port or path", "personal choice");
     keys(W, "reads the project memory before asking", "project memory", "`bm_memory`", "the repository");
-    keys(W, "adds what it learnt to bm_memory with its source", "a fact, a convention, a contract", "`bm_memory`", "with its source");
+    // ADR-037: what outlasts the request, as a repo entry with a subject to replace one.
+    keys(W, "adds lasting facts, conventions and contracts to bm_memory", "Lasting facts, conventions and contracts later Workers here need go to `bm_memory`", "its source", '`scope: "repo"`', "a `subject` to replace one");
+    keys(W, "reads more memory with a query", "(`bm_memory` with a query reads more)");
   });
 });
 
@@ -1053,7 +1065,11 @@ describe("bounded requests and waits by structure (delivery line design §2, §6
 
   it("the Main's tell holds for a waiting Worker unless now: true, as the tool says", () => {
     const tell = toolFacesFor("manager", true).find((face) => face.name === "bm_tell_worker");
-    expect(tell?.description).toContain("now: true delivers it at once, for owner words that change the wait");
+    // Delivery line design §19.5: now: true is the owner's words, at once and steered into a running turn.
+    // §19.12: only words about the request's own work; now: true with about: "current" for the owner's correction.
+    expect(tell?.description).toContain("never new work: while the request is at work, about is required");
+    expect(tell?.description).toContain('now: true with about: "current" marks the owner\'s own words that correct or stop this work: delivered at once');
+    expect(tell?.description).toContain('(delivery "steered")');
     expect(tell?.description).toContain("A finished or stopped request goes on as its continuation");
   });
 });

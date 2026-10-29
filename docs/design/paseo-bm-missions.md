@@ -108,7 +108,8 @@ The default comes from Q-200 and the owner's answer of 2026-10-09 ("Main có th�
 ```
 
 - **Automatic entries.** An owner's answered decision of a request in that repo adds a `decision` entry; a precedent of that repo (precedent store) is shown as a `precedent` entry, read through, not copied.
-- **Bounds.** At most 300 active entries per repo. An `add` past 300 is refused with "curate the memory first (bm_memory remove)"; automatic entries past 300 replace the oldest automatic `decision` entry. The governor signals bloat at 250 (§9.2).
+- **Bounds.** At most 300 live entries per repo. An `add` past 300 is refused with "curate the memory first (bm_memory remove)"; automatic entries past 300 replace the oldest automatic `decision` entry. The governor signals bloat at 250 (§9.2).
+- **Scope and life** *(since 2026-10-25, [ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md))*: an entry also carries `scope?: "repo" | "mission"` and `subject?`. A `mission` entry of a closed mission, an entry whose subject a newer one names, and a mission fact older than 14 days are retired: computed at each read, never stored, reversible; an entry retired for 30 days becomes `removed` at the next write. The rules are the [delivery line design](paseo-bm-delivery-line.md) §18.1.
 
 ### 2.6 Peer links (ADR-028 store, extended)
 
@@ -219,7 +220,7 @@ The Main's tools are bound Manager tools. Rows marked † are new.
 
 | Tool | Input | Does | Refusals |
 |---|---|---|---|
-| † `bm_mission` | — | Reads the caller's mission: charter, plan, contracts, roster with each request's repo, Worker, phase and newest report, open questions of its Workers, the mission level, the newest 50 journal lines | not a Main of a mission |
+| † `bm_mission` | — | Reads the caller's mission: charter, plan, contracts, roster with each active request's repo, Worker, phase, newest report and open questions, each settled one as a line (the newest 20), the mission level, the newest 20 journal lines; `requestId` and `journal` ask for more (delivery line design §18.3) | not a Main of a mission |
 | † `bm_mission_start` | `name`, `code`, `goal`, `repos` (workspace ids or folders) | An unassigned Main's first act: records a **proposed** mission (keyed by the Main and its turn's start mark); at the turn's end it settles only if the turn holds the owner's own message (as `bm_answers`). Creates the mission, labels and binds the Main | already in a mission; code taken; a repo unknown or a plugin home |
 | † `bm_mission_update` | any of `name`, `code`, `goal`, `nonGoals`, `doneCriteria` (add, edit text, set status), `budget`, `plan`, `contracts` (add, new version), `repos` (add or remove), `confirmCharter`, `close` | **Free for the Main:** `plan`, `contracts`, criterion **status** with evidence, new criteria; adding a repo at mission level `scope-repo`. **On the owner's card:** everything else — `name`, `code`, `goal`, `nonGoals`, `budget`, `confirmCharter`, `close`, removing a repo, editing or dropping a criterion, adding a repo without `scope-repo` — opens an `m:` decision (§4.1) whose options are "apply" and "keep as is", the change attached as a prepared change; the plugin applies it on the owner's tap. Each applied change adds a journal line | code taken; a repo unknown, archived or a plugin home; `close` while a Worker of the mission runs |
 | `bm_create_worker` | + `project` (required when the mission has more than one repo) | `project` must be in the charter's `repos`. The Worker's `cwd` is that repo's directory; its binding `{ role: "worker", workspaceId: <repo>, requestId, parentId: <Main>, missionId }`; the request is registered **in that repo** with `managerId` and `missionId`; the roster gains it; the creation project (child mode, action boundary, autonomy) is that repo's. The brief adds `mission: <code> <name>`, the request's place in the plan, the repo's memory (§7, the newest 30 active entries and every `contract` entry that names the repo), and the mission's contracts touching the repo. Without `staffing` delegated, refused when the mission already has a live Worker in that repo or `charter.budget.workers` live Workers in all | `project` outside the scope, archived or a plugin home; the `staffing` rule above; the other refusals of base design §7.15 |
@@ -281,8 +282,8 @@ Each row is a place that found "the Manager of a workspace" and now goes through
 
 ## 7. Project memory in briefs
 
-- **Into a Worker's brief:** `bm_create_worker` adds `Project memory (<repo>):` — the newest 30 active entries plus every `contract` entry — each one line with its source. The handoff successor's brief carries the same.
-- **For the Main:** it reads the full memory with `bm_memory`.
+- **Into a Worker's brief:** `bm_create_worker` adds `Project memory (<repo>):` — live entries within a 6,000-character budget, the mission's own first, ranked by the words they share with the request, each one line with its source, then one line for the rest. The handoff successor's and a continuation's briefs carry the same. *Before 2026-10-25* it was the newest 30 active entries plus every `contract` entry ([ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md); delivery line design §18.2).
+- **For the Main:** `bm_memory read` gives an index of the live entries; a query or an id gives entries in full (delivery line design §18.3).
 
 ## 8. Autonomy: the two layers (REQ-189)
 
@@ -537,7 +538,7 @@ Built by beads `bm-missions-9qc3.1`–`.17` and `.27`; acceptance: [operations r
   Extra Managers raise `outdated-agent` with `EXTRA_MANAGER_DETAIL` and the mission's id; the Inbox offers "Replace Main" / "Open Main" through `mission.ensure` (alerts carry an optional `missionId`).
 - **§4 tools.**
   - The bound Manager's list is `bm_create_worker`, `bm_tell_worker`, `bm_answers`, `bm_peers`, `bm_peer_reply`, `bm_mission`, `bm_mission_start`, `bm_mission_update`, `bm_answer_worker`, `bm_memory`, `bm_repo`, `bm_link_workers`, `bm_ask_mission`, `bm_decisions`; the Worker gains `bm_memory`.
-  - `bm_create_worker` gains `project` and `planStep` (≤ 300); Workers of a Main are created through `workspaces.ref(<repo>).agents.create`, with the staffing rule (one live Worker per repo, at most `budget.workers`) unless `staffing` is delegated. The brief adds `mission:`, `plan:`, `Mission contracts touching <repo>:` and `Project memory (<repo>):` (`BRIEF_MEMORY_ENTRIES` 30 plus every contract).
+  - `bm_create_worker` gains `project` and `planStep` (≤ 300); Workers of a Main are created through `workspaces.ref(<repo>).agents.create`, with the staffing rule (one live Worker per repo, at most `budget.workers`) unless `staffing` is delegated. The brief adds `mission:`, `plan:`, `Mission contracts touching <repo>:` and `Project memory (<repo>):` (`BRIEF_MEMORY_ENTRIES` 30 plus every contract). *Since 2026-10-25* ([ADR-038](../adr/ADR-038-parallel-lanes-and-a-held-queue.md)): `lane: "new"` (a lane of its own, up to 7 a repository) and `after` (held by paseo-bm until the named requests finish), and the Main's `bm_hold_cancel`; delivery line design §19.
   - `bm_mission_start` is settled at the turn's end (`proposed-mission-starts.ts`). `bm_mission_update` turns each sensitive change into one `m:` card (options `apply` / `keep`); applying or keeping it is told to the current Main by an outbox `message` whose `requestId` is the `m:` id.
   - `bm_answer_worker` (`MAIN_ANSWER_MINUTES` 10, all-or-nothing) records `by: main`, `via: main`, or `prediction.main` in a `shadow` cell.
   - `bm_memory` / `bm_repo`: `memory-tools.ts`, `repo-tool.ts` `repoIn` (actions status, diff-stat, log, show, read; `REPO_READ_LINES` 400, at most 2,000). Automatic memory entries come from `decision-store.ts` `rememberOwnerAnswer` for owner answers.
@@ -674,7 +675,7 @@ Four read-only reviews of Phases 1–3, then fixes and simplifications (beads `b
 - **Role files:** the Orchestrator's stop and split rules are each said once; the Worker reports to "your Main"; the Main names `bm_repo` once.
 
 - **The owner's answers of 2026-10-10:**
-  - **`f:` incidents:** no wake; they wait for the owner in the Inbox unless `bm_decide` is delegated their class and the Orchestrator meets one.
+  - **`f:` incidents:** delegated incidents of a mission request reach its current Main through the durable channel; it resolves them with `bm_answer_fallback` (ADR-040, runtime design §4.5.1). Other incidents keep their existing Orchestrator/owner authority.
   - **`bm_predict` is retired:** the Orchestrator has 16 tools. A stored `prediction.orchestrator` is still read and shown, and the Main's `prediction.main` is the proposal at Co-pilot and up.
   - **`bm_ask_project` is the Worker's only:** a Main calling it gets "Unknown tool", and peer tools run per role only what that role lists.
   - **The re-plan window:** a `bm_govern` step on a family at step 1 or 2 restarts both its minutes and its Main-turn count (`governedLadderOf`); `bm_govern` reads the Main's turns for a nudge, a re-plan or named figures (`governSend`).
@@ -762,3 +763,6 @@ Every stored change is additive. An older build ignores the wake fields and `dan
 | 2026-10-21 | Claude (as built, ADR-035 Phase 8) | §9.6 the conflict source is the overlap of mission branches' diffs; writer collisions between missions retired (delivery line design §3, §4.7, §4.9) |
 | 2026-10-21 | Claude (as built, ADR-035 Phase 9) | §2.1 contracts' status and agreements; §2.6 typed link messages (delivery line design §9) |
 | 2026-10-21 | hieu.nt10 (owner request and approval; written by Claude) | §10.2 New mission and the mission page's "+ Add" choose Paseo projects, not workspaces (workspace titles were chat titles and one repository showed once per workspace); repositories are named by their project's name everywhere on the mission page; mockup [mission-projects.html](mockups/mission-projects.html) artboards L, M, N approved as is |
+| 2026-10-25 | hieu.nt10 (owner's answers; written by Claude) | §2.5 scope and life of memory entries, the bound counts live entries; §7 the brief's memory budget and the Main's index read ([ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md)) |
+| 2026-10-25 | hieu.nt10 (owner's answers; written by Claude) | Pointer to parallel lanes, `after` and `bm_hold_cancel` ([ADR-038](../adr/ADR-038-parallel-lanes-and-a-held-queue.md); delivery line design §19) |
+| 2026-10-26 | Codex (owner request, ADR-040) | §19: route delegated request fallback to the Main instead of leaving recovery dependent on an unrelated governor wake |

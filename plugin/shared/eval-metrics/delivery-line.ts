@@ -1,8 +1,9 @@
 /**
- * M-36, M-40 and M-42 (missions PRD; delivery line design §13): bounded
- * requests, waits by structure and maintenance on time, read from the stores
- * alone — the trace records, the request registry's chain fields, the stored
- * decisions, `orchestrator/compactions.json` and `handoffs/*.json`.
+ * M-36, M-40, M-42 and M-44 (missions PRD; delivery line design §13,
+ * §19.10): bounded requests, waits by structure, maintenance on time and the
+ * wait of a tell, read from the stores alone — the trace records, the request
+ * registry's chain fields, the stored decisions,
+ * `orchestrator/compactions.json`, `handoffs/*.json` and `outbox/*.json`.
  *
  * - **M-36** (§2.6): the tokens a request reads — input + cached over all its
  *   turns, every role, as `turnTokensOf` reads a turn (the rollover's own
@@ -32,6 +33,15 @@
  *   `MAINTENANCE_WAIT_MS` (the time ceiling) when they ended. The token figure
  *   at the ceiling is not stored, so the time ceiling is the one judged; every
  *   `no-safe-point` drop waited its window (60 min), past the 30-minute ceiling.
+ * - **M-44** (§19.5, §19.10): the part of "minutes from an owner's message to
+ *   a Worker acting on it" the stores hold — the outbox's tells created in the
+ *   window. A tell is a `message` record from an agent: `bm_tell_worker` is
+ *   the only store of one, as the Main's messages come from `plugin`, `owner`
+ *   or `orchestrator` (`OUTBOX_NON_AGENT_SENDERS`). A delivered tell waited
+ *   `steeredAt` (steered or turn-replaced), else `outcomeAt`, minus
+ *   `createdAt`; p50 and p90 by nearest rank. `queuedAtEnd` is a tell not
+ *   settled by the window's end: still open, or settled after `until`. The
+ *   owner's message time in the Main's timeline is not joined here.
  * - **M-37** (§3, ADR-035 decision 2): files written by Workers of two
  *   missions in one workspace — a placement, or before placements the shared
  *   checkout of a repo — from the Workers' own reports' `filesChanged` of the
@@ -89,6 +99,23 @@ const maintenanceEntrySchema = z.object({
   ending: z.string().min(1).nullable(),
 });
 type MaintenanceEntry = z.infer<typeof maintenanceEntrySchema>;
+
+/** What the metrics read of an outbox record (`server/outbox.ts`): its kind, ends, times and steer marks. */
+const outboxRecordSchema = z.object({
+  kind: z.string().min(1),
+  from: z.string().min(1),
+  to: z.string().min(1),
+  createdAt: z.string().min(1),
+  state: z.string().min(1),
+  outcomeAt: z.string().min(1).nullable().optional(),
+  atOnce: z.boolean().optional(),
+  steeredAt: z.string().min(1).optional(),
+  replaced: z.boolean().optional(),
+});
+type OutboxEntry = z.infer<typeof outboxRecordSchema>;
+
+/** The senders of the plugin's own `message` records to a Main (`governor-store.ts`, `mission-tools.ts` `tellMain`): no tell to a Worker. */
+export const OUTBOX_NON_AGENT_SENDERS: ReadonlySet<string> = new Set(["plugin", "owner", "orchestrator"]);
 
 /** The registry entries, valid ones by request id (the first of each); a bad one is counted. */
 export function registryOf(input: Pick<EvalInput, "requests">, unknowns: EvalUnknowns): Map<string, RegistryEntry> {
@@ -388,6 +415,50 @@ export function m42Of(scope: EvalScope, input: Pick<EvalInput, "compactions" | "
     ceilingMs: { compact: MAINTENANCE_WAIT_MS.compact, handoff: MAINTENANCE_WAIT_MS.handoff },
     compactions: maintenanceFiguresOf(input.compactions, MAINTENANCE_WAIT_MS.compact, scope, unknowns),
     handoffs: maintenanceFiguresOf(input.handoffs, MAINTENANCE_WAIT_MS.handoff, scope, unknowns),
+  };
+}
+
+// ── M-44 ────────────────────────────────────────────────────────────────────
+
+/** M-44 over the tells to Workers created in the window. Never throws: a record that does not validate is counted and skipped. */
+export function m44Of(scope: EvalScope, input: Pick<EvalInput, "outbox">, unknowns: EvalUnknowns): EvalMetrics["m44"] {
+  const tells: OutboxEntry[] = [];
+  for (const raw of input.outbox ?? []) {
+    const parsed = outboxRecordSchema.safeParse(raw);
+    if (!parsed.success) {
+      unknowns.invalidOutboxRecords += 1;
+      continue;
+    }
+    const record = parsed.data;
+    if (record.kind !== "message" || OUTBOX_NON_AGENT_SENDERS.has(record.from)) continue;
+    if (within(timeOrNull(record.createdAt), scope.bounds)) tells.push(record);
+  }
+  const waits: number[] = [];
+  let delivered = 0;
+  let steered = 0;
+  let replaced = 0;
+  let queuedAtEnd = 0;
+  const until = scope.bounds.until;
+  for (const tell of tells) {
+    if (tell.replaced === true) replaced += 1;
+    else if (tell.steeredAt !== undefined) steered += 1;
+    const settledAt = timeOrNull(tell.outcomeAt);
+    const open = tell.state === "pending" || tell.state === "held";
+    if (open || (until !== null && settledAt !== null && settledAt > until)) queuedAtEnd += 1;
+    if (tell.state !== "delivered") continue;
+    delivered += 1;
+    const created = timeOrNull(tell.createdAt);
+    const acted = timeOrNull(tell.steeredAt) ?? settledAt;
+    if (created !== null && acted !== null && acted >= created) waits.push((acted - created) / 60_000);
+  }
+  return {
+    outboxIncluded: input.outbox !== undefined,
+    tells: tells.length,
+    delivered,
+    waitMinutes: { p50: percentile(waits, 50), p90: percentile(waits, 90) },
+    steered,
+    replaced,
+    queuedAtEnd,
   };
 }
 

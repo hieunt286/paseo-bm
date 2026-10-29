@@ -42,7 +42,7 @@ afterEach(() => {
 });
 
 describe("the alerts file", () => {
-  it("names the thirteen kinds of the design", () => {
+  it("names the fourteen kinds of the design", () => {
     expect(ALERT_KINDS).toEqual([
       "request-stalled",
       "peer-unanswered",
@@ -57,7 +57,10 @@ describe("the alerts file", () => {
       "off-tool-reviewer",
       "coordination-off",
       "boundary-off",
+      "turn-replaced",
     ]);
+    // Delivery line design §19.5: Paseo replaced a Worker's running turn with the owner's words, keyed by the Worker.
+    expect(alertKeyOf("turn-replaced", WS, "agent-w")).toBe(`turn-replaced:${WS}:agent-w`);
     // Compaction or handoff switched off below A-12's target (§G.3, §G.7): one per mechanism, for every project.
     expect(alertKeyOf("coordination-off", null, "compact")).toBe("coordination-off:-:compact");
     expect(alertKeyOf("stuck", WS, "agent-w")).toBe(`stuck:${WS}:agent-w`);

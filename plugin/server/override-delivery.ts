@@ -284,7 +284,8 @@ export function createOverrideDelivery(deps: OverrideDeliveryDeps = {}): Overrid
         failed(workerId, `Worker ${workerId} is archived, closed or gone, or the send failed`);
         return;
       }
-      record(store, stored, { to: workerId, kind, at: now().toISOString(), outcome });
+      // No steer is asked here (delivery line design §19.5), so a steer's outcomes never come; they would read as sent.
+      record(store, stored, { to: workerId, kind, at: now().toISOString(), outcome: outcome === "steered" || outcome === "turn-replaced" ? "sent" : outcome });
     } catch (error) {
       log(`[paseo-bm] delivering override ${decision.id} failed: ${errorText(error)}`);
     } finally {

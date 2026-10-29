@@ -62,6 +62,21 @@
  *   failed, or its subject settled before delivery). An item's `isHeld` is
  *   read as a single notice's is: a held item leaves the message, and its
  *   `onHeld` is told.
+ * - `options.steer` (delivery line design §19.5, ADR-038 decision 4): the
+ *   owner's words (`isOwnerWords`, `owner-words.ts`). When the target is in a
+ *   running turn and every guard of `steerRefusalOf` holds — a Worker whose
+ *   provider's base is Claude or Codex, `status: "running"` with an
+ *   `activeTurn.turnId`, a text that does not start with `/` — it is sent at
+ *   once with `send(text, { messageId, activeTurnBehavior: "steer" })`, ahead
+ *   of what is queued for the target. The turn id is read before and after
+ *   the send: the same id answers `"steered"`; another id means Paseo
+ *   replaced the turn (it does when the provider refuses the steer) and
+ *   answers `"turn-replaced"`, with one log line. Either way
+ *   `callbacks.onSteered` is told, then `onSent`. A guard that does not hold
+ *   — or an idle, gone or unreadable target — leaves the notice to the rules
+ *   above: sent now when idle, else queued for the turn end. Never a steer
+ *   without `options.steer`, and never to a target not read `running` just
+ *   before.
  * - `registerNoticeQueue(host)` → `{ host, remove }`: the queue does not add a
  *   lifecycle hook of its own. It rides on an existing `agent.turn_ended` hook:
  *   pass the returned `host` to the module that registers one (index.server.ts
@@ -72,8 +87,9 @@
  *   forgets what it holds.
  *
  * Rules this module must never lose:
- * - **Never into a running turn.** Nothing is sent unless `refresh()`, read
- *   just before, says the target is neither `running` nor `initializing`.
+ * - **Never into a running turn**, but for a steer (`options.steer`, above).
+ *   Nothing else is sent unless `refresh()`, read just before, says the
+ *   target is neither `running` nor `initializing`.
  * - **One notice per idle moment.** The notice sent starts a turn on the
  *   target, and a second `send()` would replace that turn; so each chance
  *   sends the oldest queued notice only — a batch group counts as one notice,
@@ -96,18 +112,31 @@
  * - **Never throws.** Every failure costs one `console.warn` line that starts
  *   with `[paseo-bm]`.
  */
+import { randomUUID } from "node:crypto";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { roleOfProvider } from "./agent-role";
+import { aliasBases } from "./alias-bases";
+import { providerId } from "./provider-id";
 import { errorText } from "./rpc-kit";
 
 /** A notice's marker, for example `"BM-TOOLS"`; one queued notice per kind and target. */
 export type NoticeKind = string;
 
-export type NoticeOutcome = "sent" | "queued" | "replaced" | "dropped";
+/**
+ * `steered` and `turn-replaced` answer only a notice queued with
+ * `options.steer` (delivery line design §19.5): it went into the running
+ * turn, or Paseo replaced that turn with it.
+ */
+export type NoticeOutcome = "sent" | "queued" | "replaced" | "dropped" | "steered" | "turn-replaced";
 
 /** The snapshot fields this module reads; `PaseoAgent` is structurally assignable. */
 export interface NoticeAgentSnapshot {
   status?: string | null;
   archivedAt?: string | null;
+  /** The provider id (`bm-worker`, `bm-worker/<model>`); read only for a steer. */
+  provider?: string | null;
+  /** The foreground turn while one runs (Paseo's `activeTurn`); read only for a steer. */
+  activeTurn?: { turnId?: string | null } | null;
 }
 
 /** The SDK slice this module uses; `PaseoApi` from a hook or handler context is structurally assignable. */
@@ -115,9 +144,52 @@ export interface NoticePaseo {
   agents: {
     ref(agentId: string): {
       refresh(): Promise<{ agent?: NoticeAgentSnapshot | null } | null>;
-      send(text: string): Promise<void>;
+      send(text: string, options?: { messageId?: string }): Promise<void>;
     };
   };
+}
+
+/** The base providers whose running turn takes a steer (delivery line design §19.9: the spike on Paseo 0.12). */
+export const STEER_PROVIDERS: readonly string[] = ["claude", "codex"];
+
+/** The foreground turn id of a snapshot, or null when it shows none. Pure. */
+export function turnIdOf(agent: NoticeAgentSnapshot | null | undefined): string | null {
+  const id = agent?.activeTurn?.turnId;
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+}
+
+/**
+ * Why the owner's words would not be steered into `agent`'s turn (delivery
+ * line design §19.5 guards), or null when every guard holds: a Worker, its
+ * provider's `base` Claude or Codex, `running` with a foreground turn id, and
+ * a text that does not start with `/`. Pure.
+ */
+export function steerRefusalOf(agent: NoticeAgentSnapshot, text: string, base: string | null): string | null {
+  if (roleOfProvider(agent.provider) !== "worker") return "the target is not a Worker";
+  if (base === null || !STEER_PROVIDERS.includes(base)) return `its provider's base (${base ?? "not known"}) is not Claude or Codex`;
+  if (agent.status !== "running") return "it is not in a running turn";
+  if (turnIdOf(agent) === null) return "Paseo shows no foreground turn id for it";
+  if (text.trimStart().startsWith("/")) return "the text starts with /";
+  return null;
+}
+
+/** What a steer came to (`NoticeCallbacks.onSteered`). */
+export interface SteerResult {
+  /** When the steer was sent (ISO). */
+  at: string;
+  /** The `messageId` it was sent with. */
+  messageId: string;
+  /** Paseo replaced the running turn: the turn id after the send differs from the one before. */
+  replaced: boolean;
+  turnBefore: string;
+  /** Null when it could not be read after the send (counted as the same turn). */
+  turnAfter: string | null;
+}
+
+/** The send options of a steer; the SDK's `PaseoAgentSendOptions` (0.8.0) does not declare `activeTurnBehavior`, Paseo 0.12's daemon reads it. */
+interface SteerSendOptions {
+  messageId: string;
+  activeTurnBehavior: "steer";
 }
 
 /** A queued notice, as `pending()` shows it. */
@@ -177,6 +249,8 @@ export interface NoticeCallbacks {
   onDropped?(targetId: string, kind: NoticeKind, reason: string): void;
   /** Its `isHeld` held it at the send (delivery line design §6.4): it left the queue unsent; the sender holds it. */
   onHeld?(targetId: string, kind: NoticeKind): void;
+  /** It was steered into the target's running turn (delivery line design §19.5); told before `onSent`. */
+  onSteered?(targetId: string, kind: NoticeKind, result: SteerResult): void;
 }
 
 /** How a single notice is queued. */
@@ -185,6 +259,8 @@ export interface EnqueueOptions {
   first?: boolean;
   /** Read just before the send: true holds it instead (delivery line design §6.4: the wake gate at the send). */
   isHeld?: () => boolean;
+  /** The owner's words (delivery line design §19.5): steered into a running turn when every guard holds (`steerRefusalOf`). */
+  steer?: boolean;
 }
 
 export interface NoticeQueue {
@@ -210,6 +286,20 @@ export interface NoticeQueue {
 export interface NoticeQueueDeps {
   /** Where failures are reported. Defaults to `console.warn`. */
   log?: (message: string) => void;
+  /** A steer's time; the clock by default. */
+  now?: () => Date;
+  /** A steer's `messageId`; `randomUUID` by default. */
+  newMessageId?: () => string;
+  /** The base provider of a provider id (`bm-worker` → `claude`), for a steer's guard; the aliases' `extends` (`aliasBases`) by default. */
+  baseOf?: (paseo: NoticePaseo, provider: string | null | undefined) => Promise<string | null>;
+}
+
+/** A provider id's base: a base itself, else its alias's `extends`; null when not known. Never rejects. */
+async function defaultBaseOf(paseo: NoticePaseo, provider: string | null | undefined): Promise<string | null> {
+  const id = providerId(provider);
+  if (id === null) return null;
+  if (STEER_PROVIDERS.includes(id)) return id;
+  return (await aliasBases(paseo))[id] ?? null;
 }
 
 interface Entry extends QueuedNotice {
@@ -256,6 +346,9 @@ function outcomeOf(entry: Entry): NoticeOutcome {
 
 export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
   const log = deps.log ?? ((message: string) => console.warn(message));
+  const now = deps.now ?? (() => new Date());
+  const newMessageId = deps.newMessageId ?? randomUUID;
+  const baseOf = deps.baseOf ?? defaultBaseOf;
   /** Target agent id → its queued notices, oldest first. */
   const queued = new Map<string, Entry[]>();
   /** Targets being delivered to right now; `again` asks that delivery for one more look. */
@@ -442,6 +535,73 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     }
   }
 
+  /**
+   * Delivery line design §19.5: the owner's words into the target's running
+   * turn, when every guard holds. Null when no steer applies — the target is
+   * idle, gone, unreadable or being delivered to, the notice is held, or a
+   * guard fails — and the notice takes the normal path. Holds the target's
+   * delivery while it runs, so no other notice is sent meanwhile.
+   */
+  async function trySteer(targetId: string, entry: Entry, paseo: NoticePaseo): Promise<NoticeOutcome | null> {
+    if (delivering.has(targetId) || heldNow(entry)) return null;
+    const flag = { again: false };
+    delivering.set(targetId, flag);
+    try {
+      const ref = paseo.agents.ref(targetId);
+      let agent: NoticeAgentSnapshot | null;
+      try {
+        agent = (await ref.refresh())?.agent ?? null;
+      } catch {
+        return null;
+      }
+      if (agent === null || agent.archivedAt != null || agent.status !== "running") return null;
+      let base: string | null;
+      try {
+        base = await baseOf(paseo, agent.provider);
+      } catch {
+        base = null;
+      }
+      if (steerRefusalOf(agent, entry.text, base) !== null) return null;
+      const turnBefore = turnIdOf(agent)!;
+      const messageId = newMessageId();
+      try {
+        // The SDK 0.8.0 types lack `activeTurnBehavior`; the plugin's `send` forwards its options to the daemon's `sendAgentMessage`.
+        await ref.send(entry.text, { messageId, activeTurnBehavior: "steer" } satisfies SteerSendOptions as { messageId: string });
+      } catch (error) {
+        entry.state = "dropped";
+        log(`[paseo-bm] could not steer the ${entry.kind} notice into ${targetId}'s turn: ${errorText(error)}; dropped it.`);
+        tell(targetId, entry, "dropped", `the send failed: ${errorText(error)}`);
+        return "dropped";
+      }
+      const at = now().toISOString();
+      let turnAfter: string | null = null;
+      try {
+        turnAfter = turnIdOf((await ref.refresh())?.agent ?? null);
+      } catch (error) {
+        log(`[paseo-bm] could not read ${targetId} after steering the ${entry.kind} notice into its turn: ${errorText(error)}; counted as steered.`);
+      }
+      const replaced = turnAfter !== null && turnAfter !== turnBefore;
+      // The newest notice of a kind wins (as `put`): an older one of this kind no longer goes.
+      for (const old of queued.get(targetId) ?? []) if (old.kind === entry.kind) old.state = "replaced";
+      const kept = (queued.get(targetId) ?? []).filter((old) => old.kind !== entry.kind);
+      if (kept.length === 0) queued.delete(targetId);
+      else queued.set(targetId, kept);
+      entry.state = replaced ? "turn-replaced" : "steered";
+      if (replaced) log(`[paseo-bm] Paseo replaced ${targetId}'s running turn (${turnBefore} → ${turnAfter}) with the ${entry.kind} notice instead of steering it in.`);
+      try {
+        entry.callbacks?.onSteered?.(targetId, entry.kind, { at, messageId, replaced, turnBefore, turnAfter });
+      } catch (error) {
+        log(`[paseo-bm] after steering the ${entry.kind} notice into ${targetId}'s turn: ${errorText(error)}`);
+      }
+      tell(targetId, entry, "sent");
+      return entry.state;
+    } finally {
+      delivering.delete(targetId);
+      // A turn end handled meanwhile left its delivery to this one.
+      if (flag.again && queued.has(targetId)) await deliver(targetId, paseo);
+    }
+  }
+
   async function enqueue(targetId: string, kind: NoticeKind, text: string, paseo?: NoticePaseo, callbacks?: NoticeCallbacks, options?: EnqueueOptions): Promise<NoticeOutcome> {
     try {
       if (!nonEmpty(targetId) || !nonEmpty(kind) || !nonEmpty(text)) {
@@ -452,6 +612,11 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       if (callbacks !== undefined) entry.callbacks = callbacks;
       if (options?.first === true) entry.first = true;
       if (typeof options?.isHeld === "function") entry.isHeld = options.isHeld;
+      if (options?.steer === true) {
+        const steering = handleFor(paseo);
+        const steered = steering === null ? null : await trySteer(targetId, entry, steering);
+        if (steered !== null) return steered;
+      }
       put(targetId, entry);
       const handle = handleFor(paseo);
       if (handle !== null) await deliver(targetId, handle);

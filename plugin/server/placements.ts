@@ -67,11 +67,14 @@ export function placementEntryOf(home: string | null, workspaceId: string): { mi
   return placementIndexIn(home)[workspaceId] ?? null;
 }
 
-/** The mission's placement of `repo` (a repo key), the newest recorded; null when it has none. Never throws. */
+/** A placement's lane (delivery line design §19.1): 1, the mission branch, unless recorded. Pure. */
+export const laneOf = (placement: Pick<Placement, "lane">): number => placement.lane ?? 1;
+
+/** The mission's placement of `repo` (a repo key) on the mission branch — lane 1, the newest recorded; null when it has none. Never throws. */
 export function placementOf(home: string, missionId: string, repo: string): Placement | null {
   try {
     const mission = createMissionStore(home).get(missionId);
-    return (mission?.placements ?? []).filter((placement) => placement.repo === repo).at(-1) ?? null;
+    return (mission?.placements ?? []).filter((placement) => placement.repo === repo && laneOf(placement) === 1).at(-1) ?? null;
   } catch {
     return null;
   }

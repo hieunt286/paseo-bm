@@ -8,8 +8,9 @@
  * Rules, the first that holds:
  * 1. `ownerOnly`; `o:`, `r:`, `h:`; an `m:` decision; an option carrying a
  *    prepared change → the owner.
- * 2. `f:` whose class the project delegates → the Orchestrator, unless
- *    `unverifiedFinishRefusalOf` refuses every acting option → the owner.
+ * 2. `f:` of a mission request delegated by repo or mission → its Main
+ *    (ADR-040); otherwise a repo-delegated incident → the Orchestrator.
+ *    `unverifiedFinishRefusalOf` refusing every acting option → the owner.
  * 3. `q:` of a request of a mission, its class delegated by the repo cell →
  *    the Main; delegated by the mission cell only → the Main when one option
  *    settles it with no effect, else the owner, the Main recommending
@@ -104,9 +105,16 @@ export function deciderOf(decision: AuthorityDecision, facts: AuthorityFacts): D
   const decisionClass = decisionClassOf(decision);
   const repoMode = facts.modeOf(decision.workspaceId, decisionClass);
   if (kind === "fallback") {
-    if (repoMode !== "delegate") return owner("owner", `${decisionClass} is not delegated in this project`);
     // Delivery line design §7.1, case 2: no option the Orchestrator may choose would act.
     if (everyActingOptionRefused(decision, facts)) return owner("owner", "its request finished unverified: every acting option is the owner's");
+    const missionId = facts.missionOf(decision.requestId);
+    if (missionId !== null) {
+      if (repoMode === "delegate") return { decider: "main", rule: "delegated-main", recommend: false, why: `${decisionClass} is delegated: the mission's Main resolves its request's fallback` };
+      if (facts.missionDelegates(missionId, "answer-effects") && decision.options.some(settlesWithoutEffect)) {
+        return { decider: "main", rule: "delegated-main", recommend: false, withoutEffects: true, why: "the mission delegates recovery without effects to its Main" };
+      }
+    }
+    if (repoMode !== "delegate") return owner("owner", `${decisionClass} is not delegated in this project`);
     return { decider: "orchestrator", rule: "orchestrator-incident", recommend: false, why: `${decisionClass} is delegated: the Orchestrator decides the incident` };
   }
   // A Worker's question (q:).

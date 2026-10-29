@@ -829,9 +829,9 @@ export function answerDecision(decision: Decision, input: AnswerInput): Transiti
   const by = input.by ?? "owner";
   // Missions design §5: an owner-only fact is the owner's own word, never relayed through a Manager's chat.
   if (decision.ownerOnly === true && (by !== "owner" || input.via === "chat-manager")) return refuse("invalid-answer", ownerOnlyRefusalText(decision.id));
-  // Missions design §4: the Main answers its Workers' questions only, via main.
+  // Missions design §4, ADR-040: the Main answers its requests' questions and fallback, via main.
   if ((by === "main") !== (input.via === "main")) return refuse("invalid-answer", "only the mission's Main answers via main, and only via main");
-  if (by === "main" && decisionKindOf(decision.id) !== "question") return refuse("invalid-answer", `decision ${decision.id} is not a Worker's question; the mission's Main answers only those`);
+  if (by === "main" && !["question", "fallback"].includes(decisionKindOf(decision.id) ?? "")) return refuse("invalid-answer", `decision ${decision.id} is not a Worker's question or fallback; the mission's Main answers only those`);
   // Autonomy design §G.4: a prepared change of the owner's settings is the owner's alone, whoever else would answer.
   if (by !== "owner" && carriesPreparedChange(decision)) return refuse("invalid-answer", preparedChangeRefusalText(decision.id));
   // Autonomy design §D.2: a held request is allowed or denied, by the owner (the policy only as it opens); never in words, never by a precedent.

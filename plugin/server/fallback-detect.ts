@@ -19,8 +19,9 @@
  * nothing is done, as before.
  *
  * Where each fact comes from:
- * - The turn's items: the hook payload, cut at its last user message
- *   (`sliceLastTurn`), as `format-check.ts` reads it. The refetch entries are
+ * - The turn's items: the hook payload, or one bounded timeline refetch when
+ *   the host supplies an empty payload (current Paseo), cut at its last user
+ *   message (`sliceLastTurn`). The refetch entries are
  *   not filtered by `turnId` here because Paseo reuses turn ids inside one
  *   agent (AGENTS.md), so an older turn with the same id could add its tool
  *   calls.
@@ -28,8 +29,10 @@
  *   the same call the collector makes; `timestampsForTurn` turns it into
  *   `usage`, so "0 output tokens" means exactly what a trace record says.
  *
- * Checks run cheapest first, so a turn with a tool call, or whose text does not
- * classify as a fallback class, costs no daemon call. Nothing here records an
+ * With a nonempty hook payload, checks run cheapest first, so a turn with a
+ * tool call, or whose text does not classify, costs no daemon call. An empty
+ * payload needs one history read; its snapshot also supplies labels and usage.
+ * Nothing here records an
  * incident or reads `role-fallback.json`: the caller hands the file's
  * `patterns` in. Never throws: a failure costs one `[paseo-bm]` log line and
  * the turn is not classified.
@@ -76,8 +79,25 @@ function isFallbackRole(role: unknown): boolean {
 function textItem(item: unknown): { type: string; text: string } | null {
   if (item === null || typeof item !== "object") return null;
   const { type, text } = item as { type?: unknown; text?: unknown };
+  // Paseo renders an incoming agent prompt as a synthetic tool row. It is
+  // input to the Worker, not a tool the Worker ran (Paseo 0.12 field evidence).
+  const row = item as { name?: unknown; callId?: unknown; agentMessage?: { event?: unknown; text?: unknown } | null };
+  if (type === "tool_call" && row.name === "agent_message" && typeof row.callId === "string" && row.callId.startsWith("paseo-agent-message:") && row.agentMessage?.event === "message" && typeof row.agentMessage.text === "string") {
+    return { type: "user_message", text: row.agentMessage.text };
+  }
   if ((type !== "user_message" && type !== "assistant_message") || typeof text !== "string") return null;
   return { type, text };
+}
+
+/** An incoming agent message starts a turn just as a user message does. */
+function lastTurnItems(items: readonly unknown[]): unknown[] {
+  return sliceLastTurn(items, (item) => textItem(item) ?? item);
+}
+
+/** Text of an input message, including Paseo's synthetic agent-message row. */
+export function fallbackInputText(item: unknown): string | null {
+  const message = textItem(item);
+  return message?.type === "user_message" ? message.text : null;
 }
 
 /** True when a message carries a `BM-REPORT` or `BM-REVIEW` block, read the way the collector reads them. */
@@ -95,9 +115,9 @@ function hasBlock(text: string): boolean {
  */
 export function quietReply(items: readonly unknown[]): string | null {
   let last: string | null = null;
-  for (const item of items) {
-    if ((item as { type?: unknown } | null)?.type === "tool_call") return null;
+  for (const item of lastTurnItems(items)) {
     const message = textItem(item);
+    if ((item as { type?: unknown } | null)?.type === "tool_call" && message?.type !== "user_message") return null;
     if (message === null || message.type !== "assistant_message") continue;
     if (hasBlock(message.text)) return null;
     last = message.text;
@@ -113,12 +133,13 @@ export function quietReply(items: readonly unknown[]): string | null {
  */
 export function quietTokens(usage: Usage | null, items: readonly unknown[]): boolean {
   if (usage !== null) return usage.outputTokens === 0;
-  const first = items.length > 0 ? textItem(items[0]) : null;
+  const turn = lastTurnItems(items);
+  const first = turn.length > 0 ? textItem(turn[0]) : null;
   return !isPluginNotice(first?.type === "user_message" ? first.text : null);
 }
 
 /**
- * The agent's labels and usage from one `timeline.refetch`. The payload is
+ * The agent's last turn, labels and usage from one `timeline.refetch`. The payload is
  * handed to the collector's own reader so the usage is read exactly as a trace
  * record's. Throws when the call fails or the payload carries no snapshot.
  */
@@ -126,14 +147,19 @@ async function readAgent(
   paseo: CollectorPaseo,
   agentId: string,
   turnId: string | null,
-): Promise<{ labels: Record<string, unknown>; usage: Usage | null }> {
+): Promise<{ labels: Record<string, unknown>; usage: Usage | null; items: unknown[] }> {
   const payload = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: REFETCH_LIMIT });
   const snapshot = (payload as { agent?: unknown } | null)?.agent;
   if (snapshot === null || typeof snapshot !== "object") throw new Error("the timeline refetch returned no agent snapshot");
   const replay: CollectorPaseo = { agents: { ref: () => ({ timeline: { refetch: async () => payload } }) } };
   const { usage } = await timestampsForTurn({ location: null, paseo: replay }, agentId, turnId);
   const labels = (snapshot as { labels?: unknown }).labels;
-  return { labels: labels !== null && typeof labels === "object" ? (labels as Record<string, unknown>) : {}, usage };
+  const rawEntries = (payload as { entries?: unknown }).entries;
+  const entries = Array.isArray(rawEntries) ? rawEntries : [];
+  const items = lastTurnItems(entries.map((entry: { item?: unknown } | null) => entry?.item));
+  // A full page without a prompt may omit this turn's tools; do not infer N2.
+  const cut = entries.length >= REFETCH_LIMIT && !items.some((item) => textItem(item)?.type === "user_message");
+  return { labels: labels !== null && typeof labels === "object" ? (labels as Record<string, unknown>) : {}, usage, items: cut ? [] : items };
 }
 
 /**
@@ -156,7 +182,12 @@ export async function classifyTurn(event: TurnEndedEvent, deps: FallbackDetectDe
     if (outcome?.kind !== "failed" && outcome?.kind !== "completed") return null;
     if (!isFallbackRole(roleOfProvider(agent.provider))) return null;
 
-    const items = sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : []);
+    let items = sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : []);
+    let read: Awaited<ReturnType<typeof readAgent>> | null = null;
+    if (outcome.kind === "completed" && items.length === 0) {
+      read = await readAgent(deps.paseo, agent.id, event.turnId);
+      items = read.items;
+    }
     const message =
       outcome.kind === "failed"
         ? typeof outcome.error?.message === "string"
@@ -167,7 +198,7 @@ export async function classifyTurn(event: TurnEndedEvent, deps: FallbackDetectDe
     const found = matchClass(message, compilePatterns(deps.patterns, log));
     if (!isFallbackClass(found)) return null;
 
-    const { labels, usage } = await readAgent(deps.paseo, agent.id, event.turnId);
+    const { labels, usage } = read ?? await readAgent(deps.paseo, agent.id, event.turnId);
     if (Object.prototype.hasOwnProperty.call(labels, REPLACED_BY_LABEL)) return null;
     if (outcome.kind === "completed" && !quietTokens(usage, items)) return null;
     return { class: found, signal: outcome.kind, message };

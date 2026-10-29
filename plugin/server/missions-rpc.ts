@@ -6,8 +6,8 @@
  * - `mission.get { missionId }` → one mission's page: its summary (each repo
  *   with a worktree carrying its `placement`, delivery line design §4.9),
  *   charter, every governor family, one row per roster request, its
- *   contracts, the newest `MISSION_PAGE_JOURNAL` journal lines (newest first)
- *   and its plan.
+ *   contracts, the newest `MISSION_PAGE_JOURNAL` journal lines (newest first),
+ *   its plan, and In flight's Waiting part (delivery line design §19.8).
  * - `mission.change { missionId, name?, code?, addRepos?, close? }` → the
  *   owner's own change, applied at once on the `m:` card's path
  *   (`mission-tools.ts`): the card's checks (`missionChangeRefusalsOf`),
@@ -81,7 +81,8 @@ import { offerMerges } from "./mission-ownership";
 import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission, type Placement } from "./mission-store";
 import { missionStateOf } from "./mission-state";
 import type { MissionState } from "../shared/mission-state";
-import { openArchiveCards, retitlePlacements } from "./placement-create";
+import { MAX_LANES, openArchiveCards, retitlePlacements } from "./placement-create";
+import { laneViewsOf, overlapsOf, waitingOf } from "./mission-page-lanes";
 import { applyMissionChange, missionChangeRefusalsOf, syncMainAfterChange, tellMain } from "./mission-tools";
 import { missionInvalid } from "./missions-home";
 import { workspaceLabelOf } from "./orchestrator-state";
@@ -89,7 +90,7 @@ import { newestReportRecordOf, reportPhaseOf } from "./outbox";
 import type { PaseoCliDeps } from "./paseo-cli";
 import { bmAgentsOf, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { createPeerLinkStore, isLiveLink } from "./peer-links";
-import { repoKeyOf } from "./placements";
+import { laneOf, repoKeyOf } from "./placements";
 import { isPluginHomeIn } from "./plugin-homes";
 import { firstLine } from "./request-trace";
 import { READ_FAILED, coded, dataHome, errorText, logOf, requireDataHome, type RpcHomeDeps } from "./rpc-kit";
@@ -284,6 +285,14 @@ function missionViewOf(context: ReadContext, mission: Mission): MissionView {
  * homes left out). Never throws: a store that cannot be read is none.
  */
 function rowsOf(context: ReadContext, view: MissionView): MissionRow[] {
+  let fallbackRequests = new Set<string>();
+  try {
+    fallbackRequests = new Set(createDecisionStore(context.home).list({ statuses: UNSETTLED_STATUSES })
+      .filter((decision) => decision.id.startsWith("f:") && decision.requestId !== null)
+      .map((decision) => requestKey(decision.workspaceId, decision.requestId!)));
+  } catch {
+    // An unreadable decision store contributes no fallback state.
+  }
   let links: ReturnType<ReturnType<typeof createPeerLinkStore>["list"]> = [];
   try {
     links = createPeerLinkStore(context.home).list().filter(isLiveLink);
@@ -296,7 +305,7 @@ function rowsOf(context: ReadContext, view: MissionView): MissionRow[] {
     let phase: MissionRow["phase"] = entry.state === "active" ? "working" : entry.state;
     if (entry.state === "active") {
       const report = workerId === null ? null : newestReportRecordOf(context.home, entry.workspaceId, workerId);
-      if (ownerQuestions.length > 0 || (report !== null && reportPhaseOf(report.text) === "blocked")) phase = "blocked";
+      if (ownerQuestions.length > 0 || fallbackRequests.has(requestKey(entry.workspaceId, entry.requestId)) || (report !== null && reportPhaseOf(report.text) === "blocked")) phase = "blocked";
     }
     const partners = new Map<string, number>();
     for (const link of links) {
@@ -359,7 +368,7 @@ export async function handleMissionGet(input: { missionId: string }, paseo: unkn
     const { charter } = mission;
     const flight = inFlightOf(home, mission.missionId);
     return {
-      summary: { ...view.summary, repos: withPlacements(home, mission, view.summary.repos, flight.inFlight), ci: context.settings.integration.ci },
+      summary: { ...view.summary, repos: withPlacements(home, mission, view.summary.repos, flight.inFlight, { roster: view.roster, live: view.liveWorkerIds, listed: context.listed }), ci: context.settings.integration.ci },
       charter: {
         goal: charter.goal,
         nonGoals: charter.nonGoals,
@@ -385,6 +394,8 @@ export async function handleMissionGet(input: { missionId: string }, paseo: unkn
       // Mission runtime design §7: the page's In flight and Main history read the one mission state.
       ...flight,
       mainHistory: mission.mainHistory.map((entry) => ({ agentId: entry.agentId, from: entry.from, to: entry.to, reason: entry.reason })),
+      // Delivery line design §19.8: held requests and tells to busy Workers.
+      waiting: waitingOf(home, mission, view.roster, (workspaceId) => repoOf(context, workspaceId).name, context.now),
     };
   });
 }
@@ -419,10 +430,17 @@ export function integrationStateOf(placement: Pick<Placement, "repo" | "integrat
 /**
  * The summary's repos, each with a worktree carrying its `placement`
  * (delivery line design §4.9): its line as the mission state read it (no
- * git here) and push and merge request (`integrationStateOf`). Never throws:
+ * git here), push and merge request (`integrationStateOf`), and its lanes
+ * with their overlaps (§19.8, `mission-page-lanes.ts`). Never throws:
  * unreadable cards read as none.
  */
-function withPlacements(home: string, mission: Mission, repos: MissionSummary["repos"], state: MissionState | undefined): MissionSummary["repos"] {
+function withPlacements(
+  home: string,
+  mission: Mission,
+  repos: MissionSummary["repos"],
+  state: MissionState | undefined,
+  work: { roster: readonly RosterEntry[]; live: ReadonlySet<string>; listed: readonly ListedWorkspace[] | null },
+): MissionSummary["repos"] {
   const lines = state?.placements ?? [];
   if (lines.length === 0) return repos;
   let cards: Decision[] = [];
@@ -431,13 +449,19 @@ function withPlacements(home: string, mission: Mission, repos: MissionSummary["r
   } catch {
     cards = [];
   }
-  const stored = new Map((mission.placements ?? []).map((placement) => [placement.repo, placement]));
+  const stored = new Map((mission.placements ?? []).filter((placement) => laneOf(placement) === 1).map((placement) => [placement.repo, placement]));
   return repos.map((repo) => {
     const line = lines.find((entry) => entry.repo === repo.workspaceId);
     const placement = stored.get(repo.workspaceId);
     if (line === undefined || placement === undefined) return repo;
     const { branch, target, state: lineState, dirty, ahead, behind, lastCommitAt, pushed, mr, ci, readAt } = line;
-    return { ...repo, placement: { branch, target, state: lineState, dirty, ahead, behind, lastCommitAt, pushed, mr, ci, readAt, integration: integrationStateOf(placement, cards) } };
+    // Delivery line design §19.8: its lanes, "n of 7 lanes" and the overlaps the Main was told of.
+    const lanes = laneViewsOf(mission, repo.workspaceId, work.roster, work.live, work.listed);
+    const overlaps = overlapsOf(mission, repo.workspaceId, work.roster);
+    return {
+      ...repo,
+      placement: { branch, target, state: lineState, dirty, ahead, behind, lastCommitAt, pushed, mr, ci, readAt, integration: integrationStateOf(placement, cards), lanes, maxLanes: MAX_LANES, overlaps },
+    };
   });
 }
 

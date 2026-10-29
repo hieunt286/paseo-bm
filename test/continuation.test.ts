@@ -92,7 +92,8 @@ function setup(options: { agents?: (repo: string) => FakeAgent[]; workspaces?: (
     outbox: { newId: () => `out-${(n += 1).toString(16).padStart(12, "0")}` },
     binder: () => binderOf(ROLE_URL, store, (line) => logs.push(line)),
   });
-  const tell = (input: Record<string, unknown>, caller: ToolCaller = MANAGER_CALLER) => tools.manager.call("bm_tell_worker", input, caller);
+  // Delivery line design §19.12: a request at work takes words about its own work; a finished one ignores about.
+  const tell = (input: Record<string, unknown>, caller: ToolCaller = MANAGER_CALLER) => tools.manager.call("bm_tell_worker", { about: "current", ...input }, caller);
   return { home, repo, fake, store, logs, tell };
 }
 
@@ -248,7 +249,7 @@ describe("a Main's continuation (delivery line design §2.4 item 4, missions des
     const answer = await tell({ requestId: REQ, text: "More." }, caller);
     expect(answer.ok).toBe(false);
     expect(answer.text).toBe(
-      `mission SHOP already has a live Worker in repo (request ${OTHER}): give it the work with bm_tell_worker, or staffing is not delegated in this mission, so ask the owner first\nNothing was created.`,
+      `mission SHOP already has a live Worker in repo (request ${OTHER}): give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or staffing is not delegated in this mission, so ask the owner first\nNothing was created.`,
     );
     expect(fake.creates).toEqual([]);
     expect(createRequestRegistry(home).list(BACK).map((request) => request.requestId)).toEqual([REQ, OTHER]);

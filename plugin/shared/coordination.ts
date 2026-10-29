@@ -69,8 +69,9 @@ export const HANDOFF_MAX_PER_REQUEST: CoordinationBounds = { min: 1, max: 5, def
 /**
  * A Main's context (mission runtime design §3.2): compacted in place when its
  * real context — the turn's `contextUsed` — fills `main.contextShare` of its
- * window, or, with no window reported, reaches `main.contextTokens`; a new Main
- * only when it stays at `main.hardShare` after a compaction (§3.5).
+ * window or reaches `main.contextTokens`, whichever comes first (delivery line
+ * design §18.4); a new Main only when it stays at the hard figure after a
+ * compaction (§3.5).
  */
 export const MAIN_CONTEXT_SHARE: CoordinationBounds = { min: 0.3, max: 0.9, default: 0.6, whole: false };
 export const MAIN_CONTEXT_TOKENS: CoordinationBounds = { min: 50_000, max: 2_000_000, default: 150_000, whole: true };
@@ -720,30 +721,40 @@ export interface MainTurnContext {
 
 /**
  * Whether a Main's turn crosses its context threshold (mission runtime design
- * §3.1, §3.2): its real context's share of the window at `main.contextShare`,
- * or, with no window reported, its context tokens at `main.contextTokens`.
- * The per-turn token sum is never a Main's figure. Pure.
+ * §3.1, §3.2; delivery line design §18.4): its real context's share of the
+ * window at `main.contextShare`, or its context tokens at `main.contextTokens`,
+ * whichever holds first — so a big window cannot let a Main's context grow
+ * past the token figure. The figure named is the one that crossed: the share
+ * when both hold, the tokens when only they do. With no window reported, the
+ * tokens alone decide. The per-turn token sum is never a Main's figure. Pure.
  */
 export function mainContextCrossingOf(turn: MainTurnContext, settings: Pick<CoordinationSettings, "main">): ThresholdCrossing | null {
   const { contextShare, contextTokens } = settings.main;
-  if (turn.contextShare !== null && Number.isFinite(turn.contextShare)) {
-    return turn.contextShare >= contextShare ? { figure: "contextShare", value: turn.contextShare, threshold: contextShare } : null;
+  if (turn.contextShare !== null && Number.isFinite(turn.contextShare) && turn.contextShare >= contextShare) {
+    return { figure: "contextShare", value: turn.contextShare, threshold: contextShare };
   }
   if (turn.context !== null && turn.context.tokens >= contextTokens) return { figure: "contextTokens", value: turn.context.tokens, threshold: contextTokens };
   return null;
 }
 
 /**
- * Whether a Main's turn reaches the hard figure (mission runtime design §3.5):
- * `main.hardShare` of its window (never below `main.contextShare` + 0.05), or,
- * with no window, the context tokens `contextTokens / contextShare × hardShare`.
- * Pure.
+ * Whether a Main's turn reaches the hard figure (mission runtime design §3.5;
+ * delivery line design §18.4): `main.hardShare` of its window (never below
+ * `main.contextShare` + 0.05), or the context tokens
+ * `contextTokens / contextShare × hardShare` (212,500 at the defaults),
+ * never below `MAIN_HARD_TOKENS_FLOOR` × `contextTokens`, whichever holds —
+ * so a high share setting cannot bring the hard figure next to the
+ * compaction figure. With no window reported, the tokens alone decide. Pure.
  */
 export function mainContextHardOf(turn: MainTurnContext, settings: Pick<CoordinationSettings, "main">): boolean {
   const hard = Math.max(settings.main.hardShare, settings.main.contextShare + 0.05);
-  if (turn.contextShare !== null && Number.isFinite(turn.contextShare)) return turn.contextShare >= hard;
-  return turn.context !== null && turn.context.tokens >= (settings.main.contextTokens / settings.main.contextShare) * hard;
+  if (turn.contextShare !== null && Number.isFinite(turn.contextShare) && turn.contextShare >= hard) return true;
+  const tokens = Math.max((settings.main.contextTokens / settings.main.contextShare) * hard, settings.main.contextTokens * MAIN_HARD_TOKENS_FLOOR);
+  return turn.context !== null && turn.context.tokens >= tokens;
 }
+
+/** The least the hard token figure is, as a multiple of `main.contextTokens` (review of ADR-037). */
+export const MAIN_HARD_TOKENS_FLOOR = 1.25;
 
 /** Whether a Main on this provider is compacted in place (mission runtime design §3.3): `main.compact` and a provider that compacts. Pure. */
 export function mainCompactionOnFor(settings: Pick<CoordinationSettings, "main">, provider: string | null): boolean {

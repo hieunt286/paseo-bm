@@ -109,6 +109,62 @@ const missionLineFields = {
 };
 
 /**
+ * One lane of a repo (delivery line design §19.1, §19.8): its branch and
+ * workspace, the active requests working in it (with their live Workers and
+ * since when), and, once its work merged, since when it is free; a merge git
+ * refused waits as `mergePending` (§19.2).
+ */
+export const missionLaneSchema = z.object({
+  lane: z.number().int().min(1),
+  branch: z.string(),
+  workspaceId: z.string().nullable(),
+  state: z.string(),
+  requests: z.array(z.object({ requestId: z.string(), topic: z.string(), workerIds: z.array(z.string()), since: z.string() })),
+  freeSince: z.string().nullable(),
+  mergedAt: z.string().nullable(),
+  mergePending: z.object({ since: z.string(), reason: z.string(), files: z.array(z.string()) }).nullable(),
+});
+
+/** Two lanes in use of one repo changing the same files (§19.3): the Main was told at `toldAt` (null when an older build told it). */
+export const missionOverlapSchema = z.object({
+  lanes: z.tuple([z.number().int().min(1), z.number().int().min(1)]),
+  files: z.array(z.string()),
+  toldAt: z.string().nullable(),
+});
+
+/**
+ * One line of In flight's Waiting part (§19.8): a held request (§19.6) with
+ * what it waits for and where it will start, or a tell to a busy Worker
+ * (§19.5) — still waiting for its turn's end (`queued`; `held` by the wake
+ * gate), or steered into it (`steered`; `replaced` when Paseo replaced the
+ * turn instead). `owner`: the owner's words.
+ */
+export const missionWaitingSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("held"),
+    id: z.string(),
+    topic: z.string(),
+    after: z.array(z.object({ requestId: z.string(), topic: z.string().nullable() })),
+    state: z.enum(["held", "waiting-stopped"]),
+    since: z.string(),
+    /** The repo it will start in; null when it is not known. */
+    repo: z.string().nullable(),
+    /** It asked for a free or new lane (`lane: "new"`). */
+    newLane: z.boolean(),
+  }),
+  z.object({
+    kind: z.literal("tell"),
+    id: z.string(),
+    requestId: z.string(),
+    workerId: z.string(),
+    owner: z.boolean(),
+    text: z.string(),
+    state: z.enum(["queued", "held", "steered", "replaced"]),
+    since: z.string(),
+  }),
+]);
+
+/**
  * The repo row's placement (delivery line design §4.9, artboards I and J):
  * its line, and push and merge request — allowed since the grant, waiting
  * for the owner on the open integration card, not now, revoked, or not asked
@@ -123,6 +179,12 @@ export const missionPlacementSchema = z.object({
     /** The integration card's id (`m:<missionId>:<n>`); null when none was opened. */
     decisionId: z.string().nullable(),
   }),
+  /** Delivery line design §19.8 (mockup Q, R): the repo's live lanes, lane 1 first. Optional: an older server sends none. */
+  lanes: z.array(missionLaneSchema).optional(),
+  /** `MAX_LANES` (§19.1): "3 of 7 lanes". */
+  maxLanes: z.number().int().positive().optional(),
+  /** §19.3: two lanes in use that change the same files, as the Main was told. */
+  overlaps: z.array(missionOverlapSchema).optional(),
 });
 
 /** A repository of a mission, by its project name; `placement` only in `mission.get`'s summary, for a repo the mission has a worktree of (absent from an older server). */
@@ -279,6 +341,8 @@ export const missionGetRpc = defineRpc({
     inFlight: missionStateSchema.optional(),
     /** The mission's Mains with when and why each changed (mission runtime design §7); absent from an older server. */
     mainHistory: z.array(z.object({ agentId: z.string(), from: z.string(), to: z.string().nullable(), reason: z.string() })).optional(),
+    /** In flight's Waiting part (delivery line design §19.8): the newest `MISSION_WAITING_SHOWN`, oldest first; absent from an older server. */
+    waiting: z.array(missionWaitingSchema).optional(),
   }),
 });
 
@@ -357,6 +421,9 @@ export type MissionSignal = z.infer<typeof missionSignalSchema>;
 export type MissionFigure = z.infer<typeof missionFigureSchema>;
 export type MissionRow = z.infer<typeof missionRowSchema>;
 export type MissionPlacement = z.infer<typeof missionPlacementSchema>;
+export type MissionLane = z.infer<typeof missionLaneSchema>;
+export type MissionOverlap = z.infer<typeof missionOverlapSchema>;
+export type MissionWaiting = z.infer<typeof missionWaitingSchema>;
 export type MissionsListOutput = z.infer<typeof missionsListRpc.output>;
 export type MissionGetOutput = z.infer<typeof missionGetRpc.output>;
 export type MissionChangeInput = z.infer<typeof missionChangeRpc.input>;

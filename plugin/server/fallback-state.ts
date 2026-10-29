@@ -542,11 +542,10 @@ export interface RegisterFallbackOptions {
 
 /**
  * Adds the `agent.turn_ended` handler that classifies the turn and records an
- * incident. An ordinary turn costs nothing: the install home and the user's
- * patterns are only read for a paseo-bm turn that failed, or that completed
- * with a short reply and nothing else (N2), and `classifyTurn` makes no daemon
- * call before its text classifies. Returns the remover; on a host without
- * `on` it does nothing.
+ * incident. A nonempty hook timeline keeps the cheap N1/N2 checks before the
+ * install home and patterns are read. When the host omits history, a completed
+ * turn needs one bounded refetch in `classifyTurn` to establish N2. Returns the
+ * remover; on a host without `on` it does nothing.
  */
 export function registerFallbackDetection(host: FallbackHost, options: RegisterFallbackOptions = {}): () => void {
   if (typeof host.on !== "function") return () => {};
@@ -563,11 +562,13 @@ export function registerFallbackDetection(host: FallbackHost, options: RegisterF
   const detect = async (event: Parameters<NonNullable<RegisterFallbackOptions["afterDetection"]>>[0], paseo: unknown): Promise<boolean> => {
     const outcome = event?.outcome?.kind;
     if (outcome !== "failed" && outcome !== "completed") return false;
+    const timeline = Array.isArray(event.timeline) ? event.timeline : [];
     const text =
       outcome === "failed"
         ? nonEmpty((event.outcome as { error?: { message?: unknown } }).error?.message)
-        : quietReply(sliceLastTurn(Array.isArray(event.timeline) ? event.timeline : []));
-    if (text === null) return false;
+        : quietReply(sliceLastTurn(timeline));
+    // Current Paseo sends no hook history; classifyTurn refetches it on demand.
+    if (text === null && !(outcome === "completed" && timeline.length === 0)) return false;
     if (paseo === undefined) return false;
     const home = homeOf();
     if (home === null) return false;

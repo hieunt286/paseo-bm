@@ -26,7 +26,12 @@
  *    sends and records nothing.
  * 2. **Delivered** through the notice queue (`command:<id>`, or the kind the
  *    caller names), or — an interrupt — sent at once. A target that cannot be
- *    reached records nothing.
+ *    reached records nothing. A command marked `steer` — the owner's words,
+ *    the prepared command of the option the owner chose for a Worker
+ *    (`isOwnerWords`, delivery line design §19.5) — goes into the Worker's
+ *    running turn when the queue's guards hold (`steer: "steered"`); when
+ *    Paseo replaced the turn instead (`steer: "replaced"`) the Main that gets
+ *    the copy and the owner's Inbox are told (`reportTurnReplaced`).
  * 3. **Once delivered:** the command is appended to the commands store
  *    (`proposals.json`, source `chat`, its secrets masked) under its id, which
  *    is what the loop guard counts; the intervention it is, if any, is logged
@@ -47,7 +52,8 @@ import { redactText } from "./collector";
 import type { BmEvent } from "./event-bus";
 import { interventionOfCommand, recordIntervention } from "./intervention-store";
 import { enqueueNotice, type ChannelQueue } from "./main-channel";
-import { noticeQueue, type NoticePaseo } from "./notice-queue";
+import { noticeQueue, type NoticePaseo, type SteerResult } from "./notice-queue";
+import { reportTurnReplaced } from "./owner-words";
 import { commandKindOf } from "./orchestrator-state";
 import { createOrchestratorStore, type OrchestratorStoreDeps } from "./orchestrator-store";
 import { missionOfRequest } from "./orchestrator-tool-context";
@@ -256,6 +262,8 @@ export interface CommandSend {
   loopGuard: "refuse" | "count";
   /** Sends it at once, replacing the Worker's running turn; allowed only while its danger allowance is `open`. */
   interrupt?: { open: boolean };
+  /** The owner's words to a Worker (`isOwnerWords`, delivery line design §19.5): steered into its running turn when the queue's guards hold. */
+  steer?: boolean;
   /** The notice-queue kind; `command:<id>` by default. */
   kind?: string;
   /**
@@ -283,6 +291,8 @@ export type CommandSendResult =
       text: string;
       /** Delivered now, or held for the target's turn end. */
       outcome: "sent" | "queued";
+      /** A `steer` command sent into the running turn (§19.5): joined it, or Paseo replaced the turn with it. Absent otherwise. */
+      steer?: "steered" | "replaced";
       /** The Manager's copy: how it went, or null when there was none to send. */
       copy: "sent" | "queued" | "failed" | null;
       /** Why the command could not be recorded; null when it was. It was delivered either way. */
@@ -368,6 +378,7 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
   const queue = spec.queue ?? noticeQueue;
 
   let outcome: "sent" | "queued";
+  let steered: SteerResult | null = null;
   if (interrupt) {
     // The one send that replaces a running turn: the danger allowance is open (ADR-016 decision 2).
     try {
@@ -378,9 +389,36 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
     outcome = "sent";
   } else {
     // Delivery line design §6.4: every BM-COMMAND is on the wake gate's always-at-once list (`AT_ONCE_KINDS`), so it is never held.
-    const queued = await enqueueNotice({ home, queue, targetId: spec.targetId, kind, text, paseo: spec.paseo });
-    if (!delivered(queued)) return { ok: false, stage: "delivery", reason: `${role} ${spec.targetId} could not be reached` };
-    outcome = queued;
+    const steer = spec.steer === true && command.to === "worker";
+    const queued = await enqueueNotice({
+      home,
+      queue,
+      targetId: spec.targetId,
+      kind,
+      text,
+      paseo: spec.paseo,
+      ...(steer ? { steer: true, callbacks: { onSteered: (_targetId: string, _kind: string, result: SteerResult) => void (steered = result) } } : {}),
+    });
+    const went = queued === "steered" || queued === "turn-replaced" ? "sent" : queued;
+    if (!delivered(went)) return { ok: false, stage: "delivery", reason: `${role} ${spec.targetId} could not be reached` };
+    outcome = went;
+  }
+  const steerResult = steered as SteerResult | null;
+  if (steerResult?.replaced === true) {
+    await reportTurnReplaced({
+      home,
+      workspaceId,
+      workerId: spec.targetId,
+      requestId,
+      mainId: spec.copyTo,
+      what: "the owner's chosen option (a BM-COMMAND)",
+      turnBefore: steerResult.turnBefore,
+      turnAfter: steerResult.turnAfter,
+      paseo: spec.paseo,
+      queue,
+      now: () => now,
+      log,
+    });
   }
 
   let unrecorded: string | null = null;
@@ -435,5 +473,5 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
       copy = "failed";
     }
   }
-  return { ok: true, id, text, outcome, copy, unrecorded };
+  return { ok: true, id, text, outcome, copy, unrecorded, ...(steerResult === null ? {} : { steer: steerResult.replaced ? ("replaced" as const) : ("steered" as const) }) };
 }

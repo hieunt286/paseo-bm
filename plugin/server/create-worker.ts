@@ -51,11 +51,12 @@ import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
 import { directoryIn, listedWorkspaces, titleIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { createPeerLinkStore, routeOf, type PeerLink } from "./peer-links";
-import { inCharter, placementBlockOf, repoKeyOf } from "./placements";
-import { ROOT_WAIT_BRIEF_LINE, ensurePlacement, placementBriefLines, placementModeOn, type PlacementDeps } from "./placement-create";
+import { inCharter, laneOf, placementBlockOf, repoKeyOf } from "./placements";
+import { ROOT_WAIT_BRIEF_LINE, ensureLane, ensurePlacement, placementBriefLines, placementModeOn, type PlacementDeps } from "./placement-create";
 import { peerBriefOf } from "./peer-tools";
 import { createMemoryStore, type MemoryEntry } from "./memory-store";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
+import { holdRequest } from "./held-requests";
 import { createMissionRoster, runningRequestsOf } from "./mission-roster";
 import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { missionOfMain } from "./mission-tools";
@@ -113,13 +114,102 @@ export interface CreateWorkerInput {
   project?: string;
   /** A Main's: the request's place in the mission's plan. */
   planStep?: string;
+  /** A Main's: `"new"` runs it in a free or new lane of the repo (delivery line design §19.1). */
+  lane?: "new";
+  /** A Main's: hold it until these requests of the mission finish (§19.6). */
+  after?: string[];
 }
 
-/** The newest active memory entries a Worker's brief carries, beside every `contract` entry (missions design §7). */
-export const BRIEF_MEMORY_ENTRIES = 30;
+/** The memory a Worker's brief carries, in characters (delivery line design §18.2, ADR-037). */
+export const BRIEF_MEMORY_CHARS = 6_000;
+/** The longest memory line of a brief. */
+export const BRIEF_MEMORY_ENTRY_CHARS = 400;
+/** The line that names what a brief left out. */
+export const briefMemoryMoreLine = (more: number): string => `- ${more} more ${more === 1 ? "entry" : "entries"} in this repo's memory: bm_memory read with a query.`;
 
 /** One line: a newline inside a value would end it. */
 const oneLine = (text: string): string => text.replace(/\s*\r?\n\s*/g, " ").trim();
+
+/** `text` cut to `max` characters, an ellipsis last when cut. Pure. */
+const cut = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`);
+
+/** The share of `BRIEF_MEMORY_CHARS` this mission's own entries may take first (§18.2). */
+export const BRIEF_MEMORY_OWN_SHARE = 0.5;
+/** A repo entry's kind, in the order a brief prefers it when relevance ties: rules first, then agreements. */
+const KIND_ORDER: Readonly<Record<string, number>> = { convention: 0, contract: 1, decision: 2, fact: 3 };
+
+/**
+ * The features a text is matched by (§18.2): its words of two letters or more
+ * and each pair of neighbouring words, case aside, so short Vietnamese
+ * syllables count through their compounds ("nhập liệu"). Pure.
+ */
+function featuresOf(text: string): Set<string> {
+  const words = text.normalize("NFC").toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [];
+  const features = new Set<string>(words);
+  for (let index = 1; index < words.length; index += 1) features.add(`${words[index - 1]} ${words[index]}`);
+  return features;
+}
+
+/** One memory line of a brief, within `BRIEF_MEMORY_ENTRY_CHARS`, its source kept. Pure. */
+function memoryLineOf(entry: MemoryEntry): string {
+  const head = `- ${entry.kind}: `;
+  const tail = ` (source: ${cut(oneLine(entry.source), 120)})`;
+  return `${head}${cut(oneLine(entry.text), BRIEF_MEMORY_ENTRY_CHARS - head.length - tail.length)}${tail}`;
+}
+
+/**
+ * The memory lines of a Worker's brief (delivery line design §18.2), within
+ * `BRIEF_MEMORY_CHARS`:
+ * - **relevance** is the features an entry shares with the request and the
+ *   plan step, each weighted by how rare it is among the live entries
+ *   (ln(1 + N / entries holding it)), so common words count little;
+ * - **the owner's own entries** (their notes, through the Orchestrator) come
+ *   first, newest first: they are the owner's word;
+ * - **this mission's entries** follow, by relevance then newest, up to
+ *   `BRIEF_MEMORY_OWN_SHARE` of the budget;
+ * - **the repo's other entries** follow, by relevance, then conventions
+ *   before contracts, decisions and facts, then newest;
+ * - what is left of the budget then takes the rest of either, in the same
+ *   order. `more` counts the entries left out. Pure.
+ */
+export function briefMemoryOf(input: { live: readonly MemoryEntry[]; request: string; planStep?: string; missionId: string | null }): { lines: string[]; more: number } {
+  const wanted = featuresOf(`${input.request} ${input.planStep ?? ""}`);
+  const featured = input.live.map((entry) => featuresOf(`${entry.text} ${entry.subject ?? ""}`));
+  const holding = new Map<string, number>();
+  for (const features of featured) for (const feature of features) if (wanted.has(feature)) holding.set(feature, (holding.get(feature) ?? 0) + 1);
+  const total = input.live.length;
+  const scored = input.live.map((entry, index) => {
+    let score = 0;
+    for (const feature of featured[index]!) {
+      const count = holding.get(feature);
+      if (count !== undefined) score += Math.log(1 + total / count);
+    }
+    return { entry, index, owner: entry.by.role === "owner", own: input.missionId !== null && entry.by.missionId === input.missionId, score };
+  });
+  type Scored = (typeof scored)[number];
+  const newer = (a: Scored, b: Scored) => Date.parse(b.entry.at) - Date.parse(a.entry.at) || b.index - a.index;
+  const owner = scored.filter((item) => item.owner).sort(newer);
+  const own = scored.filter((item) => item.own).sort((a, b) => b.score - a.score || newer(a, b));
+  const rest = scored.filter((item) => !item.own).sort((a, b) => b.score - a.score || (KIND_ORDER[a.entry.kind] ?? 9) - (KIND_ORDER[b.entry.kind] ?? 9) || newer(a, b));
+  const lines: string[] = [];
+  const taken = new Set<number>();
+  let used = 0;
+  const fill = (items: readonly Scored[], limit: number) => {
+    for (const item of items) {
+      if (taken.has(item.index)) continue;
+      const line = memoryLineOf(item.entry);
+      if (used + line.length + 1 > limit) continue;
+      lines.push(line);
+      taken.add(item.index);
+      used += line.length + 1;
+    }
+  };
+  fill(owner, BRIEF_MEMORY_CHARS);
+  fill(own, used + BRIEF_MEMORY_CHARS * BRIEF_MEMORY_OWN_SHARE);
+  fill(rest, BRIEF_MEMORY_CHARS);
+  fill(own, BRIEF_MEMORY_CHARS);
+  return { lines, more: total - lines.length };
+}
 
 /**
  * The first prompt of a Worker created by `bm_create_worker` (design §16.6):
@@ -165,22 +255,25 @@ export function workerBriefOf(input: {
 
 /**
  * A Main's Worker's brief lines (missions design §4, §7): the mission, the
- * plan step, the mission's contracts touching the repo, then the repo's
- * memory — the newest `BRIEF_MEMORY_ENTRIES` active entries and every
- * `contract` entry, oldest first, each with its source. Pure.
+ * plan step, the mission's contracts touching the repo in full, then the
+ * repo's live memory within its budget
+ * (`briefMemoryOf`, delivery line design §18.2) and one line for the rest.
+ * Pure.
  */
 export function missionBriefLines(input: {
-  mission: Pick<Mission, "code" | "name" | "contracts">;
+  mission: Pick<Mission, "missionId" | "code" | "name" | "contracts">;
   workspaceId: string;
   planStep?: string;
+  /** The repo's live entries (`MemoryStore.live`). */
   memory: readonly MemoryEntry[];
+  /** The words the Worker is given, to rank the memory by. */
+  request: string;
   titleOf: (workspaceId: string) => string;
 }): string[] {
   const { mission, workspaceId, titleOf } = input;
   const repo = titleOf(workspaceId);
   const contracts = mission.contracts.filter((contract) => contract.providerRepo === workspaceId || contract.consumerRepos.includes(workspaceId));
-  const newest = new Set(input.memory.slice(-BRIEF_MEMORY_ENTRIES));
-  const memory = input.memory.filter((entry) => newest.has(entry) || entry.kind === "contract");
+  const memory = briefMemoryOf({ live: input.memory, request: input.request, ...(input.planStep === undefined ? {} : { planStep: input.planStep }), missionId: mission.missionId });
   return [
     `mission: ${oneLine(mission.code)} ${oneLine(mission.name)}`,
     ...(input.planStep === undefined ? [] : [`plan: ${oneLine(input.planStep)}`]),
@@ -188,12 +281,15 @@ export function missionBriefLines(input: {
       ? []
       : [
           `Mission contracts touching ${repo}:`,
+          // The mission's own agreements the Worker builds to: in full, never ranked or cut.
           ...contracts.map(
             (contract) =>
               `- ${contract.id} v${contract.version} ${oneLine(contract.title)} (provider ${titleOf(contract.providerRepo)}; consumers ${contract.consumerRepos.map(titleOf).join(", ") || "none"}): ${oneLine(contract.text)}`,
           ),
         ]),
-    ...(memory.length === 0 ? [] : [`Project memory (${repo}):`, ...memory.map((entry) => `- ${entry.kind}: ${oneLine(entry.text)} (source: ${oneLine(entry.source)})`)]),
+    ...(memory.lines.length === 0 && memory.more === 0
+      ? []
+      : [`Project memory (${repo}):`, ...memory.lines, ...(memory.more === 0 ? [] : [briefMemoryMoreLine(memory.more)])]),
   ];
 }
 
@@ -371,15 +467,23 @@ export function missionRepoOf(
  * `active` roster request its registry does not show finished. One line per
  * broken rule; none when it holds or is delegated.
  */
-export async function staffingReasons(home: string, paseo: DashboardPaseo, mission: Mission, workspaceId: string, listed: readonly ListedWorkspace[] | null): Promise<string[]> {
+export async function staffingReasons(
+  home: string,
+  paseo: DashboardPaseo,
+  mission: Mission,
+  workspaceId: string,
+  listed: readonly ListedWorkspace[] | null,
+  options: { lane?: "new" } = {},
+): Promise<string[]> {
   if (createMissionAutonomyStore(home).isDelegated(mission.missionId, "staffing")) return [];
   const running = await runningRequestsOf(home, paseo, mission.missionId);
   const reasons: string[] = [];
-  // Delivery line design §3.7: one live Worker per placement, counted per repo as before.
+  // Delivery line design §3.7: one live Worker per placement, counted per repo as before; §19.1: a new lane adds one.
   const repo = repoKeyOf(home, workspaceId);
   const here = running.find((entry) => repoKeyOf(home, entry.workspaceId) === repo);
   const ask = "staffing is not delegated in this mission, so ask the owner first";
-  if (here !== undefined) reasons.push(`mission ${mission.code} already has a live Worker in ${titleIn(listed, workspaceId)} (request ${here.requestId}): give it the work with bm_tell_worker, or ${ask}`);
+  if (options.lane === "new") reasons.push(`a new lane adds a live Worker to mission ${mission.code} in ${titleIn(listed, workspaceId)}: ${ask}`);
+  else if (here !== undefined) reasons.push(`mission ${mission.code} already has a live Worker in ${titleIn(listed, workspaceId)} (request ${here.requestId}): give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or ${ask}`);
   const cap = mission.charter.budget?.workers ?? null;
   if (cap !== null && running.length >= cap) reasons.push(`mission ${mission.code} has ${running.length} live Workers and its budget allows ${cap}: ${ask}`);
   return reasons;
@@ -535,13 +639,32 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     const input = given !== null && typeof given === "object" && !Array.isArray(given) ? Object.fromEntries(Object.entries(given).filter(([key]) => key !== "size")) : given;
     const issues = schemaIssues(face.inputSchema, input);
     if (issues.length > 0) return fixThese(CREATE_WORKER_TOOL, issues);
-    const { request, context, peerLink, project, planStep } = input as unknown as CreateWorkerInput;
+    const { request, context, peerLink, project, planStep, lane, after } = input as unknown as CreateWorkerInput;
     const home = deps.home();
     // A Main works in its mission's repos; a Manager of no mission in its own folder. A replaced Main works for none.
     const mission = missionOfMain(home, caller);
     if (mission === null && (caller.missionId ?? null) !== null) return refused(REPLACED_MAIN_MESSAGE);
-    if (mission === null && (project !== undefined || planStep !== undefined)) return refused("project and planStep are for the Main of a mission, and you are none: leave them out. Nothing was created.");
+    if (mission === null && (project !== undefined || planStep !== undefined || lane !== undefined || after !== undefined)) return refused("project, planStep, lane and after are for the Main of a mission, and you are none: leave them out. Nothing was created.");
     if (mission === null && isMissionsHome(caller.workspaceId, home)) return refused("You have no mission yet: record it with bm_mission_start before you create a Worker. Nothing was created.");
+    // Delivery line design §19.6: work that waits for requests of the mission is held by paseo-bm, not created now.
+    if (mission !== null && after !== undefined && after.length > 0) {
+      const roster = createMissionRoster(home).list(mission.missionId);
+      const unknown = after.filter((requestId) => !roster.some((entry) => entry.requestId === requestId));
+      if (unknown.length > 0) return refused(`${unknown.join(", ")} ${unknown.length === 1 ? "is not a request" : "are not requests"} of mission ${mission.code} (bm_mission lists them). Nothing was created.`);
+      const stopped = after.filter((requestId) => roster.find((entry) => entry.requestId === requestId)?.state === "stopped");
+      if (stopped.length > 0) return refused(`${stopped.join(", ")} stopped, so work after ${stopped.length === 1 ? "it" : "them"} would never start: give it without after, or ask the owner. Nothing was created.`);
+      const waiting = after.filter((requestId) => roster.find((entry) => entry.requestId === requestId)?.state !== "finished");
+      if (waiting.length > 0) {
+        const rest = Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([key]) => key !== "after"));
+        const held = holdRequest(home, mission.missionId, { after: waiting, input: rest, topic: oneLine(request).slice(0, 120), by: caller.agentId }, new Date());
+        if (!held.ok) return refused(`${held.reason}. Nothing was held.`);
+        journalQuietly(createMissionStore(home), mission.missionId, { kind: "worker", by: caller.agentId, text: `Held ${held.entry.holdId} until ${waiting.join(", ")} finish: ${held.entry.topic}`, ref: held.entry.holdId }, log);
+        return {
+          ok: true,
+          text: JSON.stringify({ held: held.entry.holdId, after: waiting, note: `paseo-bm creates its Worker when ${waiting.join(" and ")} finish${waiting.length === 1 ? "es" : ""}, within about a minute, and tells you; bm_hold_cancel cancels it` }),
+        };
+      }
+    }
     const paseo = deps.paseo();
     if (paseo === null || paseo === undefined) return refused(NO_PASEO_MESSAGE);
     // A Worker gets Paseo's tools only when it is created: one made now could not create a Reviewer.
@@ -553,6 +676,8 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     let missionLines: string[] | undefined;
     /** Why the Worker works in the shared checkout, not the mission's worktree (§4.8); told to the Main in the answer. */
     let notYet: string | null = null;
+    /** The lane the Worker works in (§19.1); 1 is the mission branch. */
+    let laneNumber = 1;
     if (mission === null) {
       // The Manager's own folder, read from Paseo — never a folder the agent typed.
       cwd = await folderOfAgent(paseo, managerId, caller.workspaceId);
@@ -563,17 +688,20 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
       // Delivery line design §3.3: from the cut-over, the Worker works in the mission's placement of the repo.
       const placed = placementModeOn(home);
       const repo = missionRepoOf(home, mission, placed && project !== undefined ? repoKeyOf(home, project) : project, listed);
-      const reasons = Array.isArray(repo) ? repo : await staffingReasons(home, paseo as DashboardPaseo, mission, repo.workspaceId, listed);
+      if (lane === "new" && !placed) return refused("lanes need the mission's worktrees, which start after this repo's cut-over: leave lane out. Nothing was created.");
+      const reasons = Array.isArray(repo) ? repo : await staffingReasons(home, paseo as DashboardPaseo, mission, repo.workspaceId, listed, lane === undefined ? {} : { lane });
       if (reasons.length > 0 || Array.isArray(repo)) return refused([...reasons, "Nothing was created."].join("\n"));
       ({ workspaceId, directory: cwd } = repo);
       const repoKey = repoKeyOf(home, workspaceId);
       let placementLines: string[] = [];
       if (placed) {
-        const placement = await ensurePlacement(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log });
+        // Delivery line design §19.1: independent work in a free or new lane; otherwise lane 1, the mission branch.
+        const placement = lane === "new" ? await ensureLane(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log }) : await ensurePlacement(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log });
         if (placement.ok) {
           workspaceId = placement.placement.workspaceId!;
           cwd = placement.placement.directory!;
           placementLines = placementBriefLines(placement.placement);
+          laneNumber = laneOf(placement.placement);
         } else if (placement.inRoot === true && workspaceId === repoKey) {
           // Delivery line design §4.8: no usable checkpoint yet, so the root, exactly as before the cut-over.
           log(`[paseo-bm] mission ${mission.code}'s Worker works in the shared checkout ${repoKey}: ${placement.reasons.join("; ")}`);
@@ -586,7 +714,8 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
           mission,
           workspaceId: repoKey,
           ...(planStep === undefined ? {} : { planStep }),
-          memory: createMemoryStore(home).active(repoKey),
+          memory: createMemoryStore(home).live(repoKey),
+          request,
           titleOf: (id) => titleIn(listed, id),
         }),
         ...placementLines,
@@ -603,7 +732,7 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     );
     if ("ok" in made) return made;
     const { workerId, requestId } = made;
-    const where = notYet === null ? {} : { worktree: notYet };
+    const where = { ...(notYet === null ? {} : { worktree: notYet }), ...(laneNumber === 1 ? {} : { lane: laneNumber }) };
     if (peerLink === undefined) return { ok: true, text: JSON.stringify({ workerId, requestId, ...where }) };
     const taken = takeLinkQuietly(home, peerLink, { workspaceId, requestId, workerId, managerId }, log);
     return { ok: true, text: JSON.stringify({ workerId, requestId, ...where, ...(taken === null ? {} : { peerLinkNotTaken: taken }) }) };

@@ -3,7 +3,9 @@
  * §G.5–§G.7; bead `7gxw.9`; drawn as the approved mockup): each mechanism its
  * own card, with its switch, how often it helped, and its thresholds as
  * number fields read in their own units ("390 K", "50 %") inside their
- * bounds, then Save; and the review card (delivery line design §5.6): the
+ * bounds, then Save — the compaction card's "Compact a Main at" being a
+ * Main's context tokens (`main.contextTokens`, delivery line design §18.4);
+ * and the review card (delivery line design §5.6): the
  * re-reviews per batch and the review calls per milestone batch as number
  * fields, the cap per request they make (read-only), then Save; and the
  * rollover card (delivery line design §2.6, §6.6, §12 item 4), drawn with
@@ -42,6 +44,7 @@ export type ThresholdKey =
   | "compact.managerTokensPerTurn"
   | "compact.workerTokensPerTurn"
   | "compact.contextShare"
+  | "main.contextTokens"
   | "compact.maxPerAgent"
   | "handoff.requestTokens"
   | "handoff.maxPerRequest"
@@ -58,7 +61,7 @@ export const COORDINATION_CARDS: readonly CoordinationCard[] = [...COORDINATION_
 
 /** Each card's thresholds, in the order it shows them. */
 export const MECHANISM_THRESHOLDS: Readonly<Record<CoordinationCard, readonly ThresholdKey[]>> = {
-  compact: ["compact.managerTokensPerTurn", "compact.workerTokensPerTurn", "compact.contextShare", "compact.maxPerAgent"],
+  compact: ["compact.managerTokensPerTurn", "compact.workerTokensPerTurn", "compact.contextShare", "main.contextTokens", "compact.maxPerAgent"],
   handoff: ["handoff.requestTokens", "handoff.maxPerRequest"],
   rollover: ["rollover.beads", "rollover.turns", "rollover.tokens", "rollover.contextTokens", "rollover.ceilingFactor", "maintenance.ceilingFactor"],
 };
@@ -74,7 +77,7 @@ const MECHANISM_WORDS: Readonly<
     heading: "Compact",
     word: "compaction",
     meaning: "Shrink a Main's or Worker's conversation at a safe point, then restore what matters from the records.",
-    note: "A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is.",
+    note: "A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is. A mission's Main is compacted at \"Compact a Main at\" or its window share even with this switch off.",
     onBody: "paseo-bm may then compact a Main's or a Worker's conversation without asking you, when it crosses your thresholds.",
   },
   handoff: {
@@ -99,6 +102,7 @@ const THRESHOLD_WORDS: Readonly<Record<ThresholdKey, { label: string; spoken: st
   "compact.managerTokensPerTurn": { label: "Main reads more than, per turn", spoken: "Main turn threshold" },
   "compact.workerTokensPerTurn": { label: "Worker reads more than, per turn", spoken: "Worker turn threshold" },
   "compact.contextShare": { label: "Or its context window is fuller than", spoken: "Context threshold" },
+  "main.contextTokens": { label: "Compact a Main at", spoken: "Main compaction context" },
   "compact.maxPerAgent": { label: "At most, per agent", spoken: "Compactions per agent" },
   "handoff.requestTokens": { label: "A request has read more than", spoken: "Request threshold" },
   "handoff.maxPerRequest": { label: "At most, per request", spoken: "Handoffs per request" },
@@ -110,7 +114,16 @@ const THRESHOLD_WORDS: Readonly<Record<ThresholdKey, { label: string; spoken: st
   "maintenance.ceilingFactor": { label: "Skip the safe point at, × a threshold", spoken: "Maintenance ceiling" },
 };
 
-const TOKEN_KEYS: ReadonlySet<ThresholdKey> = new Set(["compact.managerTokensPerTurn", "compact.workerTokensPerTurn", "handoff.requestTokens", "rollover.tokens", "rollover.contextTokens"]);
+const TOKEN_KEYS: ReadonlySet<ThresholdKey> = new Set([
+  "compact.managerTokensPerTurn",
+  "compact.workerTokensPerTurn",
+  "main.contextTokens",
+  "handoff.requestTokens",
+  "rollover.tokens",
+  "rollover.contextTokens",
+]);
+/** The token figures read as a context's size ("context 150k"), not tokens read. */
+const CONTEXT_TOKEN_KEYS: ReadonlySet<ThresholdKey> = new Set(["main.contextTokens", "rollover.contextTokens"]);
 /** The factors, read as "2 ×" and stepped by a half. */
 const FACTOR_KEYS: ReadonlySet<CoordinationNumberKey> = new Set(["rollover.ceilingFactor", "maintenance.ceilingFactor"]);
 
@@ -128,7 +141,7 @@ export function tokenCountText(tokens: number): string {
 
 /** A threshold's value in words: "5.7M tokens read", "context 250k", "50% of the window", "2×", "15 beads", "at most 2". */
 export function thresholdValueText(key: ThresholdKey, value: number): string {
-  if (key === "rollover.contextTokens") return `context ${tokenCountText(value)}`;
+  if (CONTEXT_TOKEN_KEYS.has(key)) return `context ${tokenCountText(value)}`;
   if (TOKEN_KEYS.has(key)) return `${tokenCountText(value)} tokens read`;
   if (key === "compact.contextShare") return `${Math.round(value * 100)}% of the window`;
   if (FACTOR_KEYS.has(key)) return `${trimmed(value)}×`;
@@ -243,7 +256,7 @@ export function stepThreshold(key: ThresholdKey, value: number, step: -1 | 1): n
 
 /** The stored value of a threshold. */
 function storedValue(settings: CoordinationSettings, key: ThresholdKey): number {
-  const [group, field] = key.split(".") as ["compact" | "handoff" | "rollover" | "maintenance", string];
+  const [group, field] = key.split(".") as ["compact" | "handoff" | "main" | "rollover" | "maintenance", string];
   return (settings[group] as unknown as Record<string, number>)[field]!;
 }
 

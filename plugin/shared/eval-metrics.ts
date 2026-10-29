@@ -17,7 +17,7 @@
  * - `eval-metrics/orchestrator.ts` — A-7, the Orchestrator's tokens of A-8, A-12, A-13;
  * - `eval-metrics/mains.ts` — A-14, the Mains' turns by what started them;
  * - `eval-metrics/owner-cards.ts` — M-39 and M-41, what the owner's cards were about (delivery line design §13);
- * - `eval-metrics/delivery-line.ts` — M-36, M-37, M-38, M-40 and M-42: the tokens a request reads, files two missions wrote in one workspace, committed and verified finishes, Worker turns while a wait is unsettled, maintenance dropped after its ceiling (delivery line design §13);
+ * - `eval-metrics/delivery-line.ts` — M-36, M-37, M-38, M-40, M-42 and M-44: the tokens a request reads, files two missions wrote in one workspace, committed and verified finishes, Worker turns while a wait is unsettled, maintenance dropped after its ceiling, the wait of a tell to a Worker (delivery line design §13, §19.10);
  * - `eval-metrics/tokens.ts` — A-8 and the context and token figures;
  * - `eval-metrics/requests.ts` — A-11, review lift per tier and workspace (autonomy design §C.4) and the other supplementary figures;
  * - `eval-metrics/suite.ts` — A-3 and A-9, which only the suite knows;
@@ -50,7 +50,7 @@
 import { a6Of } from "./eval-metrics/actions";
 import { admissionEvidenceOf, type AdmissionEvidence } from "./eval-metrics/admission";
 import { delegationOf } from "./eval-metrics/delegation";
-import { m36Of, m37Of, m38Of, m40Of, m42Of, registryOf, tokensReadOf } from "./eval-metrics/delivery-line";
+import { m36Of, m37Of, m38Of, m40Of, m42Of, m44Of, registryOf, tokensReadOf } from "./eval-metrics/delivery-line";
 import { a14Of } from "./eval-metrics/mains";
 import { m39Of, m41Of, missionDecisionsOf } from "./eval-metrics/owner-cards";
 import { a12Of, a13Of, a7Of, orchestratorTokensOf } from "./eval-metrics/orchestrator";
@@ -160,6 +160,7 @@ export function computeEvalMetrics(input: EvalInput): EvalMetrics {
     m38: m38Of(scope, input),
     m40: m40Of(scope, stores, registry, tokensRead, input),
     m42: m42Of(scope, input, unknowns),
+    m44: m44Of(scope, input, unknowns),
     context: contextOf(scope),
     reviewLift: reviewLiftOf(scope),
     supplementary: {

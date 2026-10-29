@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paseo-bm — mission page: parallel lanes and the waiting list (draft for approval)</title>
+<style>
+  /* Colours stand for the theme tokens the plugin uses (no literal colours in code):
+     surface0, surface1, border, foreground, foregroundMuted, accent, accentForeground,
+     statusWarning, statusDanger, statusSuccess. Radius 2. */
+  :root { --s0:#0f1115; --s1:#161a20; --s2:#1c2129; --b:#2a303a; --fg:#e6e8eb; --mu:#8b93a1;
+          --ac:#7c93ff; --acf:#0b0d12; --wa:#e3a33b; --da:#e5534b; --ok:#3fb27f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#07080a; color:var(--fg); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; }
+  h1.page { font-size:15px; color:var(--mu); font-weight:500; margin:24px 32px 8px; }
+  .note { margin:0 32px 24px; color:var(--mu); font-size:12px; max-width:1100px; }
+  .boards { display:flex; flex-wrap:wrap; gap:32px; padding:0 32px 48px; align-items:flex-start; }
+  .board { background:var(--s0); border:1px solid var(--b); border-radius:6px; overflow:hidden; }
+  .board > .cap { font-size:11px; color:var(--mu); padding:6px 10px; border-bottom:1px solid var(--b); background:#0b0d11; }
+  .desk { width:1040px; } .phone { width:390px; }
+  .tabs { display:flex; gap:18px; padding:12px 24px 0; border-bottom:1px solid var(--b); }
+  .phone .tabs { padding:10px 12px 0; gap:12px; overflow:hidden; }
+  .tab { padding:0 0 10px; color:var(--mu); font-size:13px; }
+  .tab.on { color:var(--fg); border-bottom:2px solid var(--ac); }
+  .content { padding:24px; display:flex; flex-direction:column; gap:12px; }
+  .phone .content { padding:12px; gap:8px; }
+  .title { font-size:24px; font-weight:600; } .phone .title { font-size:18px; }
+  .row { display:flex; align-items:center; gap:10px; } .between { justify-content:space-between; }
+  .wrap { flex-wrap:wrap; }
+  .label { color:var(--mu); font-size:12px; font-weight:500; text-transform:uppercase; letter-spacing:.6px; }
+  .muted { color:var(--mu); } .small { font-size:12px; } .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  .card { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:14px; display:flex; flex-direction:column; gap:8px; position:relative; }
+  .phone .card { padding:10px; gap:6px; }
+  .bar { position:absolute; left:0; top:0; bottom:0; width:3px; }
+  .btn { padding:9px 14px; border-radius:2px; font-size:13px; border:1px solid var(--b); background:transparent; color:var(--fg); }
+  .btn.pri { background:var(--ac); color:var(--acf); border-color:var(--ac); }
+  .btn.dan { border-color:var(--da); color:var(--da); }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--fg); padding:2px 8px; border:1px solid var(--b); border-radius:2px; background:var(--s2); }
+  .sq { width:7px; height:7px; display:inline-block; }
+  .code { font-weight:700; letter-spacing:.5px; }
+  .prog { height:4px; background:var(--s2); border-radius:2px; overflow:hidden; } .prog > i { display:block; height:100%; background:var(--ac); }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .grid3 { display:grid; grid-template-columns: repeat(3,1fr); gap:10px; }
+  .stat { background:var(--s1); border:1px solid var(--b); border-radius:2px; padding:12px; }
+  .stat b { font-size:20px; display:block; } .phone .stat b { font-size:16px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:7px 8px; border-bottom:1px solid var(--b); vertical-align:top; }
+  th { color:var(--mu); font-weight:500; font-size:12px; }
+  .ok{color:var(--ok)} .wa{color:var(--wa)} .da{color:var(--da)} .ac{color:var(--ac)}
+  .crit { display:flex; gap:8px; align-items:flex-start; font-size:13px; } .box { width:14px; height:14px; border:1px solid var(--b); border-radius:2px; flex:none; margin-top:2px; }
+  .box.met { background:var(--ok); border-color:var(--ok); } .box.drop { background:var(--s2); }
+  .seg { display:flex; border:1px solid var(--b); border-radius:2px; overflow:hidden; } .seg span { padding:6px 10px; font-size:12px; color:var(--mu); border-right:1px solid var(--b); } .seg span:last-child{border-right:none} .seg span.on { background:var(--ac); color:var(--acf); }
+  .journal div { font-size:12px; color:var(--mu); padding:3px 0; border-bottom:1px dashed var(--b); } .journal b { color:var(--fg); font-weight:500; }
+  .input { border:1px solid var(--b); background:var(--s0); border-radius:2px; padding:8px 10px; color:var(--mu); font-size:13px; }
+  .new { outline:1px dashed var(--ac); outline-offset:3px; }
+  .tag { font-size:10px; color:var(--ac); border:1px solid var(--ac); border-radius:2px; padding:0 4px; margin-left:6px; text-transform:none; letter-spacing:0; }
+  .dim { opacity:.45; }
+  .q { display:flex; gap:8px; align-items:flex-start; font-size:13px; padding:6px 0; border-bottom:1px dashed var(--b); }
+  .q:last-child { border-bottom:none; }
+  .who { font-size:11px; color:var(--mu); min-width:84px; }
+</style>
+</head>
+<body>
+<h1 class="page">paseo-bm · mission page — parallel lanes and the waiting list — mockup for the owner's approval (2026-10-25, draft 1)</h1>
+<p class="note">Design: docs/design/paseo-bm-delivery-line.md §19 (ADR-038). Two changes to the approved mission page (delivery-line.html artboards I and J): <b>Repositories</b> shows each repository's lanes — up to 7 independent pieces of work at once, each in its own worktree and branch, merged back into the mission branch when it finishes — and warns when two lanes change the same files. <b>In flight</b> gains a lane column and a <b>Waiting</b> part: requests that start by themselves after another finishes, and your words to a busy Worker, said whether they reached it mid-turn. Everything else is unchanged and shown dimmed; new parts have a dashed outline. Nothing here is built until you approve it.</p>
+
+<div class="boards">
+
+<!-- ============ Q. Desktop · mission page ============ -->
+<div class="board desk">
+  <div class="cap">Q · Desktop — a mission's page: lanes per repository, the waiting list</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span><span class="tab">Tools &amp; skills</span></div>
+  <div class="content">
+    <div class="row between">
+      <div class="row"><span class="muted">Missions ›</span><span class="code" style="font-size:20px">AIX</span><span class="title" style="font-size:20px">Dynamic Form in AI</span></div>
+      <div class="row"><span class="btn pri">Open Main</span><span class="btn">Rename</span><span class="btn dan">Close mission</span></div>
+    </div>
+    <div class="dim"><div class="card"><span class="label">Main</span><div class="small">As approved (artboard G)</div></div></div>
+
+    <div class="card new"><div class="row between"><span class="label">Repositories<span class="tag">new: lanes</span></span><span class="small muted">up to 7 lanes a repository · read 04:40</span></div>
+      <table>
+        <tr><th>Repository · lane</th><th>Branch</th><th>Work</th><th>State</th><th>Merge request · push</th></tr>
+        <tr><td><b>ai-assistant</b> <span class="small muted">· 3 of 7 lanes</span></td><td><span class="mono">m/AIX/ai-assistant</span> → <span class="mono">dev</span></td><td class="small muted">the mission branch: lanes merge here</td><td>↑9 ↓0 · clean</td><td><span class="ac">!2 open</span> · <span class="small">allowed</span> <span class="btn" style="padding:3px 8px;margin-left:6px">Revoke</span></td></tr>
+        <tr><td style="padding-left:22px">lane 1</td><td><span class="mono">m/AIX/ai-assistant</span></td><td>Audit both repos <span class="small muted">· 🔵 3729405 · 1 Worker</span></td><td><span class="ac">working · 2 h 12 min</span></td><td class="muted small">—</td></tr>
+        <tr><td style="padding-left:22px">lane 2</td><td><span class="mono">m/AIX/ai-assistant-2</span></td><td>Keep only the bypass-authz flag <span class="small muted">· 🔵 51e2660</span></td><td><span class="ac">working · 6 min</span><div class="small muted">merges into the mission branch at finished</div></td><td class="muted small">—</td></tr>
+        <tr><td style="padding-left:22px">lane 3</td><td><span class="mono">m/AIX/ai-assistant-3</span></td><td class="muted">free</td><td class="small muted">merged 03:58 · kept for the next piece of work</td><td class="muted small">—</td></tr>
+        <tr><td><b>xspace-ai-assistant</b> <span class="small muted">· 2 of 7 lanes</span></td><td><span class="mono">m/AIX/xspace-ai-assistant</span> → <span class="mono">dev</span></td><td class="small muted">the mission branch: lanes merge here</td><td>↑14 ↓0 · <span class="wa">● uncommitted</span></td><td><span class="ac">!4 open</span> · <span class="small">allowed</span> <span class="btn" style="padding:3px 8px;margin-left:6px">Revoke</span></td></tr>
+        <tr><td style="padding-left:22px">lane 1</td><td><span class="mono">m/AIX/xspace-ai-assistant</span></td><td>Audit both repos <span class="small muted">· 🔵 9b40933</span></td><td><span class="ac">working · 11 min</span></td><td class="muted small">—</td></tr>
+        <tr><td style="padding-left:22px">lane 2</td><td><span class="mono">m/AIX/xspace-ai-assistant-2</span></td><td>Menu entries for the ops screens <span class="small muted">· 🔵 c41d7e2, 🔵 08aa3f9 · 2 Workers</span></td><td><span class="ac">working · 4 min</span></td><td class="muted small">—</td></tr>
+      </table>
+      <div class="row" style="gap:8px"><span class="sq" style="background:var(--wa)"></span><span class="small"><b>Lanes 1 and 2 of xspace-ai-assistant both change</b> <span class="mono">libs/ui-ai-assistant/src/lib/ops/OpsMenu.tsx</span> · the Main was told 04:38</span></div>
+      <span class="small muted">A lane is a worktree of its own on its own branch, made from the mission branch. When its request finishes, the Worker brings the mission branch into the lane and paseo-bm moves the mission branch forward; push and merge request stay one per repository. A free lane is kept for the next piece of work; you remove worktrees when the mission closes.</span>
+    </div>
+
+    <div class="card new"><div class="row between"><span class="label">In flight<span class="tag">new: lanes, waiting</span></span><span class="small muted">what the Main knows · read 04:40</span></div>
+      <table>
+        <tr><th>Request · topic</th><th>Repository · lane</th><th>Worker</th><th>State</th><th>Last report</th></tr>
+        <tr><td><span class="mono">req-…021049Z</span> Audit both repos</td><td>ai-assistant · 1</td><td>🔵 3729405</td><td><span class="ac">working</span></td><td class="small muted">implementing · 04:31</td></tr>
+        <tr><td><span class="mono">req-…040712Z</span> Keep only the bypass-authz flag</td><td>ai-assistant · 2</td><td>🔵 51e2660</td><td><span class="ac">working</span></td><td class="small muted">started 04:07</td></tr>
+        <tr><td><span class="mono">req-…043712Z</span> Menu entries for the ops screens</td><td>xspace-ai-assistant · 2</td><td>🔵 c41d7e2 +1</td><td><span class="ac">working</span></td><td class="small muted">started 04:37</td></tr>
+      </table>
+      <div class="label" style="margin-top:6px">Waiting</div>
+      <table>
+        <tr><th>What</th><th>For</th><th>Since</th><th>Then</th></tr>
+        <tr><td>Wire the ops screens to the new endpoints <div class="small muted">a request paseo-bm starts by itself</div></td><td>after <span class="mono">req-…040712Z</span> (Keep only the bypass-authz flag)</td><td class="small">04:09 · 31 min</td><td class="small muted">a new Worker in a free lane of xspace-ai-assistant</td></tr>
+        <tr><td>Your words "check why the UI shows nothing new" <div class="small muted">to 🔵 9b40933</div></td><td class="ok">reached it mid-turn</td><td class="small">04:33</td><td class="small muted">—</td></tr>
+        <tr><td>"also list the four routes in the menu" <div class="small muted">a Main's tell to 🔵 3729405</div></td><td class="wa">the end of its turn</td><td class="small">04:37 · 3 min</td><td class="small muted">delivered when its turn ends</td></tr>
+      </table>
+      <span class="small muted">Your own words reach a busy Worker at once, inside its turn. Other messages wait for its turn to end. Work that depends on another request waits here and starts by itself when that request finishes.</span>
+    </div>
+
+    <div class="dim"><div class="grid2">
+      <div class="card"><span class="label">Questions · Links</span><div class="small">As approved (artboard G)</div></div>
+      <div class="card"><span class="label">Contracts · Journal</span><div class="small">As approved (artboard G)</div></div>
+    </div></div>
+  </div>
+</div>
+
+<!-- ============ R. Phone · mission page ============ -->
+<div class="board phone">
+  <div class="cap">R · Phone — a mission's page</div>
+  <div class="tabs"><span class="tab">Inbox</span><span class="tab on">Missions</span><span class="tab">Projects</span><span class="tab">Settings</span></div>
+  <div class="content">
+    <div class="small muted">Missions ›</div>
+    <div class="row"><span class="code" style="font-size:18px">AIX</span><span class="title">Dynamic Form in AI</span></div>
+    <div class="row"><span class="btn pri" style="flex:1;text-align:center">Open Main</span><span class="btn">⋯</span></div>
+    <div class="dim"><div class="card"><span class="label">Main</span><div class="small muted">As approved (artboard H)</div></div></div>
+    <div class="card new"><span class="label">Repositories<span class="tag">new: lanes</span></span>
+      <div class="small"><b>ai-assistant</b> · 3 of 7 lanes · ↑9 ↓0 · clean</div>
+      <div class="small muted">1 · Audit both repos · <span class="ac">working 2 h 12 min</span></div>
+      <div class="small muted">2 · Keep only the bypass-authz flag · <span class="ac">working 6 min</span></div>
+      <div class="small muted">3 · free</div>
+      <div class="small" style="margin-top:6px"><b>xspace-ai-assistant</b> · 2 of 7 lanes · <span class="wa">● uncommitted</span></div>
+      <div class="small muted">1 · Audit both repos · <span class="ac">working 11 min</span></div>
+      <div class="small muted">2 · Menu entries · 2 Workers · <span class="ac">working 4 min</span></div>
+      <div class="small"><span class="wa">■</span> Lanes 1 and 2 change the same file · Main told</div>
+    </div>
+    <div class="card new"><span class="label">In flight<span class="tag">new</span></span>
+      <div class="small"><b>Audit both repos</b> · ai-assistant 1 · <span class="ac">working</span></div>
+      <div class="small"><b>Keep only bypass-authz</b> · ai-assistant 2 · <span class="ac">working</span></div>
+      <div class="small"><b>Menu entries</b> · xspace 2 · <span class="ac">working</span></div>
+      <div class="label" style="margin-top:4px">Waiting</div>
+      <div class="small"><b>Wire the ops screens</b> · after Keep only bypass-authz · 31 min</div>
+      <div class="small">Your words to 9b40933 · <span class="ok">reached it mid-turn</span></div>
+      <div class="small">A tell to 3729405 · <span class="wa">end of its turn</span> · 3 min</div>
+    </div>
+    <div class="dim"><div class="card"><span class="label">Questions · Links · Charter · Governor · Workers</span><div class="small muted">As approved (artboards D, H)</div></div></div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

@@ -84,6 +84,26 @@ describe("the thresholds' words and steps", () => {
   });
 });
 
+describe("a Main's context tokens on the compaction card (delivery line design §18.4)", () => {
+  it("reads, steps and refuses `main.contextTokens` as a context-token figure within 50 K to 2 M; Save sends its own change", () => {
+    expect(MECHANISM_THRESHOLDS.compact).toContain("main.contextTokens");
+    expect(thresholdValueText("main.contextTokens", 150_000)).toBe("context 150k");
+    expect(coordinationInputText("main.contextTokens", 150_000)).toBe("150 K");
+    expect(parseCoordinationInput("main.contextTokens", "200 K")).toEqual({ value: 200_000, error: null });
+    expect(parseCoordinationInput("main.contextTokens", "1.5M")).toEqual({ value: 1_500_000, error: null });
+    expect(parseCoordinationInput("main.contextTokens", "40k")).toEqual({ value: null, error: "Compact a Main at: a number from 50 K to 2 M." });
+    expect(parseCoordinationInput("main.contextTokens", "3M").error).toBe("Compact a Main at: a number from 50 K to 2 M.");
+    expect([stepThreshold("main.contextTokens", 150_000, 1), stepThreshold("main.contextTokens", 150_000, -1)]).toEqual([200_000, 120_000]);
+    expect(stepThreshold("main.contextTokens", 50_000, -1)).toBe(50_000);
+    expect(stepThreshold("main.contextTokens", 2_000_000, 1)).toBe(2_000_000);
+    const row = view({ draft: { "main.contextTokens": 200_000 } }).rows.find((entry) => entry.key === "main.contextTokens")!;
+    expect(row).toMatchObject({ label: "Compact a Main at", valueText: "context 200k", inputText: "200 K" });
+    expect(row.decrease.accessibilityLabel).toBe("Main compaction context: lower to context 150k");
+    expect(changedThresholds("compact", D, { "main.contextTokens": 200_000 })).toEqual([{ key: "main.contextTokens", value: 200_000 }]);
+    expect(defaultsDraft("compact", D)["main.contextTokens"]).toBe(D.main.contextTokens);
+  });
+});
+
 describe("the fields' text (the approved mockup's number inputs)", () => {
   it("shows a token count with K or M, the context share in percent, a count as it is", () => {
     expect(coordinationInputText("compact.managerTokensPerTurn", 390_000)).toBe("390 K");
@@ -123,14 +143,18 @@ describe("a mechanism's card (autonomy design §G.7)", () => {
     const card = view();
     expect(card).toMatchObject({ title: "Compact", helped: "helped —", status: { text: "On", tone: "success" }, save: { enabled: false, label: "Save" }, reset: null });
     expect(card.meaning).toBe("Shrink a Main's or Worker's conversation at a safe point, then restore what matters from the records.");
-    expect(card.note).toBe("A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is.");
+    expect(card.note).toBe(
+      'A Claude turn is judged by its tokens read, a Codex or OpenCode turn by how full its context is. A mission\'s Main is compacted at "Compact a Main at" or its window share even with this switch off.',
+    );
     expect(card.toggle).toEqual({ turnsOn: false, enabled: true, label: "Turn off", accessibilityLabel: "Turn compaction off now" });
     expect(card.rows.map((row) => [row.label, row.valueText, row.inputText])).toEqual([
       ["Main reads more than, per turn", "390k tokens read", "390 K"],
       ["Worker reads more than, per turn", "5.7M tokens read", "5.7 M"],
       ["Or its context window is fuller than", "50% of the window", "50 %"],
+      ["Compact a Main at", "context 150k", "150 K"],
       ["At most, per agent", "at most 2", "2"],
     ]);
+    expect(card.rows[3]!.accessibilityLabel).toBe("Main compaction context: context 150k");
     expect(card.rows[0]!.accessibilityLabel).toBe("Main turn threshold: 390k tokens read");
     expect(card.rows[0]!.decrease).toEqual({ enabled: true, label: "−", accessibilityLabel: "Main turn threshold: lower to 300k tokens read" });
     expect(card.rows[0]!.increase).toEqual({ enabled: true, label: "+", accessibilityLabel: "Main turn threshold: raise to 400k tokens read" });
@@ -150,7 +174,7 @@ describe("a mechanism's card (autonomy design §G.7)", () => {
     const card = view({ draft });
     expect(card.save).toEqual({ enabled: true, label: "Save", accessibilityLabel: "Save the compaction thresholds" });
     expect(card.reset).toEqual({ enabled: true, label: "Use the defaults", accessibilityLabel: "Set the compaction thresholds back to their defaults" });
-    expect(card.rows[3]!.decrease.enabled).toBe(false);
+    expect(card.rows[4]!.decrease.enabled).toBe(false);
     expect(changedThresholds("compact", D, draft)).toEqual([
       { key: "compact.contextShare", value: 0.6 },
       { key: "compact.maxPerAgent", value: 1 },
@@ -343,9 +367,10 @@ describe("MechanismCard (hook-free)", () => {
       "Main reads more than, per turn",
       "Worker reads more than, per turn",
       "Or its context window is fuller than",
+      "Compact a Main at",
       "At most, per agent",
     ]);
-    expect(inputsOf(atRest).map((input) => input.props.value)).toEqual(["390 K", "5.7 M", "50 %", "2"]);
+    expect(inputsOf(atRest).map((input) => input.props.value)).toEqual(["390 K", "5.7 M", "50 %", "150 K", "2"]);
     expect(inputsOf(atRest).map((input) => input.props.accessibilityLabel)).toEqual(view().rows.map((row) => row.accessibilityLabel));
     const [toggle] = pressables(atRest);
     expect(toggle!.props).toMatchObject({ accessibilityRole: "switch", accessibilityLabel: "Turn compaction off now", accessibilityState: { checked: true, disabled: false } });
@@ -356,7 +381,7 @@ describe("MechanismCard (hook-free)", () => {
     const onSave = vi.fn();
     const card = view({ draft: { "compact.workerTokensPerTurn": 6_000_000 } });
     const nodes = draw({ view: card, inputs: { "compact.workerTokensPerTurn": "6M" }, onInput, onToggle, onSave });
-    expect(inputsOf(nodes).map((input) => input.props.value)).toEqual(["390 K", "6M", "50 %", "2"]);
+    expect(inputsOf(nodes).map((input) => input.props.value)).toEqual(["390 K", "6M", "50 %", "150 K", "2"]);
     (inputsOf(nodes)[0]!.props.onChangeText as (text: string) => void)("400k");
     expect(onInput.mock.calls).toEqual([["compact.managerTokensPerTurn", "400k"]]);
     const buttons = pressables(nodes);
@@ -373,7 +398,7 @@ describe("MechanismCard (hook-free)", () => {
     expect(JSON.stringify(refusal.props.style)).toContain("#statusDanger");
     const save = pressables(nodes).find((button) => button.props.accessibilityRole === "button")!;
     expect(save.props.disabled).toBe(true);
-    const field = allNodes(nodes).filter((node) => node.type === "TextInput")[3]!;
+    const field = allNodes(nodes).filter((node) => node.type === "TextInput")[4]!;
     expect(JSON.stringify(field.props.style)).toContain("#statusDanger");
   });
 
@@ -510,9 +535,9 @@ describe("Coordination on a phone (MobileSettings.dc.html)", () => {
     const nodes = renderTree(
       MechanismCard({ view: view(), inputs: {}, dialog: null, busy: false, error: null, narrow: true, onToggle: noop, onConfirm: noop, onCancel: noop, onInput: noop, onSave: noop, styles, theme }),
     );
-    expect(fieldWidths(nodes)).toEqual([84, 84, 84, 84]);
+    expect(fieldWidths(nodes)).toEqual([84, 84, 84, 84, 84]);
     const cells = allNodes(nodes).filter((node) => node.type === "View" && (node.props.style as Style | undefined)?.width === "100%");
-    expect(cells).toHaveLength(4);
+    expect(cells).toHaveLength(5);
     expect(texts(nodes).slice(0, 3)).toEqual(["Compact", view().meaning, "helped —"]);
   });
 

@@ -5,7 +5,7 @@
 | Status | Active — the contract the plan's beads build to; edited in place as built |
 | Owner | hieu.nt10 |
 | Requirements | [Missions PRD](../product/paseo-bm-missions-prd.md) REQ-202 → REQ-208, M-31 → M-35 |
-| Decision | [ADR-033](../adr/ADR-033-the-mission-is-the-system-of-record.md) |
+| Decision | [ADR-033](../adr/ADR-033-the-mission-is-the-system-of-record.md); request fallback amended by [ADR-040](../adr/ADR-040-the-main-resolves-its-requests-fallback.md) |
 | Plan | [mission runtime plan](../archive/plans/paseo-bm-plan-mission-runtime.md) |
 | Builds on | [missions design](./paseo-bm-missions.md) (stores §2, the Main §3, autonomy §8, governor §9, §20); [base design](./paseo-bm.md) §7.16 (outbox), §7.5 (notices); [autonomy design](./paseo-bm-autonomy.md) Part B (levels), §A.6 (decisions); [Orchestrator design](./paseo-bm-orchestrator.md) |
 
@@ -53,7 +53,7 @@ interface MissionState {
 |---|---|
 | `mission` | `missions/<id>.json` |
 | `requests` | the roster (every entry not `finished`/`stopped`, plus those finished in the last 24 h), the registry (`workerIds`, `finishedAt`), the outbox's newest `report` record of the request (`newestReportRecordOf`), the roster's `followUpAt` (§2.3) |
-| `questions` | the unsettled `q:` decisions of the roster's requests in their repos, and the unsettled `m:` decisions of the mission; `decider` from `deciderOf` (§4.1) |
+| `questions` | the unsettled `q:` and `f:` decisions of the roster's requests in their repos, and the unsettled `m:` decisions of the mission; `decider` from `deciderOf` (§4.1) |
 | `asks` | the unsettled `m:` decisions of the mission |
 | `links` | the peer-link store: live links whose `from.requestId` or `to.requestId` is on the roster, or whose `missionId` is this mission |
 | `owner` | the trace records of the mission's Main agents (`mainHistory` ids) in the Missions home (or `legacyWorkspaceId`): each turn's owner-origin `sent` message and the first paragraph of its `received` reply, ≤ 300 characters each, newest last |
@@ -134,7 +134,7 @@ Coordination gains the group `main = { compact: true, contextShare: 0.6, context
 | `main.contextTokens` | 50,000–2,000,000 |
 | `main.hardShare` | 0.35–0.95; the hard figure is never read below `contextShare` + 0.05 |
 
-The figure crosses when `used / max ≥ contextShare`, or, with no `max`, when `used ≥ contextTokens`. The hard figure is `used / max ≥ hardShare`, or, with no `max`, `used ≥ contextTokens / contextShare × hardShare`.
+The figure crosses when `used / max ≥ contextShare` or `used ≥ contextTokens`, whichever comes first; with no `max`, only the second applies. The hard figure is `used / max ≥ hardShare` or `used ≥ contextTokens / contextShare × hardShare` (212,500 at the defaults). *Since 2026-10-25* ([ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md), delivery line design §18.4): before, `contextTokens` applied only with no `max`, so a Codex Main of a 475,000-token window crossed at 285,000.
 
 `main.compact` is separate from `compact.enabled`, `compact.maxPerAgent` and the A-12 guard. A Main's compaction is maintenance, not a coordination intervention, so it records no intervention entry and the guard never counts it.
 
@@ -199,7 +199,7 @@ Rules, the first that holds:
 | # | Decision | Decider |
 |---|---|---|
 | 1 | `ownerOnly`; `o:`; `r:`; `h:`; an option carrying a prepared change | owner |
-| 2 | `f:` whose class (`environment`) the project delegates, unless every acting option is refused for an unverified finish (then the owner) | orchestrator |
+| 2 | `f:` unless every acting option is refused for an unverified finish (then the owner): of a mission request, its class delegated by the repo or `answer-effects` by the mission (the latter permits only options without effects) | main; otherwise a repo-delegated incident stays orchestrator, else owner |
 | 3 | retired on 2026-10-20 (review budgets): reviews past a request's cap are one owner-only `review-cap` question, rule 1 (delivery line design §5.4) | — |
 | 4 | `q:` of a request of a mission, its class delegated by the repo cell or the mission cell (`answer-technical` / `answer-effects`). When only the mission cell delegates it, the Main is named only if an option leaves no effect (rule `mission-effects`), and `bm_answer_worker` refuses an option with effects (delivery line design §7.1) | main |
 | 5 | `q:` of a request of a mission, repo cell `shadow` | owner, the Main recommending |
@@ -250,6 +250,33 @@ It refuses, before writing anything:
 It writes the Main's recommendation with `withMainPrediction`. The same writer attaches a recommendation when `bm_owner_question` refuses a repeat of an open Worker question (delivery line design §7.2).
 
 Under the mission-only delegation it also refuses an option with effects (delivery line design §7.1). The answer is `by: main`, `via: main`, delivered to the Worker as the Main's.
+
+### 4.5.1 The Main resolves fallback (ADR-040)
+
+The canonical Routing Decision is in bead `bm-fuud`; requirements are REQ-204 e and
+[ADR-040](../adr/ADR-040-the-main-resolves-its-requests-fallback.md). This extension owns request
+fallback authority, notification and answer delivery; provider choice stays in the configured chain.
+
+`bm_answer_fallback { decisionId: f:<incidentId>, option: switch | wait | dismiss, why: 1–300 chars }`
+is Main-only. It checks the caller is the current Main, the request belongs to its mission, the
+resolver names the Main, the decision is open and the option exists, again in the synchronous store
+transition. It records `by: main`, `via: main`, no grant, and invokes the same settlement as the owner's
+answer. The result reports the stored delivery, including failure. Other missions, replaced Mains,
+owner-only/prepared changes, missing delegation, invalid options and settled decisions write nothing.
+
+New fallback decisions reach the Main through `tellMainOfQuestions` as a durable `message` identified by
+the full decision id in its text, retaining the original request id for Main retargeting. The notice names the available options and `bm_answer_fallback`, instructing it
+to recover without another owner confirmation. On the first Paseo handle after reload, open pending
+incidents are reconciled; a non-dropped outbox message for that decision is not duplicated. Pending
+outbox delivery follows the current Main and is resent by the existing outbox recovery. Duplicate
+notices are harmless: the first answer and switch locks still stand. Unresolved fallback blocks the
+mission row even before a Worker can report. The Main's own fallback retains its existing authority.
+
+The tool and accepted Main answer kind are additive; there is no stored-format migration. The
+Orchestrator uses the same resolver and refuses a Main's incident. Restore the previous plugin bundle
+for containment. Proof covers the entire detection → durable notice → Main answer → existing switch
+path, duplicate attempts, negative authority, reload reconciliation and blocked mission rows, then
+product tests/type checks/lint/build. No blocking open questions; the owner selected this authority.
 
 ### 4.6 The Main asks the owner with a stored decision
 
@@ -475,3 +502,5 @@ The role-file changes flag running Mains outdated once.
 | 2026-10-21 | Claude (as built, ADR-035 Phase 7) | §6.1 held deliveries, the Worker's `BM-UPDATES` release, `BM-ROLLOVER`; §6.2 records to Workers except a release; §6.3 structured waits first (delivery line design §6) |
 | 2026-10-21 | Claude (as built, ADR-035 Phase 8) | §5.4 a close retires the mission's placements and offers their archive card |
 | 2026-10-21 | Claude (as built, ADR-035 Phases 8–9) | §2.2 the Lines and Contracts sections, links by their latest message, the Worker brief's links and contracts |
+| 2026-10-25 | hieu.nt10 (owner's answer; written by Claude) | §3.2: a Main crosses at its window share or `main.contextTokens`, whichever comes first ([ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md)) |
+| 2026-10-26 | Codex (owner request, ADR-040) | §4.1/§4.5.1: the Main resolves delegated request fallback, receives durable notices and recovers pending incidents; additive tool with negative authority and delivery proof |

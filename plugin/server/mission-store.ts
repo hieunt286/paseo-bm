@@ -191,6 +191,18 @@ const placementSchema = z.object({
   note: z.string().optional(),
   /** The owner's archive card (`m:`) once one names it (§3.6). */
   archiveCard: z.string().optional(),
+  /** Its lane (delivery line design §19.1); absent = 1, the mission branch. */
+  lane: z.number().int().min(1).optional(),
+  /** When its last request merged into the mission branch (§19.2). */
+  mergedAt: isoOrNull.optional(),
+  /** Since when it waits, free, for the next piece of work (§19.2); absent or null while in use. */
+  freeSince: isoOrNull.optional(),
+  /** A merge into the mission branch that git refused and paseo-bm tries again (§19.2 step 2). */
+  mergePending: z.object({ since: z.string(), triedAt: z.string(), reason: z.string(), files: z.array(z.string()) }).optional(),
+  /** The files already told to the Main as shared with each lower lane, by its number (§19.3). */
+  overlapTold: z.record(z.string(), z.array(z.string())).optional(),
+  /** When the Main was last told of the files shared with each lower lane, by its number (§19.3, shown on the mission page §19.8). */
+  overlapToldAt: z.record(z.string(), z.string()).optional(),
 });
 
 export const missionSchema = z.object({

@@ -35,7 +35,10 @@
  * reporting Worker is released when its report left no wait unmet
  * (`releaseHeldOf`). A `bm_tell_worker` the gate holds answers
  * `delivery: "held"` and names what the Worker waits on (`heldTellText`);
- * with `now: true` it passes the gate.
+ * with `now: true` it passes the gate, and is the owner's words (delivery
+ * line design §19.5): steered into the Worker's running turn when the
+ * queue's guards hold (`delivery: "steered"`); a turn Paseo replaced with it
+ * answers `delivery: "sent"`, `turnReplaced: true` and `TURN_REPLACED_NOTE`.
  *
  * An unbound caller never reaches `bm_report`, `bm_review` or `bm_answers`
  * here: the endpoint answers it with the pure builders (`agent-tools.ts`).
@@ -67,6 +70,7 @@ import { createDecisionStore } from "./decision-store";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import type { NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
+import { clearTurnReplacedAlert } from "./owner-words";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
 import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
@@ -79,7 +83,9 @@ import { gatedWaitOf, heldTellText, releaseHeldOf, releaseSettledWaits } from ".
 import { openIntegrationCardIfNeeded } from "./integration-grant";
 import { committedOf, finishedLineOf, liveChecksOf, verifiedOf, type TimelineEntries } from "./line-state";
 import { integrationCiOf } from "./coordination-store";
-import { placementEntryOf, placementOfWorkspace } from "./placements";
+import { laneOf, placementEntryOf, placementOfWorkspace } from "./placements";
+import { turnStartOf, type WorkerSnapshot } from "./worker-watch";
+import { laneMergeIssueOf, laneMergeLineOf, mergeLane } from "./lane-merge";
 import type { GitRunner } from "./repo-tool";
 import type { ReportCiState } from "../shared/contracts";
 import { timeOrZero } from "../shared/time";
@@ -114,6 +120,8 @@ export const QUESTIONS_NOT_BOUND_MESSAGE =
 /** `bm_tell_worker` for a caller that is not a Manager bound with the tools. */
 export const TELL_NOT_BOUND_MESSAGE =
   "bm_tell_worker is only for a Manager paseo-bm created with its own tools, and you are not one: give the Worker the owner's words as your instructions say. Nothing was sent.";
+/** `bm_tell_worker`'s note when Paseo replaced the Worker's running turn with the words instead of steering them in (delivery line design §19.5). */
+export const TURN_REPLACED_NOTE = "Paseo could not steer your message into the Worker's running turn, so it stopped that turn and started a new one with it; the owner's Inbox shows it.";
 /** A bound builder name reached with a caller that is not bound (the endpoint answers unbound callers with the builders). */
 export const DELIVERY_NOT_BOUND_MESSAGE = "This tool delivers only for an agent paseo-bm created with its own tools. Nothing was stored or sent.";
 
@@ -204,6 +212,31 @@ export function batchesAwaitingVerdict(request: RegisteredRequest | null, record
   });
 }
 
+/**
+ * `bm_tell_worker`'s refusal of new work for a request still at work (delivery
+ * line design §19.12): where it goes instead. Pure.
+ */
+export function newWorkRefusalOf(requestId: string, missionId: string | null): string {
+  const where =
+    missionId === null
+      ? `give it its own Worker with bm_create_worker (after: ["${requestId}"] if it needs this request first)`
+      : `give it its own Worker with bm_create_worker: lane: "new" when it can run now beside the others, after: ["${requestId}"] when it needs this request first`;
+  return `New work never goes into request ${requestId}, which is still at work: ${where}. Nothing was sent.`;
+}
+
+/** The whole minutes a Worker's running turn has lasted (delivery line design §19.4); null when it runs none or Paseo cannot tell. Never throws. */
+async function turnMinutesOf(paseo: unknown, workerId: string, now: Date): Promise<number | null> {
+  try {
+    const handle = paseo as { agents?: { ref(id: string): { refresh(): Promise<{ agent?: unknown } | null> } } };
+    const agent = ((await handle.agents?.ref(workerId).refresh())?.agent ?? null) as WorkerSnapshot | null;
+    if (agent === null) return null;
+    const started = turnStartOf(agent);
+    return started === null ? null : Math.max(0, Math.floor((now.getTime() - Date.parse(started)) / 60_000));
+  } catch {
+    return null;
+  }
+}
+
 export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools {
   const log = deps.log ?? ((message: string) => console.warn(message));
   const now = deps.now ?? (() => new Date());
@@ -219,10 +252,11 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     init: OutboxInit,
     paseo: unknown,
     before?: (record: OutboxRecord) => void,
-  ): Promise<ServerToolAnswer | { record: OutboxRecord; delivery: DeliveryState }> => {
+  ): Promise<ServerToolAnswer | { record: OutboxRecord; delivery: DeliveryState; turnReplaced?: true }> => {
     try {
       const { record, outcome } = await storeAndDeliver(workspaceId, init, outboxDepsOf(home, { ...deps, now, log }, paseo), before);
-      return { record, delivery: deliveryOf(outcome) };
+      // Delivery line design §19.5: Paseo replaced the Worker's running turn with the owner's words instead of steering them in.
+      return { record, delivery: deliveryOf(outcome), ...(outcome === "turn-replaced" ? { turnReplaced: true as const } : {}) };
     } catch (error) {
       return refused(`paseo-bm could not store your ${init.kind} (${reasonOf(error)}); nothing was sent. Tell the owner in one line.`);
     }
@@ -329,6 +363,9 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if (place !== null && (filesChanged ?? []).length > 0 && integration === undefined) {
       return fixThese("bm_report", [`input.integration.commit: commit on ${place.branch} and report its sha`]);
     }
+    // Delivery line design §19.2 step 1: a lane finishes with the mission branch merged into it.
+    const laneIssue = place !== null && laneOf(place) >= 2 ? await laneMergeIssueOf(place, deps.git === undefined ? {} : { git: deps.git }) : null;
+    if (laneIssue !== null) return fixThese("bm_report", [`input.phase: ${laneIssue}`]);
     const store = createDecisionStore(home, { log });
     // Only open questions of this request: the owner can still answer them.
     const notOpen = (waitingOn ?? []).filter((id) => {
@@ -377,6 +414,14 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
           : null;
       const verified = verifiedOf({ ci, committed: committed.committed, integration, aheadOfOrigin: committed.line?.aheadOfOrigin ?? null, checks });
       text = `${text}\n\n${finishedLineOf(committed, place.branch, verified)}`;
+    }
+    // Delivery line design §19.2 step 2: the mission branch moves forward to a finished lane; the Main reads the outcome.
+    if (place !== null && laneOf(place) >= 2) {
+      const mission = placementEntryOf(home, worker.workspaceId);
+      if (mission !== null) {
+        const outcome = await mergeLane(home, mission.missionId, place, { log, now, ...(deps.git === undefined ? {} : { git: deps.git }) });
+        text = `${text}\n${laneMergeLineOf(place, outcome)}`;
+      }
     }
     // §7.17.8 (g): the Manager reads a stop in the first turn after a Paseo cut as no stop of the owner's.
     if (phase === "stopped" && (await followsPaseoCut(worker.agentId, () => recentItemsOf(paseo, worker.agentId)))) text = `${text}\n\n${CUT_NOTE_LINE}`;
@@ -448,6 +493,8 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
           }
           // Design §16.8: an ended request's off-tool Reviewer alerts end with it.
           clearOffToolAlertsOfRequest(home, worker.workspaceId, requestId, { now });
+          // Delivery line design §19.5: so does its Worker's replaced-turn alert.
+          clearTurnReplacedAlert(home, worker.workspaceId, worker.agentId, { now });
         }
         // Delivery line design §2.6, §2.7: the size continuation opens before the report goes, so its delivery names it.
         const prev = sized === undefined ? null : locateRequest(home, requestId, worker.workspaceId);
@@ -671,7 +718,15 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const input = withoutNulls(raw);
     const shape = schemaIssues(TELL_WORKER_FACE.inputSchema, input);
     if (shape.length > 0) return fixThese(TELL_WORKER_TOOL, shape);
-    const { requestId: given, text: words, source, peerLink, now: atOnce = false, refs } = input as { requestId: string; text: string; source?: string; peerLink?: string; now?: boolean; refs?: MessageRefs };
+    const { requestId: given, text: words, source, peerLink, now: atOnce = false, refs, about } = input as {
+      requestId: string;
+      text: string;
+      source?: string;
+      peerLink?: string;
+      now?: boolean;
+      refs?: MessageRefs;
+      about?: "current" | "new";
+    };
     const home = deps.home();
     const nothing = "Nothing was sent.";
     const asked = managersRequest(home, manager.workspaceId, given, manager.agentId, nothing);
@@ -700,6 +755,14 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       if ("ok" in opened) return opened;
       return answered({ requestId: opened.requestId, continuationOf: requestId, workerId: opened.workerId, delivery: "sent", opened: "follow-up", ...(opened.peerLinkNotTaken === undefined ? {} : { peerLinkNotTaken: opened.peerLinkNotTaken }) });
     }
+    // Delivery line design §19.12 (owner, 2026-10-25): a request still at work takes only words about its own work;
+    // new work gets its own Worker, so the running one is never pulled off what it is doing.
+    if (about === undefined) {
+      return fixThese(TELL_WORKER_TOOL, [
+        `input.about: request ${requestId} is still at work: "current" when these words correct, stop or answer its own work; "new" for any other work, which gets its own Worker`,
+      ]);
+    }
+    if (about === "new") return refused(newWorkRefusalOf(requestId, asked.missionId ?? manager.missionId ?? null));
     const moved = requestId === given ? {} : { requestId };
     let workerId: string | null;
     try {
@@ -742,7 +805,15 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       const wait = gatedWaitOf(home, workerId, { workspaceId, requestId });
       return answered({ ...moved, workerId, delivery: stored.delivery, ...(wait === null ? {} : { note: heldTellText(wait.waiting) }) });
     }
-    return answered({ ...moved, workerId, delivery: stored.delivery });
+    // Delivery line design §19.4: a queued tell says how long the Worker's turn has run, so the Main can choose a lane instead.
+    const turnMinutes = stored.delivery === "queued" ? await turnMinutesOf(paseo, workerId, now()) : null;
+    return answered({
+      ...moved,
+      workerId,
+      delivery: stored.delivery,
+      ...(turnMinutes === null ? {} : { turnMinutes }),
+      ...(stored.turnReplaced === true ? { turnReplaced: true, note: TURN_REPLACED_NOTE } : {}),
+    });
   };
 
   // -------------------------------------------------------------------------

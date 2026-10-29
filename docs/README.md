@@ -74,6 +74,10 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [034](adr/ADR-034-each-mission-has-its-own-workspace.md) | Each mission has its own workspace in the Mission-List project | Accepted |
 | [035](adr/ADR-035-a-delivery-line.md) | A delivery line: bounded requests, a branch per mission, integration as a stage, limits that hold | Accepted; supersedes parts of 027, 029, 033 and 034 |
 | [036](adr/ADR-036-no-agent-waits-on-machines.md) | No agent waits on machines: CI off, re-reviews of the fix diff by a fresh Reviewer, Workers capped by context | Accepted; amends 035 decisions 1, 3, 4 |
+| [037](adr/ADR-037-agents-are-given-a-bounded-context.md) | Agents are given a bounded context: scoped memory, budgeted briefs, summary reads, a Main compacted by tokens | Accepted; amends 029's memory in briefs and the mission runtime's §3.2 |
+| [038](adr/ADR-038-parallel-lanes-and-a-held-queue.md) | Parallel lanes in a repository, owner's words steered into a running turn, and a held queue | Accepted; amends 035 decision 2 and the delivery line design §3.7 |
+| [039](adr/ADR-039-new-work-never-into-a-busy-worker.md) | New work never goes into a busy Worker; outdated Mains are handed over when idle | Accepted; amends 038 decisions 3 and 4 |
+| [040](adr/ADR-040-the-main-resolves-its-requests-fallback.md) | The Main resolves its requests' delegated provider fallback | Accepted; amends 033 decision 3 |
 
 ## Work in progress — `plans/`
 
@@ -97,7 +101,7 @@ Acceptance on a real daemon uses the kit in [`scripts/manual-test/`](../scripts/
 
 ## Release notes — `releases/`
 
-This is the **single authored changelog source**. Add one file per version, `paseo-bm-release-notes-<version>.md`; the release workflow uses it verbatim as the GitHub Release body, and `npm run build` validates and embeds the same content for the plugin's Settings view. Never maintain a second changelog in a README or generated package file. Latest in this tree: [0.5.6](releases/paseo-bm-release-notes-0.5.6.md).
+This is the **single authored changelog source**. Add one file per version, `paseo-bm-release-notes-<version>.md`; the release workflow uses it verbatim as the GitHub Release body, and `npm run build` validates and embeds the same content for the plugin's Settings view. Never maintain a second changelog in a README or generated package file. Latest in this tree: [0.7.0](releases/paseo-bm-release-notes-0.7.0.md).
 
 ## History — `archive/`
 

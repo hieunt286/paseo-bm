@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { NO_BINDER, clearBindingCache, type ToolCaller } from "../plugin/server/agent-bindings";
 import { createWorkerCreationTools, missionRepoOf } from "../plugin/server/create-worker";
 import { clearJsonFileCache } from "../plugin/server/data-files";
+import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { clearRequestIndexCache, createMissionRoster } from "../plugin/server/mission-roster";
 import { MISSIONS_DIR_NAME, createMissionStore, type Mission, type Placement } from "../plugin/server/mission-store";
@@ -15,7 +16,9 @@ import {
   PLACEMENT_MODE_FILE_NAME,
   ROOT_WAIT_BRIEF_LINE,
   SETUP_NOTE,
+  MAX_LANES,
   createPlacementLifecycle,
+  ensureLane,
   ensurePlacement,
   moveRequestToPlacement,
   newWorkerPlaceOf,
@@ -752,3 +755,186 @@ describe("from the checkpoint (§4.8 steps 3 and 5)", () => {
     expect(await successorPlacementOf(home, fake.paseo, { workspaceId: "wks_wt_1", missionId: mission.missionId }, { ...deps, git: same })).toBeNull();
   });
 });
+
+/** Delivery line design §19.1 (ADR-038): lanes of one repo, made from the mission branch, reused when free, bounded. */
+describe("lanes (§19.1)", () => {
+  /** The read-only fake git, plus the lane writes (`switch`, `branch -f`) recorded and a `merge-base` answer. */
+  function laneGit(world: GitWorld, writes: string[][], dirty: Set<string> = new Set()): GitRunner {
+    const read = fakeGit(world);
+    return async (args, options) => {
+      if (args[0] === "switch" || args[0] === "branch") {
+        writes.push([...args, `@${options.cwd}`]);
+        return { stdout: "" };
+      }
+      const command = args.slice(GIT_READ_ONLY_PREFIX.length);
+      if (command[0] === "merge-base") return { stdout: "" };
+      if (command[0] === "status" && dirty.has(options.cwd)) return { stdout: " M src/a.ts\n" };
+      return read(args, options);
+    };
+  }
+
+  async function lane(home: string, paseo: unknown, missionId: string, git: GitRunner) {
+    const mission = createMissionStore(home).get(missionId)!;
+    const listed = (await listedWorkspaces(paseo as DashboardPaseo)) as ListedWorkspace[];
+    return ensureLane(home, paseo, mission, REPO, listed, { log: () => {}, git, clone: fakeClone(), now: () => NOW });
+  }
+
+  const busy = (home: string, missionId: string, workspaceId: string, n: number) =>
+    createMissionRoster(home, { now: () => NOW }).add(missionId, { requestId: `req-20261025T0${String(n).padStart(5, "0")}Z`, workspaceId, topic: `work ${n}`, workerId: `wkr-${n}` });
+
+  it("makes lane 2 from the mission branch's head, on its own branch and worktree, mapped to the repo", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake, creations } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const writes: string[][] = [];
+    const made = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+    expect(made.ok, made.ok ? "" : made.reasons.join("\n")).toBe(true);
+    // Lane 1 first, then lane 2 branched off it.
+    expect(creations).toHaveLength(2);
+    expect(creations[1]!["source"]).toMatchObject({ action: "branch-off", baseBranch: "m/ABC/repo", branchName: "m/ABC/repo-2", worktreeSlug: "m-abc-repo-2" });
+    expect(creations[1]!["title"]).toBe("ABC · repo · 2");
+    expect(creations[1]!["requestId"]).toBe(`bm-place-${mission.missionId}-${REPO}-lane2`);
+    if (!made.ok) return;
+    expect(made.placement).toMatchObject({ lane: 2, branch: "m/ABC/repo-2", base: "m/ABC/repo", state: "ready", integration: null });
+    expect(repoKeyOf(home, made.placement.workspaceId!)).toBe(REPO);
+    // The mission's placement of the repo is still lane 1, the mission branch.
+    expect(placementOf(home, mission.missionId, REPO)).toMatchObject({ branch: "m/ABC/repo" });
+    expect(writes).toEqual([]);
+  });
+
+  it("opens lane 3 while lane 2 works, and reuses a free, clean lane reset to the mission branch", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake, creations } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const writes: string[][] = [];
+    const two = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+    if (!two.ok) throw new Error(two.reasons.join("\n"));
+    busy(home, mission.missionId, two.placement.workspaceId!, 1);
+    const three = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+    if (!three.ok) throw new Error(three.reasons.join("\n"));
+    expect(three.placement).toMatchObject({ lane: 3, branch: "m/ABC/repo-3" });
+    expect(creations).toHaveLength(3);
+
+    // Lane 3 merged and freed: it is reused, reset to the mission branch, and not made again.
+    createMissionStore(home, { now: () => NOW }).update(mission.missionId, (current) => ({
+      ...current,
+      placements: current.placements!.map((placement) => (placement.lane === 3 ? { ...placement, freeSince: NOW.toISOString(), mergedAt: NOW.toISOString() } : placement)),
+    }));
+    const again = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+    if (!again.ok) throw new Error(again.reasons.join("\n"));
+    expect(again.placement).toMatchObject({ lane: 3, freeSince: null });
+    expect(creations).toHaveLength(3);
+    expect(writes).toEqual([["switch", "-C", "m/ABC/repo-3", "m/ABC/repo", `@${three.placement.directory}`]]);
+  });
+
+  it("skips unmanaged draft branches even above the live-lane cap, without changing them", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const occupied = Array.from({ length: MAX_LANES }, (_, i) => `m/ABC/repo-${i + 2}`);
+    const world = gitWorld({ local: new Set(occupied) });
+    const { fake, creations } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const writes: string[][] = [];
+    const made = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    expect(made.placement).toMatchObject({ lane: MAX_LANES + 2, branch: `m/ABC/repo-${MAX_LANES + 2}`, state: "ready" });
+    expect(creations[1]!["source"]).toMatchObject({ action: "branch-off", baseBranch: "m/ABC/repo", branchName: `m/ABC/repo-${MAX_LANES + 2}` });
+    expect(writes).toEqual([]);
+    expect(occupied.every((branch) => world.local.has(branch))).toBe(true);
+  });
+
+  it.each([false, true])("reuses an archived lane only when ancestry is established (merged: %s)", async (merged) => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake, creations, archive } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const writes: string[][] = [];
+    const read = laneGit(world, writes);
+    const git: GitRunner = async (args, options) => {
+      if (!merged && args[GIT_READ_ONLY_PREFIX.length] === "merge-base") throw new Error("ancestry not established");
+      return read(args, options);
+    };
+    const two = await lane(home, fake.paseo, mission.missionId, git);
+    if (!two.ok) throw new Error(two.reasons.join("\n"));
+    archive(two.placement.workspaceId!);
+    const made = await lane(home, fake.paseo, mission.missionId, git);
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    expect(made.placement).toMatchObject({ lane: merged ? 2 : 3, branch: merged ? "m/ABC/repo-2" : "m/ABC/repo-3", state: "ready" });
+    expect(creations[2]!["source"]).toMatchObject(merged ? { action: "checkout", refName: "m/ABC/repo-2" } : { action: "branch-off", branchName: "m/ABC/repo-3" });
+    expect(writes).toEqual(merged ? [["branch", "-f", "m/ABC/repo-2", "m/ABC/repo", `@${root}`]] : []);
+  });
+
+  it("does not reuse a free lane with uncommitted changes, and makes a new one", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const writes: string[][] = [];
+    const two = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+    if (!two.ok) throw new Error(two.reasons.join("\n"));
+    createMissionStore(home, { now: () => NOW }).update(mission.missionId, (current) => ({
+      ...current,
+      placements: current.placements!.map((placement) => (placement.lane === 2 ? { ...placement, freeSince: NOW.toISOString() } : placement)),
+    }));
+    const next = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes, new Set([two.placement.directory!])));
+    if (!next.ok) throw new Error(next.reasons.join("\n"));
+    expect(next.placement.lane).toBe(3);
+    expect(writes).toEqual([]);
+  });
+
+  it(`refuses past ${MAX_LANES} live lanes, naming each lane's work`, async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const writes: string[][] = [];
+    for (let n = 2; n <= MAX_LANES; n += 1) {
+      const made = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+      if (!made.ok) throw new Error(made.reasons.join("\n"));
+      expect(made.placement.lane).toBe(n);
+      busy(home, mission.missionId, made.placement.workspaceId!, n);
+    }
+    const refused = await lane(home, fake.paseo, mission.missionId, laneGit(world, writes));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.reasons[0]).toContain(`already has ${MAX_LANES} lanes in repo`);
+    expect(refused.reasons[0]).toContain("lane 2: req-20261025T000002Z work 2");
+    expect(refused.reasons[0]).toContain("hold the request with after, or stop one");
+  });
+
+  it("bm_create_worker with lane: \"new\" runs independent work in lane 2 beside lane 1, with the lane's brief lines; refused without staffing delegated", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake, creations } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const writes: string[][] = [];
+    const tools = createWorkerCreationTools({ binder: () => NO_BINDER, paseo: () => fake.paseo, home: () => home, log: () => {}, placements: { git: laneGit(world, writes), clone: fakeClone() } });
+    createMissionAutonomyStore(home).setLevel(mission.missionId, 1);
+    const first = await tools.call("bm_create_worker", { request: "Audit the repo.", context: [] }, mainCaller(mission.missionId));
+    expect(first.ok, first.text).toBe(true);
+    const refused = await tools.call("bm_create_worker", { request: "Fix the compile error.", context: [], lane: "new" }, mainCaller(mission.missionId));
+    expect(refused.ok).toBe(false);
+    expect(refused.text).toContain("a new lane adds a live Worker to mission ABC in repo: staffing is not delegated in this mission, so ask the owner first");
+
+    createMissionAutonomyStore(home).setLevel(mission.missionId, 2);
+    const second = await tools.call("bm_create_worker", { request: "Fix the compile error.", context: [], lane: "new" }, mainCaller(mission.missionId));
+    expect(second.ok, second.text).toBe(true);
+    expect(JSON.parse(second.text)).toMatchObject({ lane: 2 });
+    expect(creations.map((creation) => (creation["source"] as { branchName?: string; refName?: string }).branchName)).toEqual(["m/ABC/repo", "m/ABC/repo-2"]);
+    const lane2 = placementsOf(home, mission.missionId).find((placement) => placement.lane === 2)!;
+    expect(fake.creates.at(-1)!.workspaceId).toBe(lane2.workspaceId);
+    const prompt = fake.creates.at(-1)!.options.prompt!;
+    expect(prompt).toContain(`worktree: ${lane2.directory} on branch m/ABC/repo-2 (lane 2; the mission branch is m/ABC/repo)`);
+    expect(prompt).toContain("lane: at finished, merge m/ABC/repo into m/ABC/repo-2, resolve conflicts, check what the merge touched, commit, then report finished; paseo-bm moves m/ABC/repo forward. Never push this branch.");
+    expect(prompt).not.toContain("push and merge request:");
+  });
+});
+

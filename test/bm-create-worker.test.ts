@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -34,6 +34,7 @@ import { boundToolFacesFor } from "../plugin/shared/bm-tools";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { createMemoryStore } from "../plugin/server/memory-store";
+import { cancelHeld, heldRequestsOf, startHeldRequests } from "../plugin/server/held-requests";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { clearRequestIndexCache, createMissionRoster, requestIndexOf } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
@@ -516,7 +517,7 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
     expect(requestIndexOf(home, requestId)).toEqual({ missionId, workspaceId: BACK });
     expect(createMissionStore(home).journal(missionId).at(-1)).toMatchObject({ kind: "worker", by: MAIN, ref: requestId });
 
-    // The brief: B's folder, then the mission, the plan step, the contracts touching B, and B's memory (the newest 30 and every contract).
+    // The brief: B's folder, then the mission, the plan step, the contracts touching B, and B's live memory within its budget (delivery line design §18.2).
     const lines = options.prompt!.split("\n");
     expect(lines).toContain(`repository: ${BACK_FOLDER} (beads in ${BACK_FOLDER}/.beads/)`);
     const from = lines.indexOf(`managerAgentId: ${MAIN}`);
@@ -528,10 +529,10 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
       "Project memory (back):",
     ]);
     const memoryLines = lines.slice(from + 6, lines.indexOf("Context:"));
-    expect(memoryLines).toHaveLength(31);
-    expect(memoryLines[0]).toBe("- contract: Totals are integers in cents. (source: owner, 2026-10-01)");
-    expect(memoryLines[1]).toBe("- fact: Fact 2. (source: note 2)");
-    expect(memoryLines.at(-1)).toBe("- fact: Fact 31. (source: note 31)");
+    // All 32 fit the budget; every entry is the owner's, and the owner's come first, newest first.
+    expect(memoryLines).toHaveLength(32);
+    expect(memoryLines[0]).toBe("- fact: Fact 31. (source: note 31)");
+    expect(memoryLines.at(-1)).toBe("- contract: Totals are integers in cents. (source: owner, 2026-10-01)");
   });
 
   it("a one-repo mission needs no project: its only repo", async () => {
@@ -565,7 +566,7 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
     expect((await call({ project: "wks_orch" })).text).toBe("project wks_orch is a paseo-bm home, not a repo\nNothing was created.");
     createMissionStore(home).update(missionId, (current) => ({ ...current, state: "closed", closedAt: "2026-10-09T00:00:00.000Z" }));
     expect((await call({ project: BACK })).text).toBe("mission SHOP is closed\nNothing was created.");
-    expect(await call({ project: BACK }, MANAGER_CALLER)).toEqual({ ok: false, text: "project and planStep are for the Main of a mission, and you are none: leave them out. Nothing was created." });
+    expect(await call({ project: BACK }, MANAGER_CALLER)).toEqual({ ok: false, text: "project, planStep, lane and after are for the Main of a mission, and you are none: leave them out. Nothing was created." });
     expect(await call({}, { ...caller, agentId: "agent-unassigned", missionId: null })).toEqual({
       ok: false,
       text: "You have no mission yet: record it with bm_mission_start before you create a Worker. Nothing was created.",
@@ -599,7 +600,7 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
     const ask = "staffing is not delegated in this mission, so ask the owner first";
     expect((await call(BACK)).text).toBe(
       [
-        `mission SHOP already has a live Worker in back (request ${requestId}): give it the work with bm_tell_worker, or ${ask}`,
+        `mission SHOP already has a live Worker in back (request ${requestId}): give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or ${ask}`,
         `mission SHOP has 1 live Workers and its budget allows 1: ${ask}`,
         "Nothing was created.",
       ].join("\n"),
@@ -611,4 +612,108 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
     expect((await call(BACK)).ok).toBe(true);
     expect(fake.creates).toHaveLength(2);
   });
+
+  /** Delivery line design §19.6 (ADR-038): work after other requests is held by paseo-bm and starts by itself. */
+  describe("the held queue (§19.6)", () => {
+    const fakeQueue = () => {
+      const told: string[] = [];
+      return {
+        told,
+        queue: {
+          enqueue: vi.fn(async (_target: string, _kind: string, text: string) => {
+            told.push(text);
+            return "sent" as const;
+          }),
+          enqueueBatch: vi.fn(async (_target: string, _batch: unknown, items: Array<{ line: string }>) => {
+            for (const item of items) told.push(item.line);
+            return items.map(() => "sent" as const);
+          }),
+        } as never,
+      };
+    };
+
+    it("holds work after a running request, refuses an unknown or stopped one, and creates at once after a finished one", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const roster = createMissionRoster(home);
+      roster.add(missionId, { requestId: "req-20261025T010000Z", workspaceId: BACK, topic: "flags", workerId: "w-old" });
+      const tools = toolsOf(home, fake, store);
+
+      const unknown = await tools.call("bm_create_worker", { request: "Wire the screens.", context: [], after: ["req-20261025T999999Z"] }, caller);
+      expect(unknown).toEqual({ ok: false, text: "req-20261025T999999Z is not a request of mission SHOP (bm_mission lists them). Nothing was created." });
+
+      const held = await tools.call("bm_create_worker", { request: "Wire the screens.\nTo the new endpoints.", context: [], after: ["req-20261025T010000Z"] }, caller);
+      expect(held.ok, held.text).toBe(true);
+      const answer = JSON.parse(held.text) as { held: string; after: string[]; note: string };
+      expect(answer.held).toMatch(/^hold-\d{8}T\d{6,9}Z$/);
+      expect(answer.after).toEqual(["req-20261025T010000Z"]);
+      expect(fake.creates).toHaveLength(0);
+      expect(heldRequestsOf(home, missionId)).toEqual([expect.objectContaining({ holdId: answer.held, topic: "Wire the screens. To the new endpoints.", state: "held", input: { request: "Wire the screens.\nTo the new endpoints.", context: [] } })]);
+
+      roster.setState(missionId, "req-20261025T010000Z", "stopped");
+      const afterStopped = await tools.call("bm_create_worker", { request: "Other work.", context: [], after: ["req-20261025T010000Z"] }, caller);
+      expect(afterStopped.text).toContain("req-20261025T010000Z stopped, so work after it would never start");
+      roster.setState(missionId, "req-20261025T010000Z", "finished");
+      const now = await tools.call("bm_create_worker", { request: "Other work.", context: [], after: ["req-20261025T010000Z"] }, caller);
+      expect(now.ok, now.text).toBe(true);
+      expect(JSON.parse(now.text)).toHaveProperty("workerId");
+      expect(fake.creates).toHaveLength(1);
+    });
+
+    it("starts a held request when its requests finish, tells the Main, and is listed and cancellable meanwhile", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const roster = createMissionRoster(home);
+      roster.add(missionId, { requestId: "req-20261025T010000Z", workspaceId: BACK, topic: "flags", workerId: "w-old" });
+      const tools = toolsOf(home, fake, store);
+      const first = JSON.parse((await tools.call("bm_create_worker", { request: "Wire the screens.", context: [] , after: ["req-20261025T010000Z"] }, caller)).text) as { held: string };
+      const second = JSON.parse((await tools.call("bm_create_worker", { request: "Write the docs.", context: [], after: ["req-20261025T010000Z"] }, caller)).text) as { held: string };
+      const { queue, told } = fakeQueue();
+      const create = (input: Record<string, unknown>, as: ToolCaller) => tools.call("bm_create_worker", input, as);
+
+      // Still running: nothing starts.
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates).toHaveLength(0);
+      expect(cancelHeld(home, missionId, second.held, "not needed any more", new Date())).toBeNull();
+      expect(cancelHeld(home, missionId, second.held, "again", new Date())).toBe(`held request ${second.held} is already cancelled`);
+
+      roster.setState(missionId, "req-20261025T010000Z", "finished");
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates).toHaveLength(1);
+      expect(fake.creates[0]!.options.prompt).toContain("> Wire the screens.");
+      const started = heldRequestsOf(home, missionId).find((entry) => entry.holdId === first.held)!;
+      expect(started.state).toBe("started");
+      expect(started.startedAs).toMatch(/^req-/);
+      expect(told.at(-1)).toContain(`held request ${first.held} ("Wire the screens.") started as ${started.startedAs}`);
+      // Once only.
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates).toHaveLength(1);
+      expect(caller.missionId).toBe(missionId);
+    });
+
+    it("tells the Main once when a request a held one waits for stopped, and keeps it held", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const roster = createMissionRoster(home);
+      roster.add(missionId, { requestId: "req-20261025T010000Z", workspaceId: BACK, topic: "flags", workerId: "w-old" });
+      const tools = toolsOf(home, fake, store);
+      const held = JSON.parse((await tools.call("bm_create_worker", { request: "Wire the screens.", context: [], after: ["req-20261025T010000Z"] }, caller)).text) as { held: string };
+      roster.setState(missionId, "req-20261025T010000Z", "stopped");
+      const { queue, told } = fakeQueue();
+      const create = (input: Record<string, unknown>, as: ToolCaller) => tools.call("bm_create_worker", input, as);
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(told).toHaveLength(1);
+      expect(told[0]).toContain(`held request ${held.held} ("Wire the screens.") waits for req-20261025T010000Z, which stopped`);
+      expect(heldRequestsOf(home, missionId)[0]!.state).toBe("waiting-stopped");
+      expect(fake.creates).toHaveLength(0);
+    });
+  });
 });
+

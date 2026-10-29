@@ -16,6 +16,7 @@ import { ChatCardView } from "./client/chat-card";
 import { ChatBeadsPanel } from "./client/chat-beads-panel";
 import { workerNewNoticeOf, workerNewNotices } from "./client/worker-new";
 import { BeadsTabPanel } from "./client/beads-tab";
+import { registerBeadsComposerPills } from "./client/beads-composer-pill";
 import { registerBeadsHeaderButtons } from "./client/beads-header-button";
 import { registerBeadsManagerSidebarItem } from "./client/sidebar-item";
 
@@ -244,6 +245,9 @@ export default function contribute(client: PluginClientContext): () => void {
     // The same tab from a button on every workspace header: Paseo 0.8's mobile
     // app has no "+" menu (delta 20260918e §4.6).
     registerBeadsHeaderButtons(client),
+    // And from a pill above every bm-* agent's composer: Paseo 0.12's mobile
+    // header draws no plugin header buttons (owner decision 2026-10-25).
+    registerBeadsComposerPills(client),
     client.addWorkspacePanel({
       id: AGENT_TREE_PANEL_ID,
       title: "Beads agents",

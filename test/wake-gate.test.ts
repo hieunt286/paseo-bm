@@ -295,10 +295,10 @@ describe("bm_tell_worker and the gate", () => {
       { kind: "question", id: Q(2) },
       { kind: "question", id: Q(3) },
     ]);
-    const held = await tools.manager.call("bm_tell_worker", { requestId: REQ, text: "Also the footer." }, MANAGER_CALLER);
+    const held = await tools.manager.call("bm_tell_worker", { requestId: REQ, text: "Also the footer.", about: "current" }, MANAGER_CALLER);
     expect(JSON.parse(held.text)).toEqual({ workerId: WORKER, delivery: "held", note: "The Worker waits on Q2 and Q3; it gets this with them." });
     expect(fake.sends).toEqual([]);
-    const now = await tools.manager.call("bm_tell_worker", { requestId: REQ, text: "Stop waiting on Q3: use the default.", now: true }, MANAGER_CALLER);
+    const now = await tools.manager.call("bm_tell_worker", { requestId: REQ, text: "Stop waiting on Q3: use the default.", now: true, about: "current" }, MANAGER_CALLER);
     expect(JSON.parse(now.text)).toEqual({ workerId: WORKER, delivery: "sent" });
     expect(fake.sends).toHaveLength(1);
     expect(fake.sends[0]!.text).toContain("Stop waiting on Q3");

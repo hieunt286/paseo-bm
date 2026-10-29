@@ -159,4 +159,35 @@ describe("the Main's channel (design §6.2)", () => {
     expect(updatesItemsOf("BM-UPDATESX 2")).toBeNull();
     expect(updatesItemsOf("hello")).toBeNull();
   });
+
+  it("says each thing once: a repeat over another link is dropped, a request's status replies keep only the newest (delivery line design §18.5)", () => {
+    const reply = (record: string, link: string, quote: string) =>
+      `BM-DELIVERY peer-reply ${record}\nlink: ${link}\nfrom: project "ai-assistant" (wks_95db2f82e1df8534), request req-20261024T050600Z, phase: blocked\n> ${quote}`;
+    const first = reply("out-8167f70e1e3a", "peer-d2f041c5bc37", "blockers: waiting on review: b1.");
+    const repeat = reply("out-ae0cb9f01c26", "peer-fa3a41067fba", "blockers: waiting on review: b1.");
+    const unrelated = "BM-DELIVERY message out-0123456789ab\nContinue req-20261024T060000Z.";
+    const newer = reply("out-1b2c3d4e5f60", "peer-d2f041c5bc37", "blockers: waiting on review: b2.");
+    const other = reply("out-2b2c3d4e5f60", "peer-d2f041c5bc37", "blockers: none.").replace("req-20261024T050600Z", "req-20261024T070000Z");
+
+    // A request's status reply over two links: one is kept (the newest), and one block left goes alone.
+    expect(updatesNoticeOf([first, repeat])).toBe(repeat);
+    expect(updatesItemsOf(updatesNoticeOf([first, unrelated, repeat]))).toEqual([unrelated, repeat]);
+    // Of one request's status replies only the newest is kept, in the given order; another request's reply stays.
+    const text = updatesNoticeOf([first, unrelated, repeat, other, newer]);
+    expect(text.split("\n").slice(0, 2)).toEqual(["BM-UPDATES 3", "From the paseo-bm plugin, not the owner: 3 items, oldest first. Act on each as its block says."]);
+    expect(updatesItemsOf(text)).toEqual([unrelated, other, newer]);
+    // Any other block whose content repeats an earlier one's, apart from its record and link ids and link line, is dropped — the later copy —
+    // and the kept one names the other link, so an answer owed on each link is not lost (review of ADR-037).
+    const message = (record: string, link: string) =>
+      `BM-DELIVERY peer-message ${record}\nlink: ${link}\nfrom: project "ai-assistant" (wks_95db2f82e1df8534), worker w2\n> The API is live.\nReply with bm_peer_reply on ${link}.`;
+    const once = message("out-8167f70e1e3a", "peer-d2f041c5bc37");
+    const twice = message("out-ae0cb9f01c26", "peer-fa3a41067fba");
+    const onceAlso = `${once}\nalso on link: peer-fa3a41067fba (the same message; one bm_peer_reply on each link that asks)`;
+    expect(updatesItemsOf(updatesNoticeOf([once, unrelated, twice, newer]))).toEqual([onceAlso, unrelated, newer]);
+    expect(updatesNoticeOf([once, twice])).toBe(onceAlso);
+    // The same link twice adds nothing.
+    expect(updatesNoticeOf([once, message("out-0123456789ab", "peer-d2f041c5bc37")])).toBe(once);
+    // Different content is never dropped.
+    expect(updatesItemsOf(updatesNoticeOf([unrelated, "BM-SIGNAL danger\nw1 ran a command."]))).toHaveLength(2);
+  });
 });

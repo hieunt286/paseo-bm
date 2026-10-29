@@ -600,10 +600,11 @@ describe("the tool list", () => {
     expect(schemaIssues(face.inputSchema, { decisionId: "f:fb-0123456789ab", optionKey: "wait", reason: "The limit resets soon." })).toEqual([]);
     // Its authority is in its description, where the model reads it: a fallback incident whose class the owner's policy
     // delegates (autonomy design §B.5, §B.9); a Worker's question is its Main's or the owner's (missions design §9.1).
-    expect(face.description).toMatch(/Decide a fallback incident \(f:…\) for the owner, where the owner's policy delegates its class to you in that project/);
+    expect(face.description).toMatch(/Decide a fallback incident \(f:…\) outside a mission request for the owner, where the owner's policy delegates its class to you in that project/);
     expect(face.description).toMatch(/a Worker's question \(q:…\) is its Main's or the owner's/);
     expect(face.description).toMatch(/your own decisions \(o:…\) are always the owner's/);
     expect(face.description).toMatch(/An incident you leave stays open for the owner/);
+    expect(face.description).toContain("A mission request's delegated fallback belongs to its Main");
   });
 
   it("bm_predict is retired (owner, 2026-10-10): no role lists it", () => {

@@ -43,6 +43,13 @@
  * stored with `atOnce` (`bm_tell_worker`'s `now: true`) is never held.
  * An older build skips a `held` record.
  *
+ * **Steered** (delivery line design §19.5): such an `atOnce` message is the
+ * owner's words (`isOwnerWords`), queued with `steer`: the queue sends it
+ * into the Worker's running turn when its guards hold. The record then gains
+ * `steeredAt`, and `replaced: true` when Paseo replaced the turn instead —
+ * which also tells the request's Main and opens the owner's `turn-replaced`
+ * Inbox alert (`reportTurnReplaced`).
+ *
  * **No turn** (delivery line design §9.1): an `ack` or `close` on a link is
  * stored `delivered` with reason `no-turn` (`add` with `noTurn`) and never
  * enqueued, so neither the queue nor the wake gate sees it. Its target reads
@@ -99,10 +106,11 @@ import { DELIVERY_KINDS, OUTBOX_RECORD_ID_PATTERN, PEER_DELIVERY_KINDS, delivery
 import { createAlertStore, type AlertInput } from "./alert-store";
 import { redactText } from "./collector";
 import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
-import { requestIndexOf } from "./mission-roster";
+import { missionManagerOf, requestIndexOf } from "./mission-roster";
 import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
 import { enqueueNotice, type ChannelQueue } from "./main-channel";
-import { noticeQueue, type NoticeCallbacks, type NoticeOutcome, type NoticePaseo } from "./notice-queue";
+import { noticeQueue, type NoticeCallbacks, type NoticeOutcome, type NoticePaseo, type SteerResult } from "./notice-queue";
+import { isOwnerWords, reportTurnReplaced } from "./owner-words";
 import { createRequestRegistry } from "./request-registry";
 import { errorText } from "./rpc-kit";
 import { WORKSPACE_ID_PATTERN } from "./trace-store";
@@ -137,6 +145,10 @@ const recordSchema = z.object({
   atOnce: z.literal(true).optional(),
   /** A record that started no turn (delivery line design §9.1): when a delivery to its target carried it at its head. Absent until then. */
   shownAt: z.string().optional(),
+  /** The owner's words steered into the Worker's running turn (delivery line design §19.5): when. Absent otherwise. */
+  steeredAt: z.string().optional(),
+  /** Paseo replaced that running turn instead of steering the words in (§19.5). Absent otherwise. */
+  replaced: z.literal(true).optional(),
 });
 
 export type OutboxRecord = z.infer<typeof recordSchema>;
@@ -232,6 +244,8 @@ export interface Outbox {
   workspaces(): string[];
   /** Notes that a delivery carried the no-turn record `id` at its head (delivery line design §9.1). Throws when the file cannot be written. */
   markShown(workspaceId: string, id: string, at: string): void;
+  /** Notes that record `id` was steered into its target's running turn at `at`, and whether Paseo replaced that turn (§19.5). Throws when the file cannot be written. */
+  markSteered(workspaceId: string, id: string, at: string, replaced: boolean): void;
 }
 
 /** The outbox of the data folder `home`. Creating it touches nothing on disk. */
@@ -345,6 +359,15 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
         const index = current.records.findIndex((record) => record.id === id);
         if (index === -1 || current.records[index]!.shownAt !== undefined) return null;
         return { records: current.records.map((record, place) => (place === index ? { ...record, shownAt: at } : record)) };
+      });
+    },
+    markSteered(workspaceId, id, at, replaced) {
+      requireWorkspace(workspaceId);
+      fileOf(workspaceId).update((current) => {
+        const index = current.records.findIndex((record) => record.id === id);
+        if (index === -1 || current.records[index]!.steeredAt !== undefined) return null;
+        const steered = (record: OutboxRecord): OutboxRecord => ({ ...record, steeredAt: at, ...(replaced ? { replaced: true as const } : {}) });
+        return { records: current.records.map((record, place) => (place === index ? steered(record) : record)) };
       });
     },
     workspaces() {
@@ -705,6 +728,32 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
   };
   /** The wake gate's kind for this record: a tell with `now: true` is always at once. */
   const gateKind = record.atOnce === true ? "tell-now" : record.kind;
+  /** Delivery line design §19.5: the owner's words go into the Worker's running turn when the queue's guards hold. */
+  const steer = isOwnerWords({ via: "tell", now: record.kind === "message" && record.atOnce === true });
+  /** The steer is written on the record; a replaced turn is told to the Main and the owner's Inbox. */
+  const steered = (result: SteerResult): void => {
+    try {
+      // The outbox's own clock, as every other time on the record.
+      createOutbox(deps.home, deps).markSteered(workspaceId, record.id, (deps.now ?? (() => new Date()))().toISOString(), result.replaced);
+    } catch (error) {
+      log(`[paseo-bm] could not note that the ${record.kind} ${record.id} was steered: ${errorText(error)}`);
+    }
+    if (!result.replaced) return;
+    void reportTurnReplaced({
+      home: deps.home,
+      workspaceId,
+      workerId: record.to,
+      requestId: record.requestId,
+      mainId: missionManagerOf(deps.home, record.requestId) ?? record.from,
+      what: `the owner's words (${record.kind} ${record.id})`,
+      turnBefore: result.turnBefore,
+      turnAfter: result.turnAfter,
+      ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }),
+      ...(deps.queue === undefined ? {} : { queue: deps.queue }),
+      ...(deps.now === undefined ? {} : { now: deps.now }),
+      log,
+    });
+  };
   const gateDeps = { ...(deps.now === undefined ? {} : { now: deps.now }), log };
 
   /** One enqueue of the record as it is now. Never rejects. */
@@ -728,9 +777,10 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
           told.held = hold(true);
           if (!told.held) log(`[paseo-bm] the ${record.kind} ${record.id} held at its send stays pending: it goes again after a reload.`);
         },
+        ...(steer ? { onSteered: (_targetId: string, _kind: string, result: SteerResult) => steered(result) } : {}),
       };
       const isHeld = holdsAtSend(deps.home, record.to, gateKind, waitRefsOfRecord(record), { workspaceId, requestId: record.requestId }, gateDeps);
-      const outcome = await enqueueNotice({ home: deps.home, queue, targetId: record.to, kind: deliveryKindOf(record), text: deliveryTextOf(record, lead), ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }), callbacks, isHeld });
+      const outcome = await enqueueNotice({ home: deps.home, queue, targetId: record.to, kind: deliveryKindOf(record), text: deliveryTextOf(record, lead), ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }), callbacks, isHeld, ...(steer ? { steer: true } : {}) });
       if (told.held) return "held";
       // A drop during this call that sent the record on: its outcome is this delivery's.
       if (told.again !== null) return await told.again;

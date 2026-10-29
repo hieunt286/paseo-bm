@@ -94,6 +94,8 @@ export interface EvalInput {
   compactions?: readonly unknown[];
   /** Every `handoffs/<id>.json` → `handoff`, unvalidated (M-42); absent when not read. */
   handoffs?: readonly unknown[];
+  /** Every `outbox/<workspaceId>.json` → `records`, unvalidated (M-44); absent when not read. */
+  outbox?: readonly unknown[];
   window: EvalWindow;
   /** Workspace directory by workspace id, for the `rm -rf` outside-the-workspace rule of A-6. */
   workspaceDirectories?: Readonly<Record<string, string>>;
@@ -722,6 +724,29 @@ export interface EvalMetrics {
     handoffs: { entries: number; dropped: number; afterCeiling: number };
   };
   /**
+   * M-44 (missions PRD; delivery line design §19.5, §19.10;
+   * `eval-metrics/delivery-line.ts`): the part of "minutes from an owner's
+   * message to a Worker acting on it" the stores hold — the wait of each tell
+   * (`bm_tell_worker`'s `message` record) created in the window, from the
+   * outbox. Targets: under 5 minutes; under 2 for the owner's words to a busy
+   * Worker.
+   */
+  m44: {
+    outboxIncluded: boolean;
+    /** `message` records from an agent (not the plugin's own messages to a Main) created in the window. */
+    tells: number;
+    /** Of `tells`: those whose state is `delivered`. */
+    delivered: number;
+    /** Over the delivered tells with both times: `steeredAt` (else `outcomeAt`) − `createdAt`, in minutes; null with none. */
+    waitMinutes: { p50: number | null; p90: number | null };
+    /** Of `tells`: steered into the Worker's running turn (`steeredAt`, not `replaced`). */
+    steered: number;
+    /** Of `tells`: Paseo replaced the running turn instead (`replaced: true`). */
+    replaced: number;
+    /** Of `tells`: not delivered or dropped by the window's end — still open, or settled after `until`. */
+    queuedAtEnd: number;
+  };
+  /**
    * Context and tokens (autonomy design §G.2 Derived): tokens read per turn,
    * per request by role and per agent, a context figure per turn, and the
    * compaction and handoff candidates the §G.7 defaults would have raised.
@@ -881,6 +906,8 @@ export interface EvalMetrics {
     invalidRequestEntries: number;
     /** Compaction and handoff entries that did not validate (M-42). */
     invalidMaintenanceEntries: number;
+    /** Outbox records that did not validate (M-44). */
+    invalidOutboxRecords: number;
     effectfulWithoutTime: number;
     /** `rm -rf` of a target that cannot be judged: a variable, or a path while the workspace directory is unknown. */
     rmTargetsNotJudged: number;

@@ -85,36 +85,36 @@ and a short `## Provenance` (the `requestId` and the request in one quoted line)
 
 Proof is **the cheapest evidence that the outcome happened**: a test or a compile for code, a conclusion with its
 sources for research, configuration read back, a captured response or screenshot for an API or a screen; no build or
-test command is not a reason to stop. Run each check after your last edit, without pipes or redirections, and **name
-it in `buildAndTests` exactly as run**. Run `git status` once before your first write and keep it: it tells your
-changes from those already there. Per bead: `br update <id> --status in_progress` → the work → the check →
-`br close <id> --reason "<the evidence>"`, after reading the check's own result. One bead `in_progress` at a time,
-only this request's (several: `implementing-beads`), never two agents editing at once. A blocking finding on a closed
-bead: `br reopen <id>` → fix → re-check → close with new evidence. Name the scratch directory literally —
-`S=$(mktemp -d) && … && rm -rf "$S"` in one command, or later the path `mktemp -d` printed (or a `/tmp/…` path) —
-never as a variable from an earlier call, so the plugin can read it and not stop you. **On a mission branch**, report
-each commit in `bm_report`'s `integration`; a push goes to `origin`, its merge request through `glab mr create` or
+test command is not a reason to stop. Run each check after your last edit, without pipes or redirections, and **name it
+in `buildAndTests` exactly as run**. Run `git status` once before your first write and keep it: it tells your changes
+from those already there. Per bead: `br update <id> --status in_progress` → the work → the check →
+`br close <id> --reason "<the evidence>"`, after reading the check's own result. One bead `in_progress` at a time, only
+this request's (several: `implementing-beads`), never two agents editing at once. A blocking finding on a closed bead:
+`br reopen <id>` → fix → re-check → close with new evidence. Name the scratch directory literally —
+`S=$(mktemp -d) && … && rm -rf "$S"` in one command, or later the path `mktemp -d` printed (or a `/tmp/…` path) — never
+as a variable from an earlier call, so the plugin can read it and not stop you. **On a mission branch**, report each
+commit in `bm_report`'s `integration`; a push goes to `origin`, its merge request through `glab mr create` or
 `glab mr update` from the branch into `<target>`; `glab mr view` only when you need its state. **After a push, report
-and end your turn**: never read, wait for or poll a pipeline (paseo-bm does not use CI). **Update the branch** before
-a push and when told it is behind or conflicting: `git merge origin/<target>` (never rebase pushed history), resolve
+and end your turn**: never read, wait for or poll a pipeline (paseo-bm does not use CI). **Update the branch** before a
+push and when told it is behind or conflicting: `git merge origin/<target>` (never rebase pushed history), resolve
 within the request's scope — `.beads/issues.jsonl` per line, never per hunk: every id once, the integration branch's
 line where both sides have it, sorted — commit the merge, `br sync --rebuild`, re-apply your own bead changes with
-`br`, run the checks. A conflict needing another mission's choice: `blocked` with a question for your Main.
+`br`, run the checks. A conflict needing another mission's choice: `blocked` with a question for your Main. **In a
+lane** (`lane:` in the brief): never push; merge the mission branch in at `finished`; ask your Main before changing a
+file another lane changes.
 
 ## Deciding and asking
 
-**Look before you ask**: first your `## Owner precedents` — one that answers a question is the
-owner's answer: follow it and cite its `subject`; ask what it leaves open, or what rule 1 guards,
-with that `subject`. Then the project memory in your brief (`bm_memory` reads it all), the
-repository, its docs, beads, git history and config — never environment values or secrets. **Decide
-what you can undo** (approach, names, layout, test shape, bead order, a library already there) and
-put the choices the owner may care about on your `decided` line. **Ask only for these four:**
-1. **Scope** — widening or narrowing the request, or a requirement beyond the owner's words.
-2. **What rules 1 and 2 guard, and approved decisions** — departing from an approved or frozen document;
-   changing a bead's acceptance criteria or an approved design for a Reviewer; deleting or merging beads.
-3. **What only the owner has** — something they must type or do, a fact you cannot read, a security
-   trade-off, behaviour existing users rely on.
-4. **Being stuck** — one error after three different fixes, or an uncheckable change: list the attempts.
+**Look before you ask**: first your `## Owner precedents` — one that answers a question is the owner's answer: follow
+it and cite its `subject`; ask what it leaves open, or what rule 1 guards, with that `subject`. Then the project memory
+in your brief (`bm_memory` with a query reads more), the repository, its docs, beads, git history and config — never
+environment values or secrets. **Decide what you can undo** (approach, names, layout, test shape, bead order, a library
+already there) and put the choices the owner may care about on your `decided` line. **Ask only for these four:** 1.
+**Scope** — widening or narrowing the request, or a requirement beyond the owner's words. 2. **What rules 1 and 2
+guard, and approved decisions** — departing from an approved or frozen document; changing a bead's acceptance criteria
+or an approved design for a Reviewer; deleting or merging beads. 3. **What only the owner has** — something they must
+type or do, a fact you cannot read, a security trade-off, behaviour existing users rely on. 4. **Being stuck** — one
+error after three different fixes, or an uncheckable change: list the attempts.
 
 **How to ask**: one round with `bm_questions`, each question in the owner's language with options and what
 each costs. Give each a `subject` (a slug for the decision, the same when you ask it again) and a `class`
@@ -162,11 +162,11 @@ bm_report {"requestId": "req-20260917T010956Z", "phase": "blocked", "tier": {"le
 At `blocked`, name each wait by id — `waitingOn` (questions), `waitingOnPeers` (links), `waitingOnRequests`,
 `waitingOnBatches` — why in `waitingFor`, `wakeOn: "any"` when one is enough, and end the turn: paseo-bm wakes you
 once with everything, as one `BM-UPDATES` message (the facts in a `BM-DELIVERY wait` block): act on each block. A
-brief with a `peer:` line: end `finished` with `forPeer` and talk to that project with `bm_peer_reply`. What you
-learnt that the next Worker here needs (a fact, a convention, a contract) goes to `bm_memory` with its source. In
-your chat, tell the owner in a few lines, in the owner's language, what changed, how you checked it, and what is
-left. Messages from the plugin that start with `BM-` (`BM-FALLBACK`, `BM-HANDOFF`, …) each say what to do: do
-exactly that. A `BM-COMMAND` is the owner's word, from an option they chose or the Orchestrator: follow it within
+brief with a `peer:` line: end `finished` with `forPeer` and talk to that project with `bm_peer_reply`. Lasting facts,
+conventions and contracts later Workers here need go to `bm_memory` (its source, `scope: "repo"`, a `subject` to
+replace one). In your chat, tell the owner in a few lines, in the owner's language, what changed, how you checked it,
+and what is left. Messages from the plugin that start with `BM-` (`BM-FALLBACK`, `BM-HANDOFF`, …) each say what to do:
+do exactly that. A `BM-COMMAND` is the owner's word, from an option they chose or the Orchestrator: follow it within
 your rules; if it cut a step short, check that step first and report it as interrupted by the Orchestrator.
 
 ## Stop

@@ -95,6 +95,8 @@ Each was applied to the phase plans, the designs and the beads; the plans in `do
 |---|---|---|
 | [code-review-20260930](operations/paseo-bm-code-review-20260930.md) | 2026-09-30 | The code review that led to ADR-022 |
 | [field-review-20261020](operations/paseo-bm-field-review-20261020.md) | 2026-10-20 | The field review of the delivery flow (2026-10-02 → 20) that led to ADR-035 |
+| [context-review-20261025](operations/paseo-bm-context-review-20261025.md) | 2026-10-25 | What agents are given to read: memory, briefs, the Main's reads and compaction; led to ADR-037 |
+| [mission-queue-review-20261025](operations/paseo-bm-mission-queue-review-20261025.md) | 2026-10-25 | Why mission AIX's new goals queued behind long Worker turns; led to ADR-038 |
 
 ## Completed plans and their acceptance records
 
@@ -110,4 +112,5 @@ Each was applied to the phase plans, the designs and the beads; the plans in `do
 | [plan-autonomy-phase0](plans/paseo-bm-plan-autonomy-phase0.md) | 2026-09-29 | the [evaluation baseline](../operations/paseo-bm-eval-baseline.md) |
 | [plan-autonomy-phase1a](plans/paseo-bm-plan-autonomy-phase1a.md) | 2026-09-29 | — |
 | [plan-delivery-line](plans/paseo-bm-plan-delivery-line.md) (ADR-035) | 2026-10-21 | the [field review](operations/paseo-bm-field-review-20261020.md) before, the [spikes](operations/paseo-bm-delivery-line-spikes-20261020.md); the owner's drill and migration are in the plan §7 |
+| [plan-lanes](plans/paseo-bm-plan-lanes.md) (ADR-038) | 2026-10-25 | the [queue review](operations/paseo-bm-mission-queue-review-20261025.md) before; the owner's drill is in the plan §3 |
 | [plan-agent-tools-delivery](plans/paseo-bm-plan-agent-tools-delivery.md) (ADR-027) | 2026-10-03 | [agent-tools-acceptance-20261003](operations/paseo-bm-agent-tools-acceptance-20261003.md); after its post-build review, [agent-tools-review-live-20261003](operations/paseo-bm-agent-tools-review-live-20261003.md) (the relay of an unbound Worker's report, the `AskUserQuestion` deny, a size kept in the brief) |

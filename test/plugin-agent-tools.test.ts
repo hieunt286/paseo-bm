@@ -697,7 +697,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     const { endpoint } = await start();
     const store = endpoint.bindings!;
     const list = async (url: string) => (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((tool: { name: string }) => tool.name);
-    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1")}`)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(await list(`${endpoint.urlFor("manager")!}/${bindManager(store, "agent-m1")}`)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_answer_fallback", "bm_hold_cancel", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(await list(endpoint.urlFor("manager")!)).toEqual(["bm_answers", "bm_decisions"]);
     // A pending binding lists them; calling waits for the binding (the shared guard).
     const pending = store.issue({ role: "manager", workspaceId: "wks_1" }).token;
@@ -710,7 +710,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
     expect(await list(`${endpoint.urlFor("worker")!}/${bindAs("worker", "agent-w1")}`)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
     expect(await list(`${endpoint.urlFor("reviewer")!}/${bindAs("reviewer", "agent-r1")}`)).toEqual(["bm_review"]);
     expect(toolFacesFor("manager").map((face) => face.name)).not.toContain("bm_create_worker");
-    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(toolFacesFor("manager", true).map((face) => face.name)).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_answer_fallback", "bm_hold_cancel", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     expect(toolFacesFor("worker", true).map((face) => face.name)).toEqual(["bm_report", "bm_questions", "bm_create_reviewer", "bm_rereview", "bm_peers", "bm_ask_project", "bm_peer_reply", "bm_memory", "bm_reply"]);
   });
 
@@ -733,7 +733,7 @@ describe("bm_create_worker on the bound Manager's list only (design §16.6)", ()
       const request = { config: { provider: "bm-manager/claude-opus-5", cwd: "/repo", mcpServers: { [AGENT_TOOLS_SERVER]: { type: "http", url: `${urlFor("manager")}/${token}` } } } } as unknown as AgentCreateRequest;
       return applyAgentTools(request, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool);
     };
-    expect(created()).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
+    expect(created()).toEqual(["bm_create_worker", "bm_tell_worker", "bm_answers", "bm_peers", "bm_peer_reply", "bm_mission", "bm_mission_start", "bm_mission_update", "bm_answer_worker", "bm_answer_fallback", "bm_hold_cancel", "bm_split_mission", "bm_owner_question", "bm_memory", "bm_repo", "bm_link_workers", "bm_ask_mission", "bm_decisions"]);
     // A creation without a token: the role path and today's list.
     expect(applyAgentTools({ config: { provider: "bm-manager", cwd: "/repo" } } as unknown as AgentCreateRequest, { urlFor, bindings: store }, "claude")?.config.toolPolicy?.preapproved?.map((grant) => grant.tool)).toEqual([
       "bm_answers",

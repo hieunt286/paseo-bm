@@ -2259,6 +2259,7 @@ const STORE_METRICS: EvalMetrics = {
     compactions: { entries: 0, dropped: 0, afterCeiling: 0 },
     handoffs: { entries: 0, dropped: 0, afterCeiling: 0 },
   },
+  m44: { outboxIncluded: false, tells: 0, delivered: 0, waitMinutes: { p50: null, p90: null }, steered: 0, replaced: 0, queuedAtEnd: 0 },
   // No model id: every turn's provider is unknown, read as input + cached; no context and no tool calls recorded.
   context: {
     turns: { withUsage: 12, byProvider: { claude: 0, codex: 0, opencode: 0, unknown: 12 }, repeated: 0, withToolCalls: 0 },
@@ -2348,6 +2349,7 @@ const STORE_METRICS: EvalMetrics = {
     invalidDangerEntries: 0,
     invalidRequestEntries: 0,
     invalidMaintenanceEntries: 0,
+    invalidOutboxRecords: 0,
     effectfulWithoutTime: 0,
     rmTargetsNotJudged: 0,
     processWeightWithoutTier: 0,

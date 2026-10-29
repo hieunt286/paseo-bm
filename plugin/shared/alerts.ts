@@ -36,6 +36,7 @@ export const ALERT_KINDS = [
   "off-tool-reviewer",
   "coordination-off",
   "boundary-off",
+  "turn-replaced",
 ] as const;
 export const alertKindSchema = z.enum(ALERT_KINDS);
 export type AlertKind = z.infer<typeof alertKindSchema>;
@@ -53,6 +54,8 @@ export const MAX_ALERT_DETAIL_CHARS = 300;
  * (`peer-unanswered`, its links and why in the detail), the Worker's id (`permission-waiting`,
  * `danger`, `stuck`), the agent's id (`pairing-mismatch`, `outdated-agent`,
  * `boundary-off`),
+ * the Worker's id (`turn-replaced`: Paseo replaced its running turn instead
+ * of steering the owner's words in, delivery line design §19.5),
  * the decision's id (`fallback-failed`), the request's id (`delivery-dropped`,
  * the record in its detail), the Reviewer's id (`off-tool-reviewer`, its Worker
  * and request in its detail) or the mechanism

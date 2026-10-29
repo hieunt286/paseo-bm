@@ -482,7 +482,7 @@ export const workerPassResult = (status: WorkerPassResult["status"]): WorkerPass
 export type PermissionFirstSeen = Map<string, string>;
 
 /** The snapshot fields a pass reads; `PaseoAgent` is structurally assignable. */
-interface WorkerSnapshot {
+export interface WorkerSnapshot {
   status?: unknown;
   cwd?: unknown;
   lastUserMessageAt?: unknown;

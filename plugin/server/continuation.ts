@@ -227,7 +227,7 @@ export async function openContinuation(
       const reasons = Array.isArray(repo) ? repo : await staffingReasons(home, paseo as DashboardPaseo, mission, workspaceId, listed);
       if (reasons.length > 0 || Array.isArray(repo)) return refused([...reasons, "Nothing was created."].join("\n"));
       cwd = repo.directory;
-      missionLines = missionBriefLines({ mission, workspaceId: repoKeyOf(home, workspaceId), memory: createMemoryStore(home).active(workspaceId), titleOf: (id) => titleIn(listed, id) });
+      missionLines = missionBriefLines({ mission, workspaceId: repoKeyOf(home, workspaceId), memory: createMemoryStore(home).live(workspaceId), request: init.text, titleOf: (id) => titleIn(listed, id) });
     }
     const peer = init.peerLink === undefined ? undefined : await peerLinesFor(home, paseo, init.peerLink, workspaceId, mission?.missionId ?? null, deps.binder ?? NO_BINDER);
     if (typeof peer === "string") return refused(`${peer} Nothing was created.`);

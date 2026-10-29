@@ -19,7 +19,7 @@
 
 ## 1. Preparation (an agent can do this)
 
-1. **Pick the number.** A prerelease → `next`, a stable version → `latest`. `test/plugin-role-labels.test.ts` pins the payload's minor version (`0.6.`); changing the minor means fixing that check in the same commit.
+1. **Pick the number.** A prerelease → `next`, a stable version → `latest`. `test/plugin-role-labels.test.ts` pins the payload's minor version (`0.7.`); changing the minor means fixing that check in the same commit.
 2. **Change the version, then build, before verifying**:
    ```bash
    npm version <version> --no-git-tag-version

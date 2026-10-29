@@ -11,7 +11,7 @@
  * | report fields | the LATEST `BM-REPORT` of that request in the workspace trace store |
  * | `reviewCalls` | the request's reconstructed trace, against its review cap and grants (delivery line design §5.3: `reviewCapOf` with the owner's `review` settings, the request registry's batches and grants); a replacement Reviewer's first message is not counted (§4.5.1) |
  * | `questions` | the decision store: every question the request asked the owner (`q:<requestId>:<Qn>`) with its answer, `open`, or how it ended (autonomy design §A.4) |
- * | original request | the first `user_message` of the replaced Worker's timeline |
+ * | original request | the first input message of the replaced Worker's timeline, including an incoming Paseo agent message |
  *
  * Manager (`managerHandover`):
  *
@@ -39,6 +39,7 @@ import { peersOfWorkspace } from "./chat-peers";
 import { pluginSentBeside, redactText } from "./collector";
 import { createDecisionStore } from "./decision-store";
 import { replacementsOf, reviewerReplacementIds, reviewerReplacementsFor } from "./fallback-state";
+import { fallbackInputText } from "./fallback-detect";
 import { LIVE_MAX_PAGES, LIVE_PAGE_LIMIT, readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { HANDOVER_PROMPT_MARKER, briefLineOf } from "./notices";
 import { agentFactsOf, bmAgentsOf, type DashboardPaseo } from "./paseo-directory";
@@ -177,15 +178,15 @@ function latestReport(records: readonly TraceRecord[], requestId: string): Parse
   return latest;
 }
 
-/** The first `user_message` of an agent's timeline (bounded walk back to its start), masked; null when none. */
+/** The first input message of an agent's timeline (bounded walk back to its start), masked; null when none. */
 export async function firstUserMessage(paseo: unknown, agentId: string): Promise<string | null> {
   let first: string | null = null;
   await readTimelinePages(paseo as LiveTimelinePaseo, agentId, { pages: LIVE_MAX_PAGES, limit: LIVE_PAGE_LIMIT }, (entries) => {
     // Pages come newest first, each oldest first: every older page's first message replaces the last one found.
     const found = entries
-      .map((entry) => entry.item as { type?: unknown; text?: unknown } | undefined)
-      .find((item) => item?.type === "user_message" && typeof item.text === "string" && item.text.trim() !== "");
-    if (found !== undefined) first = found.text as string;
+      .map((entry) => fallbackInputText(entry.item))
+      .find((text) => text !== null && text.trim() !== "");
+    if (found !== undefined) first = found;
   });
   return first === null ? null : redactText(first);
 }

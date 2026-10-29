@@ -46,6 +46,7 @@ import type { OnDecisionsSettled } from "./decision-rpc";
 import { preparedCommandOf } from "./command-authority";
 import { copyRecipientOf, sendCommand, type CommandSendResult } from "./command-send";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
+import { isOwnerWords } from "./owner-words";
 import { commandKindOf } from "./orchestrator-state";
 import { findOrchestratorAgent, type OrchestratorAgentPaseo } from "./orchestrator-agent";
 import type { OrchestratorStoreDeps } from "./orchestrator-store";
@@ -171,6 +172,8 @@ export function createOrchestratorDecisionDelivery(deps: OrchestratorDeliveryDep
         backstop: false,
         // The owner's own answer is counted and never refused; one a precedent or the policy gave is refused once the guard is full.
         loopGuard: decision.answer?.by === "owner" ? "count" : "refuse",
+        // Delivery line design §19.5: the option the owner chose is the owner's words, steered into a running Worker's turn.
+        ...(isOwnerWords({ via: "command", to: action.to, answeredBy: decision.answer?.by }) ? { steer: true } : {}),
         kind,
         intervention: null,
         queue: deps.queue ?? noticeQueue,

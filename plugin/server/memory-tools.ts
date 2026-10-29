@@ -4,13 +4,17 @@
  *
  * | Tool | Caller | Does |
  * |---|---|---|
- * | `bm_memory` | a Main | `read` (`query?`), `add` (`kind`, `text`, `source`) or `remove` (`id`, `why`) in a repo of its charter; a removal's `why` goes to the mission's journal |
- * | `bm_memory` | a bound Worker | `read`, and `add` of a `fact`, `convention` or `contract`, in its own repo only |
+ * | `bm_memory` | a Main | `read` (`query?`, `id?`, `retired?`), `add` (`kind`, `text`, `source`, `scope?`, `subject?`, `supersedes?`) or `remove` (`id`, `why`) in a repo of its charter; a removal's `why` goes to the mission's journal |
+ * | `bm_memory` | a bound Worker | `read`, and `add` of a `fact`, `convention` or `contract` (`scope?`, `subject?`), in its own repo only |
  * | `bm_repo` | a Main | `repo-tool.ts`'s read-only git and file reads, plus `read` (a window of a file's lines), in a repo of its charter only |
  *
- * `read` lists the repo's active entries, oldest first, then the owner's
- * precedents that hold there (`precedent-store.ts`) as `precedent` entries —
- * read through, never copied. The owner's answers to a request's questions
+ * `read` (delivery line design §18.3) gives, with no `query` and no `id`, an
+ * index of the repo's live entries, newest first (`MEMORY_INDEX_ENTRIES`,
+ * text cut at `MEMORY_INDEX_TEXT`); a `query` gives the matching entries in
+ * full (`MEMORY_QUERY_ENTRIES`), an `id` one entry; `retired: true` adds the
+ * retired ones with why. The owner's precedents that hold there
+ * (`precedent-store.ts`) follow as `precedent` entries — read through, never
+ * copied. The owner's answers to a request's questions
  * are added by the decision store (`decision-store.ts`, `ownerAnswerEntryOf`).
  *
  * Common rules (§7.15): a refusal is one line per reason and changes nothing;
@@ -24,7 +28,7 @@ import type { ToolCaller } from "./agent-bindings";
 import { MEMORY_TOOL_FACES, schemaIssues, type MainRepoAction, type ToolFace } from "../shared/bm-tools";
 import { TRACES_DIR_NAME } from "./data-home";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
-import { MAX_ACTIVE_MEMORY, createMemoryStore, type MemoryEntry, type MemoryKind } from "./memory-store";
+import { MAX_ACTIVE_MEMORY, createMemoryStore, scopeOf, type MemoryEntry, type MemoryKind, type MemoryRetirement, type MemoryScope } from "./memory-store";
 import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { NOT_A_MAIN_MESSAGE, missionOfMain } from "./mission-tools";
 import { Refusal } from "./orchestrator-tool-context";
@@ -36,6 +40,14 @@ import { readWorkspaceMeta } from "./trace-store";
 import { actingTools, answered, boundAs, fixThese, refused, withoutNulls, type BoundCaller } from "./tool-kit";
 
 const NOTHING = "Nothing was read or changed.";
+/** The live entries an index read shows, newest first (§18.3). */
+export const MEMORY_INDEX_ENTRIES = 80;
+/** How much of an entry's text an index line shows. */
+export const MEMORY_INDEX_TEXT = 160;
+/** The entries a query read shows in full, newest first. */
+export const MEMORY_QUERY_ENTRIES = 20;
+/** The owner's precedents an index read shows, newest first; a query finds the others. */
+export const MEMORY_INDEX_PRECEDENTS = 20;
 /** A caller that is neither a Main nor a bound Worker. */
 export const MEMORY_NOT_BOUND_MESSAGE = `bm_memory and bm_repo are only for a Main or a Worker paseo-bm created with its own tools. ${NOTHING}`;
 
@@ -63,9 +75,13 @@ interface MemoryInput {
   project?: string;
   op: "read" | "add" | "remove";
   query?: string;
+  retired?: boolean;
   kind?: MemoryKind;
   text?: string;
   source?: string;
+  scope?: MemoryScope;
+  subject?: string;
+  supersedes?: string;
   id?: string;
   why?: string;
 }
@@ -83,10 +99,14 @@ interface MainRepoInput {
 interface ShownEntry {
   id: string;
   kind: string;
+  scope?: MemoryScope;
+  subject?: string;
   text: string;
   source: string;
   by: string;
   at: string;
+  /** Why paseo-bm retired it (§18.1); only with `retired: true` or an `id`. */
+  retired?: MemoryRetirement["reason"];
 }
 
 const faceOf = (name: string, role: "manager" | "worker"): ToolFace => MEMORY_TOOL_FACES.find((face) => face.name === name && face.role === role)!;
@@ -97,10 +117,10 @@ function opIssues(input: MemoryInput): string[] {
   return needs.filter((field) => input[field] === undefined).map((field) => `input.${field}: ${input.op} needs it`);
 }
 
-/** True when every word of `query` is in the entry's text or source, case aside. Pure. */
+/** True when every word of `query` is in the entry's text, subject or source, case aside. Pure. */
 function matches(entry: ShownEntry, query: string | undefined): boolean {
   if (query === undefined) return true;
-  const haystack = `${entry.text} ${entry.source}`.toLowerCase();
+  const haystack = `${entry.text} ${entry.subject ?? ""} ${entry.source}`.toLowerCase();
   return query
     .toLowerCase()
     .split(/\s+/)
@@ -108,7 +128,32 @@ function matches(entry: ShownEntry, query: string | undefined): boolean {
     .every((word) => haystack.includes(word));
 }
 
-const shown = (entry: MemoryEntry): ShownEntry => ({ id: entry.id, kind: entry.kind, text: entry.text, source: entry.source, by: entry.by.role, at: entry.at });
+const shown = (entry: MemoryEntry, retirement?: MemoryRetirement): ShownEntry => ({
+  id: entry.id,
+  kind: entry.kind,
+  scope: scopeOf(entry),
+  ...(entry.subject === undefined ? {} : { subject: entry.subject }),
+  text: entry.text,
+  source: entry.source,
+  by: entry.by.role,
+  at: entry.at,
+  ...(retirement === undefined ? {} : { retired: retirement.reason }),
+});
+
+/** An index line (§18.3): the entry with its text cut. Pure. */
+const indexed = (entry: ShownEntry): Omit<ShownEntry, "source"> => ({
+  id: entry.id,
+  kind: entry.kind,
+  ...(entry.scope === undefined ? {} : { scope: entry.scope }),
+  ...(entry.subject === undefined ? {} : { subject: entry.subject }),
+  text: entry.text.length <= MEMORY_INDEX_TEXT ? entry.text : `${entry.text.slice(0, MEMORY_INDEX_TEXT - 1)}…`,
+  by: entry.by,
+  at: entry.at,
+  ...(entry.retired === undefined ? {} : { retired: entry.retired }),
+});
+
+/** Newest first, the store's order breaking ties. Pure. */
+const newestFirst = (entries: readonly ShownEntry[]): ShownEntry[] => [...entries].reverse().sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || 0);
 
 /** `bm_memory` and the Main's `bm_repo`, as server-run tools the endpoint composes with its others. Never throws. */
 export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
@@ -135,7 +180,8 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
     const home = deps.home();
     const store = createMemoryStore(home, { now, env });
     if (input.op === "read") {
-      const active = store.active(project);
+      const live = store.live(project);
+      const retired = store.retired(project);
       const precedents = createPrecedentStore(home)
         .active(now(), project)
         .map((precedent): ShownEntry => ({
@@ -146,13 +192,61 @@ export function createMemoryTools(deps: MemoryToolDeps): MemoryTools {
           by: "owner",
           at: precedent.createdAt,
         }));
-      const entries = [...active.map(shown), ...precedents].filter((entry) => matches(entry, input.query));
-      return answered({ project, active: active.length, limit: MAX_ACTIVE_MEMORY, entries });
+      const counts = { project, live: live.length, retired: retired.length, limit: MAX_ACTIVE_MEMORY };
+      if (input.id !== undefined) {
+        const found = live.find((entry) => entry.id === input.id);
+        const old = retired.find(({ entry }) => entry.id === input.id);
+        if (found === undefined && old === undefined) return refused(`memory entry ${input.id} is not an active entry of ${project}; read without an id for the index. ${NOTHING}`);
+        return answered({ ...counts, entry: found === undefined ? shown(old!.entry, old!.retirement) : shown(found) });
+      }
+      const pool = newestFirst([...live.map((entry) => shown(entry)), ...(input.retired === true ? retired.map(({ entry, retirement }) => shown(entry, retirement)) : [])]);
+      if (input.query !== undefined) {
+        const hits = [...pool, ...precedents].filter((entry) => matches(entry, input.query));
+        const entries = hits.slice(0, MEMORY_QUERY_ENTRIES);
+        return answered({ ...counts, entries, ...(hits.length > entries.length ? { more: hits.length - entries.length } : {}) });
+      }
+      const index = pool.slice(0, MEMORY_INDEX_ENTRIES).map(indexed);
+      const shownPrecedents = newestFirst(precedents).slice(0, MEMORY_INDEX_PRECEDENTS);
+      return answered({
+        ...counts,
+        index,
+        ...(pool.length > index.length ? { more: `${pool.length - index.length} older entries: read with a query or an id` } : {}),
+        precedents: shownPrecedents,
+        ...(precedents.length > shownPrecedents.length ? { precedentsMore: `${precedents.length - shownPrecedents.length} older precedents: read with a query` } : {}),
+      });
     }
     if (input.op === "add") {
-      const result = store.add(project, { kind: input.kind!, text: input.text!, source: input.source!, by });
+      const result = store.add(project, {
+        kind: input.kind!,
+        text: input.text!,
+        source: input.source!,
+        by,
+        ...(input.scope === undefined ? {} : { scope: input.scope }),
+        ...(input.subject === undefined ? {} : { subject: input.subject }),
+        ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
+      });
       if (!result.ok) return refused([...result.reasons, "Nothing was stored."].join("\n"));
-      return answered({ added: shown(result.entry), active: store.active(project).length, limit: MAX_ACTIVE_MEMORY });
+      // §18.3: the entries its subject retires, by id.
+      const replaced = store
+        .retired(project)
+        .filter(({ entry, retirement }) => retirement.reason === "superseded" && retirement.since === result.entry.at && entry.id !== result.entry.id)
+        .map(({ entry }) => entry.id);
+      // §18.1: a mission's entry never retires a repo entry on the same subject; say so, so the adder can replace it as repo.
+      const subject = result.entry.subject?.trim().toLowerCase();
+      const kept =
+        subject === undefined || scopeOf(result.entry) === "repo"
+          ? []
+          : store
+              .live(project)
+              .filter((entry) => entry.id !== result.entry.id && scopeOf(entry) === "repo" && entry.subject?.trim().toLowerCase() === subject)
+              .map((entry) => entry.id);
+      return answered({
+        added: shown(result.entry),
+        live: store.live(project).length,
+        limit: MAX_ACTIVE_MEMORY,
+        ...(replaced.length === 0 ? {} : { retires: replaced }),
+        ...(kept.length === 0 ? {} : { stillLive: kept, note: `${kept.join(", ")} (repo) keep${kept.length === 1 ? "s" : ""} holding for later missions; add with scope repo to replace ${kept.length === 1 ? "it" : "them"}.` }),
+      });
     }
     const result = store.remove(project, input.id!);
     if (!result.ok) return refused([...result.reasons, "Nothing was changed."].join("\n"));

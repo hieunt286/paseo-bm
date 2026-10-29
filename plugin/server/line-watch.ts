@@ -28,6 +28,7 @@ import type { IntegrationCi } from "../shared/coordination";
 import { GIT_READ_ONLY_PREFIX, runGit, type GitRunner } from "./repo-tool";
 import { descriptorOf, lineStateOf, type LineDescriptor, type LineState } from "./line-state";
 import { createMissionStore, type Mission, type Placement } from "./mission-store";
+import { laneOf } from "./placements";
 
 /** How old a line may be before the next pass reads it again. */
 export const LINE_REFRESH_MS = 60_000;
@@ -76,7 +77,8 @@ export function clearLineCache(): void {
 /** A mission's newest placement of each repo (§3.2: a retry appends a record), in charter order of first appearance. Pure. */
 export function newestPlacementsOf(mission: Pick<Mission, "placements">): Placement[] {
   const byRepo = new Map<string, Placement>();
-  for (const placement of mission.placements ?? []) byRepo.set(placement.repo, placement);
+  // Delivery line design §19.1: the line is the mission branch, lane 1; other lanes merge into it.
+  for (const placement of mission.placements ?? []) if (laneOf(placement) === 1) byRepo.set(placement.repo, placement);
   return [...byRepo.values()];
 }
 

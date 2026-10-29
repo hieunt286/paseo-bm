@@ -50,6 +50,8 @@ export interface AgentNotice {
   first?: boolean;
   /** The wake gate at the send (delivery line design §6.4): read just before it goes; true holds it (`callbacks.onHeld`). */
   isHeld?: () => boolean;
+  /** The owner's words to a Worker (delivery line design §19.5): `EnqueueOptions.steer`. Ignored on the Main's channel. */
+  steer?: boolean;
   /** The plugin's shared queue by default. */
   queue?: ChannelQueue;
 }
@@ -59,7 +61,9 @@ export async function enqueueNotice(notice: AgentNotice): Promise<NoticeOutcome>
   const queue = notice.queue ?? noticeQueue;
   if (queue.enqueueBatch === undefined || !isMissionMain(notice.home, notice.targetId)) {
     const args = [notice.targetId, notice.kind, notice.text, notice.paseo] as const;
-    if (notice.isHeld !== undefined) return queue.enqueue(...args, notice.callbacks, { isHeld: notice.isHeld });
+    if (notice.isHeld !== undefined || notice.steer === true) {
+      return queue.enqueue(...args, notice.callbacks, { ...(notice.isHeld === undefined ? {} : { isHeld: notice.isHeld }), ...(notice.steer === true ? { steer: true } : {}) });
+    }
     return notice.callbacks === undefined ? queue.enqueue(...args) : queue.enqueue(...args, notice.callbacks);
   }
   const item = {

@@ -6,6 +6,23 @@ export interface ReleaseNote { version: string; summary: string; sections: reado
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    "version": "0.7.0",
+    "summary": "Missions can run independent work in parallel lanes, keep their context bounded, and recover delegated provider failures through their Main without another owner confirmation.",
+    "sections": [
+      "What this version brings",
+      "Context and memory",
+      "Parallel work and delivery",
+      "Provider recovery",
+      "Agent roles",
+      "What to know when upgrading",
+      "Rollback",
+      "Evidence",
+      "Sources"
+    ],
+    "prereleases": [],
+    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.7.0/docs/releases/paseo-bm-release-notes-0.7.0.md"
+  },
+  {
     "version": "0.6.0",
     "summary": "A delivery line for missions. Each mission now works on its own branch, in its own worktree of each repository, and its Workers commit there; pushing and opening the merge request takes your yes once per mission and repository. A request ends at its first finished, and more work continues in a fresh Worker. No agent waits on a CI pipeline any more, a re-review checks only the diff of the fixes, and a waiting Worker is woken only for what it waits on. You get fewer cards, and each says what was really done.",
     "sections": [

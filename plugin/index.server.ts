@@ -1,5 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { tellMainOfQuestions } from "./server/mission-tools";
+import { createMainFallbackRecovery, tellMainOfQuestions } from "./server/mission-tools";
 import type { Decision } from "./shared/decisions";
 import { MANAGER_INSTRUCTIONS } from "./server/manager-instructions";
 import { listWorkspaceAgents } from "./server/manager";
@@ -32,6 +32,9 @@ import { createCheckpointOffers } from "./server/checkpoint-card";
 import { createBudgetTold } from "./server/budget-told";
 import { registerFormatCheck } from "./server/format-check";
 import { registerNoticeQueue, type NoticePaseo } from "./server/notice-queue";
+import { createWorkerCreationTools } from "./server/create-worker";
+import { startHeldRequests } from "./server/held-requests";
+import { replaceOutdatedMains } from "./server/main-upgrade";
 import { createOutboxResend } from "./server/outbox";
 import { dataHome } from "./server/rpc-kit";
 import { registerSetupRpcs } from "./server/setup-rpc";
@@ -204,6 +207,14 @@ export default function contribute(server: PluginServerContext): () => void {
       try {
         await recoverHookBindings(handle, { home: dataHome(), bindings: agentTools.bindings });
       } finally {
+        // Delivery line design §19.6: held requests whose requests finished start, created as their Main would.
+        const home = dataHome();
+        if (home !== null) {
+          const creation = createWorkerCreationTools({ binder: () => agentTools.binder, paseo: () => handle, home: () => home, log: (message) => console.warn(message) });
+          await startHeldRequests(home, { create: (input, caller) => creation.call("bm_create_worker", input, caller), paseo: handle as unknown as NoticePaseo, log: (message) => console.warn(message) });
+          // Delivery line design §19.12: a Main on an older paseo-bm's instructions is handed over while idle.
+          await replaceOutdatedMains(home, handle, { home, binder: () => agentTools.binder, bindings: () => agentTools.bindings, log: (message) => console.warn(message) });
+        }
         // Missions design §9.7: the governor's mission.signal, mission.review and mission.scope wake the Orchestrator.
         await eventBus.governed(await governor.pass(handle), handle);
         await eventBus.publish(await conflicts.pass(), handle);
@@ -363,9 +374,12 @@ export default function contribute(server: PluginServerContext): () => void {
   const fallbackWaiter = createFallbackWaiter();
   // Autonomy design §A.5 d: pending incidents recorded before this run get their decision once.
   const syncFallbackDecisionsOnce = createFallbackDecisionStartup();
+  const recoverMainFallbacks = createMainFallbackRecovery();
   const armWaits = (paseo: unknown) => {
     void fallbackWaiter.ensureArmed(paseo);
     syncFallbackDecisionsOnce();
+    const home = dataHome();
+    if (home !== null) void recoverMainFallbacks({ home, paseo, now: new Date(), log: (message) => console.warn(message) });
     shareHandle(paseo);
   };
   const removeFallbackDetection = registerFallbackDetection(server, {
@@ -407,10 +421,13 @@ export default function contribute(server: PluginServerContext): () => void {
   };
   const switchByRole: FallbackAction = (incident, paseo, deps) => switches[incident.role](incident, paseo, deps);
   const fallbackActions: FallbackActions = { switch: switchByRole, wait: fallbackWaiter.wait, resend: createReviewerResend() };
-  // A new incident's decision wakes nothing (missions design §9.1), as a Worker's question does not.
+  // ADR-040: a delegated request fallback reaches its Main through the durable channel.
   const removeFallbackRpcs = registerFallbackRpcs(server, fallbackActions, {
     onPaseo: armWaits,
-    onDecisionsOpened: (_opened, paseo) => eventBus.publish([], paseo),
+    onDecisionsOpened: (opened, paseo) => {
+      tellMainsOf(opened, paseo);
+      return eventBus.publish([], paseo);
+    },
   });
   // Autonomy design §A.6 (ADR-017): decisions.list / get / answer / confirm. An
   // answered decision is delivered by its asker kind: a fallback decision runs

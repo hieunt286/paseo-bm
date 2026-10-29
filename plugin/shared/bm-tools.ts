@@ -1058,7 +1058,7 @@ export const ORCHESTRATOR_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_decide",
     role: "orchestrator",
     description:
-      "Decide a fallback incident (f:…) for the owner, where the owner's policy delegates its class to you in that project. Choose the option the owner would, and give your reason in one line; the owner sees both. The plugin then runs the incident's action exactly as it runs the owner's choice. Refused, changing nothing, unless the incident is still open and its class is delegated in that project; a Worker's question (q:…) is its Main's or the owner's, and your own decisions (o:…) are always the owner's. An incident you leave stays open for the owner.",
+      "Decide a fallback incident (f:…) outside a mission request for the owner, where the owner's policy delegates its class to you in that project. A mission request's delegated fallback belongs to its Main, which uses bm_answer_fallback. Choose the option the owner would, and give your reason in one line; the owner sees both. The plugin then runs the incident's action exactly as it runs the owner's choice. Refused, changing nothing, unless the incident is still open and its class is delegated in that project; a Worker's question (q:…) is its Main's or the owner's, and your own decisions (o:…) are always the owner's. An incident you leave stays open for the owner.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1216,7 +1216,7 @@ export const MANAGER_SERVER_TOOLS: readonly ToolFace[] = [
     name: "bm_decisions",
     role: "manager",
     description:
-      "The owner's decisions of one request, as the plugin stores them: the Worker's questions and the Orchestrator's, newest asked first, redacted, each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its class, its options, the owner's answer and what the plugin delivered. Read-only: answering is the owner's, in paseo-bm. Returns JSON.",
+      "The owner's decisions of one request, as the plugin stores them: the Worker's questions and the Orchestrator's, newest asked first, redacted, each with its status (open, needs-confirmation, answered, superseded, withdrawn, expired), its class, its options, the owner's answer and what the plugin delivered. Read-only: as a Main, answer your delegated Worker questions with bm_answer_worker and delegated provider fallback with bm_answer_fallback; the owner may answer first. Returns JSON.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1557,7 +1557,7 @@ export const TELL_WORKER_FACE: ToolFace = {
   name: "bm_tell_worker",
   role: "manager",
   description:
-    "Give a request's Worker the owner's words or a fact it needs: paseo-bm delivers them to that request's one live Worker at its next idle moment, never into a running turn. While the Worker waits on items by id, a tell is held and goes with them (delivery \"held\", with a note naming them); now: true delivers it at once, for owner words that change the wait. A finished or stopped request goes on as its continuation: a new request and Worker, briefed by paseo-bm, returning { requestId, continuationOf, workerId, delivery, opened }. Only a request of yours. Returns JSON { workerId, delivery, note? }.",
+    "Give a request's Worker words about ITS OWN work — the owner's correction, a stop, an answer or a fact it needs — never new work: while the request is at work, about is required, and about: \"new\" is refused (new work gets its own Worker with bm_create_worker, lane: \"new\" or after). paseo-bm delivers to that request's one live Worker at its next idle moment (delivery \"sent\" or \"queued\" with turnMinutes, how long its turn has run). While the Worker waits on items by id, a tell is held and goes with them (delivery \"held\", with a note naming them). now: true with about: \"current\" marks the owner's own words that correct or stop this work: delivered at once, and into a running Claude or Codex Worker's turn (delivery \"steered\"); turnReplaced: true when Paseo restarted that turn with them instead. A finished or stopped request goes on as its continuation: a new request and Worker, briefed by paseo-bm, returning { requestId, continuationOf, workerId, delivery, opened }. Only a request of yours. Returns JSON { workerId, delivery, turnMinutes?, turnReplaced?, note? }.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1567,7 +1567,12 @@ export const TELL_WORKER_FACE: ToolFace = {
       text: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellText, description: "The owner's words, verbatim, or the fact." },
       source: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.tellSource, description: "Where it comes from: the owner's message, a document, a decision id." },
       peerLink: PEER_LINK,
-      now: { type: "boolean", description: "true: deliver at once even while the Worker waits on items by id — only for the owner's words that change what it waits on." },
+      now: { type: "boolean", description: "true, with about: \"current\": the owner's own words from their message in this turn that correct or stop this request's work — delivered at once even while the Worker waits on items by id, and steered into its running turn. Never for your own facts, never for new work." },
+      about: {
+        type: "string",
+        enum: ["current", "new"],
+        description: "Required while the request is at work. \"current\": these words correct, stop or answer this request's own work. \"new\": anything else — a new ask, a bug elsewhere, another feature; refused here, it gets its own Worker with bm_create_worker.",
+      },
       refs: MESSAGE_REFS,
     },
   },
@@ -1779,14 +1784,21 @@ const MISSION_REPOS: JsonSchema = { type: "array", minItems: 1, maxItems: MISSIO
 const BUDGET_VALUE: JsonSchema = { type: "integer", minimum: 0 };
 
 
-/** `bm_mission`, `bm_mission_start`, `bm_mission_update` and `bm_answer_worker`: a bound Manager lists them; only a Main can use them. */
+/** `bm_mission`, `bm_mission_start`, `bm_mission_update`, `bm_answer_worker` and `bm_hold_cancel`: a bound Manager lists them; only a Main can use them. */
 export const MISSION_TOOL_FACES: readonly ToolFace[] = [
   {
     name: "bm_mission",
     role: "manager",
     description:
-      "Read your mission: its charter (goal, repos, non-goals, done criteria, budget, whether the owner confirmed it), plan and contracts; each request of its roster with its repo, Worker, phase and newest report; your Workers' open questions and the mission's open owner cards (m:); the mission level; the newest 50 journal lines. Read-only. Returns JSON.",
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      "Read your mission: its charter (goal, repos, non-goals, done criteria, budget, whether the owner confirmed it), plan and contracts; each active request of its roster with its repo, Worker, phase, newest report and open questions; each finished or stopped request as one line (the newest 20, with settledMore when there are others); the mission's open owner cards (m:); the mission level; the newest 20 journal lines. requestId gives one request in full; journal asks for more lines. Read-only. Returns JSON.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        requestId: { ...ID, description: "One request of this mission (req-…), active or settled: the answer adds it in full as request." },
+        journal: { type: "integer", minimum: 1, maximum: 50, description: "How many of the newest journal lines to show, 1-50 (default 20)." },
+      },
+    },
   },
   {
     name: "bm_mission_start",
@@ -1913,6 +1925,35 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
       },
     },
   },
+  {
+    name: "bm_answer_fallback",
+    role: "manager",
+    description: `Resolve an open provider fallback (f:…) of your mission's request where paseo-bm names you the decider. Choose an offered recovery option now, normally switch to the configured candidate, without asking the owner to confirm again. The plugin records your reason and runs its existing switch or wait; never create a replacement yourself. Refused for another mission, missing delegation, an ownerOnly decision, a settled incident or an unavailable option. Returns JSON { decisionId, delivery, said }; check the stored delivery and tell the owner if recovery failed. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["decisionId", "option", "why"],
+      properties: {
+        decisionId: { type: "string", pattern: "^f:fb-[0-9a-f]{12}$", description: "The full fallback decision id from the plugin notice or bm_decisions." },
+        option: { type: "string", enum: ["switch", "wait", "dismiss"], description: "An option the decision offers." },
+        why: { type: "string", minLength: 1, maxLength: 300, description: "Why this recovery continues the mission, in one line." },
+      },
+    },
+  },
+  {
+    name: "bm_hold_cancel",
+    role: "manager",
+    description: `Cancel a held request of your mission (one bm_create_worker held with after, listed by bm_mission under held): paseo-bm will not create its Worker. Its why goes to the mission's journal. Returns JSON { cancelled }. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["holdId", "why"],
+      properties: {
+        holdId: { type: "string", pattern: "^hold-\\d{8}T\\d{6,9}Z$", description: "The held request, hold-…, as bm_mission lists it." },
+        why: { type: "string", minLength: 1, maxLength: 300, description: "Why, in one line." },
+      },
+    },
+  },
 ];
 
 /**
@@ -1991,7 +2032,7 @@ export const MISSION_SPLIT_FACE: ToolFace = {
 // ---------------------------------------------------------------------------
 
 /** The bounds of `bm_memory` and the Main's `bm_repo` (missions design §2.5, §4); `text` and `source` are the memory store's. */
-export const MEMORY_TOOL_LIMITS = { text: 1_000, source: 300, query: 200, why: 300, from: 1_000_000, lines: 2_000 } as const;
+export const MEMORY_TOOL_LIMITS = { text: 1_000, source: 300, query: 200, why: 300, subject: 80, from: 1_000_000, lines: 2_000 } as const;
 /** What a Main adds to a repo's memory; a Worker adds the last three (§5). A `precedent` is the owner's, read through. */
 export const MEMORY_ADD_KINDS = ["decision", "fact", "convention", "contract"] as const;
 export const WORKER_MEMORY_KINDS = ["fact", "convention", "contract"] as const;
@@ -2002,8 +2043,8 @@ function memoryFace(role: "manager" | "worker"): ToolFace {
     name: "bm_memory",
     role,
     description: main
-      ? `Read or curate the project memory of a repo of your mission: what it decided, learnt and agreed, for the Workers and Mains after you. op read (query narrows it) lists its active entries and the owner's precedents; add stores one (kind, text, source); remove (id, why) retires one, its why in the mission's journal. At most 300 active entries a repo: past that, add is refused until you remove some. The owner's answers to your Workers' questions are added by paseo-bm. Returns JSON. ${DELIVERED}`
-      : `Read or add to the project memory of your own repo: what it decided, learnt and agreed, for the Workers after you. op read (query narrows it) lists its active entries and the owner's precedents; add stores one fact, convention or contract (kind, text, source). Returns JSON. ${DELIVERED}`,
+      ? `Read or curate the project memory of a repo of your mission: what later Workers there must know. op read gives an index of the live entries (id, kind, scope, the first words); a query gives the matching entries in full, an id one entry; retired: true adds the entries paseo-bm retired (a closed mission's, a replaced subject's, an old mission fact). add stores one (kind, text, source; scope repo for what outlasts this mission, a subject when it replaces an entry on the same subject); remove (id, why) retires one, its why in the mission's journal. At most 300 live entries a repo. The owner's answers to your Workers' questions are added by paseo-bm. Returns JSON. ${DELIVERED}`
+      : `Read or add to the project memory of your own repo: what later Workers here must know. op read gives an index of the live entries; a query gives the matching entries in full, an id one entry. add stores one lasting fact, convention or contract (kind, text, source; scope repo when it outlasts this mission, a subject when it replaces an entry on the same subject). Returns JSON. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2015,13 +2056,17 @@ function memoryFace(role: "manager" | "worker"): ToolFace {
           description: main ? "The workspace id of a repo of your mission (bm_mission lists them)." : "Your own repo's workspace id; leave it out for your repo.",
         },
         op: { type: "string", enum: main ? ["read", "add", "remove"] : ["read", "add"] },
-        query: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.query, description: "read: only the entries whose text or source holds these words." },
+        query: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.query, description: "read: the entries whose text, subject or source holds these words, in full." },
+        retired: { type: "boolean", description: "read: also the entries paseo-bm retired, each with why." },
         kind: { type: "string", enum: main ? MEMORY_ADD_KINDS : WORKER_MEMORY_KINDS, description: "add: what the entry is." },
         text: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.text, description: "add: the entry, one self-contained statement." },
         source: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.source, description: "add: where it comes from: a request, a decision id, a document, a commit." },
+        subject: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.subject, description: "add: a short name of what the entry is about; a newer entry with the same subject retires the older one." },
+        scope: { type: "string", enum: ["repo", "mission"], description: "add: repo for what every later mission needs; mission for what only this mission settled. Default: mission for a fact or a decision, repo otherwise." },
+        id: { type: "string", pattern: "^mem-[0-9a-f]{10}$", description: main ? "read: that entry in full; remove: the entry to retire. mem-…, as read gave it." : "read: that entry in full, mem-…, as read gave it." },
         ...(main
           ? {
-              id: { type: "string", pattern: "^mem-[0-9a-f]{10}$", description: "remove: the entry, mem-…, as read gave it." },
+              supersedes: { type: "string", pattern: "^mem-[0-9a-f]{10}$", description: "add: an entry this one replaces, mem-…; it is removed in the same write." },
               why: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.why, description: "remove: why it no longer holds, in one line." },
             }
           : {}),
@@ -2133,6 +2178,18 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
           description: "A Main only: the workspace id of the mission's repo the Worker works in (bm_mission lists them). Required when the mission has more than one repo.",
         },
         planStep: { type: "string", minLength: 1, maxLength: 300, description: "A Main only: where this request sits in the mission's plan, in one line." },
+        lane: {
+          type: "string",
+          enum: ["new"],
+          description: "A Main only: \"new\" runs this independent work in a lane of its own in the repo (a worktree and branch made from the mission branch, or a free one reused), so it starts now beside the running work; up to 7 lanes a repo. Leave it out for work on the mission branch itself.",
+        },
+        after: {
+          type: "array",
+          minItems: 1,
+          maxItems: 10,
+          items: REQUEST_ID,
+          description: "A Main only: requests of your mission this work depends on. paseo-bm holds it and creates its Worker by itself when every one of them finishes, and tells you; nothing starts now. Leave it out for work that can start now.",
+        },
       },
     },
   },

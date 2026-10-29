@@ -243,13 +243,82 @@ export const UPDATES_ITEM_MARKER = "BM-ITEM";
 
 const UPDATES_ITEM_LINE = new RegExp(`^${UPDATES_ITEM_MARKER} \\d+$`);
 
-/** The one message of a Main's pending items, oldest first (§6.2); one item alone is its block. Pure. */
+/** An outbox record id (`out-8167f70e1e3a`) or a peer link id (`peer-d2f041c5bc37`) anywhere in a block. */
+const UPDATES_ID_WORDS = /\b(?:out|peer)-[0-9a-f]{6,}\b/g;
+/** The request and phase of a `peer-reply` block's `from:` line. */
+const PEER_REPLY_REQUEST = /\brequest (\S+), phase: /;
+
+/** A block's text with its record and link ids and its `link:` line taken out: what two copies over two links share (delivery line design §18.5). */
+function repeatKeyOf(block: string): string {
+  return block
+    .split("\n")
+    .filter((line) => !line.startsWith("link: "))
+    .join("\n")
+    .replace(UPDATES_ID_WORDS, "");
+}
+
+/** The request a `BM-DELIVERY peer-reply` block reports a phase of, or null for any other block. */
+function peerReplyRequestOf(block: string): string | null {
+  if (!/^BM-DELIVERY peer-reply\b/.test(block)) return null;
+  return PEER_REPLY_REQUEST.exec(block)?.[1] ?? null;
+}
+
+/** The link ids of a block's `link:` lines. */
+function linksOf(block: string): string[] {
+  return block
+    .split("\n")
+    .filter((line) => line.startsWith("link: "))
+    .map((line) => line.slice("link: ".length).trim());
+}
+
+/**
+ * The blocks an update keeps (delivery line design §18.5, ADR-037 decision
+ * 5), in the given order:
+ * - of the `peer-reply` blocks of one request, only the newest (the last) is
+ *   kept;
+ * - a block whose text repeats an earlier kept block's, apart from its record
+ *   and link ids and its `link:` line, is dropped — and when it came over
+ *   another link, the kept block says so (`also on link: …`), so an answer
+ *   owed on each link is not lost.
+ * Pure.
+ */
+export function updatesBlocksOf(blocks: readonly string[]): string[] {
+  const newest = new Map<string, number>();
+  blocks.forEach((block, index) => {
+    const request = peerReplyRequestOf(block);
+    if (request !== null) newest.set(request, index);
+  });
+  const kept: Array<{ block: string; links: string[]; also: string[] }> = [];
+  const byKey = new Map<string, number>();
+  blocks.forEach((block, index) => {
+    const request = peerReplyRequestOf(block);
+    if (request !== null && newest.get(request) !== index) return;
+    const key = repeatKeyOf(block);
+    const at = byKey.get(key);
+    if (at === undefined) {
+      byKey.set(key, kept.length);
+      kept.push({ block, links: linksOf(block), also: [] });
+      return;
+    }
+    const held = kept[at]!;
+    for (const link of linksOf(block)) if (!held.links.includes(link) && !held.also.includes(link)) held.also.push(link);
+  });
+  return kept.map(({ block, also }) => (also.length === 0 ? block : `${block}\nalso on link: ${also.join(", ")} (the same message; one bm_peer_reply on each link that asks)`));
+}
+
+/**
+ * The one message of a Main's pending items, oldest first (§6.2), each thing
+ * said once (`updatesBlocksOf`, delivery line design §18.5); the count is the
+ * blocks kept, and one block kept is sent alone. Each item's callbacks are
+ * the queue's, so a dropped block's record still settles. Pure.
+ */
 export function updatesNoticeOf(blocks: readonly string[]): string {
-  if (blocks.length === 1) return blocks[0]!;
+  const kept = updatesBlocksOf(blocks);
+  if (kept.length === 1) return kept[0]!;
   return [
-    `${UPDATES_NOTICE_MARKER} ${blocks.length}`,
-    `From the paseo-bm plugin, not the owner: ${blocks.length} items, oldest first. Act on each as its block says.`,
-    ...blocks.flatMap((block, index) => [`${UPDATES_ITEM_MARKER} ${index + 1}`, block]),
+    `${UPDATES_NOTICE_MARKER} ${kept.length}`,
+    `From the paseo-bm plugin, not the owner: ${kept.length} items, oldest first. Act on each as its block says.`,
+    ...kept.flatMap((block, index) => [`${UPDATES_ITEM_MARKER} ${index + 1}`, block]),
   ].join("\n");
 }
 

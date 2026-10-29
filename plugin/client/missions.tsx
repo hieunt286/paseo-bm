@@ -3,7 +3,9 @@
  * `docs/design/mockups/missions-screen.html`, artboards A–F): one screen,
  * four views — the list (A, C), a mission's page (B, D; its Main card and
  * In flight card from `docs/design/mockups/mission-runtime.html`, artboards
- * G and H), New mission (E) and a project's memory (F). What each shows is `missions-model.ts`; this file
+ * G and H; its Repositories lanes and In flight's Waiting part from
+ * `docs/design/mockups/mission-lanes.html`, artboards Q and R), New mission
+ * (E) and a project's memory (F). What each shows is `missions-model.ts`; this file
  * reads `missions.list`, `mission.get` and `memory.list` every
  * `WORK_POLL_MS` while the view shows, and sends the owner's changes:
  * `mission.change` (Rename, Close mission, "+ Add"), `autonomy.set-mission-level`
@@ -61,8 +63,11 @@ import {
   type MemoryView,
   type MissionCardView,
   type MissionDraft,
+  type LaneRowView,
   type MissionPageView,
   type NameOf,
+  type OverlapView,
+  type WaitingRowView,
 } from "./missions-model";
 import { RADIUS, dashboardStyles } from "./styles";
 import { MONO } from "./text-tabs";
@@ -707,12 +712,14 @@ function LevelCard({ page, ui, compact, on, styles, theme }: Pick<MissionPageBod
 
 const WORKER_COLUMNS = [1.3, 2.2, 1, 1.4, 1.6] as const;
 
-function WorkerCell({ worker, workerId, openAgent, theme }: { worker: string | null; workerId: string | null; openAgent?: (agentId: string) => void; theme: Theme }) {
+/** A Worker's mark and id, which opens it; `more` other Workers of its lane as "+1" (delivery line design §19.8, mockup Q). */
+function WorkerCell({ worker, workerId, more = 0, openAgent, theme }: { worker: string | null; workerId: string | null; more?: number; openAgent?: (agentId: string) => void; theme: Theme }) {
   if (worker === null || workerId === null) return <Text style={{ fontSize: 13, color: theme.colors.foregroundMuted }}>—</Text>;
   const body = (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
       <RoleMark kind="worker" theme={theme} size={16} />
       <Text style={{ fontSize: 12, fontFamily: MONO, color: theme.colors.foreground }}>{worker}</Text>
+      {more > 0 ? <Text style={{ fontSize: 12, color: theme.colors.foreground }}>{`+${more}`}</Text> : null}
     </View>
   );
   return openAgent === undefined ? body : <Pressable accessibilityRole="button" accessibilityLabel={`Open Worker ${worker}`} onPress={() => openAgent(workerId)}>{body}</Pressable>;
@@ -769,14 +776,64 @@ function WorkersCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyP
   );
 }
 
-const REPO_COLUMNS = [1.2, 2.5, 1.6, 1.2, 1.7] as const;
+const REPO_COLUMNS = [1.5, 2, 2.2, 1.7, 1.8] as const;
 /** The small Revoke and Answer buttons of a table cell. */
 const CELL_BUTTON: ViewStyle = { paddingVertical: 3, paddingHorizontal: 8 };
+/** A lane row's first cell, indented under its repository (mockup Q: 22px with the cell's own 8). */
+const LANE_INDENT: TextStyle = { paddingLeft: 14 };
+
+/** A lane's Work cell (mockup Q): its topic, then "· 🔵 3729405 · 1 Worker" small and muted; "free" when it has none. */
+function LaneWork({ lane, openAgent, theme }: { lane: LaneRowView; openAgent?: (agentId: string) => void; theme: Theme }) {
+  const { colors } = theme;
+  if (lane.work === null) return <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>{lane.idle ?? "—"}</Text>;
+  const { workers, count } = lane.work;
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+      <Text style={{ fontSize: 13, color: colors.foreground }}>{lane.work.topic}</Text>
+      {workers.length === 0 && count === null ? null : <Small tone="muted" theme={theme}>·</Small>}
+      {workers.map((worker, index) => {
+        const mark = (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            <RoleMark kind="worker" theme={theme} size={14} />
+            <Small tone="muted" theme={theme}>{`${worker.short}${index < workers.length - 1 ? "," : ""}`}</Small>
+          </View>
+        );
+        return openAgent === undefined ? (
+          <View key={worker.agentId}>{mark}</View>
+        ) : (
+          <Pressable key={worker.agentId} accessibilityRole="button" accessibilityLabel={`Open Worker ${worker.short}`} onPress={() => openAgent(worker.agentId)}>
+            {mark}
+          </Pressable>
+        );
+      })}
+      {count === null ? null : <Small tone="muted" theme={theme}>{`· ${count}`}</Small>}
+    </View>
+  );
+}
+
+/** The overlap line under the table (mockup Q): a warning square, the lanes in bold, the files in mono, when the Main was told. */
+function OverlapLine({ overlap, theme }: { overlap: OverlapView; theme: Theme }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <View style={{ width: 7, height: 7, backgroundColor: toneColor(theme, "warning") }} />
+      <Text style={{ flexShrink: 1, fontSize: 12, color: theme.colors.foreground }}>
+        <Text style={{ fontWeight: "700" }}>{overlap.lead}</Text>
+        {" "}
+        <Text style={{ fontFamily: MONO }}>{overlap.files}</Text>
+        {` · ${overlap.told}`}
+      </Text>
+    </View>
+  );
+}
 
 /**
- * The Repositories card (delivery line design §4.9, artboards I and J): each
- * repo's mission branch and its state, its merge request and CI (no CI while
- * `integration.ci` is off, ADR-036), and push and merge request with Revoke (confirmed in place) or Answer (the Inbox).
+ * The Repositories card (delivery line design §4.9, §19.8; mockup
+ * `mission-lanes.html`, artboards Q and R): each repo's mission branch and
+ * its state, "n of 7 lanes", its merge request (CI only while
+ * `integration.ci` is on, ADR-036) and push and merge request with Revoke
+ * (confirmed in place) or Answer (the Inbox); under it each lane with its
+ * branch, work and Workers, state and age, a free lane's last merge; then
+ * the overlap lines.
  */
 function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "ui" | "compact" | "on" | "styles" | "theme">) {
   const repositories = page.repositories;
@@ -807,6 +864,7 @@ function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<Mission
           <View key={row.workspaceId} style={{ gap: 6, marginTop: index === 0 ? 0 : 6 }}>
             <Text style={{ fontSize: 12, color: colors.foreground }}>
               <Text style={{ fontWeight: "700" }}>{row.name}</Text>
+              {row.lanesLine === null ? "" : ` · ${row.lanesLine}`}
               {` · ${row.counts}`}
               {row.dirty === null ? null : (
                 <>
@@ -861,12 +919,31 @@ function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<Mission
                 ) : null}
               </Text>
             )}
+            {/* Artboard R: one muted line per lane, its state in its tone; then the overlap lines. */}
+            {row.lanes.map((lane) => (
+              <Text key={lane.lane} style={{ fontSize: 12, color: colors.foregroundMuted }}>
+                {lane.phone}
+                {lane.phoneState === null ? null : (
+                  <>
+                    {" · "}
+                    <Text style={{ color: toneColor(theme, lane.phoneState.tone) }}>{lane.phoneState.text}</Text>
+                  </>
+                )}
+              </Text>
+            ))}
+            {row.overlaps.map((overlap) => (
+              <Text key={overlap.lead} style={{ fontSize: 12, color: colors.foreground }}>
+                <Text style={{ color: toneColor(theme, "warning") }}>■</Text>
+                {` ${overlap.phone}`}
+              </Text>
+            ))}
             {confirmOf(row)}
           </View>
         ))}
       </Card>
     );
   }
+  const muted = (value: string) => <Small tone="muted" theme={theme}>{value}</Small>;
   return (
     <Card styles={styles} theme={theme}>
       <View style={SPREAD_ROW}>
@@ -874,42 +951,48 @@ function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<Mission
         <Small tone="muted" theme={theme}>{repositories.meta}</Small>
       </View>
       <View>
-        <TableRow header cells={["Repository", "Branch → integration", "State", repositories.mrHeader, "Push & merge request"]} flex={REPO_COLUMNS} theme={theme} />
+        <TableRow header cells={["Repository · lane", "Branch", "Work", "State", repositories.mrHeader]} flex={REPO_COLUMNS} theme={theme} />
         {repositories.rows.map((row) => (
           <View key={row.workspaceId}>
             <TableRow
               flex={REPO_COLUMNS}
               theme={theme}
               cells={[
-                row.name,
+                <Text key="name" style={{ fontSize: 13, color: colors.foreground }}>
+                  <Text style={{ fontWeight: "700" }}>{row.name}</Text>
+                  {row.lanesLine === null ? null : <Text style={{ fontSize: 12, color: colors.foregroundMuted }}>{` · ${row.lanesLine}`}</Text>}
+                </Text>,
                 <Text key="branch" style={{ fontSize: 13, color: colors.foreground }}>
                   <Text style={{ fontFamily: MONO, fontSize: 12 }}>{row.branch}</Text>
                   {" → "}
                   <Text style={{ fontFamily: MONO, fontSize: 12 }}>{row.target}</Text>
                 </Text>,
-                <View key="state">
-                  <Text style={{ fontSize: 13, color: colors.foreground }}>
-                    {row.counts}
-                    {row.dirty === null ? null : (
-                      <>
-                        {" · "}
-                        <Text style={{ color: toneColor(theme, row.dirty.tone) }}>{row.dirty.text}</Text>
-                      </>
-                    )}
-                  </Text>
-                  {row.lastCommit === null ? null : <Small tone="muted" theme={theme}>{row.lastCommit}</Small>}
-                </View>,
-                <Text key="mr" style={{ fontSize: 13, color: colors.foregroundMuted }}>
-                  {row.mr === null ? "no merge request yet" : mrLink(row, row.mr.text)}
-                  {row.ci === null ? null : (
+                muted(row.lanes.length === 0 ? "—" : "the mission branch: lanes merge here"),
+                <Text key="state" style={{ fontSize: 13, color: colors.foreground }}>
+                  {row.counts}
+                  {row.dirty === null ? null : (
                     <>
                       {" · "}
-                      <Text style={{ color: toneColor(theme, row.ci.tone) }}>{row.ci.text}</Text>
+                      <Text style={{ color: toneColor(theme, row.dirty.tone) }}>{row.dirty.text}</Text>
                     </>
                   )}
                 </Text>,
-                <View key="push" style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-                  <Small tone={row.push.tone} theme={theme} style={row.push.action === "answer" ? { fontSize: 13 } : undefined}>{row.push.text}</Small>
+                <View key="mr" style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                  <Text style={{ fontSize: 13, color: colors.foregroundMuted }}>
+                    {row.mr === null ? "no merge request yet" : mrLink(row, row.mr.text)}
+                    {row.ci === null ? null : (
+                      <>
+                        {" · "}
+                        <Text style={{ color: toneColor(theme, row.ci.tone) }}>{row.ci.text}</Text>
+                      </>
+                    )}
+                    {row.push.short === "—" ? null : (
+                      <>
+                        {" · "}
+                        <Text style={{ fontSize: 12, color: toneColor(theme, row.push.tone) }}>{row.push.short}</Text>
+                      </>
+                    )}
+                  </Text>
                   {canRevoke(row) ? (
                     <Button label="Revoke" kind="secondary" accessibilityLabel={`Revoke push and merge request for ${row.name}`} disabled={ui.busy !== null} onPress={() => ask(row.workspaceId)} styles={styles} style={CELL_BUTTON} textStyle={BUTTON_TEXT} />
                   ) : canAnswer(row) ? (
@@ -921,11 +1004,33 @@ function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<Mission
               ]}
             />
             {confirmOf(row)}
+            {row.lanes.map((lane) => (
+              <TableRow
+                key={lane.lane}
+                flex={REPO_COLUMNS}
+                theme={theme}
+                cells={[
+                  <Text key="lane" style={{ fontSize: 13, color: colors.foreground, ...LANE_INDENT }}>{lane.label}</Text>,
+                  <Text key="branch" style={{ fontSize: 12, fontFamily: MONO, color: colors.foreground }}>{lane.branch}</Text>,
+                  <LaneWork key="work" lane={lane} openAgent={on.openAgent} theme={theme} />,
+                  lane.state === null ? (
+                    muted(lane.note ?? "—")
+                  ) : (
+                    <View key="state">
+                      <Text style={{ fontSize: 13, color: toneColor(theme, lane.state.tone) }}>{lane.state.text}</Text>
+                      {lane.note === null ? null : <Small tone="muted" theme={theme}>{lane.note}</Small>}
+                    </View>
+                  ),
+                  muted("—"),
+                ]}
+              />
+            ))}
           </View>
         ))}
       </View>
+      {repositories.rows.flatMap((row) => row.overlaps.map((overlap) => <OverlapLine key={`${row.workspaceId}-${overlap.lead}`} overlap={overlap} theme={theme} />))}
       <Small tone="muted" theme={theme}>
-        ↑ commits on the mission branch not yet in the integration branch · ↓ commits of the integration branch not yet merged into it. Merging stays on GitLab. A worktree is removed only by you, when the mission closes.
+        A lane is a worktree of its own on its own branch, made from the mission branch. When its request finishes, the Worker brings the mission branch into the lane and paseo-bm moves the mission branch forward; push and merge request stay one per repository. A free lane is kept for the next piece of work; you remove worktrees when the mission closes.
       </Small>
     </Card>
   );
@@ -1019,7 +1124,71 @@ function FlightLine({ who, children, answer, on, styles, theme }: { who: { text:
   );
 }
 
-/** The In flight card (mission runtime design §7, artboards G and H): what the Main knows — requests and whom they wait on, open questions, the Main's asks, live links. */
+const WAITING_COLUMNS = [2.4, 2, 1, 1.8] as const;
+
+/**
+ * In flight's Waiting part (delivery line design §19.8, artboard Q): held
+ * requests with what they wait for, and tells to busy Workers — steered into
+ * the turn or waiting for its end — with since when and what comes then.
+ */
+function WaitingPart({ rows, styles, theme }: { rows: readonly WaitingRowView[]; styles: Styles; theme: Theme }) {
+  const { colors } = theme;
+  return (
+    <>
+      <Text style={[styles.sectionLabel, { marginTop: 6 }]}>Waiting</Text>
+      {rows.length === 0 ? (
+        <Small tone="muted" theme={theme}>Nothing waiting.</Small>
+      ) : (
+        <View>
+          <TableRow header cells={["What", "For", "Since", "Then"]} flex={WAITING_COLUMNS} theme={theme} />
+          {rows.map((row) => (
+            <TableRow
+              key={row.id}
+              flex={WAITING_COLUMNS}
+              theme={theme}
+              cells={[
+                <View key="what">
+                  <Text style={{ fontSize: 13, color: colors.foreground }}>{row.what}</Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+                    <Small tone="muted" theme={theme}>{row.note}</Small>
+                    {row.worker === null ? null : (
+                      <>
+                        <RoleMark kind="worker" theme={theme} size={14} />
+                        <Small tone="muted" theme={theme}>{row.worker}</Small>
+                      </>
+                    )}
+                  </View>
+                </View>,
+                <View key="for">
+                  {row.after === null ? null : (
+                    <Text style={{ fontSize: 13, color: colors.foreground }}>
+                      {"after "}
+                      {row.after.map((entry, index) => (
+                        <Text key={entry.request}>
+                          {index === 0 ? "" : ", "}
+                          <Text style={{ fontFamily: MONO, fontSize: 12 }}>{entry.request}</Text>
+                          {entry.topic === null ? "" : ` (${entry.topic})`}
+                        </Text>
+                      ))}
+                    </Text>
+                  )}
+                  {row.status === null ? null : <Text style={{ fontSize: row.after === null ? 13 : 12, color: toneColor(theme, row.status.tone) }}>{row.status.text}</Text>}
+                </View>,
+                <Small key="since" theme={theme}>{row.since}</Small>,
+                <Small key="then" tone={row.then.tone} theme={theme}>{row.then.text}</Small>,
+              ]}
+            />
+          ))}
+        </View>
+      )}
+      <Small tone="muted" theme={theme}>
+        Your own words reach a busy Worker at once, inside its turn. Other messages wait for its turn to end. Work that depends on another request waits here and starts by itself when that request finishes.
+      </Small>
+    </>
+  );
+}
+
+/** The In flight card (mission runtime design §7, artboards G and H; its lanes and Waiting part, delivery line design §19.8, artboards Q and R): what the Main knows — requests and whom they wait on, open questions, the Main's asks, live links. */
 function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "on" | "styles" | "theme">) {
   const flight = page.inFlight;
   if (flight === null) return null;
@@ -1043,7 +1212,8 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
           <View key={request.requestId}>
             <Text style={{ fontSize: 12, color: colors.foreground }}>
               <Text style={{ fontWeight: "700" }}>{request.topic}</Text>
-              {" · "}
+              {/* Delivery line design §19.8 (artboard R): its repository and lane. */}
+              {request.phoneRepo === null ? " · " : ` · ${request.phoneRepo} · `}
               <Text style={{ color: toneColor(theme, request.state.tone) }}>{request.phoneState}</Text>
             </Text>
             {/* Delivery line design §2.7 (artboard J): the request it continues. */}
@@ -1051,6 +1221,25 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
           </View>
         ))}
         {flight.restLine === null ? null : <Small tone="muted" theme={theme}>{flight.restLine}</Small>}
+        {/* Delivery line design §19.8 (artboard R): what waits, one line each. */}
+        {flight.waiting === null || flight.waiting.length === 0 ? null : (
+          <>
+            <Text style={[styles.sectionLabel, { marginTop: 4 }]}>Waiting</Text>
+            {flight.waiting.map((row) => (
+              <Text key={row.id} style={{ fontSize: 12, color: colors.foreground }}>
+                {row.phone.bold ? <Text style={{ fontWeight: "700" }}>{row.phone.lead}</Text> : row.phone.lead}
+                {row.phone.rest}
+                {row.phone.status === null ? null : (
+                  <>
+                    {" · "}
+                    <Text style={{ color: toneColor(theme, row.phone.status.tone) }}>{row.phone.status.text}</Text>
+                  </>
+                )}
+                {row.phone.age === null ? null : ` · ${row.phone.age}`}
+              </Text>
+            ))}
+          </>
+        )}
         {yours.map((question) => (
           <Text key={question.id} style={{ fontSize: 12, color: colors.foreground, marginTop: 4 }}>
             <Text style={{ color: toneColor(theme, "warning") }}>You decide:</Text>
@@ -1079,7 +1268,7 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
         <Small tone="muted" theme={theme}>Nothing in flight.</Small>
       ) : (
         <View>
-          <TableRow header cells={["Request · topic", "Repository", "Worker", "State", "Last report"]} flex={FLIGHT_COLUMNS} theme={theme} />
+          <TableRow header cells={["Request · topic", flight.repoHeader, "Worker", "State", "Last report"]} flex={FLIGHT_COLUMNS} theme={theme} />
           {flight.requests.map((request) => (
             <TableRow
               key={request.requestId}
@@ -1101,7 +1290,7 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
                   )}
                 </View>,
                 text(request.repo, !request.active),
-                <WorkerCell key="worker" worker={request.worker} workerId={request.workerId} openAgent={on.openAgent} theme={theme} />,
+                <WorkerCell key="worker" worker={request.worker} workerId={request.workerId} more={request.moreWorkers} openAgent={on.openAgent} theme={theme} />,
                 <Text key="state" style={{ fontSize: 13, color: toneColor(theme, request.state.tone) }}>
                   {request.state.text}
                   {request.next === null ? null : <Text style={{ color: colors.foregroundMuted }}>{` ${request.next}`}</Text>}
@@ -1123,6 +1312,7 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
           ))}
         </View>
       )}
+      {flight.waiting === null ? null : <WaitingPart rows={flight.waiting} styles={styles} theme={theme} />}
       <Grid gap={12}>
         {[
           <View key="questions">

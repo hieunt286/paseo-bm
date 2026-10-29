@@ -77,6 +77,8 @@ import {
 import { resolveAtOpen } from "./policy-resolve";
 import { undeclaredCategoriesOf } from "../shared/decision-gate";
 import { decideRefusalOf, type AutonomyPolicy } from "../shared/autonomy";
+import { deciderOf } from "../shared/authority";
+import { authorityFactsOf } from "./authority-facts";
 import {
   MAX_ANSWER_REASON_CHARS,
   MAX_ASK_OWNER_OPTIONS,
@@ -600,7 +602,12 @@ async function recordInterventionOf(of: Decision, context: ToolContext, deps: De
 export async function bmDecide(input: DecideInput, context: ToolContext, deps: DecideToolDeps): Promise<ServerToolResult> {
   // An incident's options allow no effect (`fallback-decisions.ts`): none acts on a request's finish or grants review calls.
   const { decision: answered, store } = transitionUnderPolicy(input, context, {
-    refusalOf: notAQuestion((policy, decision) => decideRefusalOf(policy, decision, { optionKey: input.optionKey })),
+    refusalOf: notAQuestion((policy, decision) => {
+      const refusal = decideRefusalOf(policy, decision, { optionKey: input.optionKey });
+      if (refusal !== null) return refusal;
+      const authority = deciderOf(decision, authorityFactsOf(context.home));
+      return authority.decider === "orchestrator" ? null : `decision ${decision.id} belongs to ${authority.decider}: ${authority.why}`;
+    }),
     idsFrom: "bm_decisions gave",
     what: "the answer to",
     change: (current, { reason, at }) =>

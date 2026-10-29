@@ -4,12 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import contribute from "../plugin/index.server";
 import {
+  STEER_PROVIDERS,
   createNoticeQueue,
   enqueue,
   noticeQueue,
   registerNoticeQueue,
+  steerRefusalOf,
+  turnIdOf,
   type NoticeHost,
   type NoticePaseo,
+  type SteerResult,
 } from "../plugin/server/notice-queue";
 
 /**
@@ -829,5 +833,155 @@ describe("the server entry", () => {
     cleanup();
     expect(hooks.size).toBe(0);
     expect(noticeQueue.pending("agent-1")).toEqual([]);
+  });
+});
+
+/**
+ * The owner's words steered into a running Worker's turn (delivery line
+ * design §19.5, §19.9; WP-11.6). A fake handle: scripted snapshots with a
+ * provider and Paseo's `activeTurn`, a record of every send and its options.
+ * A steer keeps the turn id unless the fake is told Paseo replaces the turn.
+ */
+describe("steer (delivery line design §19.5)", () => {
+  type SteerAgent = { status: string; provider: string; activeTurn?: { turnId: string } | null; archivedAt?: string | null };
+  const BASES: Record<string, string> = { "bm-worker": "claude", "bm-worker-fallback-1": "codex", "bm-worker-fallback-2": "opencode", "bm-reviewer": "claude" };
+
+  function steerWorld(initial: Record<string, SteerAgent>, options: { replaces?: boolean; failSend?: boolean } = {}) {
+    const agents = new Map(Object.entries(initial).map(([id, agent]) => [id, { ...agent }]));
+    const sends: Array<{ id: string; text: string; options: unknown }> = [];
+    let turns = 0;
+    const paseo: NoticePaseo = {
+      agents: {
+        ref: (id: string) => ({
+          refresh: async () => {
+            const agent = agents.get(id);
+            return agent === undefined ? null : { agent: { ...agent } };
+          },
+          send: async (text: string, sendOptions?: unknown) => {
+            if (options.failSend === true) throw new Error("daemon said no");
+            sends.push({ id, text, options: sendOptions });
+            const agent = agents.get(id)!;
+            const steer = (sendOptions as { activeTurnBehavior?: string } | undefined)?.activeTurnBehavior === "steer";
+            // Paseo: a steer the provider takes joins the turn; anything else starts a new turn.
+            if (!steer || options.replaces === true) agents.set(id, { ...agent, status: "running", activeTurn: { turnId: `turn-new-${++turns}` } });
+          },
+        }),
+      },
+    };
+    const logs: string[] = [];
+    let ids = 0;
+    const queue = createNoticeQueue({
+      log: (message) => logs.push(message),
+      now: () => new Date("2026-10-25T10:00:00.000Z"),
+      newMessageId: () => `msg-${++ids}`,
+      baseOf: async (_paseo, provider) => (provider === null || provider === undefined ? null : (BASES[provider.split("/")[0]!] ?? null)),
+    });
+    const set = (id: string, change: Partial<SteerAgent>) => agents.set(id, { ...agents.get(id)!, ...change });
+    const turnEnded = (id: string) =>
+      queue.turnEnded({ agent: { id, workspaceId: "ws-1", parentAgentId: null, provider: "bm-worker", cwd: "/repo", title: null }, turnId: "t", outcome: { kind: "completed" }, timeline: [] }, paseo);
+    return { paseo, sends, logs, queue, set, turnEnded };
+  }
+
+  const running = (provider = "bm-worker", turnId = "turn-1"): SteerAgent => ({ status: "running", provider, activeTurn: { turnId } });
+
+  it("steers the owner's words into a running Claude Worker's turn when every guard holds", async () => {
+    const { paseo, sends, logs, queue } = steerWorld({ wrk: running() });
+    const told: Array<[string, unknown]> = [];
+    const outcome = await queue.enqueue(
+      "wrk",
+      "message:out-1",
+      "Continue req-1.\nUse the blue button.",
+      paseo,
+      { onSteered: (_id, _kind, result) => told.push(["steered", result]), onSent: () => told.push(["sent", null]) },
+      { steer: true },
+    );
+    expect(outcome).toBe("steered");
+    expect(sends).toEqual([{ id: "wrk", text: "Continue req-1.\nUse the blue button.", options: { messageId: "msg-1", activeTurnBehavior: "steer" } }]);
+    const result: SteerResult = { at: "2026-10-25T10:00:00.000Z", messageId: "msg-1", replaced: false, turnBefore: "turn-1", turnAfter: "turn-1" };
+    expect(told).toEqual([["steered", result], ["sent", null]]);
+    expect(queue.pending("wrk")).toEqual([]);
+    expect(logs).toEqual([]);
+  });
+
+  it("steers into a Codex Worker (a fallback alias) as well", async () => {
+    const { paseo, sends, queue } = steerWorld({ wrk: running("bm-worker-fallback-1/gpt-5") });
+    await expect(queue.enqueue("wrk", "message:out-1", "Stop after the tests.", paseo, undefined, { steer: true })).resolves.toBe("steered");
+    expect(sends.map((send) => send.options)).toEqual([{ messageId: "msg-1", activeTurnBehavior: "steer" }]);
+  });
+
+  it.each<[string, SteerAgent, string]>([
+    ["a Reviewer", running("bm-reviewer"), "words"],
+    ["a Worker whose base is not Claude or Codex", running("bm-worker-fallback-2"), "words"],
+    ["a provider whose base is not known", running("bm-worker-fallback-3"), "words"],
+    ["a turn with no id", { status: "running", provider: "bm-worker", activeTurn: null }, "words"],
+    ["an older daemon that shows no activeTurn", { status: "running", provider: "bm-worker" }, "words"],
+    ["an initializing Worker", { status: "initializing", provider: "bm-worker", activeTurn: { turnId: "turn-1" } }, "words"],
+    ["a text that starts with /", running(), "  /compact now"],
+  ])("queues for the turn end, never steering, to %s", async (_name, agent, text) => {
+    const { paseo, sends, queue, set, turnEnded } = steerWorld({ wrk: agent });
+    await expect(queue.enqueue("wrk", "message:out-1", text, paseo, undefined, { steer: true })).resolves.toBe("queued");
+    expect(sends).toEqual([]);
+    expect(queue.pending("wrk")).toEqual([{ kind: "message:out-1", text }]);
+    // At the turn end it goes as every other notice: a plain send, no steer.
+    set("wrk", { status: "idle", activeTurn: null });
+    await turnEnded("wrk");
+    expect(sends).toEqual([{ id: "wrk", text, options: undefined }]);
+  });
+
+  it("never steers without the steer option", async () => {
+    const { paseo, sends, queue } = steerWorld({ wrk: running() });
+    await expect(queue.enqueue("wrk", "message:out-1", "words", paseo)).resolves.toBe("queued");
+    expect(sends).toEqual([]);
+  });
+
+  it("sends to an idle Worker as today: a plain send, no steer", async () => {
+    const { paseo, sends, queue } = steerWorld({ wrk: { status: "idle", provider: "bm-worker", activeTurn: null } });
+    const told: string[] = [];
+    await expect(queue.enqueue("wrk", "message:out-1", "words", paseo, { onSteered: () => told.push("steered"), onSent: () => told.push("sent") }, { steer: true })).resolves.toBe("sent");
+    expect(sends).toEqual([{ id: "wrk", text: "words", options: undefined }]);
+    expect(told).toEqual(["sent"]);
+  });
+
+  it("answers turn-replaced, tells the sender and logs one line when the turn id changed across the send", async () => {
+    const { paseo, sends, logs, queue } = steerWorld({ wrk: running() }, { replaces: true });
+    const results: SteerResult[] = [];
+    const sent: string[] = [];
+    const outcome = await queue.enqueue("wrk", "message:out-1", "words", paseo, { onSteered: (_id, _kind, result) => results.push(result), onSent: (id) => sent.push(id) }, { steer: true });
+    expect(outcome).toBe("turn-replaced");
+    expect(sends).toHaveLength(1);
+    expect(results).toEqual([{ at: "2026-10-25T10:00:00.000Z", messageId: "msg-1", replaced: true, turnBefore: "turn-1", turnAfter: "turn-new-1" }]);
+    expect(sent).toEqual(["wrk"]);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/^\[paseo-bm\] Paseo replaced wrk's running turn \(turn-1 → turn-new-1\)/);
+  });
+
+  it("goes ahead of what is queued for the Worker, which still waits for the turn end", async () => {
+    const { paseo, sends, queue } = steerWorld({ wrk: running() });
+    await expect(queue.enqueue("wrk", "report:out-0", "a report", paseo)).resolves.toBe("queued");
+    await expect(queue.enqueue("wrk", "message:out-1", "words", paseo, undefined, { steer: true })).resolves.toBe("steered");
+    expect(sends.map((send) => send.text)).toEqual(["words"]);
+    expect(queue.pending("wrk")).toEqual([{ kind: "report:out-0", text: "a report" }]);
+  });
+
+  it("drops the notice and tells the sender when the steer's send fails", async () => {
+    const { paseo, logs, queue } = steerWorld({ wrk: running() }, { failSend: true });
+    const dropped: string[] = [];
+    await expect(queue.enqueue("wrk", "message:out-1", "words", paseo, { onDropped: (_id, _kind, reason) => dropped.push(reason) }, { steer: true })).resolves.toBe("dropped");
+    expect(dropped).toEqual(["the send failed: daemon said no"]);
+    expect(logs).toHaveLength(1);
+    expect(queue.pending("wrk")).toEqual([]);
+  });
+
+  it("steerRefusalOf names the first guard that fails; turnIdOf reads Paseo's activeTurn", () => {
+    expect(STEER_PROVIDERS).toEqual(["claude", "codex"]);
+    expect(steerRefusalOf(running(), "words", "claude")).toBeNull();
+    expect(steerRefusalOf(running("bm-manager"), "words", "claude")).toBe("the target is not a Worker");
+    expect(steerRefusalOf(running(), "words", "opencode")).toMatch(/is not Claude or Codex/);
+    expect(steerRefusalOf({ ...running(), status: "idle" }, "words", "codex")).toBe("it is not in a running turn");
+    expect(steerRefusalOf({ ...running(), activeTurn: { turnId: " " } }, "words", "codex")).toMatch(/no foreground turn id/);
+    expect(steerRefusalOf(running(), "/review", "codex")).toBe("the text starts with /");
+    expect(turnIdOf({ activeTurn: { turnId: "t-9" } })).toBe("t-9");
+    expect(turnIdOf({})).toBeNull();
+    expect(turnIdOf(null)).toBeNull();
   });
 });

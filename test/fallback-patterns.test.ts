@@ -22,7 +22,7 @@ const classifyText = (text: unknown, user?: UserPatterns | null): string => matc
 
 /** The defaults exactly as the bead and the design list them. */
 const LISTED: Record<PatternClass, string[]> = {
-  L1: ["usage limit", "limit reached", "hit your (usage )?limit", "limit (will )?reset", "resets? (at|in) "],
+  L1: ["usage limit", "limit reached", "hit your (usage |weekly )?limit", "limit (will )?reset", "resets? (at|in) "],
   L2: ["credit balance", "billing", "subscription (has )?(expired|ended|inactive)", "payment (required|failed)", "quota exceeded"],
   L4: ["not logged in", "please (run )?/?login", "invalid api key", "authentication (failed|error)", "\\b401\\b", "oauth token (has )?expired"],
   L5: ["provider (is )?unavailable", "process exited with code", "command not found", "ENOENT"],
@@ -33,7 +33,7 @@ const LISTED: Record<PatternClass, string[]> = {
 const SAMPLES: Record<string, string> = {
   "usage limit": "Claude USAGE LIMIT for this plan",
   "limit reached": "5-hour Limit Reached",
-  "hit your (usage )?limit": "You've hit your limit for now",
+  "hit your (usage |weekly )?limit": "You've hit your limit for now",
   "limit (will )?reset": "Your limit will reset tomorrow",
   "resets? (at|in) ": "Try again later, it Resets at 5pm (Europe/Paris)",
   "credit balance": "Your credit balance is too low to access the API",

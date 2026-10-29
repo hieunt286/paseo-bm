@@ -6,7 +6,7 @@ import type { ToolCaller } from "../plugin/server/agent-bindings";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { MAX_ACTIVE_MEMORY, MAX_MEMORY_SOURCE, MAX_MEMORY_TEXT, MEMORY_FULL_REASON, createMemoryStore } from "../plugin/server/memory-store";
-import { MEMORY_NOT_BOUND_MESSAGE, createMemoryTools } from "../plugin/server/memory-tools";
+import { MEMORY_INDEX_ENTRIES, MEMORY_INDEX_TEXT, MEMORY_NOT_BOUND_MESSAGE, MEMORY_QUERY_ENTRIES, createMemoryTools } from "../plugin/server/memory-tools";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { NOT_A_MAIN_MESSAGE } from "../plugin/server/mission-tools";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
@@ -106,7 +106,7 @@ describe("bm_memory for a Main (§2.5, §4)", () => {
     expect(createMemoryStore(home).active("wks-a")[0]!.by).toEqual({ role: "main", agentId: MAIN, missionId: created.missionId });
     await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "fact", text: "CI runs on Node 22", source: "ci.yml" }, main);
     const read = await json("manager", "bm_memory", { project: "wks-a", op: "read", query: "CENTS" }, main);
-    expect(read).toMatchObject({ project: "wks-a", active: 2, limit: MAX_ACTIVE_MEMORY });
+    expect(read).toMatchObject({ project: "wks-a", live: 2, retired: 0, limit: MAX_ACTIVE_MEMORY });
     expect((read["entries"] as Array<{ id: string }>).map((entry) => entry.id)).toEqual([added.id]);
     expect(await json("manager", "bm_memory", { project: "wks-a", op: "remove", id: added.id, why: "Moved to decimal strings" }, main)).toEqual({ removed: added.id });
     expect(createMemoryStore(home).active("wks-a").map((entry) => entry.text)).toEqual(["CI runs on Node 22"]);
@@ -147,9 +147,79 @@ describe("bm_memory for a Main (§2.5, §4)", () => {
     const { json } = setup();
     const { main } = mission();
     createPrecedentStore(home).save({ scope: "wks-a", subject: "push-backends", text: "Push contract only", sourceDecisionId: "q:req-20261009T100000Z:Q1", expiresInDays: 30 }, NOW);
-    const entries = (await json("manager", "bm_memory", { project: "wks-a", op: "read" }, main))["entries"] as Array<Record<string, string>>;
-    expect(entries).toEqual([expect.objectContaining({ kind: "precedent", text: "push-backends: Push contract only", source: "q:req-20261009T100000Z:Q1", by: "owner" })]);
+    const read = await json("manager", "bm_memory", { project: "wks-a", op: "read" }, main);
+    expect(read["index"]).toEqual([]);
+    expect(read["precedents"]).toEqual([expect.objectContaining({ kind: "precedent", text: "push-backends: Push contract only", source: "q:req-20261009T100000Z:Q1", by: "owner" })]);
+    const queried = (await json("manager", "bm_memory", { project: "wks-a", op: "read", query: "contract" }, main))["entries"];
+    expect(queried).toEqual([expect.objectContaining({ kind: "precedent", by: "owner" })]);
     expect(createMemoryStore(home).list("wks-a")).toEqual([]);
+  });
+});
+
+describe("bm_memory reads a summary first (delivery line design §18.3)", () => {
+  it("gives an index newest first with cut text, a query in full, an id, and retired entries only when asked", async () => {
+    const { call, json } = setup();
+    const { main } = mission();
+    const long = `Money is integer cents everywhere. ${"x".repeat(400)}`;
+    const first = (await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "convention", text: long, source: "docs/prd.md" }, main))["added"] as Record<string, string>;
+    await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "fact", text: "CI runs on Node 22", source: "ci.yml", scope: "repo" }, main);
+    fillMemory(home, "wks-a", MEMORY_INDEX_ENTRIES + 5, (n) => ({ kind: "convention", text: `rule ${n}`, at: new Date(NOW.getTime() - (n + 1) * 1000).toISOString() }));
+    const index = await json("manager", "bm_memory", { project: "wks-a", op: "read" }, main);
+    const lines = index["index"] as Array<Record<string, string>>;
+    expect(lines).toHaveLength(MEMORY_INDEX_ENTRIES);
+    expect(index).toMatchObject({ live: MEMORY_INDEX_ENTRIES + 7, retired: 0, more: "7 older entries: read with a query or an id" });
+    expect(lines[0]).toMatchObject({ kind: "fact", scope: "repo", text: "CI runs on Node 22" });
+    expect(lines[0]).not.toHaveProperty("source");
+    const cut = lines.find((line) => line.id === first.id)!.text!;
+    expect(cut).toHaveLength(MEMORY_INDEX_TEXT);
+    expect(cut.endsWith("…")).toBe(true);
+    const queried = await json("manager", "bm_memory", { project: "wks-a", op: "read", query: "rule" }, main);
+    expect(queried["entries"] as unknown[]).toHaveLength(MEMORY_QUERY_ENTRIES);
+    expect(queried["more"]).toBe(MEMORY_INDEX_ENTRIES + 5 - MEMORY_QUERY_ENTRIES);
+    expect((await json("manager", "bm_memory", { project: "wks-a", op: "read", id: first.id }, main))["entry"]).toMatchObject({ id: first.id, text: long, source: "docs/prd.md" });
+    const unknown = await call("manager", "bm_memory", { project: "wks-a", op: "read", id: "mem-ffffffffff" }, main);
+    expect(unknown.ok).toBe(false);
+    expect(unknown.text).toContain("memory entry mem-ffffffffff is not an active entry of wks-a");
+  });
+
+  it("retires an entry by subject on add, names it, and shows it again with retired: true", async () => {
+    const { json } = setup();
+    const { main } = mission();
+    const old = (await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "contract", text: "GET /users v1", source: "api.md", subject: "Users API" }, main))["added"] as Record<string, string>;
+    const later = new Date(NOW.getTime() + 1000);
+    const tools = createMemoryTools({ paseo: () => fakePaseo({ workspaces: [{ id: "wks-a", directory: repoA }] }).paseo, home: () => home, now: () => later, git, env: {} });
+    const answer = await tools.manager.call("bm_memory", { project: "wks-a", op: "add", kind: "contract", text: "GET /users v2", source: "api.md", subject: "users api" }, main);
+    const added = JSON.parse(answer.text) as Record<string, unknown>;
+    expect(added).toMatchObject({ added: { subject: "users api", scope: "repo" }, live: 1, retires: [old.id] });
+    const plain = await json("manager", "bm_memory", { project: "wks-a", op: "read", query: "users" }, main);
+    expect((plain["entries"] as Array<{ text: string }>).map((entry) => entry.text)).toEqual(["GET /users v2"]);
+    const all = await json("manager", "bm_memory", { project: "wks-a", op: "read", query: "users", retired: true }, main);
+    expect(all["entries"]).toEqual([expect.objectContaining({ text: "GET /users v2" }), expect.objectContaining({ id: old.id, retired: "superseded" })]);
+    expect((await json("manager", "bm_memory", { project: "wks-a", op: "read", id: old.id }, main))["entry"]).toMatchObject({ id: old.id, retired: "superseded" });
+  });
+
+  it("says when a mission entry leaves a repo entry of the same subject live", async () => {
+    const { json } = setup();
+    const { main } = mission();
+    const rule = (await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "convention", text: "Dates are ISO-8601", source: "AGENTS.md", subject: "date-format" }, main))["added"] as Record<string, string>;
+    const later = new Date(NOW.getTime() + 1000);
+    const tools = createMemoryTools({ paseo: () => fakePaseo({ workspaces: [{ id: "wks-a", directory: repoA }] }).paseo, home: () => home, now: () => later, git, env: {} });
+    const answer = JSON.parse((await tools.manager.call("bm_memory", { project: "wks-a", op: "add", kind: "decision", text: "This mission shows dd/mm", source: "owner chat", subject: "date-format" }, main)).text) as Record<string, unknown>;
+    expect(answer).toMatchObject({ added: { scope: "mission" }, live: 2, stillLive: [rule.id] });
+    expect(answer["note"]).toBe(`${rule.id} (repo) keeps holding for later missions; add with scope repo to replace it.`);
+    expect(answer).not.toHaveProperty("retires");
+  });
+
+  it("keeps a closed mission's entries out of reads, and its repo entries in", async () => {
+    const { json } = setup();
+    const { mission: created, main } = mission();
+    await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "fact", text: "Merged into dev at abc123", source: "out-1" }, main);
+    await json("manager", "bm_memory", { project: "wks-a", op: "add", kind: "convention", text: "Use yarn", source: "README" }, main);
+    createMissionStore(home, { now: () => NOW }).update(created.missionId, (current) => ({ ...current, state: "closed", closedAt: NOW.toISOString() }));
+    const next = mission();
+    const read = await json("manager", "bm_memory", { project: "wks-a", op: "read" }, next.main);
+    expect((read["index"] as Array<{ text: string }>).map((entry) => entry.text)).toEqual(["Use yarn"]);
+    expect(read).toMatchObject({ live: 1, retired: 1 });
   });
 });
 
@@ -158,7 +228,7 @@ describe("bm_memory for a Worker (§5)", () => {
     const { call, json } = setup();
     const added = (await json("worker", "bm_memory", { op: "add", kind: "fact", text: "The API paginates with ?page", source: "src/routes.ts" }, WORKER))["added"] as Record<string, string>;
     expect(added).toMatchObject({ kind: "fact", by: "worker" });
-    expect(((await json("worker", "bm_memory", { project: "wks-a", op: "read" }, WORKER))["entries"] as unknown[]).length).toBe(1);
+    expect(((await json("worker", "bm_memory", { project: "wks-a", op: "read" }, WORKER))["index"] as unknown[]).length).toBe(1);
     expect((await call("worker", "bm_memory", { project: "wks-b", op: "read" }, WORKER)).text).toContain("your own repo's memory only (wks-a)");
     expect((await call("worker", "bm_memory", { op: "remove", id: added.id, why: "x" }, WORKER)).ok).toBe(false);
     expect((await call("worker", "bm_memory", { op: "add", kind: "decision", text: "x", source: "y" }, WORKER)).ok).toBe(false);

@@ -928,19 +928,19 @@ export async function runScenario(options: ScenarioOptions): Promise<ScenarioRes
       .list()
       .find((link) => link.to.workspaceId === agent.workspaceId && link.state === "open" && link.to.managerId === agent.id);
     if (ask !== undefined && head !== null && head.finishedAt === null) {
-      const told = await manager.call("bm_tell_worker", { requestId: head.requestId, text: "Answer this project's ask.", peerLink: ask.linkId }, caller);
+      const told = await manager.call("bm_tell_worker", { requestId: head.requestId, text: "Answer this project's ask.", peerLink: ask.linkId, about: "current" }, caller);
       count(told.ok ? "peer.taken" : "peer.takeRefused");
       await flush();
       adopt();
     } else if (head !== null && head.finishedAt !== null) {
       // The owner wants more of a finished request: its continuation (design §2.4).
-      const told = await manager.call("bm_tell_worker", { requestId: head.requestId, text: "Also export the totals as CSV.", source: "owner message" }, caller);
+      const told = await manager.call("bm_tell_worker", { requestId: head.requestId, text: "Also export the totals as CSV.", source: "owner message", about: "current" }, caller);
       count(told.ok ? "continuation.followUp" : "continuation.refused");
       if (!told.ok) log(`[scenario] follow-up of ${head.requestId} refused: ${told.text}`);
       await flush();
       adopt();
     } else if (head !== null && chance(0.15)) {
-      const told = await manager.call("bm_tell_worker", { requestId: head.requestId, text: "The owner adds: keep the old column names." }, caller);
+      const told = await manager.call("bm_tell_worker", { requestId: head.requestId, text: "The owner adds: keep the old column names.", about: "current" }, caller);
       if (told.ok) count((JSON.parse(told.text) as { delivery: string }).delivery === "held" ? "tell.held" : "tell.sent");
       await flush();
       adopt();

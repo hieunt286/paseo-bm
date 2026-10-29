@@ -16,6 +16,7 @@ import {
   createInputOf,
   figureSentenceOf,
   governorLinesOf,
+  laneRowOf,
   levelConfirmDialog,
   levelLineOf,
   levelSentenceOf,
@@ -30,6 +31,7 @@ import {
   repositoriesOf,
   revokeIntegrationDialog,
   toggleRepo,
+  waitingRowOf,
   type MissionDraft,
 } from "../plugin/client/missions-model";
 import { allNodes, pressables, renderTree, textOf, texts, type RNode } from "./helpers/element-tree";
@@ -917,7 +919,7 @@ describe("the mission page's Repositories card (delivery line design §4.9; mock
         "last commit 11:52",
         { text: "!42 open", short: "!42", tone: "info", url: "https://gitlab.example/x/-/merge_requests/42" },
         { text: "CI passed", tone: "success" },
-        { text: "allowed since 10:42", tone: "plain", phone: "Push & MR allowed", action: "revoke", decisionId: "m:mis-0123456789:1" },
+        { text: "allowed since 10:42", short: "allowed", tone: "plain", phone: "Push & MR allowed", action: "revoke", decisionId: "m:mis-0123456789:1" },
       ],
       [
         "ai-assistant",
@@ -929,13 +931,13 @@ describe("the mission page's Repositories card (delivery line design §4.9; mock
         "last commit 12:05",
         null,
         null,
-        { text: "waiting for you", tone: "warning", phone: "Push & MR: waiting for you", action: "answer", decisionId: "m:mis-0123456789:2" },
+        { text: "waiting for you", short: "waiting for you", tone: "warning", phone: "Push & MR: waiting for you", action: "answer", decisionId: "m:mis-0123456789:2" },
       ],
     ]);
     expect(missionPageOf(PAGE, LATER).repositories).toBeNull();
     expect(repositoriesOf({ code: "INO", repos: [{ ...UI, placement: line({ readAt: null, dirty: null, ahead: null, behind: null }) }] }, LATER)).toEqual({
       meta: "each mission writes on its own branch",
-      mrHeader: "Merge request · CI",
+      mrHeader: "Merge request · CI · push",
       rows: [expect.objectContaining({ counts: "not read yet", dirty: null, lastCommit: null })],
     });
   });
@@ -955,12 +957,12 @@ describe("the mission page's Repositories card (delivery line design §4.9; mock
   it("with integration.ci off (ADR-036 §17.1), the merge request without CI; on, or from an older server, with it", () => {
     const repos = [{ ...UI, placement: line({ ci: "failure", mr: { url: "https://gitlab.example/x/-/merge_requests/9", state: "opened", mergeable: null } }) }];
     const off = repositoriesOf({ code: "INO", repos, ci: "off" }, LATER)!;
-    expect(off.mrHeader).toBe("Merge request");
+    expect(off.mrHeader).toBe("Merge request · push");
     expect(off.rows[0]!.ci).toBeNull();
     expect(off.rows[0]!.mr?.text).toBe("!9 open");
     for (const ci of ["on", undefined] as const) {
       const shown = repositoriesOf({ code: "INO", repos, ...(ci === undefined ? {} : { ci }) }, LATER)!;
-      expect(shown.mrHeader).toBe("Merge request · CI");
+      expect(shown.mrHeader).toBe("Merge request · CI · push");
       expect(shown.rows[0]!.ci).toEqual({ text: "CI failed", tone: "danger" });
     }
   });
@@ -977,18 +979,21 @@ describe("the mission page's Repositories card (delivery line design §4.9; mock
   const draw = (compact: boolean, on = actions(), ui: Record<string, unknown> = {}) => renderTree(MissionPageBody({ page: view, ui: { ...PAGE_UI_IDLE, ...ui }, addable: [], compact, on, styles, theme }));
   const byLabel = (nodes: Array<RNode | string>, label: string) => allNodes(nodes).find((node) => node.props["accessibilityLabel"] === label);
 
-  it("draws artboard I: the table between the Workers and In flight; Revoke asks first, Answer opens the Inbox", () => {
+  // Mockup mission-lanes.html artboard Q replaced artboard I's columns: the table reads as Q's, here without lanes (an older server).
+  it("draws artboard Q's table without lanes: between the Workers and In flight; Revoke asks first, Answer opens the Inbox", () => {
     const on = actions();
     const nodes = draw(false, on);
     const shown = texts(nodes);
     for (const text of [
-      "Repositories", "each mission writes on its own branch · read 12:40", "Repository", "Branch → integration", "State", "Merge request · CI", "Push & merge request",
-      "m/INO/xspace-ai-assistant → develop", "↑4 ↓0 · ● uncommitted", "last commit 11:52", "!42 open · CI passed", "allowed since 10:42", "Revoke",
-      "↑2 ↓7 · clean", "no merge request yet", "waiting for you", "Answer",
-      "↑ commits on the mission branch not yet in the integration branch · ↓ commits of the integration branch not yet merged into it. Merging stays on GitLab. A worktree is removed only by you, when the mission closes.",
+      "Repositories", "each mission writes on its own branch · read 12:40", "Repository · lane", "Branch", "Work", "State", "Merge request · CI · push",
+      "m/INO/xspace-ai-assistant → develop", "↑4 ↓0 · ● uncommitted", "!42 open · CI passed · allowed", "Revoke",
+      "↑2 ↓7 · clean", "no merge request yet · waiting for you", "Answer",
+      "A lane is a worktree of its own on its own branch, made from the mission branch. When its request finishes, the Worker brings the mission branch into the lane and paseo-bm moves the mission branch forward; push and merge request stay one per repository. A free lane is kept for the next piece of work; you remove worktrees when the mission closes.",
     ]) {
       expect(shown, text).toContain(text);
     }
+    // Artboard Q's repo row has no last-commit line, no separate push column and no "Branch → integration".
+    for (const gone of ["last commit 11:52", "Push & merge request", "Branch → integration"]) expect(shown, gone).not.toContain(gone);
     // The charter's own "Repositories" label comes first: the card is found by its meta.
     const order = ["Workers by repository", "each mission writes on its own branch · read 12:40", "In flight"].map((text) => shown.indexOf(text));
     expect(order).toEqual([...order].sort((a, b) => a - b));
@@ -1027,9 +1032,9 @@ describe("the mission page's Repositories card (delivery line design §4.9; mock
   it("draws no CI with integration.ci off (ADR-036 §17.1): the column reads Merge request, the phone's branch line the merge request alone", () => {
     const page = missionPageOf({ ...PLACED, summary: { ...INO, ci: "off" } }, LATER);
     const wide = texts(renderTree(MissionPageBody({ page, ui: PAGE_UI_IDLE, addable: [], compact: false, on: actions(), styles, theme })));
-    expect(wide).toContain("Merge request");
+    expect(wide).toContain("Merge request · push");
     expect(wide).toContain("!42 open");
-    expect(wide).not.toContain("Merge request · CI");
+    expect(wide).not.toContain("Merge request · CI · push");
     expect(wide.filter((text) => /\bCI\b/.test(text))).toEqual([]);
     const phone = texts(renderTree(MissionPageBody({ page, ui: PAGE_UI_IDLE, addable: [], compact: true, on: actions(), styles, theme })));
     expect(phone).toContain("m/INO/… → develop · !42");
@@ -1063,5 +1068,227 @@ describe("the mission page's Repositories card (delivery line design §4.9; mock
       cancelLabel: "Cancel",
       defaultAction: "cancel",
     });
+  });
+});
+
+describe("the mission page's lanes and Waiting part (delivery line design §19.8; mockup mission-lanes.html, artboards Q and R)", () => {
+  // The artboards' own data, read at 04:40 local time.
+  const T = (h: number, m: number) => new Date(2026, 9, 25, h, m).toISOString();
+  const READ = new Date(2026, 9, 25, 4, 40);
+  type Placement = NonNullable<MissionSummary["repos"][number]["placement"]>;
+  type Lane = NonNullable<Placement["lanes"]>[number];
+  const lane = (over: Partial<Lane> & Pick<Lane, "lane" | "branch" | "workspaceId">): Lane => ({ state: "ready", requests: [], freeSince: null, mergedAt: null, mergePending: null, ...over });
+  const allowed = { state: "allowed" as const, at: T(1, 0), decisionId: "m:mis-0123456789:1" };
+  const placed = (over: Partial<Placement>): Placement => ({
+    branch: "",
+    target: "dev",
+    state: "ready",
+    dirty: false,
+    ahead: 0,
+    behind: 0,
+    lastCommitAt: T(4, 0),
+    pushed: true,
+    mr: null,
+    ci: null,
+    readAt: T(4, 40),
+    integration: allowed,
+    maxLanes: 7,
+    overlaps: [],
+    ...over,
+  });
+  const LANED: MissionSummary = {
+    ...AIX,
+    name: "Dynamic Form in AI",
+    ci: "off",
+    repos: [
+      {
+        ...BE,
+        placement: placed({
+          branch: "m/AIX/ai-assistant",
+          ahead: 9,
+          mr: { url: "https://gitlab.example/x/-/merge_requests/2", state: "opened", mergeable: true },
+          lanes: [
+            lane({ lane: 1, branch: "m/AIX/ai-assistant", workspaceId: "ws-be", requests: [{ requestId: "req-20261025T021049Z", topic: "Audit both repos", workerIds: ["3729405aa"], since: T(2, 28) }] }),
+            lane({ lane: 2, branch: "m/AIX/ai-assistant-2", workspaceId: "ws-be-2", requests: [{ requestId: "req-20261025T040712Z", topic: "Keep only the bypass-authz flag", workerIds: ["51e2660aa"], since: T(4, 34) }] }),
+            lane({ lane: 3, branch: "m/AIX/ai-assistant-3", workspaceId: "ws-be-3", freeSince: T(3, 58), mergedAt: T(3, 58) }),
+          ],
+        }),
+      },
+      {
+        ...UI,
+        placement: placed({
+          branch: "m/AIX/xspace-ai-assistant",
+          ahead: 14,
+          dirty: true,
+          mr: { url: "https://gitlab.example/y/-/merge_requests/4", state: "opened", mergeable: true },
+          lanes: [
+            lane({ lane: 1, branch: "m/AIX/xspace-ai-assistant", workspaceId: "ws-ui", requests: [{ requestId: "req-20261025T021050Z", topic: "Audit both repos", workerIds: ["9b40933aa"], since: T(4, 29) }] }),
+            lane({ lane: 2, branch: "m/AIX/xspace-ai-assistant-2", workspaceId: "ws-ui-2", requests: [{ requestId: "req-20261025T043712Z", topic: "Menu entries for the ops screens", workerIds: ["c41d7e2aa", "08aa3f9aa"], since: T(4, 36) }] }),
+          ],
+          overlaps: [{ lanes: [1, 2], files: ["libs/ui-ai-assistant/src/lib/ops/OpsMenu.tsx"], toldAt: T(4, 38) }],
+        }),
+      },
+    ],
+  };
+  const request = (requestId: string, workspaceId: string, repo: string, topic: string, workerId: string, lastReport: { phase: string; at: string; line: string } | null) => ({
+    requestId, workspaceId, repo, topic, workerId, state: "working" as const, lastReport, followUpAt: null, waitingOn: null,
+  });
+  const LANES_PAGE: MissionGetOutput = {
+    ...PAGE,
+    summary: LANED,
+    inFlight: {
+      at: T(4, 40),
+      mission: { missionId: LANED.missionId, code: "AIX", name: LANED.name, state: "open", goal: "g", charterConfirmed: true, repos: [], mainId: null, mainHistory: [] },
+      criteria: { met: 0, total: 0, open: [] },
+      requests: [
+        request("req-20261025T021049Z", "ws-be", "ai-assistant", "Audit both repos", "3729405aa", { phase: "implementing", at: T(4, 31), line: "" }),
+        request("req-20261025T040712Z", "ws-be-2", "ai-assistant", "Keep only the bypass-authz flag", "51e2660aa", null),
+        request("req-20261025T043712Z", "ws-ui-2", "xspace-ai-assistant", "Menu entries for the ops screens", "c41d7e2aa", null),
+      ],
+      questions: [],
+      asks: [],
+      links: [],
+      owner: [],
+      governor: [],
+      journal: [],
+      unknown: [],
+    },
+    waiting: [
+      {
+        kind: "held",
+        id: "hold-20261025T040900Z",
+        topic: "Wire the ops screens to the new endpoints",
+        after: [{ requestId: "req-20261025T040712Z", topic: "Keep only the bypass-authz flag" }],
+        state: "held",
+        since: T(4, 9),
+        repo: "xspace-ai-assistant",
+        newLane: true,
+      },
+      { kind: "tell", id: "out-000000000001", requestId: "req-20261025T021050Z", workerId: "9b40933aa", owner: true, text: "check why the UI shows nothing new", state: "steered", since: T(4, 33) },
+      { kind: "tell", id: "out-000000000002", requestId: "req-20261025T021049Z", workerId: "3729405aa", owner: false, text: "also list the four routes in the menu", state: "queued", since: T(4, 37) },
+    ],
+  };
+  const view = missionPageOf(LANES_PAGE, READ);
+  const actions = () => ({ back: vi.fn(), openMain: vi.fn(), ui: vi.fn(), saveRename: vi.fn(), close: vi.fn(), addRepos: vi.fn(), level: vi.fn(), confirmLevel: vi.fn(), memory: vi.fn(), openAgent: vi.fn(), openInbox: vi.fn(), revoke: vi.fn(), askAgain: vi.fn() });
+  const draw = (compact: boolean, on = actions()) => renderTree(MissionPageBody({ page: view, ui: PAGE_UI_IDLE, addable: [], compact, on, styles, theme }));
+
+  it("reads each repo's lanes: n of 7, the work and its Workers, state and age, a free lane's merge, the overlap", () => {
+    const repositories = view.repositories!;
+    expect(repositories.meta).toBe("up to 7 lanes a repository · read 04:40");
+    expect(repositories.mrHeader).toBe("Merge request · push");
+    const [be, ui] = repositories.rows;
+    expect([be!.lanesLine, ui!.lanesLine]).toEqual(["3 of 7 lanes", "2 of 7 lanes"]);
+    expect(be!.lanes.map((row) => [row.label, row.branch, row.work?.topic ?? row.idle, row.state, row.note, row.phone, row.phoneState?.text ?? null])).toEqual([
+      ["lane 1", "m/AIX/ai-assistant", "Audit both repos", { text: "working · 2 h 12 min", tone: "info" }, null, "1 · Audit both repos", "working 2 h 12 min"],
+      ["lane 2", "m/AIX/ai-assistant-2", "Keep only the bypass-authz flag", { text: "working · 6 min", tone: "info" }, "merges into the mission branch at finished", "2 · Keep only the bypass-authz flag", "working 6 min"],
+      ["lane 3", "m/AIX/ai-assistant-3", "free", null, "merged 03:58 · kept for the next piece of work", "3 · free", null],
+    ]);
+    expect(ui!.lanes[1]!.work).toEqual({ topic: "Menu entries for the ops screens", workers: [{ short: "c41d7e2", agentId: "c41d7e2aa" }, { short: "08aa3f9", agentId: "08aa3f9aa" }], count: "2 Workers" });
+    expect(ui!.lanes[1]!.phone).toBe("2 · Menu entries for the ops screens · 2 Workers");
+    expect(be!.lanes[0]!.work?.count).toBeNull();
+    expect(ui!.overlaps).toEqual([
+      { lead: "Lanes 1 and 2 of xspace-ai-assistant both change", files: "libs/ui-ai-assistant/src/lib/ops/OpsMenu.tsx", told: "the Main was told 04:38", phone: "Lanes 1 and 2 change the same file · Main told" },
+    ]);
+    expect(be!.push.short).toBe("allowed");
+  });
+
+  it("reads a lane's state from In flight, a waiting merge, a lane being made, and many shared files", () => {
+    const waitingYou = laneRowOf(lane({ lane: 2, branch: "b-2", workspaceId: "w", requests: [{ requestId: "req-x", topic: "T", workerIds: ["w1"], since: T(4, 30) }] }), READ, () => ({ text: "waiting for you · Q1", tone: "warning" }));
+    expect(waitingYou.state).toEqual({ text: "waiting for you · Q1 · 10 min", tone: "warning" });
+    const merge = laneRowOf(lane({ lane: 2, branch: "b-2", workspaceId: "w", mergePending: { since: T(4, 20), reason: "lane 1's uncommitted changes touch src/a.ts", files: ["src/a.ts"] } }), READ);
+    expect([merge.idle, merge.state, merge.note, merge.phone, merge.phoneState]).toEqual(["no live request", { text: "merge waits · 20 min", tone: "warning" }, "lane 1's uncommitted changes touch src/a.ts", "2 · no live request", { text: "merge waits 20 min", tone: "warning" }]);
+    expect(laneRowOf(lane({ lane: 4, branch: "b-4", workspaceId: null, state: "creating" }), READ).idle).toBe("being made");
+    expect(laneRowOf(lane({ lane: 1, branch: "b", workspaceId: "w" }), READ)).toMatchObject({ idle: "free", state: null, note: null, phone: "1 · free" });
+    const many = repositoriesOf({ code: "AIX", repos: [{ ...UI, placement: placed({ branch: "b", lanes: [], overlaps: [{ lanes: [2, 3], files: ["a", "b", "c", "d", "e"], toldAt: null }] }) }] }, READ)!;
+    expect(many.rows[0]!.overlaps[0]).toMatchObject({ files: "a, b, c, and 2 more", told: "the Main was told", phone: "Lanes 2 and 3 change the same files · Main told" });
+  });
+
+  it("reads In flight's lane column, the lane's other Workers and a request's start; and the Waiting lines", () => {
+    const flight = view.inFlight!;
+    expect(flight.repoHeader).toBe("Repository · lane");
+    expect(flight.requests.map((entry) => [entry.repo, entry.phoneRepo, entry.worker, entry.moreWorkers, entry.lastReport])).toEqual([
+      ["ai-assistant · 1", "ai-assistant 1", "3729405", 0, "implementing · 04:31"],
+      ["ai-assistant · 2", "ai-assistant 2", "51e2660", 0, "started 04:34"],
+      ["xspace-ai-assistant · 2", "xspace-ai-assistant 2", "c41d7e2", 1, "started 04:36"],
+    ]);
+    expect(flight.waiting!.map((row) => [row.what, row.note, row.worker, row.after, row.status, row.since, row.then])).toEqual([
+      ["Wire the ops screens to the new endpoints", "a request paseo-bm starts by itself", null, [{ request: "req-…040712Z", topic: "Keep only the bypass-authz flag" }], null, "04:09 · 31 min", { text: "a new Worker in a free lane of xspace-ai-assistant", tone: "muted" }],
+      ['Your words "check why the UI shows nothing new"', "to", "9b40933", null, { text: "reached it mid-turn", tone: "success" }, "04:33", { text: "—", tone: "muted" }],
+      ['"also list the four routes in the menu"', "a Main's tell to", "3729405", null, { text: "the end of its turn", tone: "warning" }, "04:37 · 3 min", { text: "delivered when its turn ends", tone: "muted" }],
+    ]);
+    // A held request waiting on a stopped one, a lane-1 one, a replaced turn, a tell held by the wake gate; an older server shows no Waiting part.
+    expect(waitingRowOf({ kind: "held", id: "h", topic: "T", after: [{ requestId: "req-20261025T040712Z", topic: null }], state: "waiting-stopped", since: T(4, 0), repo: "be", newLane: false }, READ)).toMatchObject({
+      status: { text: "a request it waits for stopped", tone: "warning" },
+      then: { text: "it does not start by itself: the Main gives it again or cancels it", tone: "warning" },
+      phone: { lead: "T", bold: true, rest: " · after req-…040712Z", status: { text: "stopped", tone: "warning" }, age: "40 min" },
+    });
+    expect(waitingRowOf({ kind: "held", id: "h", topic: "T", after: [], state: "held", since: T(4, 0), repo: "be", newLane: false }, READ).then.text).toBe("a new Worker in be");
+    expect(waitingRowOf({ kind: "tell", id: "o", requestId: "r", workerId: "abcdefghij", owner: true, text: "x", state: "replaced", since: T(4, 0) }, READ)).toMatchObject({ status: { text: "its turn was replaced" }, since: "04:00" });
+    expect(waitingRowOf({ kind: "tell", id: "o", requestId: "r", workerId: "abcdefghij", owner: false, text: "x", state: "held", since: T(4, 0) }, READ)).toMatchObject({ status: { text: "the end of its wait" }, since: "04:00 · 40 min" });
+    const older: MissionGetOutput = { ...LANES_PAGE, summary: AIX };
+    delete older.waiting;
+    expect(missionPageOf(older, READ).inFlight).toMatchObject({ repoHeader: "Repository", waiting: null });
+  });
+
+  it("draws artboard Q: Repositories with lanes and the overlap line, In flight with the lane column and the Waiting part", () => {
+    const on = actions();
+    const nodes = draw(false, on);
+    const shown = texts(nodes);
+    for (const text of [
+      "up to 7 lanes a repository · read 04:40", "Repository · lane", "Branch", "Work", "State", "Merge request · push",
+      "ai-assistant · 3 of 7 lanes", "m/AIX/ai-assistant → dev", "the mission branch: lanes merge here", "↑9 ↓0 · clean", "!2 open · allowed", "Revoke",
+      "lane 1", "m/AIX/ai-assistant", "Audit both repos", "3729405", "working · 2 h 12 min",
+      "lane 2", "m/AIX/ai-assistant-2", "Keep only the bypass-authz flag", "51e2660", "working · 6 min", "merges into the mission branch at finished",
+      "lane 3", "m/AIX/ai-assistant-3", "free", "merged 03:58 · kept for the next piece of work",
+      "xspace-ai-assistant · 2 of 7 lanes", "↑14 ↓0 · ● uncommitted", "!4 open · allowed",
+      "Menu entries for the ops screens", "c41d7e2,", "08aa3f9", "· 2 Workers", "working · 4 min",
+      "Lanes 1 and 2 of xspace-ai-assistant both change libs/ui-ai-assistant/src/lib/ops/OpsMenu.tsx · the Main was told 04:38",
+      "A lane is a worktree of its own on its own branch, made from the mission branch. When its request finishes, the Worker brings the mission branch into the lane and paseo-bm moves the mission branch forward; push and merge request stay one per repository. A free lane is kept for the next piece of work; you remove worktrees when the mission closes.",
+      "In flight", "ai-assistant · 1", "ai-assistant · 2", "xspace-ai-assistant · 2", "+1", "implementing · 04:31", "started 04:34",
+      "Waiting", "What", "For", "Since", "Then",
+      "Wire the ops screens to the new endpoints", "a request paseo-bm starts by itself", "after req-…040712Z (Keep only the bypass-authz flag)", "04:09 · 31 min", "a new Worker in a free lane of xspace-ai-assistant",
+      'Your words "check why the UI shows nothing new"', "to", "9b40933", "reached it mid-turn", "04:33",
+      '"also list the four routes in the menu"', "a Main's tell to", "the end of its turn", "04:37 · 3 min", "delivered when its turn ends",
+      "Your own words reach a busy Worker at once, inside its turn. Other messages wait for its turn to end. Work that depends on another request waits here and starts by itself when that request finishes.",
+    ]) {
+      expect(shown, text).toContain(text);
+    }
+    // Order: the repo row, its lanes, the next repo, the overlap line, the footnote; In flight's table, Waiting, then Questions.
+    const order = ["ai-assistant · 3 of 7 lanes", "lane 3", "xspace-ai-assistant · 2 of 7 lanes", "Lanes 1 and 2 of xspace-ai-assistant both change libs/ui-ai-assistant/src/lib/ops/OpsMenu.tsx · the Main was told 04:38", "In flight", "started 04:36", "Waiting", "Wire the ops screens to the new endpoints", "Questions"].map((text) => shown.indexOf(text));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(order).not.toContain(-1);
+    // A lane's Worker opens it.
+    pressByLabel(nodes, "Open Worker 08aa3f9");
+    expect(on.openAgent).toHaveBeenCalledWith("08aa3f9aa");
+  });
+
+  it("draws artboard R: each repo's lanes and the overlap mark, In flight's lane, the Waiting lines", () => {
+    const on = actions();
+    const nodes = draw(true, on);
+    const shown = texts(nodes);
+    for (const text of [
+      "ai-assistant · 3 of 7 lanes · ↑9 ↓0 · clean",
+      "1 · Audit both repos · working 2 h 12 min",
+      "2 · Keep only the bypass-authz flag · working 6 min",
+      "3 · free",
+      "xspace-ai-assistant · 2 of 7 lanes · ↑14 ↓0 · ● uncommitted",
+      "1 · Audit both repos · working 11 min",
+      "2 · Menu entries for the ops screens · 2 Workers · working 4 min",
+      "■ Lanes 1 and 2 change the same file · Main told",
+      "Audit both repos · ai-assistant 1 · working",
+      "Keep only the bypass-authz flag · ai-assistant 2 · working",
+      "Menu entries for the ops screens · xspace-ai-assistant 2 · working",
+      "Waiting",
+      "Wire the ops screens to the new endpoints · after Keep only the bypass-authz flag · 31 min",
+      "Your words to 9b40933 · reached it mid-turn",
+      "A tell to 3729405 · end of its turn · 3 min",
+    ]) {
+      expect(shown, text).toContain(text);
+    }
+    const order = ["ai-assistant · 3 of 7 lanes · ↑9 ↓0 · clean", "3 · free", "xspace-ai-assistant · 2 of 7 lanes · ↑14 ↓0 · ● uncommitted", "■ Lanes 1 and 2 change the same file · Main told", "In flight", "Waiting", "A tell to 3729405 · end of its turn · 3 min"].map((text) => shown.indexOf(text));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(order).not.toContain(-1);
+    // Revoke stays on a phone (artboard J's push line).
+    expect(shown).toContain("Push & MR allowed · Revoke");
   });
 });

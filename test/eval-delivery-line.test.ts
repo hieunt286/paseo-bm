@@ -19,7 +19,8 @@ import { makeDecision } from "./helpers/decisions";
  * from the trace records, the request registry, the stored decisions and the
  * compaction and handoff stores; then through the replay, read-only. M-37
  * and M-38: files two missions wrote in one workspace, and committed and
- * verified finishes, from the reports with the rosters and placements.
+ * verified finishes, from the reports with the rosters and placements. M-44:
+ * the wait of a tell to a Worker, from the outbox (delivery line design §19.10).
  */
 
 const OPEN = { since: null, until: null };
@@ -202,6 +203,54 @@ describe("M-42 maintenance dropped no-safe-point after its ceiling (delivery lin
   });
 });
 
+/** An outbox record as `server/outbox.ts` stores it; `bm_tell_worker`'s `message` from the Main to a Worker by default. */
+const outboxRecord = (createdAt: string, over: Record<string, unknown> = {}) => ({
+  id: "out-0123456789ab",
+  kind: "message",
+  requestId: "req-20261016T090000Z",
+  batchId: null,
+  from: MANAGER,
+  to: WORKER,
+  text: "private owner words",
+  createdAt,
+  state: "pending",
+  outcomeAt: null,
+  reason: null,
+  ...over,
+});
+
+describe("M-44 the wait of a tell to a Worker (delivery line design §19.5, §19.10)", () => {
+  const hour = (h: number, m = 0) => `2026-10-16T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00.000Z`;
+  const delivered = (createdAt: string, outcomeAt: string, over: Record<string, unknown> = {}) => outboxRecord(createdAt, { state: "delivered", outcomeAt, ...over });
+
+  it("counts the tells created in the window, their waits until delivered or steered, the steered, the replaced and the still queued", () => {
+    const m = computeEvalMetrics({
+      records: [],
+      window: { since: hour(10), until: hour(12) },
+      outbox: [
+        outboxRecord(hour(10)),
+        delivered(hour(10, 5), hour(10, 59)),
+        delivered(hour(10, 10), hour(10, 11), { atOnce: true, steeredAt: hour(10, 11) }),
+        delivered(hour(10, 20), hour(10, 23), { atOnce: true, steeredAt: hour(10, 23), replaced: true }),
+        // Delivered after the window's end: queued at its end.
+        delivered(hour(11, 50), hour(12, 30)),
+        // Outside the window.
+        delivered(hour(9), hour(9, 2)),
+        // The plugin's own message to a Main, and another kind: no tells.
+        delivered(hour(10, 30), hour(10, 31), { from: "plugin" }),
+        delivered(hour(10, 30), hour(10, 31), { from: "owner" }),
+        delivered(hour(10, 30), hour(10, 31), { kind: "report", from: WORKER, to: MANAGER }),
+        { bad: true },
+      ],
+    });
+    // Waits 54, 1, 3 and 40 minutes: p50 3, p90 54 by nearest rank.
+    expect(m.m44).toEqual({ outboxIncluded: true, tells: 5, delivered: 4, waitMinutes: { p50: 3, p90: 54 }, steered: 1, replaced: 1, queuedAtEnd: 2 });
+    expect(m.unknowns.invalidOutboxRecords).toBe(1);
+    expect(metrics([]).m44).toEqual({ outboxIncluded: false, tells: 0, delivered: 0, waitMinutes: { p50: null, p90: null }, steered: 0, replaced: 0, queuedAtEnd: 0 });
+    expect(metrics([], { outbox: [] }).m44).toMatchObject({ outboxIncluded: true, tells: 0, waitMinutes: { p50: null, p90: null } });
+  });
+});
+
 describe("the replay of M-36, M-40 and M-42 (evaluation design §5; delivery line design §13)", () => {
   let home: string;
   const R = "req-20261016T090000Z";
@@ -259,13 +308,24 @@ describe("the replay of M-36, M-40 and M-42 (evaluation design §5; delivery lin
       version: 1,
       handoff: { id: "h1", workspaceId: WS, requestId: R, workerId: WORKER, managerId: MANAGER, missionId: null, interventionId: null, reason: SECRET, state: "dropped", requestedAt: minute(2), noteAskedAt: null, note: SECRET, briefAt: null, brief: SECRET, commandId: null, commandSentAt: null, creatingAt: null, successorId: null, successorAt: null, endedAt: "2026-10-16T10:03:00.000Z", ending: "no-safe-point" },
     });
+    // M-44: queued; delivered after 54 minutes; steered after 1; replaced after 2; one a day before (10 minutes).
+    write(`outbox/${WS}.json`, {
+      schemaVersion: 1,
+      records: [
+        outboxRecord(minute(4), { id: "out-000000000001", text: SECRET }),
+        outboxRecord(minute(5), { id: "out-000000000002", text: SECRET, state: "delivered", outcomeAt: "2026-10-16T09:59:00.000Z" }),
+        outboxRecord(minute(6), { id: "out-000000000003", text: SECRET, state: "delivered", outcomeAt: minute(7), atOnce: true, steeredAt: minute(7) }),
+        outboxRecord(minute(7), { id: "out-000000000004", text: SECRET, state: "delivered", outcomeAt: minute(9), atOnce: true, steeredAt: minute(9), replaced: true }),
+        outboxRecord("2026-10-15T09:00:00.000Z", { id: "out-000000000005", text: SECRET, state: "delivered", outcomeAt: "2026-10-15T09:10:00.000Z" }),
+      ],
+    });
   });
 
   afterAll(() => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("reads the registry, the settings, the compactions and the handoffs, prints three headline rows, and writes nothing", () => {
+  it("reads the registry, the settings, the compactions, the handoffs and the outbox, prints their headline rows, and writes nothing", () => {
     const before = mtimes(home);
     const out = run(["--home", home, "--json"]);
     expect([out.code, out.stderr]).toEqual([0, ""]);
@@ -282,6 +342,8 @@ describe("the replay of M-36, M-40 and M-42 (evaluation design §5; delivery lin
     });
     expect(replay.metrics.m40).toMatchObject({ afterBlocked: 1, startedWhileWaiting: 1, tokensReadWhileWaiting: 50 * M, blockedEndTokensRead: 150 * M, workerTokensRead: 220 * M });
     expect(replay.metrics.m42).toMatchObject({ compactions: { entries: 1, dropped: 1, afterCeiling: 1 }, handoffs: { entries: 1, dropped: 1, afterCeiling: 1 } });
+    // Waits 54, 1, 2 and 10 minutes: p50 2, p90 54.
+    expect(replay.metrics.m44).toEqual({ outboxIncluded: true, tells: 5, delivered: 4, waitMinutes: { p50: 2, p90: 54 }, steered: 1, replaced: 1, queuedAtEnd: 1 });
 
     const markdown = run(["--home", home]).stdout;
     expect(markdown).toContain(
@@ -291,6 +353,7 @@ describe("the replay of M-36, M-40 and M-42 (evaluation design §5; delivery lin
     expect(markdown).toContain(
       "| M-42 maintenance dropped no-safe-point: compactions dropped / asked, after the 30-min ceiling · handoffs dropped / asked, after the 30-min ceiling (the time ceiling; the token figure is not stored) | 1 / 1, 1 · 1 / 1, 1 |",
     );
+    expect(markdown).toContain("| M-44 tells to Workers: waited until delivered p50 / p90 minutes · delivered / tells · steered into a running turn · turns Paseo replaced · still queued | 2 / 54 · 4 / 5 · 1 · 1 · 1 |");
     for (const stdout of [out.stdout, markdown]) expect(stdout).not.toContain(SECRET);
     expect(mtimes(home)).toEqual(before);
   });
@@ -298,6 +361,18 @@ describe("the replay of M-36, M-40 and M-42 (evaluation design §5; delivery lin
   it("--workspace keeps a compaction or handoff by its workspace", () => {
     const other = JSON.parse(run(["--home", home, "--json", "--workspace", "wks_beta"]).stdout) as ReplayReport;
     expect(other.metrics.m42).toMatchObject({ compactions: { entries: 0 }, handoffs: { entries: 0 } });
+    expect(other.metrics.m44).toMatchObject({ outboxIncluded: true, tells: 0 });
+  });
+
+  it("keeps a tell in the window by when it was created, and says when the outbox was not read", () => {
+    const since = JSON.parse(run(["--home", home, "--json", "--since", "2026-10-16T00:00:00.000Z"]).stdout) as ReplayReport;
+    expect(since.metrics.m44).toEqual({ outboxIncluded: true, tells: 4, delivered: 3, waitMinutes: { p50: 2, p90: 54 }, steered: 1, replaced: 1, queuedAtEnd: 1 });
+    const bare = mkdtempSync(join(tmpdir(), "bm-replay-no-outbox-"));
+    try {
+      expect(run(["--home", bare]).stdout).toContain("| M-44 tells to Workers: waited until delivered p50 / p90 minutes · delivered / tells · steered into a running turn · turns Paseo replaced · still queued | outbox not read |");
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
   });
 });
 

@@ -10,7 +10,7 @@
  *
  * Pure: no React, no React Native, no `server/` import.
  */
-import type { MemoryListOutput, MissionFigure, MissionGetOutput, MissionPlacement, MissionRow, MissionSignal, MissionSummary, MissionsCreateInput } from "../shared/contracts";
+import type { MemoryListOutput, MissionFigure, MissionGetOutput, MissionLane, MissionPlacement, MissionRow, MissionSignal, MissionSummary, MissionWaiting, MissionsCreateInput } from "../shared/contracts";
 import { MISSION_CLASSES, DEFAULT_MISSION_LEVEL, type MissionClass, type MissionLevel } from "../shared/autonomy";
 import { MISSION_CHANGE_CODE_PATTERN } from "../shared/mission-change";
 import { ago, clockText, localTimeText, ordinal, shortRequestOf, shortSpan } from "./format";
@@ -488,6 +488,8 @@ export interface MissionPageView {
 export interface RepoPushView {
   /** "allowed since 10:42", "waiting for you", "not now", "revoked 12:10", "—". */
   text: string;
+  /** The Repositories table's word beside the merge request (mockup Q): "allowed", else as `text`. */
+  short: string;
   tone: Tone;
   /** The phone's line: "Push & MR allowed", "Push & MR: waiting for you"; null before any card. */
   phone: string | null;
@@ -516,12 +518,50 @@ export interface RepoRowView {
   /** "CI passed", "CI failed", "CI running", "CI not run"; null when unknown, and always while `integration.ci` is off. */
   ci: Badge | null;
   push: RepoPushView;
+  /** Delivery line design §19.8 (mockup Q, R): "3 of 7 lanes"; null from an older server. */
+  lanesLine: string | null;
+  /** Its lanes, lane 1 first; none from an older server. */
+  lanes: LaneRowView[];
+  /** Two lanes changing the same files, as the Main was told (§19.3). */
+  overlaps: OverlapView[];
+}
+
+/** One lane of a repo (delivery line design §19.8, mockup Q and R). */
+export interface LaneRowView {
+  lane: number;
+  /** "lane 1". */
+  label: string;
+  branch: string;
+  /** Its work: the topic, its live Workers ("3729405"), and "2 Workers" from two on; null when it has none. */
+  work: { topic: string; workers: Array<{ short: string; agentId: string }>; count: string | null } | null;
+  /** "free", "no live request" or "being made" when it has no work; null otherwise. */
+  idle: string | null;
+  /** "working · 2 h 12 min" in its request's tone, "merge waits · 5 min"; null for a lane with no work. */
+  state: Badge | null;
+  /** The small line under the state: "merges into the mission branch at finished", "merged 03:58 · kept for the next piece of work", a waiting merge's reason; null when none. */
+  note: string | null;
+  /** The phone's line before its state: "1 · Audit both repos", "2 · Menu entries · 2 Workers", "3 · free". */
+  phone: string;
+  /** The phone's state: "working 2 h 12 min"; null for a lane with no work. */
+  phoneState: Badge | null;
+}
+
+/** Two lanes of a repo changing the same files (§19.3, mockup Q and R). */
+export interface OverlapView {
+  /** "Lanes 1 and 2 of xspace-ai-assistant both change". */
+  lead: string;
+  /** The files, in mono: "a.tsx, b.tsx, and 2 more". */
+  files: string;
+  /** "the Main was told 04:38". */
+  told: string;
+  /** The phone's line after its mark: "Lanes 1 and 2 change the same file · Main told". */
+  phone: string;
 }
 
 export interface RepositoriesView {
-  /** "each mission writes on its own branch · read 12:40". */
+  /** "up to 7 lanes a repository · read 04:40" (mockup Q); "each mission writes on its own branch · read 12:40" from an older server. */
   meta: string;
-  /** The merge request column's header: "Merge request · CI"; "Merge request" while `integration.ci` is off (ADR-036). */
+  /** The merge request column's header: "Merge request · CI · push"; "Merge request · push" while `integration.ci` is off (ADR-036, mockup Q). */
   mrHeader: string;
   rows: RepoRowView[];
 }
@@ -551,9 +591,14 @@ export interface InFlightRequestView {
   requestId: string;
   request: string;
   topic: string;
+  /** "ai-assistant · 1" when its lane is known (mockup Q), else the repo's name. */
   repo: string;
+  /** The phone's "ai-assistant 1" (mockup R); null when its lane is not known. */
+  phoneRepo: string | null;
   worker: string | null;
   workerId: string | null;
+  /** Its other live Workers: the "+1" after the Worker (mockup Q); 0 when none. */
+  moreWorkers: number;
   state: Badge;
   /** The phone's words: another request named by its topic. */
   phoneState: string;
@@ -596,6 +641,31 @@ export interface InFlightView {
   /** The Main's open questions to the owner. */
   asks: Array<{ id: string; text: string; meta: string }>;
   links: Array<{ id: string; who: string; text: string }>;
+  /** "Repository · lane" once a lane is known (mockup Q), else "Repository". */
+  repoHeader: string;
+  /** The Waiting part (delivery line design §19.8); null from an older server. */
+  waiting: WaitingRowView[] | null;
+}
+
+/** One line of In flight's Waiting part (§19.8, mockup Q and R): a held request or a tell to a busy Worker. */
+export interface WaitingRowView {
+  id: string;
+  /** What: the held request's topic, `Your words "…"`, or a Main's `"…"`. */
+  what: string;
+  /** The small line under it: "a request paseo-bm starts by itself", "to", "a Main's tell to" — the Worker after it. */
+  note: string;
+  /** The Worker it is for, its first 7; null for a held request. */
+  worker: string | null;
+  /** For, of a held request: the requests it waits for. */
+  after: Array<{ request: string; topic: string | null }> | null;
+  /** For, of a tell: "reached it mid-turn", "the end of its turn"; of a held request waiting on a stop, why. */
+  status: Badge | null;
+  /** "04:09 · 31 min"; a steered tell's time alone. */
+  since: string;
+  /** Then: "a new Worker in a free lane of xspace-ai-assistant", "delivered when its turn ends", "—". */
+  then: Badge;
+  /** The phone's line: its lead (bold for a held request), the rest, its status and age. */
+  phone: { lead: string; bold: boolean; rest: string; status: Badge | null; age: string | null };
 }
 
 /** How many criteria the charter card shows before "+ N more". */
@@ -667,8 +737,23 @@ const REQUEST_STATE_TONES: Readonly<Record<MissionState["requests"][number]["sta
 
 const REQUEST_ID_IN_TEXT = /req-\d{8}T\d{6}Z/g;
 
-/** The In flight card from `mission.get`'s `inFlight` (mission runtime design §7, artboards G and H); null from an older server. */
-export function inFlightOf(state: MissionState | undefined, now: Date): InFlightView | null {
+/** Where each lane's workspace is (delivery line design §19.8): its repo's name, its number, and its requests' live Workers and start. */
+export type LaneIndex = ReadonlyMap<string, { name: string; lane: number; requests: ReadonlyMap<string, { workerIds: readonly string[]; since: string }> }>;
+
+/** The lanes of every repo of `summary`, by workspace. Pure. */
+export function laneIndexOf(summary: Pick<MissionSummary, "repos">): LaneIndex {
+  const index = new Map<string, { name: string; lane: number; requests: Map<string, { workerIds: readonly string[]; since: string }> }>();
+  for (const repo of summary.repos) {
+    for (const lane of repo.placement?.lanes ?? []) {
+      if (lane.workspaceId === null) continue;
+      index.set(lane.workspaceId, { name: repo.name, lane: lane.lane, requests: new Map(lane.requests.map((request) => [request.requestId, { workerIds: request.workerIds, since: request.since }])) });
+    }
+  }
+  return index;
+}
+
+/** The In flight card from `mission.get`'s `inFlight` (mission runtime design §7, artboards G and H; lanes and Waiting, mockup Q and R); null from an older server. */
+export function inFlightOf(state: MissionState | undefined, now: Date, lanes: LaneIndex = new Map(), waiting?: readonly MissionWaiting[]): InFlightView | null {
   if (state === undefined) return null;
   const topicOf = new Map(state.requests.map((request) => [request.requestId, request.topic]));
   const qnsOf = (requestId: string, decider: "owner" | "main") =>
@@ -689,19 +774,27 @@ export function inFlightOf(state: MissionState | undefined, now: Date): InFlight
     const continuationOf = continuedBy === null ? (request.continuationOf ?? null) : null;
     const position = request.chainPosition ?? null;
     const nth = position !== null && position >= 3 ? ordinal(position) : null;
+    // Delivery line design §19.8 (mockup Q): the lane in the repository column, the lane's other Workers after the Worker.
+    const lane = lanes.get(request.workspaceId) ?? null;
+    const inLane = lane?.requests.get(request.requestId) ?? null;
+    const name = request.repo ?? lane?.name ?? request.workspaceId;
     return {
       requestId: request.requestId,
       request: shortRequestOf(request.requestId),
       topic: request.topic,
-      repo: request.repo ?? request.workspaceId,
+      repo: lane === null ? name : `${name} · ${lane.lane}`,
+      phoneRepo: lane === null ? null : `${name} ${lane.lane}`,
       worker: request.workerId === null ? null : request.workerId.slice(0, 7),
       workerId: request.workerId,
+      moreWorkers: inLane === null ? 0 : inLane.workerIds.filter((id) => id !== request.workerId).length,
       state: { text: words, tone: REQUEST_STATE_TONES[request.state] },
       phoneState: phone,
       // Delivery line design §4.6 (artboard I): "finished · committed a1b2c3d · 11:58".
       lastReport:
         request.lastReport === null
-          ? "—"
+          ? inLane === null
+            ? "—"
+            : `started ${timeOrDate(inLane.since, now)}`
           : [request.lastReport.phase, ...(request.committed === true ? [`committed${request.commit == null ? "" : ` ${request.commit.slice(0, 7)}`}`] : []), timeOrDate(request.lastReport.at, now)].join(" · "),
       commit: request.lastReport !== null && request.committed === true && request.commit != null ? request.commit.slice(0, 7) : null,
       active: request.state !== "finished" && request.state !== "stopped",
@@ -738,7 +831,62 @@ export function inFlightOf(state: MissionState | undefined, now: Date): InFlight
     who: link.waitingSince === null ? link.state : `waiting ${shortSpan(now.getTime() - (Date.parse(link.waitingSince) || now.getTime()))}`,
     text: `${link.partner} · ${link.gist}`,
   }));
-  return { meta: `what the Main knows · read ${clockText(new Date(state.at)) || "—"}`, requests, restLine: rest.length === 0 ? null : `+ ${rest.join(" · ")}`, questions, asks, links };
+  return {
+    meta: `what the Main knows · read ${clockText(new Date(state.at)) || "—"}`,
+    requests,
+    restLine: rest.length === 0 ? null : `+ ${rest.join(" · ")}`,
+    questions,
+    asks,
+    links,
+    repoHeader: lanes.size === 0 ? "Repository" : "Repository · lane",
+    waiting: waiting === undefined ? null : waiting.map((line) => waitingRowOf(line, now)),
+  };
+}
+
+/** Since when, and how long: "04:09 · 31 min". */
+const sinceAndAge = (at: string, now: Date): string => `${timeOrDate(at, now)} · ${shortSpan(now.getTime() - (Date.parse(at) || now.getTime()))}`;
+
+/** A tell's For words, wide and on a phone, and its Then (§19.5, mockup Q and R). */
+const TELL_WORDS: Readonly<Record<Extract<MissionWaiting, { kind: "tell" }>["state"], { status: Badge; phone: string; then: Badge }>> = {
+  steered: { status: { text: "reached it mid-turn", tone: "success" }, phone: "reached it mid-turn", then: { text: "—", tone: "muted" } },
+  replaced: { status: { text: "its turn was replaced", tone: "warning" }, phone: "its turn was replaced", then: { text: "the Main and your Inbox were told", tone: "muted" } },
+  queued: { status: { text: "the end of its turn", tone: "warning" }, phone: "end of its turn", then: { text: "delivered when its turn ends", tone: "muted" } },
+  held: { status: { text: "the end of its wait", tone: "warning" }, phone: "end of its wait", then: { text: "delivered when its wait ends", tone: "muted" } },
+};
+
+/** One line of the Waiting part (delivery line design §19.8, mockup Q and R). Pure. */
+export function waitingRowOf(line: MissionWaiting, now: Date): WaitingRowView {
+  const age = shortSpan(now.getTime() - (Date.parse(line.since) || now.getTime()));
+  if (line.kind === "held") {
+    const stopped = line.state === "waiting-stopped";
+    const where = line.repo === null ? "a new Worker of the mission" : line.newLane ? `a new Worker in a free lane of ${line.repo}` : `a new Worker in ${line.repo}`;
+    const status: Badge | null = stopped ? { text: "a request it waits for stopped", tone: "warning" } : null;
+    return {
+      id: line.id,
+      what: line.topic,
+      note: "a request paseo-bm starts by itself",
+      worker: null,
+      after: line.after.map((entry) => ({ request: shortRequestOf(entry.requestId), topic: entry.topic })),
+      status,
+      since: sinceAndAge(line.since, now),
+      then: stopped ? { text: "it does not start by itself: the Main gives it again or cancels it", tone: "warning" } : { text: where, tone: "muted" },
+      phone: { lead: line.topic, bold: true, rest: ` · after ${line.after.map((entry) => entry.topic ?? shortRequestOf(entry.requestId)).join(", ")}`, status: stopped ? { text: "stopped", tone: "warning" } : null, age },
+    };
+  }
+  const words = TELL_WORDS[line.state];
+  const waits = line.state === "queued" || line.state === "held";
+  const worker = line.workerId.slice(0, 7);
+  return {
+    id: line.id,
+    what: line.owner ? `Your words "${line.text}"` : `"${line.text}"`,
+    note: line.owner ? "to" : "a Main's tell to",
+    worker,
+    after: null,
+    status: words.status,
+    since: waits ? sinceAndAge(line.since, now) : timeOrDate(line.since, now),
+    then: words.then,
+    phone: { lead: line.owner ? `Your words to ${worker}` : `A tell to ${worker}`, bold: false, rest: "", status: { text: words.phone, tone: words.status.tone }, age: waits ? age : null },
+  };
 }
 
 /** The merge request's number as the forge writes it: "!42" (GitLab), "#42" (GitHub), else "MR". Pure. */
@@ -769,24 +917,89 @@ function pushOf(integration: MissionPlacement["integration"], now: Date): RepoPu
   const id = integration.decisionId;
   switch (integration.state) {
     case "allowed":
-      return { text: `allowed since ${integration.at === null ? "—" : timeOrDate(integration.at, now)}`, tone: "plain", phone: "Push & MR allowed", action: "revoke", decisionId: id };
+      return { text: `allowed since ${integration.at === null ? "—" : timeOrDate(integration.at, now)}`, short: "allowed", tone: "plain", phone: "Push & MR allowed", action: "revoke", decisionId: id };
     case "waiting":
-      return { text: "waiting for you", tone: "warning", phone: "Push & MR: waiting for you", action: "answer", decisionId: id };
+      return { text: "waiting for you", short: "waiting for you", tone: "warning", phone: "Push & MR: waiting for you", action: "answer", decisionId: id };
     case "not-now":
-      return { text: "not now", tone: "muted", phone: "Push & MR: not now", action: "ask", decisionId: id };
-    case "revoked":
-      return { text: `revoked${integration.at === null ? "" : ` ${timeOrDate(integration.at, now)}`}`, tone: "muted", phone: "Push & MR: revoked", action: "ask", decisionId: id };
+      return { text: "not now", short: "not now", tone: "muted", phone: "Push & MR: not now", action: "ask", decisionId: id };
+    case "revoked": {
+      const text = `revoked${integration.at === null ? "" : ` ${timeOrDate(integration.at, now)}`}`;
+      return { text, short: text, tone: "muted", phone: "Push & MR: revoked", action: "ask", decisionId: id };
+    }
     default:
-      return { text: "—", tone: "muted", phone: null, action: null, decisionId: id };
+      return { text: "—", short: "—", tone: "muted", phone: null, action: null, decisionId: id };
   }
+}
+
+/** The most files an overlap line names. */
+const OVERLAP_FILES_SHOWN = 3;
+
+/** A request's state in In flight's words, by its id; null when In flight does not list it. */
+export type RequestStateOf = (requestId: string) => Badge | null;
+
+/** One lane row (delivery line design §19.8, mockup Q and R). Pure. */
+export function laneRowOf(lane: MissionLane, now: Date, stateOf: RequestStateOf = () => null): LaneRowView {
+  const label = `lane ${lane.lane}`;
+  const newest = lane.requests.at(-1);
+  const pending = lane.mergePending;
+  if (newest !== undefined) {
+    const workers = [...new Set(lane.requests.flatMap((request) => request.workerIds))].map((agentId) => ({ short: agentId.slice(0, 7), agentId }));
+    const count = workers.length >= 2 ? `${workers.length} Workers` : null;
+    const since = lane.requests.map((request) => request.since).sort()[0]!;
+    const age = shortSpan(now.getTime() - (Date.parse(since) || now.getTime()));
+    const words = stateOf(newest.requestId) ?? { text: "working", tone: "info" as Tone };
+    return {
+      lane: lane.lane,
+      label,
+      branch: lane.branch,
+      work: { topic: newest.topic, workers, count },
+      idle: null,
+      state: { text: `${words.text} · ${age}`, tone: words.tone },
+      note: pending !== null ? `merge waits: ${pending.reason}` : lane.lane >= 2 ? "merges into the mission branch at finished" : null,
+      phone: [`${lane.lane} · ${newest.topic}`, ...(count === null ? [] : [count])].join(" · "),
+      phoneState: { text: `${words.text} ${age}`, tone: words.tone },
+    };
+  }
+  if (pending !== null) {
+    const age = shortSpan(now.getTime() - (Date.parse(pending.since) || now.getTime()));
+    return {
+      lane: lane.lane,
+      label,
+      branch: lane.branch,
+      work: null,
+      idle: "no live request",
+      state: { text: `merge waits · ${age}`, tone: "warning" },
+      note: pending.reason,
+      phone: `${lane.lane} · no live request`,
+      phoneState: { text: `merge waits ${age}`, tone: "warning" },
+    };
+  }
+  const free = lane.lane === 1 || lane.freeSince !== null;
+  const idle = free ? "free" : lane.state === "creating" ? "being made" : "no live request";
+  const note = lane.freeSince === null ? null : [...(lane.mergedAt === null ? [] : [`merged ${timeOrDate(lane.mergedAt, now)}`]), "kept for the next piece of work"].join(" · ");
+  return { lane: lane.lane, label, branch: lane.branch, work: null, idle, state: null, note, phone: `${lane.lane} · ${idle}`, phoneState: null };
+}
+
+/** One overlap line (§19.3, mockup Q and R). Pure. */
+function overlapOf(overlap: NonNullable<MissionPlacement["overlaps"]>[number], repo: string, now: Date): OverlapView {
+  const [a, b] = overlap.lanes;
+  const shown = overlap.files.slice(0, OVERLAP_FILES_SHOWN).join(", ");
+  const more = overlap.files.length - OVERLAP_FILES_SHOWN;
+  return {
+    lead: `Lanes ${a} and ${b} of ${repo} both change`,
+    files: more > 0 ? `${shown}, and ${more} more` : shown,
+    told: overlap.toldAt === null ? "the Main was told" : `the Main was told ${timeOrDate(overlap.toldAt, now)}`,
+    phone: `Lanes ${a} and ${b} change the same ${overlap.files.length === 1 ? "file" : "files"} · Main told`,
+  };
 }
 
 /**
  * The Repositories card from `mission.get`'s summary (delivery line design
- * §4.9, artboards I and J); null when no repo has a placement. With
- * `integration.ci` off (§17.1) the merge request shows without CI.
+ * §4.9, §19.8; mockup `mission-lanes.html`, artboards Q and R); null when no
+ * repo has a placement. With `integration.ci` off (§17.1) the merge request
+ * shows without CI. `stateOf` gives a lane's request its In flight words.
  */
-export function repositoriesOf(summary: Pick<MissionSummary, "code" | "repos" | "ci">, now: Date): RepositoriesView | null {
+export function repositoriesOf(summary: Pick<MissionSummary, "code" | "repos" | "ci">, now: Date, stateOf: RequestStateOf = () => null): RepositoriesView | null {
   const placed = summary.repos.flatMap((repo) => (repo.placement === undefined ? [] : [{ repo, placement: repo.placement }]));
   if (placed.length === 0) return null;
   const ciShown = summary.ci !== "off";
@@ -809,12 +1022,16 @@ export function repositoriesOf(summary: Pick<MissionSummary, "code" | "repos" | 
       })(),
       ci: !ciShown || placement.ci === null ? null : (CI_WORDS[placement.ci] ?? null),
       push: pushOf(placement.integration, now),
+      lanesLine: placement.lanes === undefined || placement.maxLanes === undefined ? null : `${placement.lanes.length} of ${placement.maxLanes} lanes`,
+      lanes: (placement.lanes ?? []).map((lane) => laneRowOf(lane, now, stateOf)),
+      overlaps: (placement.overlaps ?? []).map((overlap) => overlapOf(overlap, repo.name, now)),
     };
   });
+  const maxLanes = placed.map(({ placement }) => placement.maxLanes).find((max) => max !== undefined);
   const newest = placed.reduce<string | null>((latest, { placement }) => (placement.readAt !== null && (latest === null || placement.readAt > latest) ? placement.readAt : latest), null);
   return {
-    meta: ["each mission writes on its own branch", ...(newest === null ? [] : [`read ${clockText(new Date(newest)) || "—"}`])].join(" · "),
-    mrHeader: ciShown ? "Merge request · CI" : "Merge request",
+    meta: [maxLanes === undefined ? "each mission writes on its own branch" : `up to ${maxLanes} lanes a repository`, ...(newest === null ? [] : [`read ${clockText(new Date(newest)) || "—"}`])].join(" · "),
+    mrHeader: ciShown ? "Merge request · CI · push" : "Merge request · push",
     rows,
   };
 }
@@ -845,6 +1062,8 @@ export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf 
   const finished = rows.filter((row) => row.phase.tone === "success").length;
   const stopped = rows.filter((row) => !row.active && row.phase.tone !== "success").length;
   const rest = [...(finished > 0 ? [`${finished} finished`] : []), ...(stopped > 0 ? [`${stopped} stopped`] : [])];
+  // Delivery line design §19.8: In flight names each request's lane and lists what waits.
+  const inFlight = inFlightOf(page.inFlight, now, laneIndexOf(summary), page.waiting);
   return {
     missionId: summary.missionId,
     code: summary.code,
@@ -893,8 +1112,8 @@ export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf 
       meta: page.plan.updatedAt === null ? "not written yet · read-only" : `updated ${localTimeText(new Date(page.plan.updatedAt), now) || "—"} by the Main · read-only`,
     },
     mains: mainHistoryOf(page.mainHistory, now),
-    inFlight: inFlightOf(page.inFlight, now),
-    repositories: repositoriesOf(summary, now),
+    inFlight,
+    repositories: repositoriesOf(summary, now, (requestId) => inFlight?.requests.find((request) => request.requestId === requestId)?.state ?? null),
   };
 }
 

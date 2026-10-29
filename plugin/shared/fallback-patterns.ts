@@ -15,10 +15,9 @@
  * | L3    | temporary rate limit          | no       |
  * | L6    | no pattern matched            | no       |
  *
- * The defaults are a starting point never checked on a real incident
- * (proposal §1.5): the phase 2a-16 acceptance and the entry to phase 2a-18
- * check them again. So they are one table of data, and the optional `patterns`
- * of `role-fallback.json` (edited by hand only) replaces the defaults of any
+ * The defaults may need extending when providers change their failure
+ * wording. They are one table of data, and the optional `patterns` of
+ * `role-fallback.json` (edited by hand only) replaces the defaults of any
  * class it lists.
  *
  * The text is cut to `MAX_MATCH_CHARS` before matching. That bounds a pattern
@@ -57,7 +56,7 @@ export const MAX_MATCH_CHARS = 2000;
  * plan-limit message may also say "rate limit".
  */
 export const DEFAULT_PATTERNS: ReadonlyArray<{ readonly class: PatternClass; readonly patterns: readonly string[] }> = [
-  { class: "L1", patterns: ["usage limit", "limit reached", "hit your (usage )?limit", "limit (will )?reset", "resets? (at|in) "] },
+  { class: "L1", patterns: ["usage limit", "limit reached", "hit your (usage |weekly )?limit", "limit (will )?reset", "resets? (at|in) "] },
   {
     class: "L2",
     patterns: ["credit balance", "billing", "subscription (has )?(expired|ended|inactive)", "payment (required|failed)", "quota exceeded"],

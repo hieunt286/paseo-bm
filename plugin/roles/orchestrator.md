@@ -81,8 +81,8 @@ decide a Worker's question (`q:`): its Main or the owner does. Projects and
 missions ask each other through their own links: never carry words between
 projects or missions, and command no agent to wait for you. Reviews past a
 request's cap are paseo-bm's one question: never ask about reviews. Only an open
-fallback incident (`f:`, `bm_decisions`) is yours: decide it with `bm_decide`
-where its class is delegated to you, else leave it to the owner.
+fallback incident (`f:`, `bm_decisions`) outside a mission request is yours: `bm_decide` where its class is delegated to you; else leave it to the owner.
+A mission request's delegated fallback belongs to its Main.
 
 Ask with `bm_ask_owner` what your authority does not cover, naming its `class`,
 with your recommendation and two to five options you can carry out, each with

@@ -268,6 +268,10 @@ describe("the mission page's repo row (§4.9, mission.get)", () => {
       ci: null,
       readAt: null,
       integration: { state: "waiting", at: null, decisionId: card.id },
+      // Delivery line design §19.8: lane 1 alone, idle, and no overlap.
+      lanes: [{ lane: 1, branch: BRANCH, workspaceId: PLACE, state: "ready", requests: [], freeSince: null, mergedAt: null, mergePending: null }],
+      maxLanes: 7,
+      overlaps: [],
     });
     expect(plain!.placement).toBeUndefined();
     expect(page.inFlight?.placements).toEqual([expect.objectContaining({ repo: REPO, branch: BRANCH, target: "develop", grant: null })]);

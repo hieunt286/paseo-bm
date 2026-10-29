@@ -263,6 +263,8 @@ export const ALERT_WORDS: Readonly<Record<AlertKind, { what: string; tone: Tone;
   "coordination-off": { what: "Compaction or handoff was switched off: below its target", tone: "warning", opens: null, agentWord: "" },
   // Autonomy design §D.2 (change-010 C6): a Worker or Reviewer only watched in a project whose boundary is on.
   "boundary-off": { what: "An agent runs without the action boundary", tone: "warning", opens: "agent", agentWord: "agent" },
+  // Delivery line design §19.5: Paseo replaced a Worker's running turn instead of steering the owner's words in.
+  "turn-replaced": { what: "Your words restarted a Worker's turn instead of joining it", tone: "warning", opens: "agent", agentWord: "Worker" },
 };
 
 /** A `coordination-off` alert's line, naming its mechanism (its subject). */

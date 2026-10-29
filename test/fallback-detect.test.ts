@@ -28,6 +28,7 @@ const LIMIT = "You've hit your usage limit - resets 3pm (Europe/Paris)";
 const user = (text: string, clientMessageId?: string) => ({ type: "user_message", text, ...(clientMessageId ? { clientMessageId } : {}) });
 const said = (text: string) => ({ type: "assistant_message", text });
 const toolCall = { type: "tool_call", callId: "c1", name: "Bash", status: "completed", error: null, detail: { type: "shell", command: "br ready" } };
+const incoming = (text: string) => ({ type: "tool_call", callId: "paseo-agent-message:incoming", name: "agent_message", status: "completed", error: null, agentMessage: { event: "message", sender: { id: "m-1", title: "Main" }, text }, detail: { type: "plain_text", text, icon: "bot" } });
 
 function turn(overrides: Partial<FakeTurn> = {}): FakeTurn {
   return {
@@ -49,8 +50,8 @@ interface Snapshot {
   lastUsage?: { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number } | null;
 }
 
-function deps(snapshot: Snapshot | null = { labels: { "bm.role": "worker" }, lastUsage: { inputTokens: 10, outputTokens: 0 } }, extra: Partial<FallbackDetectDeps> = {}) {
-  const refetch = vi.fn(async () => ({ entries: [], agent: snapshot ?? undefined }));
+function deps(snapshot: Snapshot | null = { labels: { "bm.role": "worker" }, lastUsage: { inputTokens: 10, outputTokens: 0 } }, extra: Partial<FallbackDetectDeps> = {}, entries: unknown[] = []) {
+  const refetch = vi.fn(async () => ({ entries, agent: snapshot ?? undefined }));
   const log = vi.fn();
   const value: FallbackDetectDeps = { paseo: { agents: { ref: () => ({ timeline: { refetch } }) } }, log, ...extra };
   return { value, refetch, log };
@@ -151,6 +152,56 @@ describe("N2: a completed turn that only said a few words", () => {
     expect(await classifyTurn(asEvent(turn({ timeline: [user("go"), said("Waiting for the Reviewer.")] })), value)).toBeNull();
     expect(await classifyTurn(asEvent(turn({ timeline: [user("go"), said("Too many requests, retrying.")] })), value)).toBeNull();
     expect(refetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("Paseo hooks with an empty timeline", () => {
+  const weekly = "You've hit your weekly limit · resets Oct 28 at 10am (Asia/Saigon)";
+  const history = (items: unknown[], snapshot?: Snapshot) => deps(snapshot, {}, items.map((item) => ({ item, turnId: "turn-1", timestamp: "2026-10-26T12:47:23.000Z" })));
+
+  it("reads the last turn on demand and reuses its snapshot for the usage guard", async () => {
+    // Paseo may reuse a turn id; an earlier turn's tools must not hide this failure.
+    const { value, refetch } = history([user("earlier"), toolCall, said("Done."), user("Continue."), said(weekly)]);
+    expect(await classifyTurn(asEvent(turn({ timeline: [] })), value)).toEqual({ class: "L1", signal: "completed", message: weekly });
+    expect(refetch).toHaveBeenCalledTimes(1);
+    expect(refetch).toHaveBeenCalledWith({ direction: "tail", limit: REFETCH_LIMIT });
+  });
+
+  it("recognises Paseo's incoming agent-message row as the new prompt, not work by the Worker", async () => {
+    const items = [user("earlier"), toolCall, said("Done."), incoming("Continue."), said(weekly)];
+    const { value, refetch } = history(items);
+    expect(await classifyTurn(asEvent(turn({ timeline: [] })), value)).toEqual({ class: "L1", signal: "completed", message: weekly });
+    expect(refetch).toHaveBeenCalledTimes(1);
+    expect(await classifyTurn(asEvent(turn({ timeline: items })), deps().value)).toMatchObject({ class: "L1" });
+    expect(await classifyTurn(asEvent(turn({ timeline: [incoming("Continue."), toolCall, said(weekly)] })), deps().value)).toBeNull();
+    // A real tool merely named agent_message still blocks N2.
+    expect(await classifyTurn(asEvent(turn({ timeline: [user("Continue."), { ...incoming("work"), callId: "real-tool-call" }, said(weekly)] })), deps().value)).toBeNull();
+  });
+
+  it("does not classify a turn that used a tool or a previous turn's limit reply", async () => {
+    for (const items of [
+      [user("Continue."), toolCall, said(weekly)],
+      [user("earlier"), said(weekly), user("Continue."), said("Working on it.")],
+    ]) {
+      const { value, refetch } = history(items);
+      expect(await classifyTurn(asEvent(turn({ timeline: [] })), value)).toBeNull();
+      expect(refetch).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("keeps the plugin-notice guard when fetched history has no reported tokens", async () => {
+    const { value, refetch } = history([user("BM-FALLBACK provider failure"), said(weekly)], { labels: {}, lastUsage: null });
+    expect(await classifyTurn(asEvent(turn({ timeline: [] })), value)).toBeNull();
+    expect(refetch).toHaveBeenCalledTimes(1);
+    const received = history([incoming("BM-FALLBACK provider failure"), said(weekly)], { labels: {}, lastUsage: null });
+    expect(await classifyTurn(asEvent(turn({ timeline: [] })), received.value)).toBeNull();
+    expect(received.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not classify a full tail page whose turn boundary may be missing", async () => {
+    const { value, refetch } = history([...Array.from({ length: REFETCH_LIMIT - 1 }, () => said("Reading.")), said(weekly)]);
+    expect(await classifyTurn(asEvent(turn({ timeline: [] })), value)).toBeNull();
+    expect(refetch).toHaveBeenCalledTimes(1);
   });
 });
 

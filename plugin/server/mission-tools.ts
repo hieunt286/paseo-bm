@@ -4,7 +4,7 @@
  *
  * | Tool | Does |
  * |---|---|
- * | `bm_mission` | reads the caller's mission: charter, plan, contracts, roster (each request's repo, Worker, phase, newest report), its Workers' open questions, the open `m:` cards, the mission level, the newest `MISSION_JOURNAL_SHOWN` journal lines |
+ * | `bm_mission` | reads the caller's mission (delivery line design §18.3): charter, plan, contracts, roster (each active request's repo, Worker, phase, newest report and open questions; each settled one as one line, the newest `MISSION_SETTLED_SHOWN`, with `settledMore` when there are others), the open `m:` cards, the mission level, the newest `MISSION_JOURNAL_SHOWN` journal lines (input `journal` asks for up to 50); input `requestId` adds that request in full as `request`, settled or not |
  * | `bm_mission_start` | an unassigned Main in the Missions home proposes the mission the owner named (`proposed-mission-starts.ts`); `settleMissionStart` records it at the turn's end only when the turn holds the owner's own message (the decision materialiser), then binds, labels and titles the Main |
  * | `bm_mission_update` | writes the free changes at once (plan, contracts, new criteria, a criterion's status open or met, a repo added at a mission level that delegates `scope-repo`), each with a journal line; everything else opens one `m:` decision whose "apply" option carries the change |
  * | `bm_answer_worker` | answers open `q:` questions of the mission's requests whose decider is the Main (mission runtime design §4.1, `deciderOf`): `by: main`, `via: main`, no grant on the decision, handed to `onSettled` (the Worker gets it cited as the Main's); where the Main only recommends (a `shadow` cell) it records `prediction.main`. Refused for a question someone else decides, a settled one, a request of another mission |
@@ -47,30 +47,34 @@ import { redactText } from "./collector";
 import type { OnDecisionsSettled } from "./decision-rpc";
 import { isEmptyMissionChange, missionChangeLinesOf, type MissionChange, type MissionChangeAction } from "../shared/mission-change";
 import { createDecisionStore } from "./decision-store";
-import { answerEffect, missionCardEffect, nothingWasSentence, recommendationEffect } from "./effects";
+import { answerEffect, incidentActionEffect, missionCardEffect, nothingWasSentence, recommendationEffect } from "./effects";
 import { decisionSummaryOf, type ServerToolAnswer, type ServerTools } from "./decision-tools";
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionDecisionStore, isMainQuestion, missionOfDecisionId } from "./mission-decisions";
-import { busyRequestsOf, createMissionRoster, requestIndexOf, stopActiveRequests } from "./mission-roster";
+import { busyRequestsOf, createMissionRoster, requestIndexOf, stopActiveRequests, type RosterEntry } from "./mission-roster";
 import { offerMerges, offerTransfer } from "./mission-ownership";
 import { transferRefusalsOf } from "./mission-transfer";
 import { contractStatusOf, createMissionStore, journalQuietly, metAtOf, type ContractStatus, type Mission, type MissionContract } from "./mission-store";
 import { ensureMissionWorkspace, isMissionsHome, markMain, missionsHomeIdOf, syncMainTitle, type MissionsPaseo } from "./missions-home";
 import type { NoticePaseo } from "./notice-queue";
-import { newestReportRecordOf, reportPhaseOf, storeAndDeliver } from "./outbox";
+import { createOutbox, newestReportRecordOf, reportPhaseOf, storeAndDeliver } from "./outbox";
 import { setAgentLabel, type PaseoCliDeps } from "./paseo-cli";
 import { directoryIn, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { placementOf, repoKeyOf } from "./placements";
 import { openArchiveCards, retiredPlacements, retitlePlacements } from "./placement-create";
 import { isPluginHomeIn } from "./plugin-homes";
 import { proposeMissionStart, takeProposedMissionStart } from "./proposed-mission-starts";
+import { cancelHeld, heldRequestsOf } from "./held-requests";
 import { cutText } from "./request-render";
 import { MISSION_CODE_LABEL } from "./role-title";
 import { errorText } from "./rpc-kit";
+import { readIncidents } from "./fallback-state";
 import { actingTools, answered, boundAs, fixThese, refused, withoutNulls, type BoundCaller } from "./tool-kit";
 
-/** The journal lines `bm_mission` shows (§4). */
-export const MISSION_JOURNAL_SHOWN = 50;
+/** The journal lines `bm_mission` shows when its input names no `journal` (§4; delivery line design §18.3). */
+export const MISSION_JOURNAL_SHOWN = 20;
+/** The settled (`finished` or `stopped`) requests `bm_mission` shows, newest first in the roster's order (delivery line design §18.3). */
+export const MISSION_SETTLED_SHOWN = 20;
 /** How much of a request's newest report `bm_mission` shows. */
 export const MISSION_REPORT_SHOWN = 1_500;
 
@@ -326,6 +330,14 @@ export interface MissionAnswerDeps {
   quiet?: boolean;
 }
 
+function mainAddressOf(missionId: string, deps: MissionAnswerDeps): { mainId: string; workspaceId: string } | null {
+  const mission = createMissionStore(deps.home).get(missionId);
+  const mainId = mission?.mainId ?? null;
+  const bound = mainId === null ? undefined : createBindingStore(deps.home, { log: deps.log }).list().find((binding) => binding.agentId === mainId);
+  const workspaceId = bound?.workspaceId ?? mission?.workspaceId ?? missionsHomeIdOf(deps.home);
+  return mainId === null || workspaceId === null ? null : { mainId, workspaceId };
+}
+
 /**
  * Tells the mission's current Main what the owner decided on its card: a
  * `message` record from `from` (`owner` by default; the governor's splits and
@@ -336,10 +348,9 @@ export interface MissionAnswerDeps {
  */
 export async function tellMain(missionId: string, decisionId: string, text: string, deps: MissionAnswerDeps, from = "owner"): Promise<void> {
   try {
-    const mainId = createMissionStore(deps.home).get(missionId)?.mainId ?? null;
-    const bound = mainId === null ? undefined : createBindingStore(deps.home, { log: deps.log }).list().find((binding) => binding.agentId === mainId);
-    const workspaceId = bound?.workspaceId ?? createMissionStore(deps.home).get(missionId)?.workspaceId ?? missionsHomeIdOf(deps.home);
-    if (mainId === null || workspaceId === null) return deps.log(`[paseo-bm] the Main of mission ${missionId} could not be told of ${decisionId}: it has no Main or workspace now.`);
+    const address = mainAddressOf(missionId, deps);
+    if (address === null) return deps.log(`[paseo-bm] the Main of mission ${missionId} could not be told of ${decisionId}: it has no Main or workspace now.`);
+    const { mainId, workspaceId } = address;
     await storeAndDeliver(
       workspaceId,
       { kind: "message", requestId: decisionId, from, to: mainId, text: `${text}\nbm_mission shows the mission as it stands.` },
@@ -363,18 +374,25 @@ export async function tellMainOfQuestions(opened: readonly Decision[], deps: Mis
   try {
     const facts = authorityFactsOf(deps.home, deps.log);
     for (const decision of opened) {
-      if (decision.status !== "open" || !decision.id.startsWith("q:") || decision.requestId === null) continue;
+      const fallback = decision.id.startsWith("f:");
+      if (decision.status !== "open" || (!decision.id.startsWith("q:") && !fallback) || decision.requestId === null) continue;
       const place = requestIndexOf(deps.home, decision.requestId);
       if (place === null) continue;
       const decider = deciderOf(decision, facts);
       if (decider.decider !== "main" && !decider.recommend) continue;
-      const qn = decision.id.slice(decision.id.lastIndexOf(":") + 1);
+      const qn = fallback ? decision.id : decision.id.slice(decision.id.lastIndexOf(":") + 1);
       const options = decision.options.map((option) => `${option.key} — ${redactText(option.label).replace(/\s+/g, " ").slice(0, 120)}${option.recommended ? " (recommended)" : ""}`).join("; ");
       const question = redactText(decision.question.split("\n")[0] ?? "").replace(/\s+/g, " ").slice(0, 300);
-      const what = decider.recommend
+      const what = fallback
+        ? "Resolve this fallback now with bm_answer_fallback using this decisionId, an offered option and your reason. Normally switch to the configured candidate; do not ask the owner to confirm again or create a replacement yourself. Check the tool's delivery result and keep following the replacement."
+        : decider.recommend
         ? "Recommend an option with bm_answer_worker; the owner decides."
         : "Answer with bm_answer_worker; the owner sees your answer and may override it.";
       const text = `${qn} of ${decision.requestId} (${decisionClassOf(decision)}${decision.subject === null ? "" : `, ${decision.subject}`}) is yours ${decider.recommend ? "to recommend on" : "to answer within the mission's delegation"}: ${question}; options ${options}. ${what}`;
+      if (fallback) {
+        const address = mainAddressOf(place.missionId, deps);
+        if (address !== null && createOutbox(deps.home).list(address.workspaceId).some((record) => record.kind === "message" && record.requestId === decision.requestId && record.from === "plugin" && record.text.startsWith(`${decision.id} of ${decision.requestId} `) && record.state !== "dropped")) continue;
+      }
       await tellMain(place.missionId, decision.requestId, text, deps, "plugin");
       told += 1;
     }
@@ -382,6 +400,24 @@ export async function tellMainOfQuestions(opened: readonly Decision[], deps: Mis
     deps.log(`[paseo-bm] could not tell a Main of its Workers' questions: ${errorText(error)}`);
   }
   return told;
+}
+
+/** ADR-040: reconcile already-open fallback once a plugin run has a Paseo handle. */
+export function createMainFallbackRecovery(): (deps: MissionAnswerDeps) => Promise<number> {
+  let started = false;
+  return async (deps) => {
+    if (started) return 0;
+    started = true;
+    try {
+      const pending = new Set(readIncidents(deps.home, deps.log).incidents.filter((incident) => incident.status === "pending").map((incident) => `f:${incident.id}`));
+      const decisions = createDecisionStore(deps.home, { log: deps.log }).list({ statuses: ["open"] }).filter((decision) => pending.has(decision.id));
+      return await tellMainOfQuestions(decisions, deps);
+    } catch (error) {
+      started = false;
+      deps.log(`[paseo-bm] pending Main fallback could not be recovered: ${errorText(error)}`);
+      return 0;
+    }
+  };
 }
 
 /**
@@ -569,31 +605,51 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
   const read = async (raw: unknown, caller: ToolCaller | null): Promise<ServerToolAnswer> => {
     const found = mainOf(caller);
     if ("ok" in found) return found;
-    const issues = schemaIssues(faceOf("bm_mission").inputSchema, withoutNulls(raw ?? {}));
+    const input = withoutNulls(raw ?? {}) as { requestId?: string; journal?: number };
+    const issues = schemaIssues(faceOf("bm_mission").inputSchema, input);
     if (issues.length > 0) return fixThese("bm_mission", issues);
     const { mission } = found;
     if (mission === null) return refused(NOT_A_MAIN_MESSAGE);
+    const roster = createMissionRoster(deps.home()).list(mission.missionId);
+    const asked = input.requestId === undefined ? undefined : roster.find((entry) => entry.requestId === input.requestId);
+    if (asked === undefined && input.requestId !== undefined) {
+      return refused(`Request ${input.requestId} is not one of mission ${mission.code} (bm_mission lists them). ${nothingWasSentence("read or changed")}`);
+    }
     const home = deps.home();
     const paseo = deps.paseo();
     const listed = paseo === null || paseo === undefined ? null : await listedWorkspaces(paseo as DashboardPaseo).catch(() => null);
     const folderOf = (workspaceId: string) => directoryIn(listed, workspaceId);
     const decisions = createDecisionStore(home, { log });
     const summary = (decision: Decision) => decisionSummaryOf(decision, process.env, { grant: false });
-    const requests = createMissionRoster(home)
-      .list(mission.missionId)
+    const lineOf = (entry: RosterEntry) => ({
+      requestId: entry.requestId,
+      repo: { workspaceId: entry.workspaceId, folder: folderOf(entry.workspaceId) },
+      topic: entry.topic,
+      state: entry.state,
+      workerId: entry.workerIds.at(-1) ?? null,
+    });
+    const inFull = (entry: RosterEntry) => {
+      const line = lineOf(entry);
+      const report = line.workerId === null ? null : newestReportRecordOf(home, entry.workspaceId, line.workerId);
+      return {
+        ...line,
+        phase: report === null ? null : reportPhaseOf(report.text),
+        report: report === null ? null : { at: report.createdAt, text: cutText(report.text, MISSION_REPORT_SHOWN) },
+        openQuestions: decisions.list({ workspaceId: entry.workspaceId, requestId: entry.requestId, statuses: UNSETTLED_STATUSES }).map(summary),
+      };
+    };
+    // Delivery line design §18.3: the roster appends, so its newest settled requests are its last ones.
+    // A settled request with a question still open is always shown, with that question (review of ADR-037).
+    const settled = roster.filter((entry) => entry.state !== "active");
+    const openOf = new Map(settled.map((entry) => [entry, decisions.list({ workspaceId: entry.workspaceId, requestId: entry.requestId, statuses: UNSETTLED_STATUSES }).map(summary)]));
+    const shownSettled = new Set([...settled.slice(-MISSION_SETTLED_SHOWN), ...settled.filter((entry) => openOf.get(entry)!.length > 0)]);
+    const settledMore = settled.length - shownSettled.size;
+    const requests = roster
+      .filter((entry) => entry.state === "active" || shownSettled.has(entry))
       .map((entry) => {
-        const workerId = entry.workerIds.at(-1) ?? null;
-        const report = workerId === null ? null : newestReportRecordOf(home, entry.workspaceId, workerId);
-        return {
-          requestId: entry.requestId,
-          repo: { workspaceId: entry.workspaceId, folder: folderOf(entry.workspaceId) },
-          topic: entry.topic,
-          state: entry.state,
-          workerId,
-          phase: report === null ? null : reportPhaseOf(report.text),
-          report: report === null ? null : { at: report.createdAt, text: cutText(report.text, MISSION_REPORT_SHOWN) },
-          openQuestions: decisions.list({ workspaceId: entry.workspaceId, requestId: entry.requestId, statuses: UNSETTLED_STATUSES }).map(summary),
-        };
+        if (entry.state === "active") return inFull(entry);
+        const open = openOf.get(entry)!;
+        return open.length === 0 ? lineOf(entry) : { ...lineOf(entry), openQuestions: open };
       });
     const autonomy = createMissionAutonomyStore(home).get(mission.missionId);
     const delegated = MISSION_CLASSES.filter((name) => autonomy.cells[name].mode === "delegate");
@@ -615,9 +671,15 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       // Delivery line design §9.2: an older contract reads agreed.
       contracts: mission.contracts.map((contract) => ({ ...contract, status: contractStatusOf(contract) })),
       requests,
+      ...(settledMore > 0 ? { settledMore } : {}),
+      ...(asked === undefined ? {} : { request: inFull(asked) }),
+      // Delivery line design §19.6: what paseo-bm holds until requests finish.
+      held: heldRequestsOf(home, mission.missionId)
+        .filter((entry) => entry.state === "held" || entry.state === "waiting-stopped")
+        .map((entry) => ({ holdId: entry.holdId, topic: entry.topic, after: entry.after, state: entry.state, since: entry.at, ...(entry.note === undefined ? {} : { note: entry.note }) })),
       ownerCards: createMissionDecisionStore(home).list(mission.missionId, UNSETTLED_STATUSES).map(summary),
       level: { level: autonomy.level, delegated, owner: MISSION_CLASSES.filter((name) => !delegated.includes(name)) },
-      journal: createMissionStore(home).journal(mission.missionId, MISSION_JOURNAL_SHOWN),
+      journal: createMissionStore(home).journal(mission.missionId, input.journal ?? MISSION_JOURNAL_SHOWN),
     });
   };
 
@@ -922,5 +984,63 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     );
   };
 
-  return actingTools(MISSION_TOOL_FACES, { bm_mission: read, bm_mission_start: start, bm_mission_update: update, bm_answer_worker: answerWorker }, NOTHING);
+  // ADR-040: the Main chooses; existing fallback settlement creates/resumes the agent.
+  const answerFallback = async (raw: unknown, caller: ToolCaller | null): Promise<ServerToolAnswer> => {
+    const found = mainOf(caller);
+    if ("ok" in found) return found;
+    const input = withoutNulls(raw ?? {}) as { decisionId: string; option: string; why: string };
+    const issues = schemaIssues(faceOf("bm_answer_fallback").inputSchema, input);
+    if (issues.length > 0) return fixThese("bm_answer_fallback", issues);
+    const { mission } = found;
+    if (mission === null) return refused(NOT_A_MAIN_MESSAGE);
+    const reason = redactText(input.why).replace(/\s+/g, " ").trim();
+    if (reason === "") return refused(`Give your reason in one line. ${NOTHING}`);
+    const home = deps.home();
+    const store = createDecisionStore(home, { log });
+    const decision = store.get(input.decisionId);
+    const place = decision?.requestId === null || decision?.requestId === undefined ? null : requestIndexOf(home, decision.requestId);
+    if (decision === null || place === null || place.missionId !== mission.missionId || decision.workspaceId !== place.workspaceId) return refused(`The fallback is not of a request in mission ${mission.code}. ${NOTHING}`);
+    const facts = authorityFactsOf(home, log);
+    const incident = readIncidents(home, log).incidents.find((entry) => `f:${entry.id}` === input.decisionId);
+    if (incident?.status !== "pending" || incident.requestId !== decision.requestId) return refused(`The fallback incident is not pending for this request. ${NOTHING}`);
+    const at = now().toISOString();
+    const mutation = store.transition(decision.id, (current): TransitionResult => {
+      const authority = deciderOf(current, facts);
+      if (authority.decider !== "main") return { ok: false, refusal: "invalid-answer", message: `The fallback is ${authority.decider}'s: ${authority.why}` };
+      const option = current.options.find((entry) => entry.key === input.option);
+      if (option?.action?.kind !== "fallback" || option.action.target !== incident.id || option.action.action !== input.option || heldEffectsOf(option).length > 0) {
+        return { ok: false, refusal: "invalid-answer", message: "Choose a configured recovery option without effects offered by this incident" };
+      }
+      return answerDecision(current, { by: "main", via: "main", optionKey: input.option, class: decisionClassOf(current), reason, at });
+    }, decision.workspaceId);
+    if (mutation.status !== "updated") return refused(`${mutation.status === "refused" ? mutation.message : "No such fallback decision"}. ${NOTHING}`);
+    journalQuietly(createMissionStore(home, { now }), mission.missionId, { kind: "decision", by: "main", text: `The Main chose ${input.option} for ${decision.id}: ${reason}`, ref: decision.requestId! }, log);
+    if (deps.onSettled !== undefined) {
+      try {
+        await deps.onSettled([mutation.decision], { paseo: deps.paseo() });
+      } catch (error) {
+        log(`[paseo-bm] fallback ${decision.id} answered by the Main, but delivery failed: ${errorText(error)}`);
+      }
+    }
+    const written = store.get(decision.id, decision.workspaceId) ?? mutation.decision;
+    return answered({ decisionId: decision.id, delivery: written.delivery, said: incidentActionEffect(written.delivery).sentence });
+  };
+
+  // Delivery line design §19.6: the Main cancels a held request.
+  const holdCancel = async (raw: unknown, caller: ToolCaller | null): Promise<ServerToolAnswer> => {
+    const found = mainOf(caller);
+    if ("ok" in found) return found;
+    const issues = schemaIssues(faceOf("bm_hold_cancel").inputSchema, withoutNulls(raw ?? {}));
+    if (issues.length > 0) return fixThese("bm_hold_cancel", issues);
+    const { mission } = found;
+    if (mission === null) return refused(NOT_A_MAIN_MESSAGE);
+    const { holdId, why } = withoutNulls(raw ?? {}) as { holdId: string; why: string };
+    const home = deps.home();
+    const refusal = cancelHeld(home, mission.missionId, holdId, why, now());
+    if (refusal !== null) return refused(`${refusal}. ${NOTHING}`);
+    journalQuietly(createMissionStore(home, { now }), mission.missionId, { kind: "note", by: "main", text: `Held request ${holdId} cancelled: ${why}`, ref: holdId }, log);
+    return answered({ cancelled: holdId });
+  };
+
+  return actingTools(MISSION_TOOL_FACES, { bm_mission: read, bm_mission_start: start, bm_mission_update: update, bm_answer_worker: answerWorker, bm_answer_fallback: answerFallback, bm_hold_cancel: holdCancel }, NOTHING);
 }

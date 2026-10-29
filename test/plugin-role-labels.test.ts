@@ -83,8 +83,10 @@ describe("embedded copies", () => {
     // 20260921 moved it to 0.3.x, and ADR-012 — the plugin becoming the whole
     // product, with the npx installer retired — moved it to 0.4.x; calibrated
     // autonomy and the Orchestrator moved it to 0.5.x (owner, 2026-10-01);
-    // the delivery line (ADR-035, ADR-036) moved it to 0.6.x (owner, 2026-10-23).
-    expect(PLUGIN_VERSION.startsWith("0.6.")).toBe(true);
+    // the delivery line (ADR-035, ADR-036) moved it to 0.6.x (owner, 2026-10-23);
+    // bounded context, parallel lanes and Main fallback (ADR-037 through ADR-040)
+    // move it to 0.7.x (owner's release request, 2026-10-29).
+    expect(PLUGIN_VERSION.startsWith("0.7.")).toBe(true);
   });
 });
 
