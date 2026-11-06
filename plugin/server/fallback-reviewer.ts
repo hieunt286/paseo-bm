@@ -7,7 +7,8 @@
  * `bm_create_reviewer` does) — `bm-reviewer-fallback-<n>/<model>`, the
  * Reviewer mode rules, `parent` = the Worker, labels `bm.role`,
  * `bm.requestId`, `bm.batchId`, `bm.version`, `bm.replaces`, a bound token
- * for the same batch — with the batch's stored brief behind a `BM-BRIEF
+ * for the same batch — with the current call's brief (the batch brief for
+ * legacy calls) behind a `BM-BRIEF
  * reviewer` line carrying the replaced call's `callId`: the same review call,
  * counted once, and never off-tool. The incident is `switched` with the
  * replacement, the old Reviewer gets `bm.replacedBy`, and the Worker an
@@ -171,7 +172,7 @@ async function switchBoundReviewer(
         workerId,
         batchId: batch.batchId,
         cwd,
-        prompt: reviewerPromptOf(requestId, batch.batchId, call.callId, batch.brief),
+        prompt: reviewerPromptOf(requestId, batch.batchId, call.callId, call.brief ?? batch.brief),
         alias: candidate.alias,
         model: candidate.model,
         base: candidate.baseProvider,

@@ -434,7 +434,7 @@ const REPORT_SCHEMA: JsonSchema = {
     buildAndTests: {
       ...TEXT,
       description:
-        "Each check exactly as you ran it, in backticks, with pass/fail — `npm test` pass; `npm run lint` pass — or \"not run\". Backticks only around commands. The plugin confirms a check only from a run after your last edit, without pipes or redirections.",
+        "Each check exactly as you ran it, in backticks, with pass/fail — `npm test` pass; `npm run lint` pass — or \"not run\". Backticks only around commands. The plugin confirms a check only from a run after your last edit, without pipes or redirections. Identify reused unaffected results and their source; older evidence may remain self-reported. Never rerun a suite solely to obtain a detected label.",
     },
     skillsUsed: {
       type: "array",
@@ -1629,19 +1629,19 @@ export const CREATE_REVIEWER_FACE: ToolFace = {
         items: { type: "string", enum: REVIEW_STAGES },
         description: "What the Reviewer reviews in this batch: implementation, plan, beads, documents (one to three).",
       },
-      scope: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.scope, description: "What to review: the files, beads or documents, and the commit or diff." },
+      scope: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.scope, description: "First implementation review: its full requested scope. Later batches: only new changed paths/hunks and affected behaviour; paseo-bm supplies the delta since the last completed implementation review and retains open blocking findings." },
       checks: {
         type: "string",
         minLength: 1,
         maxLength: REVIEW_TOOL_LIMITS.checks,
-        description: "Required with implementation: the checks you ran and their result.",
+        description: "Required with implementation: affected checks and results, including still-valid earlier evidence and its source. No automatic full-suite run; explain any necessary broader check.",
       },
       milestone: {
         type: "string",
         enum: REVIEW_MILESTONES,
         description: "plan (Large only, once: the plan, its documents and the bead graph), wave (the diff since the previous implementation batch, after a planned wave) or finished (before finished). When left out: plan if the stages include plan or beads, else finished.",
       },
-      since: { ...COMMIT, description: "The commit the scope's diff starts from: the previous implementation batch's base, or the request's base for the first." },
+      since: { ...COMMIT, description: "The request's base for the first implementation review. Later batches use paseo-bm's last completed review snapshot, not this original base." },
     },
   },
 };
@@ -1661,7 +1661,7 @@ export const REREVIEW_FACE: ToolFace = {
   name: "bm_rereview",
   role: "worker",
   description:
-    "Ask for a batch's re-review: a fresh Reviewer checks the diff of your fixes against the previous blocking findings, within your request's review cap. paseo-bm records your tree at every review call and gives the new Reviewer the files changed since the batch's last call and their diff; the earlier Reviewer is left idle. Allowed while the batch's latest verdict is changes-required, up to the owner's re-reviews per batch (3 by default), and from the second re-review on only while its blocking findings fall; otherwise refused, creating nothing and asking no one. Returns JSON { reviewerId, reviewCalls }. " +
+    "Ask for a batch's re-review: a fresh Reviewer checks the diff of your fixes against the previous blocking findings, within your request's review cap. paseo-bm records your tree at every review call and gives the new Reviewer the files changed since the batch's last completed review and their diff; the earlier Reviewer is left idle. Allowed while the batch's latest verdict is changes-required, up to the owner's re-reviews per batch (3 by default), and from the second re-review on only while its blocking findings fall; otherwise refused, creating nothing and asking no one. Returns JSON { reviewerId, reviewCalls }. " +
     DELIVERED,
   inputSchema: {
     type: "object",
@@ -1669,8 +1669,8 @@ export const REREVIEW_FACE: ToolFace = {
     required: ["batchId", "fixed"],
     properties: {
       batchId: { ...BATCH_ID, description: "The batch bm_create_reviewer opened." },
-      fixed: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.fixed, description: "How each blocking finding was fixed, and the checks you ran for the files you fixed." },
-      since: { ...COMMIT, description: "Not needed: paseo-bm finds the diff itself. Only for a folder without git: the commit your fixes start from." },
+      fixed: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.fixed, description: "How each blocking finding was fixed, the changed paths/hunks, and affected check results (reuse unaffected passing evidence). This account bounds review when snapshots are unavailable." },
+      since: { ...COMMIT, description: "Legacy context only; not needed. paseo-bm uses completed-review snapshots, or the changed paths/hunks in fixed. Never a whole-request diff fallback." },
     },
   },
 };

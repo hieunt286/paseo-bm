@@ -513,11 +513,12 @@ These are additive. `bm_report` is a consumed contract, so the old shape is stil
 | Milestone | Tier | Stages | Scope | When |
 |---|---|---|---|---|
 | `plan` | Large | `plan`, `beads`, plus `documents` if written | the plan, its documents, the bead graph | once, before `beads-done` |
-| `wave` | Medium, Large | `implementation` | the diff since the previous implementation batch's base commit (for the first, the request's base), the beads closed in it, the checks run | after the last bead of a planned wave, when more waves follow |
-| `finished` | Medium, Large; Small only on the owner's ask | `implementation` | the diff since the previous implementation batch, and every check of the request | before `finished` |
+| `wave` | Medium, Large | `implementation` | the first implementation's requested scope; later, the diff since the last completed implementation review, its open blocking findings and affected checks | after the last bead of a planned wave, when more waves follow |
+| `finished` | Medium, Large; Small only on the owner's ask | `implementation` | the same incremental rule as `wave`; reuse still-valid check results | before `finished` |
 
 - **No bead has a review of its own.** A bead closes on its checks. Where the `implementing-beads` skill asks for a review before a close, the milestone batch is that review (`worker.md`).
 - **`bm_create_reviewer`** gains optional `milestone` and `since` (a commit). When `milestone` is absent it is derived: `plan` when the stages include `plan` or `beads`, else `finished`. It is stored on `batches[].milestone`.
+- **Incremental implementation (ADR-041).** The first implementation review receives the declared scope and base. Later batches receive a snapshot diff from the latest implementation call with a verdict, plus that result's open blocking findings. A plan-only batch and a no-verdict attempt establish no implementation coverage. The recorded snapshot overrides a repeated request-wide `since` or scope. Without a usable snapshot, the brief restricts review to changed paths/hunks and findings named by the Worker; missing evidence goes in `notChecked`, never a full-request fallback. Tool inputs, caps and verdict rules are unchanged. The optional `calls[].brief` keeps a re-review’s exact bounded scope for replacements; old calls fall back to the batch brief. Older readers can ignore the field; no migration is needed. `bm-eb46` owns the Routing Decision.
 - **Refused:**
   - a second `plan` batch after one passed;
   - a `plan` batch below Large ("Only a Large request reviews its plan; nothing was created").
@@ -570,7 +571,7 @@ The tool opens the decision through the materialiser before it refuses:
 
 *Since 2026-10-23 (ADR-036):* the re-review brief is §17.2's.
 
-- **The implementation stage** reviews exactly the milestone's scope: the diff since the commit the brief names, the beads closed in it, and the checks reported. The Reviewer runs the tests itself when it can.
+- **The implementation stage** reviews the initial scope once, then the incremental scope above. The Reviewer reuses valid Worker evidence, rerunning affected checks only for missing, stale, failed or suspect evidence or a concrete finding; it never repeats an unchanged suite just to certify it again.
 - **A re-review** of the same `batchId` checks the previous blocking findings against the diff since the last review, and that the fixes broke nothing. A new blocking finding is reported only where a fix introduced it. A finding still open keeps its location and wording.
 - `rereviewLineOf` adds `since: <commit>` from an optional `bm_rereview.since`.
 
@@ -1104,7 +1105,7 @@ Each phase ends with one full `npm run verify` and its automated acceptance (PRD
 - **The snapshot.** At every review call (`bm_create_reviewer` and `bm_rereview`) in a repository with git, paseo-bm writes the working tree as a tree object and stores its id on the call (`calls[].tree`). It uses the checkpoint's helper (§4.8): a temporary index outside the repository, `read-tree HEAD`, `add -A`, `write-tree`. Objects only: no ref, and the owner's HEAD, index and files are untouched.
 - **What `bm_rereview` does:**
   1. Snapshots the tree.
-  2. Reads the batch's previous call's tree.
+  2. Reads the snapshot of the batch’s last call with a verdict, skipping no-verdict attempts (ADR-041). Results select the most recent call no later than the verdict; missing or legacy trees use the bounded account fallback.
   3. Computes `git diff --stat` and `git diff` between the two trees.
   4. **Creates a new Reviewer** for the batch (the same creation path, a new `callId`, counted against the cap) with the brief below. The earlier Reviewer is left idle.
 - **The brief:**
@@ -1119,13 +1120,13 @@ Each phase ends with one full `npm run verify` and its automated acceptance (PRD
   <diff>
   Checks the Worker ran for these files: <fixed>
   ```
-- **When there is no snapshot** (a repository without git, or a git failure), the brief falls back to the Worker's `since` and `fixed` texts, and the Reviewer is still new.
+- **When there is no usable snapshot** (no Git, a Git failure, or a legacy call), the brief names only the changed paths/hunks and findings in the Worker’s `fixed` account, and missing evidence is `notChecked`. Legacy `since` is context only; never run a whole-request diff as the fallback. When no review has a verdict, retry the original review because none has completed. A re-review’s exact brief is saved on `calls[].brief` and used unchanged on provider fallback; old records use the batch brief.
 - **The Reviewer's role.**
   - Check each previous blocking finding against this diff.
   - Report a new blocking finding only where this diff introduced it.
-  - Run only the checks that cover the changed files.
-  - Read nothing outside the diff unless a finding names it.
-- **The Worker's role.** Before `bm_rereview`, run only the checks that cover the files you fixed. The full suite runs once, before `finished`.
+  - Reuse valid Worker check evidence; independently rerun affected checks only for missing, stale, failed or suspect evidence, or a concrete finding.
+  - Read outside the delta only for named findings or affected dependencies. Evidence detection remains conservative: older reused results may stay self-reported; do not rerun a suite just to earn a detected label.
+- **The Worker's role (ADR-041).** At every stage, run the smallest checks covering the changed behaviour and affected consumers. After a fix, rerun only checks whose evidence the fix invalidates. Keep prior passing results while their code, dependencies and configuration remain unchanged. No full suite is required at `finished`, after review, or merely after a merge. Run broader checks only on the owner's explicit request or for a concrete affected behaviour that narrower checks cannot prove, and state that reason.
 
 ### 17.3 A Worker rolls over by its real context
 
@@ -1451,3 +1452,4 @@ Those are the cases a replacement can follow, so §19.5's guards cover all but a
 | 2026-10-25 | Claude (as built) | §19.11: ADR-038 as built, WP-11.1 → WP-11.7 (beads `bm-lanes-9cjg.1` → `.7`) |
 | 2026-10-25 | Claude (as built) | §19.11: the screen (WP-11.8), M-44 and the close of ADR-038 Phase 11 (beads `bm-lanes-9cjg.8`, `.9`) |
 | 2026-10-25 | hieu.nt10 (owner's three answers after a field case; written by Claude) | §19.12 added: `bm_tell_worker` `about`, steer only for corrections, outdated Mains handed over when idle ([ADR-039](../adr/ADR-039-new-work-never-into-a-busy-worker.md)) |
+| 2026-11-05 | hieu.nt10 (owner request; written by Codex) | §5.1, §5.5, §17.2: completed-review baselines across implementation batches, fix-only fallback briefs, optional per-call brief persistence, and affected checks without a full-suite finish gate ([ADR-041](../adr/ADR-041-incremental-review-and-affected-checks.md), `bm-eb46`). `design-ready`: PASS; backward compatibility and isolated Git/role/contract proof specified. |

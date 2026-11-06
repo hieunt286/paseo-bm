@@ -666,7 +666,7 @@ describe("convergence: bm_rereview asks no one while blocking findings fall (del
     expect(refusal([result(1, 3), result(3, 0)], [call("create", 0), call("rereview", 2)], 1)).toContain("passed");
   });
 
-  it("without a snapshot (no git), the brief falls back to the Worker's since and fixed", async () => {
+  it("without a snapshot, only the named fixes are reviewed; legacy since cannot reopen the whole request", async () => {
     const { tools, fake, verdict } = setup({ tier: "Medium" });
     await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER);
     verdict("b1", 1);
@@ -676,13 +676,29 @@ describe("convergence: bm_rereview asks no one while blocking findings fall (del
       "Previous blocking findings (verbatim):",
       "(the review out-r00000000001 is no longer stored: the Worker's account below names the findings)",
       "Fixes — paseo-bm has no snapshot of the last review to compare, so the Worker's account stands for the diff:",
-      "The diff: git diff def456",
+      "Read only the changed paths/hunks named in the findings and the Worker's fixes; report missing evidence in notChecked. Never substitute the whole request diff.",
+      "Legacy base (context only, not the fix diff): def456",
       "How the Worker fixed them, and the checks it ran: F1 fixed.",
+      "Validation: reuse still-valid Worker results. Run only affected checks for missing, stale, failed or suspect evidence, or a concrete finding; no automatic full-suite run.",
       `requestId: ${REQ}`,
       "batchId: b1",
     ]);
-    expect(rereviewBriefOf({ requestId: REQ, batchId: "b1", findings: "-", fixed: "x", fixes: null })).toContain("The diff: the Worker named no commit; read the files the findings and the fixes name.");
+    expect(fake.creates[1]!.options.prompt).not.toContain("git diff def456");
+    expect(rereviewBriefOf({ requestId: REQ, batchId: "b1", findings: "-", fixed: "x", fixes: null })).toContain("Read only the changed paths/hunks");
     expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "x", since: "two words" }, WORKER_CALLER)).text).toContain("input.since");
+  });
+
+  it("a later batch without Git uses only the Worker's new-change account and retains open findings", async () => {
+    const { tools, fake, verdict } = setup({ tier: "Medium" });
+    expect((await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).ok).toBe(true);
+    verdict("b1", 1);
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b2", scope: "src/date.ts: use the owner's locale", since: "original-base" }, WORKER_CALLER)).ok).toBe(true);
+    const prompt = fake.creates[1]!.options.prompt!;
+    expect(prompt).toContain("Incremental implementation review");
+    expect(prompt).toContain("No usable snapshot diff");
+    expect(prompt).toContain("Worker's account of the new changes (only named changed paths/hunks are in scope):\nsrc/date.ts: use the owner's locale");
+    expect(prompt).toContain("Previous blocking findings");
+    expect(prompt).not.toContain("since: original-base");
   });
 
   it("an older batch, opened without results, reads its counts from the trace's reviews", async () => {

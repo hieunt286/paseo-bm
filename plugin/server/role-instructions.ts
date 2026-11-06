@@ -193,6 +193,7 @@ export const WORKER_HAND_PATH = [
   "Waiting on another request or Worker goes on the report's `blockers` line.",
   "",
   `**Reviewing.** Create the Reviewer with Paseo's \`create_agent\`: profile \`bm-reviewer\`, provider \`bm-reviewer/<model of the profile>\`, labels \`bm.role\` = \`reviewer\`, \`bm.requestId\` = the request's \`req-…\`, \`bm.batchId\` = the batch id, \`bm.version\` = yours if readable; \`settings.modeId\` exactly as your \`## Runtime facts\` say (missing: report \`blocked\` with Paseo's refusal). Its first prompt carries what your role file gives \`bm_create_reviewer\`. For the re-review, ask the same Reviewer with ${PASEO_SEND_TOOL}, sending only the previous blocking findings and the diff of your fixes, never the whole change again. Count your review calls yourself: one past your review cap (your \`## Runtime facts\`) that the owner did not ask for is a \`blocked\` report and a question.`,
+  "For later implementation batches, track the last completed review's baseline yourself and send only the new diff, open blocking findings and affected check evidence; do not rely on plugin snapshots on this hand path.",
   "",
   "**Reporting.** Build each report with `bm_report`. Only without it, write the block yourself (`none` for empty fields; a `blocked` one is followed by its `BM-QUESTIONS`):",
   "",

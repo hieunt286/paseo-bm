@@ -85,9 +85,10 @@ and a short `## Provenance` (the `requestId` and the request in one quoted line)
 
 Proof is **the cheapest evidence that the outcome happened**: a test or a compile for code, a conclusion with its
 sources for research, configuration read back, a captured response or screenshot for an API or a screen; no build or
-test command is not a reason to stop. Run each check after your last edit, without pipes or redirections, and **name it
-in `buildAndTests` exactly as run**. Run `git status` once before your first write and keep it: it tells your changes
-from those already there. Per bead: `br update <id> --status in_progress` → the work → the check →
+test command is not a reason to stop. **Run only checks covering the changed behaviour and affected consumers.** Reuse results while code, dependencies and configuration are unchanged; rerun only invalidated checks.
+No automatic full suite at `finished`, after review or a merge. Broaden only for an explicit owner request or an affected behaviour narrower checks cannot prove; state why.
+Without pipes or redirections, **name checks in `buildAndTests` exactly as run**, distinguishing reused results and their source.
+Run `git status` once before your first write: it tells your changes from those already there. Per bead: `br update <id> --status in_progress` → the work → the check →
 `br close <id> --reason "<the evidence>"`, after reading the check's own result. One bead `in_progress` at a time, only
 this request's (several: `implementing-beads`), never two agents editing at once. A blocking finding on a closed bead:
 `br reopen <id>` → fix → re-check → close with new evidence. Name the scratch directory literally —
@@ -139,13 +140,12 @@ its id in `refs`. A message that needs no answer is `act: ack`: it wakes no one.
 ## Reviewing
 
 A **batch** is one milestone, never one bead: where `implementing-beads` asks for a review before a close, the
-milestone batch is it. **Create the Reviewer** with `bm_create_reviewer`: the `batchId`, the `milestone`, the stages
-(`implementation`, or for `plan` the `plan` or `beads` plus `documents` you wrote), exactly what to review as `scope`
-from the commit `since` and, for an implementation, the checks you ran with their output — never its criteria or
-format. `changes-required`: fix every **blocking** finding, run only the checks that cover the files you fixed, then
-call `bm_rereview` with how each was fixed and those checks in `fixed` (no `since`; paseo-bm finds the diff); the full
-suite runs once, before `finished`. A finding that would remove work the owner asked for is a **Scope** question,
-never a fix. Fix a non-blocking slip of your own that needs no review; list the rest in `suggestions`. **Re-review
+milestone batch is it. **Create the Reviewer** with `bm_create_reviewer`: the `batchId`, `milestone`, stages (`implementation`, or
+for `plan` the `plan` or `beads` plus `documents` you wrote), exactly what to review as `scope` from the commit `since` and,
+for implementation, the checks you ran with their output — never its criteria or format. Review its full scope once; later batches cover only new changes and open blocking findings since the last completed implementation review. Name only new work in `scope`; paseo-bm supplies the snapshot diff.
+`changes-required`: fix every **blocking** finding, run only the checks that cover the files you fixed, then
+call `bm_rereview` with how each was fixed and those checks in `fixed` (no `since`; paseo-bm finds the diff); the full request diff is never reviewed again.
+A finding that would remove work the owner asked for is a **Scope** question, never a fix. Fix a non-blocking slip of your own that needs no review; list the rest in `suggestions`. **Re-review
 while the blocking findings fall**; refused, go on as it says: the next milestone batch, or `finished` with the open
 blocking findings in `reviewFindingsOpen`. At the **review cap** your `## Runtime facts` give (a ceiling, not a
 target), paseo-bm asks the owner itself: send `blocked` with `waitingOn` its question. A Reviewer that ends on a

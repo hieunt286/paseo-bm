@@ -66,6 +66,8 @@ const reviewCallSchema = z.object({
   at: z.string(),
   /** Delivery line design §17.2: the working tree at the call, as a git tree object id; none without git or from an older build. */
   tree: z.string().optional(),
+  /** ADR-041: a re-review's own bounded brief, also used by a replacement Reviewer. */
+  brief: z.string().optional(),
 });
 
 /**

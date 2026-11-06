@@ -314,6 +314,18 @@ describe("Switch for a bound Worker's Reviewer (design §16.9)", () => {
     expect(createAlertStore(home).list({ open: true })).toEqual([]);
   });
 
+  it("a replacement of a re-review keeps that call's fix-only brief rather than the initial batch scope", async () => {
+    write([incident()]);
+    const { fake, reviewerSwitch } = boundWorld();
+    const brief = "Re-review batch b1: only the src/date.ts fix and its affected checks.";
+    const callId = "out-0000000000c2";
+    createRequestRegistry(home).addReviewCall("wks_1", REQ, "b1", { callId, kind: "rereview", reviewerId: OLD, at: "2026-09-22T04:55:00.000Z", brief });
+    await handleFallbackAct({ incidentId: "fb-0000000000ee", action: "switch" }, fake.paseo, { home, log, now: NOW, actions: { switch: reviewerSwitch } });
+    expect(fake.creates[0]!.options.prompt).toBe(`${reviewerBriefLineOf(REQ, "b1", callId)}\n${brief}`);
+    expect(fake.creates[0]!.options.prompt).not.toContain(BRIEF);
+    expect(createRequestRegistry(home).get("wks_1", REQ)!.reviews.batches[0]!.calls).toHaveLength(2);
+  });
+
   it("an unbound Worker keeps the recipe: no agent created", async () => {
     write([incident()]);
     const { fake, enqueue, reviewerSwitch } = boundWorld({ bindWorker: false });

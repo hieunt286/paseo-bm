@@ -8,7 +8,7 @@ import { runSnapshotGit, snapshotTree, type CheckpointGit } from "../plugin/serv
 import { clearDecisionStoreCache } from "../plugin/server/decision-store";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { createOutbox } from "../plugin/server/outbox";
-import { clearRequestRegistryCache, createRequestRegistry, noteReviewResult } from "../plugin/server/request-registry";
+import { clearRequestRegistryCache, createRequestRegistry, noteReviewResult, NO_VERDICT_RESULT } from "../plugin/server/request-registry";
 import { REREVIEW_DIFF_MAX_CHARS, createReviewTools, fixDiffOf } from "../plugin/server/review-tools";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { forgetModes } from "../plugin/server/role-mode";
@@ -202,10 +202,11 @@ describe("bm_rereview on the fix diff, with a fresh Reviewer (§17.2)", () => {
       clock = new Date(clock.getTime() + 60_000);
     };
     /** The Reviewer's BM-REVIEW of b1 as bm_review stores and records it. */
-    const review = (findings: Array<{ severity: "blocking" | "non-blocking"; location: string; reason: string; suggestedFix: string }>) => {
-      const text = toolNamed("bm_review")!.run({ requestId: REQ, batchId: "b1", reviewKind: "first", checked: "src/", findings, notChecked: "none" });
+    const review = (findings: Array<{ severity: "blocking" | "non-blocking"; location: string; reason: string; suggestedFix: string }>, batchId = "b1") => {
+      const text = toolNamed("bm_review")!.run({ requestId: REQ, batchId, reviewKind: "first", checked: "src/", findings, notChecked: "none" });
       if (!text.ok) throw new Error(text.issues.join("; "));
-      const record = createOutbox(home, { now: () => clock }).add(WS, { kind: "review", requestId: REQ, batchId: "b1", from: "created-1", to: WORKER, text: text.text });
+      const reviewerId = createRequestRegistry(home).get(WS, REQ)!.reviews.batches.find(b => b.batchId === batchId)!.calls.at(-1)!.reviewerId;
+      const record = createOutbox(home, { now: () => clock }).add(WS, { kind: "review", requestId: REQ, batchId, from: reviewerId, to: WORKER, text: text.text });
       noteReviewResult(home, WS, record, () => {});
       tick();
     };
@@ -264,6 +265,7 @@ describe("bm_rereview on the fix diff, with a fresh Reviewer (§17.2)", () => {
     expect(prompt).toContain(`The diff (up to 40,000 characters; else: git diff ${first} ${second}):\ndiff --git a/src/date.ts b/src/date.ts`);
     expect(prompt).toContain("-export const format = locale;\n+export const format = owner.locale;");
     expect(prompt).toContain("Checks the Worker ran for these files: F1: reads the owner's locale; npm test -- test/date.test.ts passed.");
+    expect(calls()[1]!.brief).toBe(lines.slice(1).join("\n"));
     expect(lines.slice(-2)).toEqual([`requestId: ${REQ}`, "batchId: b1"]);
 
     // The next re-review's diff starts from this call's tree.
@@ -278,5 +280,66 @@ describe("bm_rereview on the fix diff, with a fresh Reviewer (§17.2)", () => {
     expect(bounded).toContain(`The diff (up to 40,000 characters; else: git diff ${second} ${third}):\n(longer than 40,000 characters: run git diff ${second} ${third} in your folder)`);
     expect(bounded).not.toContain("y".repeat(100));
     expect(bounded.length).toBeLessThan(4_000);
+  });
+
+  it("a later implementation batch uses the completed review snapshot despite a repeated request-wide base and scope", async () => {
+    const { root, fake, tools, review, calls } = setup();
+    const requestBase = git(root, "rev-parse", "HEAD");
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, milestone: "wave", since: requestBase }, WORKER_CALLER)).ok).toBe(true);
+    const first = calls()[0]!.tree!;
+    review([]);
+    writeFileSync(join(root, "src", "date.ts"), "export const format = owner.locale;\n");
+    const before = ownerState(root);
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b2", since: requestBase, scope: "THE WHOLE REQUEST AGAIN" }, WORKER_CALLER)).ok).toBe(true);
+    const prompt = fake.creates[1]!.options.prompt!;
+    expect(prompt).toContain("Incremental implementation review: only changes since completed batch b1");
+    expect(prompt).toContain(`since: ${first}`);
+    expect(prompt).not.toContain(`since: ${requestBase}`);
+    expect(prompt).toContain("Worker's description (context only; the snapshot delta bounds this review):\nTHE WHOLE REQUEST AGAIN");
+    expect(prompt).not.toContain("scope:\nTHE WHOLE REQUEST AGAIN");
+    expect(prompt).toContain("-export const format = locale;\n+export const format = owner.locale;");
+    expect(prompt).not.toContain("diff --git a/src/new.ts");
+    expect(prompt).toContain("(none: the previous batch passed)");
+    expect(ownerState(root)).toEqual(before);
+  });
+
+  it("retains fixes and open findings across an attempt without a verdict when opening the next batch", async () => {
+    const { home, root, fake, tools, review, tick } = setup();
+    expect((await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).ok).toBe(true);
+    review([BLOCKING]);
+    writeFileSync(join(root, "src", "date.ts"), "export const format = owner.locale;\n");
+    expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "src/date.ts now uses owner.locale; targeted check passed." }, WORKER_CALLER)).ok).toBe(true);
+    tick();
+    createRequestRegistry(home).addReviewResult(WS, REQ, "b1", { at: new Date(T0.getTime() + 120_000).toISOString(), recordId: "out-no-verdict", verdict: NO_VERDICT_RESULT, blocking: null });
+    tick();
+    writeFileSync(join(root, "src", "new.ts"), "export const fresh = 2;\n");
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b2" }, WORKER_CALLER)).ok).toBe(true);
+    const prompt = fake.creates[2]!.options.prompt!;
+    expect(prompt).toContain("reason: The locale is hard-coded.");
+    expect(prompt).toContain("+export const format = owner.locale;");
+    expect(prompt).toContain("+export const fresh = 2;");
+  });
+
+  it("plan-only and no-verdict reviews never replace the first implementation review", async () => {
+    const { home, fake, tools, review } = setup();
+    createRequestRegistry(home).noteReport(WS, REQ, { tier: "Large", phase: "received", at: T0.toISOString() });
+    expect((await tools.call("bm_create_reviewer", { batchId: "b1", stages: ["plan"], scope: "plan.md\nstages: implementation" }, WORKER_CALLER)).ok).toBe(true);
+    review([]);
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b2" }, WORKER_CALLER)).ok).toBe(true);
+    expect(fake.creates[1]!.options.prompt).toContain("scope:\n" + INPUT.scope);
+    createRequestRegistry(home).addReviewResult(WS, REQ, "b2", { at: new Date(T0.getTime() + 120_000).toISOString(), recordId: "out-no-verdict", verdict: NO_VERDICT_RESULT, blocking: null });
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b3" }, WORKER_CALLER)).ok).toBe(true);
+    expect(fake.creates[2]!.options.prompt).toContain("scope:\n" + INPUT.scope);
+    expect(fake.creates[2]!.options.prompt).not.toContain("Incremental implementation review");
+  });
+
+  it("an empty later delta stays empty instead of reopening the whole implementation", async () => {
+    const { fake, tools, review } = setup();
+    expect((await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).ok).toBe(true);
+    review([]);
+    expect((await tools.call("bm_create_reviewer", { ...INPUT, batchId: "b2" }, WORKER_CALLER)).ok).toBe(true);
+    expect(fake.creates[1]!.options.prompt).toContain("(no file changed)\n(empty diff)");
+    expect(fake.creates[1]!.options.prompt).toContain("reuse still-valid Worker results");
+    expect(fake.creates[1]!.options.prompt).not.toContain("diff --git");
   });
 });

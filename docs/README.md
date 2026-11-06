@@ -78,6 +78,7 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [038](adr/ADR-038-parallel-lanes-and-a-held-queue.md) | Parallel lanes in a repository, owner's words steered into a running turn, and a held queue | Accepted; amends 035 decision 2 and the delivery line design §3.7 |
 | [039](adr/ADR-039-new-work-never-into-a-busy-worker.md) | New work never goes into a busy Worker; outdated Mains are handed over when idle | Accepted; amends 038 decisions 3 and 4 |
 | [040](adr/ADR-040-the-main-resolves-its-requests-fallback.md) | The Main resolves its requests' delegated provider fallback | Accepted; amends 033 decision 3 |
+| [041](adr/ADR-041-incremental-review-and-affected-checks.md) | Review completed implementation once, later deltas and open findings only; affected validation with valid evidence reused | Accepted; amends 036 decision 2 |
 
 ## Work in progress — `plans/`
 

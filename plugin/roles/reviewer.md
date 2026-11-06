@@ -19,11 +19,9 @@ Four limits, about CLASSES of action rather than lists of commands.
 
 ## What you may run
 
-The repository's test commands; lint or typecheck commands that write no files; throwaway scripts in
-a directory you just made with `mktemp -d` (delete it before you answer); reading the repository,
-`br show`, `br list --json`, `br dep tree`, `br ready`, `br lint`, `git diff`, `git status`,
-`git log`. Run `git status --porcelain` before and after; if it changed, say so in `notChecked` and
-do NOT clean up.
+The repository's test commands; lint or typecheck commands that write no files; throwaway scripts in a new `mktemp -d`
+directory (delete it before answering); reading the repository, `br show`, `br list --json`, `br dep tree`, `br ready`,
+`br lint`, `git diff`, `git status`, `git log`. Run `git status --porcelain` before and after; if it changed, say so in `notChecked` and do NOT clean up.
 
 ## What you review
 
@@ -36,14 +34,16 @@ request asks for is never out of scope**, even beyond this batch's scope: never 
 - **documents, beads, plan:** what the scope names (`br show <id>`; a plan with the beads converted
   from it) and the cited sources you need.
 - **implementation:** exactly the milestone's scope — the diff since the commit your brief names,
-  the beads closed in it and the checks reported; run the tests yourself when you can. A simple
-  check (compiling the edited file) is enough for a small change; only a missing check for behaviour
-  that needs one is blocking. Not code: check the evidence the bead named (a conclusion against its
-  sources, a configuration read back, a screen or endpoint against the captured response).
+  the beads closed in it and the checks reported. The first review covers that scope; later reviews cover only the supplied delta and previous blocking findings.
+  A simple compile is enough for a small change; only a missing check for behaviour that needs one is blocking. Not code: check the bead's evidence
+  (a conclusion against its sources, a configuration read back, a screen or endpoint against the captured response).
 - **Re-review**: its brief holds, in place of a stage and scope, the previous blocking findings
   verbatim and the diff of the fixes. Check each finding against that diff only; a new finding only if
   blocking and this diff introduced it, and one still open with the same location and wording. Run only
-  the checks that cover the changed files; read nothing outside the diff unless a finding names it.
+  checks covering changed behaviour and affected consumers; read outside the diff only for a named finding or affected dependency.
+
+**Reuse passing Worker evidence** while its code, dependencies and configuration remain unchanged; run affected checks only for missing, stale, failed or suspect evidence, or a concrete finding.
+No automatic full suite, even at the first or final review. Broaden only for the owner's request or an affected behaviour narrower checks cannot prove; state why. Without snapshots, use only named changed paths/hunks and findings; missing evidence goes in `notChecked`, never a request-wide diff.
 
 A batch may carry several stages; apply the criteria of each, loaded as criteria only — when a skill
 says to edit something, report a finding instead.

@@ -38,11 +38,13 @@
  * - **Snapshots** (delivery line design §17.2, ADR-036): every call records
  *   the Worker's folder as a git tree object (`checkpoint.ts`
  *   `snapshotTree`: a temporary index, objects only). A re-review's brief
- *   holds `git diff` of the batch's previous call's tree and its own, inline
+ *   holds `git diff` of the batch's last completed call's tree and its own, inline
  *   up to `REREVIEW_DIFF_MAX_CHARS`; without both (no git, a git failure, an
- *   older call) it falls back to the Worker's `since` and `fixed`. While no
+ *   older call) it uses only the changed paths/hunks in the Worker's `fixed`. While no
  *   review of the batch has a verdict (no-verdicts only), the new Reviewer
- *   gets the batch's own brief instead.
+ *   gets the batch's own brief instead. Later implementation batches follow
+ *   the same completed-review baseline rule (ADR-041); plan review is separate.
+ *   Re-review calls store their own brief so fallback cannot reopen round one.
  * - **Records before acts.** A call is recorded before the tool creates; a
  *   failed creation removes it. The tools of one request run one at a time
  *   (`serialised`), so two calls never pass one check.
@@ -208,7 +210,8 @@ export function rereviewBriefOf(input: { requestId: string; batchId: string; fin
         ]
       : [
           "Fixes — paseo-bm has no snapshot of the last review to compare, so the Worker's account stands for the diff:",
-          input.since === undefined || input.since === null ? "The diff: the Worker named no commit; read the files the findings and the fixes name." : `The diff: git diff ${input.since}`,
+          "Read only the changed paths/hunks named in the findings and the Worker's fixes; report missing evidence in notChecked. Never substitute the whole request diff.",
+          ...(input.since === undefined || input.since === null ? [] : [`Legacy base (context only, not the fix diff): ${input.since}`]),
           `How the Worker fixed them, and the checks it ran: ${fixed}`,
         ];
   return [
@@ -216,9 +219,59 @@ export function rereviewBriefOf(input: { requestId: string; batchId: string; fin
     "Previous blocking findings (verbatim):",
     input.findings,
     ...lines,
+    AFFECTED_CHECKS_LINE,
     `requestId: ${requestId}`,
     `batchId: ${batchId}`,
   ].join("\n");
+}
+
+/** Evidence is reused until the delta invalidates it (delivery line design §5.5, ADR-041). */
+const AFFECTED_CHECKS_LINE = "Validation: reuse still-valid Worker results. Run only affected checks for missing, stale, failed or suspect evidence, or a concrete finding; no automatic full-suite run.";
+
+/** A real verdict's call, not a later attempt which ended without a verdict. */
+export function completedReviewOf(batch: ReviewBatch, traceReviews: readonly ParsedReview[]): { batch: ReviewBatch; results: ReviewResult[]; result: ReviewResult; call: ReviewCall | undefined } | null {
+  const results = batchResultsOf(batch, traceReviews);
+  const result = results.findLast((entry) => entry.verdict !== NO_VERDICT_RESULT);
+  if (result === undefined) return null;
+  const call = newestCallOf({ calls: batch.calls.filter((entry) => entry.reviewerId !== "" && timeOrZero(entry.at) <= timeOrZero(result.at)) });
+  return { batch, results, result, call };
+}
+
+/** Plan/document coverage never substitutes for the first implementation review. */
+function previousImplementationReviewOf(batches: readonly ReviewBatch[], traceReviews: readonly ParsedReview[]): ReturnType<typeof completedReviewOf> {
+  return batches
+    .filter((batch) => batch.milestone !== "plan" && /^stages: .*\bimplementation\b/m.test(batch.brief.split("\nscope:", 1)[0]!))
+    .map((batch) => completedReviewOf(batch, traceReviews))
+    .filter((entry) => entry !== null)
+    .sort((a, b) => timeOrZero(a.result.at) - timeOrZero(b.result.at))
+    .at(-1) ?? null;
+}
+
+/** A later implementation milestone receives the delta, including any unresolved findings. */
+function incrementalBriefOf(input: { requestId: string; batchId: string; milestone: ReviewMilestone; stages: readonly string[]; scope: string; checks?: string | null; previousBatchId: string; findings: string; fixes: FixDiff | null }): string {
+  const { fixes } = input;
+  const changes = fixes === null
+    ? [
+        "No usable snapshot diff: review only the changed paths/hunks in the Worker's account and the findings; report missing evidence in notChecked. Never substitute the whole request diff.",
+        "Worker's account of the new changes (only named changed paths/hunks are in scope):",
+        input.scope,
+      ]
+    : [
+        "Files changed since the completed review:",
+        fixes.stat.trimEnd() || "(no file changed)",
+        fixes.diff === null ? `Diff exceeds ${REREVIEW_DIFF_SHOWN} characters: run git diff ${fixes.from} ${fixes.to} in your folder.` : fixes.diff.trimEnd() || "(empty diff)",
+      ];
+  return reviewerBriefOf({
+    ...input,
+    since: fixes?.from ?? null,
+    scope: [
+      `Incremental implementation review: only changes since completed batch ${input.previousBatchId}; do not re-audit unchanged work.`,
+      ...(fixes === null ? [] : ["Worker's description (context only; the snapshot delta bounds this review):", input.scope]),
+      "Previous blocking findings (verbatim; check these even if their files are unchanged):",
+      input.findings,
+      ...changes,
+    ].join("\n"),
+  });
 }
 
 /** The snapshot of `cwd` for a review call (§17.2); undefined without git or on a git failure. Never throws. */
@@ -255,6 +308,7 @@ export function reviewerBriefOf(input: {
     "scope:",
     block(input.scope),
     ...(input.checks === undefined || input.checks === null || input.checks.trim() === "" ? [] : ["checks run:", block(input.checks)]),
+    AFFECTED_CHECKS_LINE,
     `requestId: ${input.requestId}`,
     `batchId: ${input.batchId}`,
   ].join("\n");
@@ -901,7 +955,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
       const tree = await snapshotOf(cwd);
       // A call id in the outbox's shape (`out-<12 hex>`, design §16.4).
       const callId = (deps.outbox?.newId ?? newRecordId)();
-      const brief = reviewerBriefOf({
+      const briefInput = {
         requestId: request.requestId,
         batchId: typed.batchId,
         milestone,
@@ -909,6 +963,14 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
         scope: typed.scope,
         checks: typed.checks ?? null,
         since: typed.since ?? null,
+      };
+      const previous = typed.stages.includes("implementation") ? previousImplementationReviewOf(request.reviews.batches, state.traceReviews) : null;
+      const fixes = previous?.call?.tree === undefined || tree === undefined ? null : await fixDiffOf(cwd, previous.call.tree, tree);
+      const brief = previous === null ? reviewerBriefOf(briefInput) : incrementalBriefOf({
+        ...briefInput,
+        previousBatchId: previous.batch.batchId,
+        findings: isPassVerdict(previous.result.verdict) ? "(none: the previous batch passed)" : previousFindingsOf(previous.results, reviewRecordsOf(home, [worker.workspaceId, request.workspaceId])),
+        fixes,
       });
       try {
         const recorded = registryOf(home).addReviewCall(worker.workspaceId, request.requestId, typed.batchId, callOf(callId, tree), brief, milestone);
@@ -924,12 +986,13 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
   };
 
   /** A call of the review tools, before its Reviewer is named: its snapshot when there is one (§17.2). */
-  const callOf = (callId: string, tree: string | undefined, kind: ReviewCall["kind"] = "create"): ReviewCall => ({
+  const callOf = (callId: string, tree: string | undefined, kind: ReviewCall["kind"] = "create", brief?: string): ReviewCall => ({
     callId,
     kind,
     reviewerId: "",
     at: now().toISOString(),
     ...(tree === undefined ? {} : { tree }),
+    ...(brief === undefined ? {} : { brief }),
   });
 
   /**
@@ -1054,11 +1117,12 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
       const cwd = await folderOfAgent(paseo, worker.agentId, worker.workspaceId);
       if (cwd === null) return refused(`paseo-bm could not read your folder from Paseo; try again in a moment. ${nothing}`);
 
-      // §17.2: the fixes are the diff between the batch's previous call's tree and this one's.
+      // §17.2, ADR-041: no-verdict attempts never advance the reviewed baseline.
       const tree = await snapshotOf(cwd);
-      const previous = newestCallOf(batch)?.tree;
+      const completed = completedReviewOf(batch, state.traceReviews);
+      const previous = completed?.call?.tree;
       // No review of the batch has a verdict yet (each ended without one): the new Reviewer does the batch's review itself.
-      const reviewed = results.some((result) => result.verdict !== NO_VERDICT_RESULT);
+      const reviewed = completed !== null;
       const fixes = !reviewed || tree === undefined || previous === undefined ? null : await fixDiffOf(cwd, previous, tree);
       const brief = !reviewed
         ? batch.brief
@@ -1072,7 +1136,7 @@ export function createReviewTools(deps: ReviewToolDeps): ServerTools {
           });
       const callId = (deps.outbox?.newId ?? newRecordId)();
       try {
-        const recorded = registryOf(home).addReviewCall(worker.workspaceId, request.requestId, batchId, callOf(callId, tree, "rereview"));
+        const recorded = registryOf(home).addReviewCall(worker.workspaceId, request.requestId, batchId, callOf(callId, tree, "rereview", brief));
         if (recorded !== "added") throw new Error(`the registry answered ${recorded}`);
       } catch (error) {
         return refused(`paseo-bm could not record the review call (${reasonOf(error)}); nothing was sent. Tell the owner in one line.`);

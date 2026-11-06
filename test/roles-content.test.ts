@@ -461,7 +461,8 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
 
   it("names each check exactly as run, in backticks, without pipes, so the plugin can detect it (autonomy design §C.2, §C.6)", () => {
     // How to write it (backticks, pass/fail) is the field's own description, pinned below.
-    keys(W, "each check after the last edit, without pipes, named as run", "after your last edit", "without pipes or redirections", "`buildAndTests` exactly as run");
+    keys(W, "invalidated checks rerun; commands are named without pipes", "rerun only invalidated checks");
+    keys(W, "each command is named exactly as run", "Without pipes or redirections", "`buildAndTests` exactly as run");
     const field = (toolNamed("bm_report")!.inputSchema as { properties: Record<string, { description?: string }> }).properties["buildAndTests"]?.description;
     expect(field).toContain("Each check exactly as you ran it, in backticks, with pass/fail");
     expect(field).toContain("Backticks only around commands.");
@@ -550,10 +551,13 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     keys(W, "a batch is a milestone, never a bead; it is the review implementing-beads asks for", "one milestone, never one bead", "`implementing-beads`", "the milestone batch is it");
     keys(W, "the loop names the plan, wave and finished milestones", "milestone `plan`", "`beads-done`", "planned wave", "`wave`", "milestone `finished`");
     keys(W, "the re-review through bm_rereview", "`bm_rereview` with how each was fixed");
-    // Delivery line design §17.2 (ADR-036 decision 2): targeted checks before a re-review, the full suite once.
+    // ADR-041: all validation is affected-scope; finishing never requires a full suite.
     keys(W, "before bm_rereview, only the checks covering the fixed files, named in fixed", "run only the checks that cover the files", "you fixed", "`bm_rereview`", "those checks in `fixed`");
     keys(W, "bm_rereview needs no since", "`bm_rereview`", "no `since`");
-    keys(W, "the full suite runs once, before finished", "the full suite runs once, before `finished`");
+    keys(W, "targeted evidence is reused until invalidated", "Run only checks covering the changed behaviour and affected consumers", "Reuse results", "rerun only invalidated checks");
+    keys(W, "finishing, review and merging do not trigger full suites", "No automatic full suite at `finished`, after review or a merge");
+    expect(W).not.toContain("the full suite runs once");
+    keys(W, "later milestone reviews are incremental", "Review its full scope once", "only new changes and open blocking findings", "last completed implementation review");
     // Delivery line design §5.2: re-reviews while the blocking findings fall; at the stop, go on or finish with them open.
     keys(W, "re-reviews while the blocking findings fall", "**Re-review while the blocking findings fall**");
     keys(W, "a refused re-review goes on: the next milestone batch, or finished with reviewFindingsOpen", "refused, go on as it says", "next milestone batch", "`finished`", "open blocking findings", "`reviewFindingsOpen`");
@@ -669,12 +673,14 @@ describe("reviewer.md — review against the request, blocking vs not, one resul
       keys(R, "an open one keeps its location and wording", "still open", "same location and wording");
     });
 
-    it("runs only the checks covering the changed files", () => {
-      keys(R, "only the checks covering the changed files", "Run only the checks that cover the changed files");
+    it("runs affected checks and reuses valid Worker evidence", () => {
+      keys(R, "affected checks only", "Run only", "checks covering changed behaviour and affected consumers");
+      keys(R, "reuse valid evidence", "Reuse passing Worker evidence", "code, dependencies and configuration remain unchanged");
+      expect(R).toContain("No automatic full suite");
     });
 
-    it("reads nothing outside the diff unless a finding names it", () => {
-      keys(R, "nothing outside the diff unless a finding names it", "read nothing outside the diff unless a finding names it");
+    it("limits context outside the diff to findings and affected dependencies", () => {
+      keys(R, "context stays related to the change", "read outside the diff only for a named finding or affected dependency");
     });
   });
 
