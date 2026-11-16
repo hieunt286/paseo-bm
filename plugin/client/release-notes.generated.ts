@@ -6,6 +6,22 @@ export interface ReleaseNote { version: string; summary: string; sections: reado
 
 const NOTES: readonly Omit<ReleaseNote, "gitUrl">[] = [
   {
+    "version": "0.8.0",
+    "summary": "A mission runs as a supervised line of approved steps, one request at a time, and agents that rest, repositories that move and failed deliveries no longer stop work silently.",
+    "sections": [
+      "What this version brings",
+      "The supervised mission line",
+      "Reviews, checks and context",
+      "Agents, deliveries and repositories",
+      "Agent roles",
+      "What to know when upgrading",
+      "Rollback",
+      "Evidence",
+      "Sources"
+    ],
+    "prereleases": []
+  },
+  {
     "version": "0.7.0",
     "summary": "Missions can run independent work in parallel lanes, keep their context bounded, and recover delegated provider failures through their Main without another owner confirmation.",
     "sections": [

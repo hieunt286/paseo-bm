@@ -85,8 +85,10 @@ describe("embedded copies", () => {
     // autonomy and the Orchestrator moved it to 0.5.x (owner, 2026-10-01);
     // the delivery line (ADR-035, ADR-036) moved it to 0.6.x (owner, 2026-10-23);
     // bounded context, parallel lanes and Main fallback (ADR-037 through ADR-040)
-    // move it to 0.7.x (owner's release request, 2026-10-29).
-    expect(PLUGIN_VERSION.startsWith("0.7.")).toBe(true);
+    // move it to 0.7.x (owner's release request, 2026-10-29); incremental review,
+    // resting agents, repo aliases and the supervised mission line (ADR-041
+    // through ADR-047) move it to 0.8.x (owner's release request, 2026-11-16).
+    expect(PLUGIN_VERSION.startsWith("0.8.")).toBe(true);
   });
 });
 
