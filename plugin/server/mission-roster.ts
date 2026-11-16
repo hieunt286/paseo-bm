@@ -47,6 +47,8 @@ const rosterEntrySchema = z.object({
     .string()
     .refine((id) => REQUEST_ID_PATTERN.test(id), "not a request id")
     .optional(),
+  /** ADR-045 decision 1: it runs beside the sequential slot, on the owner's explicit word; absent when it does not. */
+  parallel: z.literal(true).optional(),
 });
 
 export type RosterEntry = z.infer<typeof rosterEntrySchema>;
@@ -219,13 +221,13 @@ export function noteFollowUp(home: string, requestId: string, text: string, at: 
  * The mission's requests whose Worker still runs (missions design §4): `active`
  * in the roster, not finished in the registry, with an unarchived Worker
  * Paseo lists. None without an active request (Paseo is not read then); none
- * live when Paseo cannot be read.
+ * live when Paseo cannot be read. `agents`: what a caller already listed.
  */
-export async function runningRequestsOf(home: string, paseo: unknown, missionId: string): Promise<RosterEntry[]> {
+export async function runningRequestsOf(home: string, paseo: unknown, missionId: string, agents?: Awaited<ReturnType<typeof bmAgentsOf>>): Promise<RosterEntry[]> {
   const active = createMissionRoster(home).list(missionId).filter((entry) => entry.state === "active");
   if (active.length === 0) return [];
   const registry = createRequestRegistry(home);
-  const live = new Set((await bmAgentsOf(paseo as DashboardPaseo, { home })).filter(({ facts }) => facts.role === "worker" && !facts.archived).map(({ facts }) => facts.id));
+  const live = new Set((agents ?? (await bmAgentsOf(paseo as DashboardPaseo, { home }))).filter(({ facts }) => facts.role === "worker" && !facts.archived).map(({ facts }) => facts.id));
   return active.filter((entry) => (registry.get(entry.workspaceId, entry.requestId)?.finishedAt ?? null) === null && entry.workerIds.some((id) => live.has(id)));
 }
 
@@ -277,7 +279,7 @@ export interface MissionRoster {
    * the request or it is listed under another repo. Throws when the file
    * cannot be written.
    */
-  add(missionId: string, init: { requestId: string; workspaceId: string; topic: string; workerId?: string | null; continuationOf?: string }): RosterEntry | null;
+  add(missionId: string, init: { requestId: string; workspaceId: string; topic: string; workerId?: string | null; continuationOf?: string; parallel?: true }): RosterEntry | null;
   /** Sets a listed request's state; false when it is not listed. Throws when the file cannot be written. */
   setState(missionId: string, requestId: string, state: RosterState): boolean;
   /** A follow-up was told (mission runtime design §2.3): the entry becomes `active` with `followUpAt = at`; false when it is not listed. Throws when the file cannot be written. */
@@ -330,6 +332,7 @@ export function createMissionRoster(home: string, deps: MissionRosterDeps = {}):
             topic: redactText(init.topic.replace(/\s+/g, " ").trim(), env).slice(0, MAX_ROSTER_TOPIC),
             state: "active",
             ...(init.continuationOf === undefined ? {} : { continuationOf: init.continuationOf }),
+            ...(init.parallel === undefined ? {} : { parallel: true }),
           });
           return { requests: [...current.requests, entry] };
         }

@@ -7,6 +7,7 @@ import { clearBindingCache, createBindingStore, type AgentBinder, type BindingRe
 import { binderOf } from "../plugin/server/agent-tools";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { findMain } from "../plugin/server/manager";
+import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { createMissionStore } from "../plugin/server/mission-store";
 import {
@@ -240,6 +241,21 @@ describe("findMain and mission.ensure (§3.2, §3.4)", () => {
     ...extra,
   });
 
+  it("findMain keeps the mission's Main Paseo closed after its idle hour, never a resting predecessor or one with no session (ADR-042)", async () => {
+    const closed = { status: "closed", persistence: { sessionId: "session-1" } };
+    const fake = fakePaseo<MissionsPaseo>({
+      ignoresListFilter: true,
+      agents: [
+        main("main-current", "2026-10-01T00:00:00.000Z", {}, closed),
+        main("main-predecessor", "2026-09-01T00:00:00.000Z", {}, closed),
+        main("main-ended", "2026-10-02T00:00:00.000Z", {}, { status: "closed" }),
+      ],
+    });
+    expect((await findMain(fake.paseo, MISSION, "main-current")).map((agent) => agent.id)).toEqual(["main-current"]);
+    expect((await findMain(fake.paseo, MISSION, "main-ended")).map((agent) => agent.id)).toEqual([]);
+    expect(await findMain(fake.paseo, MISSION)).toEqual([]);
+  });
+
   it("findMain lists the live Mains of the mission, newest first, skipping replaced, archived, other missions and other roles", async () => {
     const fake = fakePaseo<MissionsPaseo>({
       ignoresListFilter: true,
@@ -419,6 +435,13 @@ describe("a cleared conversation's successor, both ways (§3.3)", () => {
 
 describe("a Main's brief and Runtime facts (§3.5)", () => {
   const MISSION = "mis-0123456789";
+
+  it("a repo the charter names by a live id reads its key's level (ADR-047)", () => {
+    createMissionStore(home, { newId: () => MISSION }).create({ code: "WEB", name: "Website", goal: "", repos: ["wks-live"], createdBy: "owner" });
+    createMissionStore(home).update(MISSION, (current) => ({ ...current, repoAliases: { "wks-live": "wks-key" } }));
+    createAutonomyStore(home).setLevel({ workspaceId: "wks-key", level: 3, confirmed: true }, "2026-11-16T00:00:00.000Z");
+    expect(mainFactsOf(home, MISSION).repoLevels).toEqual([{ workspaceId: "wks-live", level: 3 }]);
+  });
 
   it("mainFactsOf names the mission, its level's cells and its repos' levels; runtimeFactsText writes them first", () => {
     createMissionStore(home, { newId: () => MISSION }).create({ code: "WEB", name: "Website", goal: "", repos: ["wks-a"], createdBy: "owner" });

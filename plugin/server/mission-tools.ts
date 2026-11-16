@@ -52,6 +52,7 @@ import { decisionSummaryOf, type ServerToolAnswer, type ServerTools } from "./de
 import { MISSION_CLASSES, createMissionAutonomyStore } from "./mission-autonomy-store";
 import { createMissionDecisionStore, isMainQuestion, missionOfDecisionId } from "./mission-decisions";
 import { busyRequestsOf, createMissionRoster, requestIndexOf, stopActiveRequests, type RosterEntry } from "./mission-roster";
+import { createRequestRegistry } from "./request-registry";
 import { offerMerges, offerTransfer } from "./mission-ownership";
 import { transferRefusalsOf } from "./mission-transfer";
 import { contractStatusOf, createMissionStore, journalQuietly, metAtOf, type ContractStatus, type Mission, type MissionContract } from "./mission-store";
@@ -60,11 +61,11 @@ import type { NoticePaseo } from "./notice-queue";
 import { createOutbox, newestReportRecordOf, reportPhaseOf, storeAndDeliver } from "./outbox";
 import { setAgentLabel, type PaseoCliDeps } from "./paseo-cli";
 import { directoryIn, listedWorkspaces, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
-import { placementOf, repoKeyOf } from "./placements";
+import { charterKeysOf, inCharter, placementOf, repoKeyOf } from "./placements";
 import { openArchiveCards, retiredPlacements, retitlePlacements } from "./placement-create";
 import { isPluginHomeIn } from "./plugin-homes";
 import { proposeMissionStart, takeProposedMissionStart } from "./proposed-mission-starts";
-import { cancelHeld, heldRequestsOf } from "./held-requests";
+import { MAX_HELD, applyLine, cancelHeld, dropLine, heldRequestsOf, holdIdOf, isSettled, liveLineOf, liveLineStepsOf, proposeLine, releaseHeld, type LineStepInput } from "./held-requests";
 import { cutText } from "./request-render";
 import { MISSION_CODE_LABEL } from "./role-title";
 import { errorText } from "./rpc-kit";
@@ -87,6 +88,42 @@ export const NOT_A_MAIN_MESSAGE =
 const NO_PASEO = `paseo-bm has no connection to Paseo yet; try again in a moment. ${NOTHING}`;
 
 const faceOf = (name: string): ToolFace => MISSION_TOOL_FACES.find((face) => face.name === name)!;
+
+/** ADR-045 decision 8: what a refused `plan` is told, and what `bm_mission` adds to a plan from before the rule. */
+const PLAN_FIX = "input.plan: give a list of 1 to 30 steps, one line of at most 200 characters each; a fact goes to bm_memory or a contract";
+const OLDER_PLAN_NOTE = "written before plans held only steps; it may be stale: check before relying on it";
+
+/** A plan's steps as `plan.text`: one numbered line each (the stored shape does not change). */
+const planTextOf = (steps: readonly string[]): string => steps.map((step, index) => `${index + 1}. ${step.trim()}`).join("\n");
+
+/** True for a stored plan with text that is not all numbered lines. */
+const isOlderPlan = (text: string): boolean => text.trim() !== "" && !text.split("\n").every((line) => /^\d+\. /.test(line));
+
+/** The mission's requests whose `finished` could not be run for real (ADR-045 decision 6); a request that cannot be read counts as none. Never throws. */
+function couldNotRunRequestsOf(home: string, missionId: string, log: (message: string) => void): ReadonlySet<string> {
+  const registry = createRequestRegistry(home, { log });
+  return new Set(
+    createMissionRoster(home)
+      .list(missionId)
+      .filter((entry) => {
+        try {
+          return registry.get(entry.workspaceId, entry.requestId)?.proof?.kind === "could-not-run";
+        } catch {
+          return false;
+        }
+      })
+      .map((entry) => entry.requestId),
+  );
+}
+
+/** Why `evidence` cannot meet a criterion while `flagged` requests exist, or null when it can (ADR-045 decision 6). Pure. */
+function metEvidenceIssueOf(evidence: string, flagged: ReadonlySet<string>): string | null {
+  if (flagged.size === 0) return null;
+  const named = evidence.match(/req-\d{8}T\d{6}Z/g) ?? [];
+  if (named.length === 0) return `this mission has a request that could not be run (${[...flagged].join(", ")}): name the request id that proves this criterion`;
+  const unproved = named.find((id) => flagged.has(id));
+  return unproved === undefined ? null : `${unproved} could not be run, so it meets no criterion: name a request that did run it`;
+}
 
 /**
  * The mission whose current Main `caller` is: its binding's, else the open
@@ -209,6 +246,8 @@ export function applyMissionChange(mission: Mission, change: MissionChange, at: 
     ...(change.name === undefined ? {} : { name: change.name }),
     ...(change.code === undefined ? {} : { code: change.code }),
     ...(change.close === true ? { state: "closed" as const, closedAt: at } : {}),
+    // ADR-045 decision 1: the owner's apply writes the plan from the step list's titles.
+    ...(change.line === undefined ? {} : { plan: { text: planTextOf(change.line.steps.map((step) => step.title)), updatedAt: at } }),
     charter: {
       ...charter,
       ...(change.goal === undefined ? {} : { goal: change.goal }),
@@ -443,6 +482,9 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
     }
     const action = answer.by === "owner" ? chosenMissionChange(decision, answer.optionKey) : null;
     if (action === null) {
+      // ADR-045 decision 1: only the owner's own answer settles a proposed line, and anything but apply cancels it.
+      const proposedLine = decision.options.flatMap((option) => (option.action?.kind === "mission-change" && option.action.change.line !== undefined ? [option.action.change.line.lineId] : []))[0];
+      if (proposedLine !== undefined && answer.by === "owner") dropLine(deps.home, missionId, proposedLine, `The owner kept the mission as it is on ${decision.id}.`, deps.now);
       const how = answer.optionKey === null ? `answered in words: ${answer.words ?? ""}` : "kept the mission as it is";
       journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `The owner ${how} (${decision.id}).`, ref: decision.id }, deps.log);
       await tellMain(missionId, decision.id, `The owner ${how} on your card ${decision.id}.`, deps);
@@ -458,6 +500,7 @@ export async function applyMissionDecision(decision: Decision, deps: MissionAnsw
       return;
     }
     if (action.change.close === true) stopActiveRequests(deps.home, missionId, deps.log);
+    if (action.change.line !== undefined) applyLine(deps.home, missionId, action.change.line.lineId);
     // Delivery line design §3.6: the owner's archive card for the placements just retired; §3.3: a new code retitles them.
     if (action.change.close === true || (action.change.removeRepos ?? []).length > 0) await openArchiveCards(deps.home, missionId, { log: deps.log, now: () => deps.now });
     if (action.change.code !== undefined) await retitlePlacements(deps.paseo, result.mission, deps.log);
@@ -582,7 +625,8 @@ interface UpdateInput {
   nonGoals?: string[];
   doneCriteria?: Array<{ id?: string; text?: string; status?: "open" | "met" | "dropped"; evidence?: string }>;
   budget?: { requests?: number; workers?: number; reviewCalls?: number; days?: number };
-  plan?: string;
+  plan?: string[];
+  steps?: LineStepInput[];
   contracts?: Array<{ id?: string; title?: string; providerRepo?: string; consumerRepos?: string[]; text?: string; source?: string; status?: ContractStatus }>;
   repos?: { add?: string[]; remove?: string[] };
   confirmCharter?: boolean;
@@ -668,6 +712,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
         }),
       },
       plan: mission.plan,
+      ...(isOlderPlan(mission.plan.text) ? { planNote: OLDER_PLAN_NOTE } : {}),
       // Delivery line design §9.2: an older contract reads agreed.
       contracts: mission.contracts.map((contract) => ({ ...contract, status: contractStatusOf(contract) })),
       requests,
@@ -675,8 +720,10 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       ...(asked === undefined ? {} : { request: inFull(asked) }),
       // Delivery line design §19.6: what paseo-bm holds until requests finish.
       held: heldRequestsOf(home, mission.missionId)
-        .filter((entry) => entry.state === "held" || entry.state === "waiting-stopped")
+        .filter((entry) => !isSettled(entry))
         .map((entry) => ({ holdId: entry.holdId, topic: entry.topic, after: entry.after, state: entry.state, since: entry.at, ...(entry.note === undefined ? {} : { note: entry.note }) })),
+      // ADR-045 decision 1: every step of the live line, started ones too.
+      ...(liveLineStepsOf(home, mission.missionId).length === 0 ? {} : { line: liveLineStepsOf(home, mission.missionId) }),
       ownerCards: createMissionDecisionStore(home).list(mission.missionId, UNSETTLED_STATUSES).map(summary),
       level: { level: autonomy.level, delegated, owner: MISSION_CLASSES.filter((name) => !delegated.includes(name)) },
       journal: createMissionStore(home).journal(mission.missionId, input.journal ?? MISSION_JOURNAL_SHOWN),
@@ -720,7 +767,7 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     if ("ok" in found) return found;
     const input = withoutNulls(raw ?? {}) as UpdateInput;
     const issues = schemaIssues(faceOf("bm_mission_update").inputSchema, input);
-    if (issues.length > 0) return fixThese("bm_mission_update", issues);
+    if (issues.length > 0) return fixThese("bm_mission_update", issues.some((issue) => /^input\.plan\b/.test(issue)) ? [...issues, PLAN_FIX] : issues);
     const { main, mission } = found;
     if (mission === null) return refused(NOT_A_MAIN_MESSAGE);
     if (mission.state !== "open") return refused(`Mission ${mission.code} is closed. ${NOTHING}`);
@@ -744,7 +791,25 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       if (JSON.stringify(budget) !== JSON.stringify(charter.budget)) card.budget = budget;
     }
     if (input.confirmCharter === true) card.confirmCharter = true;
-    if (input.plan !== undefined && input.plan !== mission.plan.text) free.plan = input.plan;
+    const liveLine = input.plan === undefined && input.steps === undefined ? null : liveLineOf(home, mission.missionId);
+    if (input.plan !== undefined) {
+      const text = planTextOf(input.plan);
+      if (input.steps !== undefined) reasons.push("input.plan: give steps or a plan, not both: the owner's apply writes the plan from the steps' titles");
+      else if (liveLine !== null) reasons.push(`input.plan: ${liveLine} is live and the plan is written from its titles; to change it, cancel its entries with bm_hold_cancel and propose steps again`);
+      else if (text !== mission.plan.text) free.plan = text;
+    }
+    if (input.steps !== undefined) {
+      if (liveLine !== null) reasons.push(`input.steps: ${liveLine} is still live: cancel its entries with bm_hold_cancel, then propose again`);
+      const waiting = heldRequestsOf(home, mission.missionId).filter((entry) => !isSettled(entry)).length;
+      if (waiting + input.steps.length > MAX_HELD) reasons.push(`input.steps: the mission holds ${waiting} requests and takes at most ${MAX_HELD}; cancel some with bm_hold_cancel`);
+      const keyCount = charterKeysOf(home, mission).length;
+      input.steps.forEach((step, index) => {
+        if (step.project === undefined) {
+          if (keyCount > 1) reasons.push(`input.steps[${index}].project: mission ${mission.code} works in ${keyCount} repos; name the one this step works in`);
+        } else if (!inCharter(home, mission, step.project)) reasons.push(`input.steps[${index}].project: ${step.project} is not a repo of mission ${mission.code}`);
+      });
+      card.line = { lineId: `line-${holdIdOf(now()).slice("hold-".length)}`, steps: input.steps.map((step) => ({ title: step.title.trim(), acceptance: step.acceptance.map((line) => line.trim()) })) };
+    }
 
     // Repos: listed to add; in the scope to remove.
     const paseo = deps.paseo();
@@ -761,11 +826,14 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
       }
     }
     if (input.repos?.remove !== undefined) {
+      // ADR-047: a repo leaves under every id the charter names it by.
+      const idsOf = (key: string) => charter.repos.filter((repo) => repoKeyOf(home, repo) === key);
       const removed = input.repos.remove.map((repo) => idOf(repo, listed, home));
       removed.forEach((id, index) => {
-        if (!charter.repos.includes(id)) reasons.push(`input.repos.remove[${index}]: ${input.repos!.remove![index]} is not a repo of mission ${mission.code}`);
+        if (idsOf(id).length === 0) reasons.push(`input.repos.remove[${index}]: ${input.repos!.remove![index]} is not a repo of mission ${mission.code}`);
       });
-      if (removed.some((id) => charter.repos.includes(id))) card.removeRepos = [...new Set(removed.filter((id) => charter.repos.includes(id)))];
+      const gone = [...new Set(removed.flatMap(idsOf))];
+      if (gone.length > 0) card.removeRepos = gone;
     }
     if (input.close === true) {
       const running = await runningIdsOf(home, paseo, mission);
@@ -775,6 +843,8 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
 
     // Done criteria: new ones and a status are free; a new text, a drop or a restore is the owner's.
     const criteria: NonNullable<MissionChange["criteria"]> = [];
+    // ADR-045 decision 6: read once, only when a criterion turns met.
+    let flagged: ReadonlySet<string> | null = null;
     (input.doneCriteria ?? []).forEach((entry, index) => {
       const at = `input.doneCriteria[${index}]`;
       if (entry.id === undefined) {
@@ -794,7 +864,12 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
         else owner.status = "open";
       } else if (entry.status === "met" || entry.status === "open") {
         if (entry.status === "met" && entry.evidence === undefined) reasons.push(`${at}.evidence: a met criterion needs its evidence`);
-        else if (entry.status !== criterion.status || entry.evidence !== undefined) free.statuses.push({ id: criterion.id, status: entry.status, evidence: entry.evidence ?? null });
+        else {
+          flagged ??= entry.status === "met" ? couldNotRunRequestsOf(home, mission.missionId, log) : null;
+          const issue = entry.status === "met" && flagged !== null ? metEvidenceIssueOf(entry.evidence!, flagged) : null;
+          if (issue !== null) reasons.push(`${at}.evidence: ${issue}`);
+          else if (entry.status !== criterion.status || entry.evidence !== undefined) free.statuses.push({ id: criterion.id, status: entry.status, evidence: entry.evidence ?? null });
+        }
       }
       if (owner.text !== undefined || owner.status !== undefined) criteria.push(owner);
     });
@@ -860,8 +935,20 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     }
     let decisionId: string | null = null;
     if (!isEmptyMissionChange(card)) {
+      // ADR-045 decision 1: the entries wait `proposed` for the card; nothing starts.
+      if (card.line !== undefined) {
+        const proposed = proposeLine(home, mission.missionId, { lineId: card.line.lineId, by: main.agentId, steps: input.steps!.map((step) => ({ ...step, title: step.title.trim(), acceptance: step.acceptance.map((line) => line.trim()) })) }, now());
+        if (!proposed.ok) return fixThese("bm_mission_update", [`input.steps: ${proposed.reason}`]);
+      }
       const decisions = createMissionDecisionStore(home);
-      const opened = decisions.open(missionCardOf(mission, card, { id: decisions.nextId(mission.missionId), mainId: main.agentId, at }));
+      let opened: ReturnType<typeof decisions.open>;
+      try {
+        opened = decisions.open(missionCardOf(mission, card, { id: decisions.nextId(mission.missionId), mainId: main.agentId, at }));
+      } catch (error) {
+        // No card, so no one could ever apply or cancel the entries.
+        if (card.line !== undefined) dropLine(home, mission.missionId, card.line.lineId, "its owner card could not be opened", now());
+        throw error;
+      }
       decisionId = opened.decision.id;
       journalQuietly(store, mission.missionId, { kind: "decision", by: "main", text: `The Main asked the owner to ${missionChangeLinesOf(card).join("; ")} (${decisionId}).`, ref: decisionId }, log);
     }
@@ -1042,5 +1129,21 @@ export function createMissionTools(deps: MissionToolDeps): ServerTools {
     return answered({ cancelled: holdId });
   };
 
-  return actingTools(MISSION_TOOL_FACES, { bm_mission: read, bm_mission_start: start, bm_mission_update: update, bm_answer_worker: answerWorker, bm_answer_fallback: answerFallback, bm_hold_cancel: holdCancel }, NOTHING);
+  // Mission line plan §5.8: a stopped entry goes on only on the owner's word, which the Main names and the journal keeps.
+  const holdRelease = async (raw: unknown, caller: ToolCaller | null): Promise<ServerToolAnswer> => {
+    const found = mainOf(caller);
+    if ("ok" in found) return found;
+    const issues = schemaIssues(faceOf("bm_hold_release").inputSchema, withoutNulls(raw ?? {}));
+    if (issues.length > 0) return fixThese("bm_hold_release", issues);
+    const { mission } = found;
+    if (mission === null) return refused(NOT_A_MAIN_MESSAGE);
+    const { holdId, why } = withoutNulls(raw ?? {}) as { holdId: string; why: string };
+    const home = deps.home();
+    const refusal = releaseHeld(home, mission.missionId, holdId);
+    if (refusal !== null) return refused(`${refusal}. ${NOTHING}`);
+    journalQuietly(createMissionStore(home, { now }), mission.missionId, { kind: "note", by: "main", text: `Held request ${holdId} released: ${why}`, ref: holdId }, log);
+    return answered({ released: holdId, note: "paseo-bm creates its Worker within about a minute, and tells you" });
+  };
+
+  return actingTools(MISSION_TOOL_FACES, { bm_mission: read, bm_mission_start: start, bm_mission_update: update, bm_answer_worker: answerWorker, bm_answer_fallback: answerFallback, bm_hold_cancel: holdCancel, bm_hold_release: holdRelease }, NOTHING);
 }

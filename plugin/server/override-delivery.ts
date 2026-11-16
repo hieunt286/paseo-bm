@@ -47,6 +47,7 @@
  * follows it. One delivery per override at a time. Never throws: a failure is
  * one log line.
  */
+import { tellFailedDelivery } from "./delivery-failure";
 import type { TraceRecord } from "../shared/contracts";
 import { answersText, type Pick as AnswerPick } from "../shared/bm-questions";
 import { decisionKindOf, deliveryKindOf, questionDecisionId, type Decision, type DecisionDelivery } from "../shared/decisions";
@@ -237,9 +238,13 @@ export function createOverrideDelivery(deps: OverrideDeliveryDeps = {}): Overrid
       }
       const requestId = stored.requestId!;
       const kind = overrideKindOf(stored.id);
+      /** ADR-042 decision 5: a corrected answer that reached nobody is told, never only recorded. */
+      const tell = (to: string, why: string): void =>
+        void tellFailedDelivery({ workspaceId: stored.workspaceId, requestId, what: `the corrected answer ${stored.id}`, to, reason: why }, { home, queue, paseo, now, log });
       const failed = (to: string | null, why: string): void => {
         log(`[paseo-bm] the owner's corrected answer ${stored.id} was not delivered: ${why}.`);
         record(store, stored, { to: to ?? stored.askedBy.agentId ?? "worker", kind, at: now().toISOString(), outcome: "failed" });
+        tell(to ?? "its Worker", why);
       };
       let workerId: string | null;
       try {
@@ -273,13 +278,19 @@ export function createOverrideDelivery(deps: OverrideDeliveryDeps = {}): Overrid
         const write = (outcome: DecisionDelivery["outcome"]): void => record(store, stored, { to: workerId, kind, at: now().toISOString(), outcome });
         write("queued");
         queuedHere.delete(stored.id);
-        const released = await releaseWait(gate.release, { key: kind, block: text, settles: gate.settles, callbacks: { onSent: () => write("sent"), onDropped: () => write("failed"), onHeld: heldAtSend } }, { home, queue, paseo, log, now });
+        const released = await releaseWait(gate.release, { key: kind, block: text, settles: gate.settles, callbacks: { onSent: () => write("sent"), onDropped: (_target, _kind, reason) => { write("failed"); tell(workerId, reason); }, onHeld: heldAtSend } }, { home, queue, paseo, log, now });
         if (released === "dropped") log(`[paseo-bm] the owner's corrected answer ${stored.id} was not delivered: Worker ${workerId} is archived, closed or gone, or the send failed.`);
         return;
       }
       let heldNow = false;
-      const outcome = await queue.enqueue(workerId, kind, text, paseo, { onHeld: () => ((heldNow = true), heldAtSend()) }, { isHeld: holdsAtSend(home, workerId, "override", [], hint, { now, log }) });
-      if (heldNow) return;
+      // Told at once or at a later turn end: a queued answer can still fail.
+      let droppedNow = false;
+      const onDropped = (_target: string, _kind: string, reason: string): void => {
+        droppedNow = true;
+        failed(workerId, reason);
+      };
+      const outcome = await queue.enqueue(workerId, kind, text, paseo, { onHeld: () => ((heldNow = true), heldAtSend()), onDropped }, { wake: true, isHeld: holdsAtSend(home, workerId, "override", [], hint, { now, log }) });
+      if (heldNow || droppedNow) return;
       if (outcome === "dropped" || outcome === "replaced") {
         failed(workerId, `Worker ${workerId} is archived, closed or gone, or the send failed`);
         return;

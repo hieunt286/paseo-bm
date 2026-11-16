@@ -91,7 +91,7 @@ jobs:
         run: npm run build
 
       # Checks that plugin-package/ is what the build writes from plugin/, packs
-      # it, checks its tarball (exact contents, the paseo.cafe scan budget) and
+      # it, checks its tarball (exact contents) and
       # installs it offline into a temp project (ADR-026).
       - name: Smoke test packed package
         run: npm run smoke:packed
@@ -166,7 +166,7 @@ jobs:
             }
             // The dist-tag follows the kind of version: a prerelease goes to
             // `next`, a stable one to `latest` — the tag that a plain
-            // `paseo plugin update` and the paseo.cafe scanner both read. Publishing to `latest` happens
+            // `paseo plugin update` reads. Publishing to `latest` happens
             // over OIDC in this same job, which removes the manual
             // `npm dist-tag add` step (that one needs a one-time password).
             // A stable version is NOT also pushed to `next`: that would need
@@ -211,7 +211,7 @@ jobs:
 
       # Everything that can be checked is checked before anything is published:
       # a version on npm cannot be taken back. The plugin package must carry the
-      # name paseo.cafe lists and the version of the tag (ADR-009, ADR-012).
+      # name users install and the version of the tag (ADR-009, ADR-012).
       - name: Assert the plugin version
         env:
           VERSION: ${{ steps.meta.outputs.version }}
@@ -247,7 +247,7 @@ jobs:
       # so the Release itself is the approval point. The dist-tag is resolved
       # above from the kind of version (prerelease -> `next`, stable -> `latest`),
       # and the GitHub Release's own prerelease flag must agree with it. The
-      # tarball root is the loadable plugin that paseo.cafe scans: plugin-package/,
+      # tarball root is the loadable plugin that Paseo installs: plugin-package/,
       # the bundled entries (ADR-026).
       - name: Publish payload to npm
         if: github.event_name == 'release'

@@ -66,16 +66,20 @@ export const REPORT_FIELDS = [
 /**
  * The fields a report may add after the template's last one: the handoff note
  * the plugin asks an outgoing Worker for (`BM-HANDOFF`, autonomy design §G.6),
- * and what a size rollover leaves (`remaining`, delivery line design §2.6).
+ * what a size rollover leaves (`remaining`, delivery line design §2.6), the
+ * goal and acceptance a `received` restates (ADR-045 decision 7), and what a
+ * `finished` ran for real (`runtimeProof`, ADR-045 decision 6).
  */
 const HANDOFF_NOTE_FIELD = "handoffNote";
 const REMAINING_FIELD = "remaining";
+const GOAL_FIELDS = ["goal", "acceptance"] as const;
+const RUNTIME_PROOF_FIELD = "runtimeProof";
 /** The report's git fields (delivery line design §4.4), last and each optional. */
 const INTEGRATION_FIELDS = ["branch", "commit", "pushed", "mr", "ci"] as const;
 /** Every field a report may carry, in order. */
-const KNOWN_REPORT_FIELDS: readonly string[] = [...REPORT_FIELDS, HANDOFF_NOTE_FIELD, REMAINING_FIELD, ...INTEGRATION_FIELDS];
-/** Fields a report may leave out: `decided` came later, and older Workers never write it; `handoffNote`, `remaining` and the git fields only when there are some. */
-const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided", HANDOFF_NOTE_FIELD, REMAINING_FIELD, ...INTEGRATION_FIELDS]);
+const KNOWN_REPORT_FIELDS: readonly string[] = [...REPORT_FIELDS, HANDOFF_NOTE_FIELD, REMAINING_FIELD, ...GOAL_FIELDS, RUNTIME_PROOF_FIELD, ...INTEGRATION_FIELDS];
+/** Fields a report may leave out: `decided` came later, and older Workers never write it; `handoffNote`, `remaining`, `goal`, `acceptance`, `runtimeProof` and the git fields only when there are some. */
+const OPTIONAL_REPORT_FIELDS: ReadonlySet<string> = new Set(["decided", HANDOFF_NOTE_FIELD, REMAINING_FIELD, ...GOAL_FIELDS, RUNTIME_PROOF_FIELD, ...INTEGRATION_FIELDS]);
 /** A report's phases; `stopped` (design §16.11) is a bound Worker's report on a stop. */
 export const REPORT_PHASES = ["received", "beads-done", "blocked", "finished", "stopped"] as const;
 const TIER_SHELL = /^(?:Small|Medium|Large) \(changed: ([\s\S]+)\)$/;

@@ -37,7 +37,7 @@ holds an action that leaves this workspace until the owner allows it; the five b
 ## What you do next
 
 One loop, from the request to `finished`, the same at every tier:
-1. **Size the request**: the tier and why in one sentence, then `received`. A Small request, or one
+1. **Size the request**: the tier and why in one sentence, then `received`, Medium or Large with no `Step n of m` in the brief with `goal` and `acceptance`: what you understood, for your Main to compare. A Small request, or one
    that needs no design of yours (an answer, or exactly what it spells out), gets no bead, document,
    Reviewer or review call: do it, prove it, send `finished` with the evidence, and skip steps 3–6.
 2. **Ask once** what you cannot decide or look up, all in one round.
@@ -74,7 +74,7 @@ split by layer or file, never sized by counts. A plan's leaves, and a Large requ
 follow `converting-plan-to-beads` `reference/leaf-bead-checklist.md`; any other bead needs its Objective,
 Scope (in and out), Acceptance Criteria, a **Primary Proof** named before you start and its
 **Reversibility**. Each bead you create or update carries `feature:<slug>`, the request's noun as a
-lowercase ASCII slug (`Sửa lỗi ngày trên Hoá đơn` → `feature:hoa-don`), reusing a close one; leave other
+lowercase ASCII slug (`Hoá đơn` → `feature:hoa-don`), reusing a close one; leave other
 labels alone. First list the open beads with it (`br list --label feature:<slug> --json`) and update an
 overlapping one instead. A SPLIT makes SIBLING beads under the same parent, each with `Split-from: <id>`,
 taking over the original's edges, and closes it as "split into <ids>"; never delete a bead, never make one
@@ -87,7 +87,7 @@ Proof is **the cheapest evidence that the outcome happened**: a test or a compil
 sources for research, configuration read back, a captured response or screenshot for an API or a screen; no build or
 test command is not a reason to stop. **Run only checks covering the changed behaviour and affected consumers.** Reuse results while code, dependencies and configuration are unchanged; rerun only invalidated checks.
 No automatic full suite at `finished`, after review or a merge. Broaden only for an explicit owner request or an affected behaviour narrower checks cannot prove; state why.
-Without pipes or redirections, **name checks in `buildAndTests` exactly as run**, distinguishing reused results and their source.
+**Medium or Large code: run it for real** (what you changed, as a user would, what needs no login): `finished` carries `runtimeProof` (`ran`, `what`, `showed`); it cannot run: `could-not-run` and why, accepted and flagged. No credential is read or stored for it. **Run each check in the quietest mode its tool offers** (`vitest run --reporter=dot <path>`, `eslint --quiet`, `tsc --pretty false`, a runner's own summary flag). Without pipes or redirections, **name checks in `buildAndTests` exactly as run**, flags included; write a reused check as its backtick span followed by `reused from <source>`.
 Run `git status` once before your first write: it tells your changes from those already there. Per bead: `br update <id> --status in_progress` → the work → the check →
 `br close <id> --reason "<the evidence>"`, after reading the check's own result. One bead `in_progress` at a time, only
 this request's (several: `implementing-beads`), never two agents editing at once. A blocking finding on a closed bead:
@@ -162,7 +162,7 @@ bm_report {"requestId": "req-20260917T010956Z", "phase": "blocked", "tier": {"le
 At `blocked`, name each wait by id — `waitingOn` (questions), `waitingOnPeers` (links), `waitingOnRequests`,
 `waitingOnBatches` — why in `waitingFor`, `wakeOn: "any"` when one is enough, and end the turn: paseo-bm wakes you
 once with everything, as one `BM-UPDATES` message (the facts in a `BM-DELIVERY wait` block): act on each block. A
-brief with a `peer:` line: end `finished` with `forPeer` and talk to that project with `bm_peer_reply`. Lasting facts,
+brief whose `plan:` line says `Step n of m`, below m, ends `finished` with `forNextStep`: what the next step's Worker needs. A brief with a `peer:` line: end `finished` with `forPeer` and talk to that project with `bm_peer_reply`. Lasting facts,
 conventions and contracts later Workers here need go to `bm_memory` (its source, `scope: "repo"`, a `subject` to
 replace one). In your chat, tell the owner in a few lines, in the owner's language, what changed, how you checked it,
 and what is left. Messages from the plugin that start with `BM-` (`BM-FALLBACK`, `BM-HANDOFF`, …) each say what to do:

@@ -114,7 +114,7 @@ export function createReviewBudgetSweep(deps: ReviewBudgetSweepDeps = {}): Revie
     } catch (error) {
       log(`[paseo-bm] could not find the Worker of ${requestId} to tell it of its withdrawn questions: ${errorText(error)}`);
     }
-    const outcome = workerId === null ? "dropped" : await queue.enqueue(workerId, kind, withdrawalTextOf(requestId, decisions), paseo);
+    const outcome = workerId === null ? "dropped" : await queue.enqueue(workerId, kind, withdrawalTextOf(requestId, decisions), paseo, undefined, { wake: true });
     if (outcome === "dropped") log(`[paseo-bm] the withdrawal of ${decisions.map((decision) => decision.id).join(", ")} reached no Worker of ${requestId}.`);
     const at = now().toISOString();
     for (const decision of decisions) {

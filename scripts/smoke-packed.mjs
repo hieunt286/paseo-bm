@@ -20,9 +20,9 @@
 //      pack` it into an empty temp directory.
 //   3. Extract the tarball and assert its contents: its root is a loadable
 //      plugin (manifest requiring Paseo >=0.9.0, both entries, LICENSE,
-//      README.md) and holds nothing else; the two entries stay within
-//      paseo.cafe's 2,000,000-byte scan budget; the version is the root
-//      package.json's; no install lifecycle scripts; no dependencies.
+//      README.md) and holds nothing else; the version is the root
+//      package.json's; no install lifecycle scripts; no dependencies. The
+//      entries' size is reported, never limited (ADR-048).
 //   4. Install the tarball into an isolated temp project, offline, with a
 //      throwaway npm cache and userconfig (the package has no dependencies, so
 //      nothing needs the network); assert the installed package is the packed
@@ -142,8 +142,8 @@ try {
   const tarball = join(packDir, tarballs[0]);
 
   // 3. Inspect the tarball itself, independently of what npm reported. Its root
-  // must BE a loadable plugin: that is what the paseo.cafe security scan
-  // checks, and it always reads the tarball root (ADR-009).
+  // must BE a loadable plugin: Paseo installs the tarball root as the plugin
+  // (ADR-009).
   console.log("\n# tarball contents");
   mustRun("tar extract", "tar", ["-xzf", tarball, "-C", extractDir]);
   const packed = join(extractDir, "package");
@@ -169,9 +169,9 @@ try {
   const repoFiles = snapshot(join(repoRoot, "plugin-package"));
   const differing = expectedFiles.filter((path) => path !== "package.json" && repoFiles.get(path) !== packedFiles.get(path));
   check(differing.length === 0, `each packed file is the one in plugin-package/${differing.length ? ` (differs: ${differing.join(", ")})` : ""}`);
-  // paseo.cafe's security scan refuses a reachable graph over 2,000,000 bytes (ADR-026).
+  // The size is reported, not limited (ADR-048).
   const entryBytes = ["index.server.ts", "index.client.tsx"].reduce((sum, name) => sum + readFileSync(join(packed, name)).length, 0);
-  check(entryBytes <= 2_000_000, `the two entries are ${entryBytes} bytes, within paseo.cafe's 2,000,000-byte scan budget`);
+  console.log(`info the two entries are ${entryBytes} bytes`);
   // Downloading the package must never run code on the installing machine
   // (AGENTS.md, hard packaging rule).
   const lifecycle = ["preinstall", "install", "postinstall", "prepare"].filter(

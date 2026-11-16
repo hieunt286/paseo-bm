@@ -126,7 +126,7 @@ async function gitOut(git: GitRunner, cwd: string, args: readonly string[], maxB
   }
 }
 
-const hasRef = async (git: GitRunner, cwd: string, ref: string): Promise<boolean> => (await gitOut(git, cwd, ["rev-parse", "--verify", "--quiet", ref])) !== null;
+export const hasRef = async (git: GitRunner, cwd: string, ref: string): Promise<boolean> => (await gitOut(git, cwd, ["rev-parse", "--verify", "--quiet", ref])) !== null;
 
 /** The integration branch of the root checkout (§3.3): its upstream, else `origin/HEAD`; null when neither reads. */
 export async function integrationBranchOf(git: GitRunner, root: string): Promise<{ target: string; base: string } | null> {
@@ -290,7 +290,12 @@ async function branchOff(ctx: Context, n: number, records: readonly Placement[])
     const tail = mission.missionId.slice(-4);
     branch = `m/${mission.code}-${tail}/${slug}`;
     worktreeSlug = `m-${code}-${tail}-${slug}`;
-    if (await taken(branch)) return fail(`the branches m/${mission.code}/${slug} and ${branch} both exist in ${ctx.name}, and neither is this mission's; the owner renames or deletes one`);
+    if (await taken(branch)) {
+      // ADR-043: a branch of this mission under another repo key is the mission's work, never someone else's.
+      const owned = (mission.placements ?? []).find((placement) => placement.branch === branch);
+      if (owned !== undefined) return fail(`${branch} is mission ${mission.code}'s branch, recorded under repo ${owned.repo}, not proved to be ${ctx.name}: keep the branch and tell the owner`);
+      return fail(`the branches m/${mission.code}/${slug} and ${branch} both exist in ${ctx.name} and belong to other work: tell the owner; both keep their work`);
+    }
   }
   // §4.8 step 3: a mission open at the repo's checkpoint branches from the checkpoint branch (never its sha, spike S1).
   const checkpoint = checkpointBaseOf(ctx.home, mission, ctx.repo);

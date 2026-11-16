@@ -7,13 +7,15 @@ import { clearJsonFileCache } from "../plugin/server/data-files";
 import { materialiseTurn } from "../plugin/server/decision-materialiser";
 import { handleDecisionsAnswer, handleDecisionsGet, handleDecisionsList } from "../plugin/server/decision-rpc";
 import { createDecisionStore } from "../plugin/server/decision-store";
+import { heldRequestsOf } from "../plugin/server/held-requests";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { MISSION_DECISION_ID_PATTERN, createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { contractStatusOf, createMissionStore } from "../plugin/server/mission-store";
-import { MISSION_JOURNAL_SHOWN, MISSION_NOT_BOUND_MESSAGE, MISSION_SETTLED_SHOWN, NOT_A_MAIN_MESSAGE, applyFreeUpdate, applyMissionChange, createMissionTools, type FreeMissionUpdate } from "../plugin/server/mission-tools";
+import { MISSION_JOURNAL_SHOWN, MISSION_NOT_BOUND_MESSAGE, MISSION_SETTLED_SHOWN, NOT_A_MAIN_MESSAGE, applyFreeUpdate, applyMissionChange, applyMissionDecision, createMissionTools, type FreeMissionUpdate } from "../plugin/server/mission-tools";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
 import { createOutbox } from "../plugin/server/outbox";
+import { createRequestRegistry } from "../plugin/server/request-registry";
 import { clearProposedMissionStarts, proposedMissionStartOf } from "../plugin/server/proposed-mission-starts";
 import { decisionsListRpc } from "../plugin/shared/contracts";
 import { DECISION_ID_PATTERN, answerDecision } from "../plugin/shared/decisions";
@@ -287,7 +289,7 @@ describe("bm_mission_update (§4, §4.1)", () => {
     const answer = await json(
       "bm_mission_update",
       {
-        plan: "1. API\n2. Web",
+        plan: ["API", "Web"],
         doneCriteria: [{ text: "Invoices list" }, { text: "Invoices PDF" }],
         contracts: [{ title: "Invoice API", providerRepo: "/repo/api", consumerRepos: ["wks-b"], text: "GET /invoices", source: "PRD §3" }],
       },
@@ -308,6 +310,54 @@ describe("bm_mission_update (§4, §4.1)", () => {
     expect(stored.contracts[0]).toMatchObject({ text: "GET /invoices?page", version: 2 });
     expect(createMissionStore(home).journal(mission.missionId).map((line) => line.kind)).toEqual(["plan", "criterion", "contract", "criterion", "contract"]);
     expect(createMissionDecisionStore(home).list(mission.missionId)).toEqual([]);
+  });
+
+  it("a plan is a list of one-line steps (ADR-045 decision 8): anything else is refused with how to fix it, and nothing is written", async () => {
+    const { call } = await setup();
+    const { mission, who } = missionOf();
+    const fix = "input.plan: give a list of 1 to 30 steps, one line of at most 200 characters each; a fact goes to bm_memory or a contract";
+    for (const [plan, line] of [
+      ["1. API\n2. Web", "input.plan: must be an array"],
+      [["x".repeat(201)], "input.plan[0]: must be at most 200 characters"],
+      [["API", "Web\nand a fact"], "input.plan[1]: must match"],
+      [Array.from({ length: 31 }, (_, index) => `step ${index}`), "input.plan: takes at most 30 items"],
+      [[], "input.plan: needs at least 1 item(s)"],
+    ] as const) {
+      const answer = await call("bm_mission_update", { plan }, who);
+      expect(answer.ok).toBe(false);
+      expect(answer.text).toContain(line);
+      expect(answer.text).toContain(fix);
+    }
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("");
+    expect(createMissionStore(home).journal(mission.missionId)).toEqual([]);
+    expect((await call("bm_mission_update", { goal: "x".repeat(4_001) }, who)).text).not.toContain(fix);
+  });
+
+  it("the same steps again change nothing; 30 steps of 200 characters are accepted", async () => {
+    const { call, json } = await setup();
+    const { mission, who } = missionOf();
+    await json("bm_mission_update", { plan: ["API", "Web"] }, who);
+    expect((await call("bm_mission_update", { plan: ["API", "Web"] }, who)).text).toContain("Nothing to change");
+    await json("bm_mission_update", { plan: Array.from({ length: 30 }, () => "x".repeat(200)) }, who);
+    const lines = createMissionStore(home).get(mission.missionId)!.plan.text.split("\n");
+    expect(lines).toHaveLength(30);
+    expect(lines[29]).toBe(`30. ${"x".repeat(200)}`);
+  });
+
+  it("bm_mission flags a stored plan from before the rule, and only that one (ADR-045 decision 8)", async () => {
+    const { json } = await setup();
+    const { mission, who } = missionOf();
+    const storedPlan = (text: string) => createMissionStore(home).update(mission.missionId, (current) => ({ ...current, plan: { text, updatedAt: NOW.toISOString() } }));
+    expect(await json("bm_mission", {}, who)).not.toHaveProperty("planNote");
+    storedPlan("BM cannot create the BE Worker.\n1. API");
+    expect(await json("bm_mission", {}, who)).toMatchObject({
+      plan: { text: "BM cannot create the BE Worker.\n1. API" },
+      planNote: "written before plans held only steps; it may be stale: check before relying on it",
+    });
+    storedPlan("1. API\n2. Web");
+    expect(await json("bm_mission", {}, who)).not.toHaveProperty("planNote");
+    await json("bm_mission_update", { plan: ["API", "Web", "Docs"] }, who);
+    expect(await json("bm_mission", {}, who)).not.toHaveProperty("planNote");
   });
 
   it("contract status (delivery line design §9.2): a new contract and a new version are proposed unless stated agreed; a status alone keeps the version; an older contract reads agreed", async () => {
@@ -349,6 +399,18 @@ describe("bm_mission_update (§4, §4.1)", () => {
     expect(createMissionStore(home).get(mission.missionId)!.charter.repos).toEqual(["wks-a", "wks-b"]);
   });
 
+  /** ADR-047: a charter that names a repo by a live id and by its key loses both when the repo is removed. */
+  it("removes a repo under every id the charter names it by, whichever id is given", async () => {
+    const { json } = await setup();
+    const { mission, who } = missionOf({ repos: ["wks-a", "wks-old", "wks-b"] });
+    createMissionStore(home).update(mission.missionId, (current) => ({ ...current, repoAliases: { "wks-a": "wks-old" } }));
+    for (const given of ["wks-a", "wks-old"]) {
+      const answer = await json("bm_mission_update", { repos: { remove: [given] } }, who);
+      const card = createMissionDecisionStore(home).get(answer["decisionId"] as string)!;
+      expect(card.options.find((option) => option.key === "apply")!.action).toMatchObject({ kind: "mission-change", change: { removeRepos: ["wks-a", "wks-old"] } });
+    }
+  });
+
   it("refuses what cannot be: a taken code, an unknown repo or criterion, a met criterion without evidence, nothing to change", async () => {
     const { call } = await setup();
     createMissionStore(home).create({ code: "API", name: "Api", goal: "", repos: [], createdBy: "owner" });
@@ -364,19 +426,19 @@ describe("bm_mission_update (§4, §4.1)", () => {
       expect(refused.text).toContain(line);
     }
     expect((await call("bm_mission_update", { name: "Website" }, who)).text).toContain("Nothing to change");
-    expect((await call("bm_mission_update", { plan: "x" }, caller({ agentId: "other" }))).text).toBe(NOT_A_MAIN_MESSAGE);
+    expect((await call("bm_mission_update", { plan: ["x"] }, caller({ agentId: "other" }))).text).toBe(NOT_A_MAIN_MESSAGE);
   });
 
   it("opens one m: card for the sensitive parts, which only the owner's tap applies", async () => {
     const { json, fake } = await setup();
     const { mission, who } = missionOf();
     await json("bm_mission_update", { doneCriteria: [{ text: "Invoices list" }] }, who);
-    const answer = await json("bm_mission_update", { name: "Website v2", goal: "Ship v2 and v3", plan: "new plan", doneCriteria: [{ id: "D1", status: "dropped" }], confirmCharter: true }, who);
+    const answer = await json("bm_mission_update", { name: "Website v2", goal: "Ship v2 and v3", plan: ["new plan"], doneCriteria: [{ id: "D1", status: "dropped" }], confirmCharter: true }, who);
     const id = answer["decisionId"] as string;
     expect(id).toBe(`m:${mission.missionId}:1`);
     // The free part is written; the rest waits for the owner.
     let stored = createMissionStore(home).get(mission.missionId)!;
-    expect(stored.plan.text).toBe("new plan");
+    expect(stored.plan.text).toBe("1. new plan");
     expect(stored.name).toBe("Website");
     expect(stored.charter.doneCriteria[0]!.status).toBe("open");
 
@@ -428,7 +490,7 @@ describe("bm_mission_update (§4, §4.1)", () => {
     const { json, fake } = await setup();
     const { mission, who } = missionOf();
     mkdirSync(join(home, "missions", `${mission.missionId}.journal.jsonl`));
-    expect(await json("bm_mission_update", { plan: "1. API" }, who)).toMatchObject({ applied: ["The Main rewrote the plan."], decisionId: null });
+    expect(await json("bm_mission_update", { plan: ["API"] }, who)).toMatchObject({ applied: ["The Main rewrote the plan."], decisionId: null });
     expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("1. API");
     const id = (await json("bm_mission_update", { goal: "Something else" }, who))["decisionId"] as string;
     expect(id).toMatch(MISSION_DECISION_ID_PATTERN);
@@ -477,5 +539,180 @@ describe("bm_mission_update (§4, §4.1)", () => {
     await handleDecisionsAnswer({ id, optionKey: "apply" }, fake.paseo, { home, now: () => NOW, cli: fakeCli().cli });
     expect(createMissionStore(home).get(mission.missionId)).toMatchObject({ state: "closed", closedAt: NOW.toISOString() });
     expect(createMissionRoster(home).get(mission.missionId, "req-20261009T100000Z")?.state).toBe("stopped");
+  });
+});
+
+describe("bm_mission_update steps: a step list approved on one owner card (ADR-045 decision 1)", () => {
+  const STEPS = [
+    { title: "Build the API", request: "Add the orders endpoint.", acceptance: ["GET /orders answers 200", "It is documented"] },
+    { title: "Wire the screens", request: "Show the orders.", acceptance: ["The page lists them"] },
+  ];
+  const proposal = async (json: Awaited<ReturnType<typeof setup>>["json"], who: ToolCaller) => (await json("bm_mission_update", { steps: STEPS }, who))["decisionId"] as string;
+  const answerAs = (fake: ReturnType<typeof daemon>, id: string, optionKey: string) => handleDecisionsAnswer({ id, optionKey }, fake.paseo, { home, now: () => NOW, cli: fakeCli().cli, log: (line) => logs.push(line) });
+
+  it("stores proposed entries, opens one card listing the titles within 1,000 characters, and starts nothing", async () => {
+    const { json, fake } = await setup();
+    const { mission, who } = missionOf();
+    const id = await proposal(json, who);
+    expect(id).toMatch(MISSION_DECISION_ID_PATTERN);
+    const entries = heldRequestsOf(home, mission.missionId);
+    expect(entries.map((entry) => entry.state)).toEqual(["proposed", "proposed"]);
+    expect(entries[0]!.after).toEqual([]);
+    expect(entries[1]!.after).toEqual([entries[0]!.holdId]);
+    const decisions = createMissionDecisionStore(home).list(mission.missionId, ["open"]);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]!.question).toContain("1. Build the API");
+    expect(decisions[0]!.question).toContain("2. Wire the screens");
+    expect(decisions[0]!.options.map((option) => option.key)).toEqual(["apply", "keep"]);
+    expect(fake.creates).toEqual([]);
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("");
+  });
+
+  it("the card's question holds every title of the longest list within 1,000 characters", async () => {
+    const { json } = await setup();
+    const { mission, who } = missionOf();
+    const steps = Array.from({ length: 12 }, (_, index) => ({ title: `${index + 1} ${"t".repeat(66)}`, request: "r", acceptance: ["a"] }));
+    await json("bm_mission_update", { steps }, who);
+    const { question } = createMissionDecisionStore(home).list(mission.missionId, ["open"])[0]!;
+    expect(question.length).toBeLessThanOrEqual(1_000);
+    for (let n = 1; n <= 12; n += 1) expect(question).toContain(`- ${n}. ${n} t`);
+  });
+
+  it("the owner's apply moves all entries to held in order, each after the previous one, and writes the plan from the titles", async () => {
+    const { json, fake } = await setup();
+    const { mission, who } = missionOf();
+    await answerAs(fake, await proposal(json, who), "apply");
+    const entries = heldRequestsOf(home, mission.missionId);
+    expect(entries.map((entry) => [entry.state, entry.step?.n])).toEqual([["held", 1], ["held", 2]]);
+    expect(entries[0]!.after).toEqual([]);
+    expect(entries[1]!.after).toEqual([entries[0]!.holdId]);
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("1. Build the API\n2. Wire the screens");
+    expect(fake.creates).toEqual([]);
+  });
+
+  it("keep as is cancels them and leaves the plan", async () => {
+    const { json, fake } = await setup();
+    const { mission, who } = missionOf();
+    await answerAs(fake, await proposal(json, who), "keep");
+    expect(heldRequestsOf(home, mission.missionId).map((entry) => entry.state)).toEqual(["cancelled", "cancelled"]);
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("");
+  });
+
+  it("an answer that is not the owner's applies nothing and cancels nothing", async () => {
+    const { json } = await setup();
+    const { mission, who } = missionOf();
+    const id = await proposal(json, who);
+    const card = createMissionDecisionStore(home).get(id)!;
+    for (const by of ["main", "orchestrator", "policy", "precedent"] as const) {
+      await applyMissionDecision({ ...card, status: "answered", answer: { via: "chat-main", optionKey: "apply", words: null, at: NOW.toISOString(), by } } as never, { home, now: NOW, log: (line) => logs.push(line), cli: fakeCli().cli });
+      await applyMissionDecision({ ...card, status: "answered", answer: { via: "chat-main", optionKey: "keep", words: null, at: NOW.toISOString(), by } } as never, { home, now: NOW, log: (line) => logs.push(line), cli: fakeCli().cli });
+    }
+    expect(heldRequestsOf(home, mission.missionId).map((entry) => entry.state)).toEqual(["proposed", "proposed"]);
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("");
+    // The store itself refuses any answerer but the owner on an m: card.
+    for (const by of ["policy", "precedent"] as const) {
+      expect(JSON.stringify(answerDecision(card, { via: "inbox", optionKey: "apply", words: null, at: NOW.toISOString(), by } as never))).toContain("only the owner answers it");
+    }
+    expect(JSON.stringify(answerDecision(card, { via: "main", optionKey: "apply", words: null, at: NOW.toISOString(), by: "main" } as never))).toContain("the mission's Main answers only those");
+  });
+
+  it("a malformed step is refused per field and stores nothing", async () => {
+    const { call } = await setup();
+    const { mission, who } = missionOf({ repos: ["wks-a", "wks-b"] });
+    const good = { title: "A", request: "r", acceptance: ["a"], project: "wks-a" };
+    const cases: Array<[unknown, string]> = [
+      [[good], "input.steps: needs at least 2 item(s)"],
+      [Array.from({ length: 13 }, () => good), "input.steps: takes at most 12 items"],
+      [[{ ...good, title: "x".repeat(71) }, good], "input.steps[0].title: must be at most 70 characters"],
+      [[good, { ...good, acceptance: [] }], "input.steps[1].acceptance: needs at least 1 item(s)"],
+      [[good, { ...good, acceptance: Array.from({ length: 7 }, () => "a") }], "input.steps[1].acceptance: takes at most 6 items"],
+      [[good, { ...good, acceptance: ["x".repeat(201)] }], "input.steps[1].acceptance[0]: must be at most 200 characters"],
+      [[{ title: "A", acceptance: ["a"], project: "wks-a" }, good], "input.steps[0].request: is required"],
+      [[good, { ...good, context: Array.from({ length: 17 }, () => ({ fact: "f", source: "s" })) }], "input.steps[1].context: takes at most 16 items"],
+      [[good, { ...good, project: undefined }], "input.steps[1].project: mission WEB works in 2 repos; name the one this step works in"],
+      [[good, { ...good, project: "wks-gone" }], "input.steps[1].project: wks-gone is not a repo of mission WEB"],
+    ];
+    for (const [steps, line] of cases) {
+      const answer = await call("bm_mission_update", { steps }, who);
+      expect(answer.ok, line).toBe(false);
+      expect(answer.text).toContain(line);
+    }
+    expect(heldRequestsOf(home, mission.missionId)).toEqual([]);
+    expect(createMissionDecisionStore(home).list(mission.missionId, ["open"])).toEqual([]);
+  });
+
+  it("plan is refused while a line is live, and so is another list; bm_mission lists the steps", async () => {
+    const { json, call, fake } = await setup();
+    const { mission, who } = missionOf();
+    await answerAs(fake, await proposal(json, who), "apply");
+    const planned = await call("bm_mission_update", { plan: ["Other"] }, who);
+    expect(planned.ok).toBe(false);
+    expect(planned.text).toContain("input.plan:");
+    expect(planned.text).toContain("is live");
+    const again = await call("bm_mission_update", { steps: STEPS }, who);
+    expect(again.ok).toBe(false);
+    expect(again.text).toContain("input.steps:");
+    expect(again.text).toContain("is still live");
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("1. Build the API\n2. Wire the screens");
+    const read = await json("bm_mission", {}, who);
+    expect(read["line"]).toEqual([
+      { n: 1, of: 2, title: "Build the API", state: "held", holdId: expect.stringMatching(/^hold-/) },
+      { n: 2, of: 2, title: "Wire the screens", state: "held", holdId: expect.stringMatching(/^hold-/) },
+    ]);
+  });
+
+  it("steps and plan in one call are refused, storing nothing: the owner's apply writes the plan", async () => {
+    const { call } = await setup();
+    const { mission, who } = missionOf();
+    const both = await call("bm_mission_update", { plan: ["x"], steps: STEPS }, who);
+    expect(both.ok).toBe(false);
+    expect(both.text).toContain("input.plan: give steps or a plan, not both");
+    expect(heldRequestsOf(home, mission.missionId)).toEqual([]);
+    expect(createMissionStore(home).get(mission.missionId)!.plan.text).toBe("");
+  });
+});
+
+describe("a done criterion and a request that could not run (ADR-045 decision 6)", () => {
+  const FLAGGED = "req-20261009T100000Z";
+  const PROVED = "req-20261009T110000Z";
+  const met = (evidence: string) => ({ doneCriteria: [{ id: "D1", status: "met", evidence }] });
+
+  async function withCriterion(proofs: Array<[string, "ran" | "could-not-run"]>) {
+    const { call, json } = await setup();
+    const { mission, who } = missionOf();
+    await json("bm_mission_update", { doneCriteria: [{ text: "Invoices list" }] }, who);
+    const registry = createRequestRegistry(home);
+    for (const [requestId, kind] of proofs) {
+      createMissionRoster(home).add(mission.missionId, { requestId, workspaceId: "wks-a", topic: "Invoices", workerId: "w-1" });
+      registry.register("wks-a", requestId, { source: "tool", managerId: MAIN });
+      registry.noteProof("wks-a", requestId, { kind, what: "the page", at: NOW.toISOString() });
+    }
+    const status = () => createMissionStore(home).get(mission.missionId)!.charter.doneCriteria[0]!.status;
+    return { call, json, who, status };
+  }
+
+  it("with a flagged request: met with no request id or naming it is refused, and naming a proved request is accepted", async () => {
+    const { call, json, who, status } = await withCriterion([[FLAGGED, "could-not-run"], [PROVED, "ran"]]);
+    const none = await call("bm_mission_update", met("It works on staging."), who);
+    expect(none.ok).toBe(false);
+    expect(none.text).toContain(`input.doneCriteria[0].evidence: this mission has a request that could not be run (${FLAGGED}): name the request id that proves this criterion`);
+    const named = await call("bm_mission_update", met(`Shown by ${FLAGGED} and ${PROVED}.`), who);
+    expect(named.ok).toBe(false);
+    expect(named.text).toContain(`input.doneCriteria[0].evidence: ${FLAGGED} could not be run, so it meets no criterion: name a request that did run it`);
+    expect(status()).toBe("open");
+    await json("bm_mission_update", met(`Shown by ${PROVED}.`), who);
+    expect(status()).toBe("met");
+  });
+
+  it("only met is held to it", async () => {
+    const flagged = await withCriterion([[FLAGGED, "could-not-run"]]);
+    await flagged.json("bm_mission_update", { doneCriteria: [{ id: "D1", text: "Invoices list v2" }] }, flagged.who);
+    expect(flagged.status()).toBe("open");
+  });
+
+  it("a mission whose requests all ran still takes evidence without an id", async () => {
+    const { json, who, status } = await withCriterion([[PROVED, "ran"]]);
+    await json("bm_mission_update", met("It works on staging."), who);
+    expect(status()).toBe("met");
   });
 });

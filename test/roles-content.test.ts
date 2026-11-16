@@ -265,7 +265,11 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
     keys(M, "a lane's Workers share its tree; one fact names a shared file", "another Worker writes the same files", "a lane's Workers share its tree", "one fact names it");
     expect(M).not.toMatch(/one repo's Workers share/);
     // Design §16.12: the creation recipe leaves the role file; a bound Manager's text never teaches it.
-    expect(M).not.toMatch(/create_agent|list_profiles|YYYYMMDDTHHMMSSZ|initialPrompt|settings\.modeId/);
+    expect(M).not.toMatch(/list_profiles|YYYYMMDDTHHMMSSZ|initialPrompt|settings\.modeId/);
+    // ADR-045 decision 9: `create_agent` appears once, as the limit in rule 4, and the unbound Manager's facts keep the recipe.
+    expect(M.match(/create_agent/g)).toHaveLength(1);
+    keys(MR, "a bound Main makes a Worker by hand only when the owner asks", "make a Worker by hand (`create_agent`) only when the owner asks for one");
+    verbatim(MH, "`create_agent`");
     verbatim(MANAGER_HAND_PATH, "`req-` + current UTC time as `YYYYMMDDTHHMMSSZ`", "`provider` = `bm-worker/<model of the profile>`", "`bm.role` = `worker`", "`bm.requestId` = the `requestId`", "`bm.version`");
     verbatim(MH, "call `list_profiles` **once**");
     // Re-run finding H1 (bead bm-w6bh): an unbound Manager quoted only the first sentence and dropped the asked review.
@@ -279,7 +283,11 @@ describe("manager.md — the project's context keeper (REQ-117 c–e)", () => {
   });
 
   it("checks plan and result against the owner's goals and raises a misalignment as a question (REQ-117 d)", () => {
-    keys(M, "at received, beads-done and finished", "At `received`, `beads-done`", "`finished`", "owner's goals");
+    // ADR-045 decision 7: the restated goal is compared once, at a Medium or Large received outside a step.
+    keys(M, "a Medium or Large received outside a step is compared at that report only", "At a Medium or Large `received` outside a step", "compare its `goal` and `acceptance` with the owner's words", "at that report only");
+    keys(M, "at finished, what it did against the owner's goals", "at `finished`, what it did with the owner's goals");
+    keys(M, "beads-done, a Small received and a step's arrive as a note, for no comparison", "`beads-done`, a Small `received` and a step's arrive as a `noted:` line");
+    keys(W, "a Medium or Large received with no step restates goal and acceptance", "then `received`, Medium or Large with no `Step n of m` in the brief with `goal` and `acceptance`", "for your Main to compare");
     // Mission runtime design §4.6 (REQ-205): a misalignment is a stored question, never only prose in the reply.
     keys(M, "asked as a stored question, with options and a recommendation", "ask it with `bm_owner_question`", "options", "your recommendation", "name it in one line");
     keys(M, "the owner's answer goes through bm_tell_worker", "Their answer goes to the Worker with `bm_tell_worker`");
@@ -463,6 +471,8 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     // How to write it (backticks, pass/fail) is the field's own description, pinned below.
     keys(W, "invalidated checks rerun; commands are named without pipes", "rerun only invalidated checks");
     keys(W, "each command is named exactly as run", "Without pipes or redirections", "`buildAndTests` exactly as run");
+    // ADR-045 decision 12: the quietest mode the tool offers, no pipe, and the named check keeps its flags.
+    keys(W, "runs checks quietly, with the forms named", "**Run each check in the quietest mode its tool offers**", "`vitest run --reporter=dot <path>`", "`eslint --quiet`", "`tsc --pretty false`", "a runner's own summary flag", "Without pipes or redirections", "exactly as run", "flags included");
     const field = (toolNamed("bm_report")!.inputSchema as { properties: Record<string, { description?: string }> }).properties["buildAndTests"]?.description;
     expect(field).toContain("Each check exactly as you ran it, in backticks, with pass/fail");
     expect(field).toContain("Backticks only around commands.");
@@ -555,6 +565,8 @@ describe("worker.md — sizing, beads, proof and the four questions", () => {
     keys(W, "before bm_rereview, only the checks covering the fixed files, named in fixed", "run only the checks that cover the files", "you fixed", "`bm_rereview`", "those checks in `fixed`");
     keys(W, "bm_rereview needs no since", "`bm_rereview`", "no `since`");
     keys(W, "targeted evidence is reused until invalidated", "Run only checks covering the changed behaviour and affected consumers", "Reuse results", "rerun only invalidated checks");
+    keys(W, "Medium or Large code runs for real, no login, or could-not-run and why, with no credential", "**Medium or Large code: run it for real**", "as a user would, what needs no login", "`runtimeProof` (`ran`, `what`, `showed`)", "`could-not-run` and why", "No credential is read or stored");
+    keys(W, "a reused check is a backtick span followed by its source", "write a reused check as its backtick span followed by `reused from <source>`");
     keys(W, "finishing, review and merging do not trigger full suites", "No automatic full suite at `finished`, after review or a merge");
     expect(W).not.toContain("the full suite runs once");
     keys(W, "later milestone reviews are incremental", "Review its full scope once", "only new changes and open blocking findings", "last completed implementation review");
@@ -867,8 +879,10 @@ describe("orchestrator.md — the governor: reads the figures and the charter, a
     // §9.6: arbitration names the owner of the area and a reason; a goal change is the losing mission's card.
     keys(O, "mission.conflict: read both, bm_arbitrate with a reason, a goal change is the owner's card", "`mission.conflict`", "read both missions", "`bm_arbitrate`", "reason both Mains read", "losing", "goal", "owner's card");
     // Delivery line design §8.3: on a mission's process the owner is reached from ladder step 4; a goal change at once.
-    keys(O, "mission.scope: read, then govern; from step 4, or at once on a goal change, ask", "`mission.scope`", "outside the charter", "`bm_govern`", "from step 4", "goal", "`subject`", "`bm_ask_owner`");
-    keys(O, "mission.review: read against the charter, then govern, from step 4 ask, or note", "`mission.review`", "against its charter", "`bm_govern`", "from step 4", "`bm_ask_owner`", "`bm_note`");
+    // ADR-045 decision 9: the mess and drift families are not nudged for.
+    keys(O, "mission.scope: a note, unless the goal changes, then ask", "`mission.scope`", "outside the charter", "a note with `bm_note`", "on a goal change", "`subject`", "`bm_ask_owner`");
+    expect(O).not.toMatch(/`mission\.scope`[^-]*`bm_govern`/);
+    keys(O, "mission.review: read against the charter, govern only stuck, overengineering and budget, from step 4 ask, or note", "`mission.review`", "against its charter", "`bm_govern` only stuck work, overengineering and budget", "from step 4", "`bm_ask_owner`", "`bm_note`");
     // §9.1: bm_direct_worker is narrowed to a stop, on a danger signal or the governor's stop step, evidence first.
     keys(O, "reads a danger signal's evidence first", "`danger`", "read its evidence first");
     keys(O, "stops a Worker only on danger or a governor stop step, after its evidence, unless the owner asked for it", "read its evidence first", "Only a stop goes to a Worker", "`bm_direct_worker` only on a `danger` signal or a governor", "stop step", "unless the owner asked for it");
@@ -978,6 +992,8 @@ describe("missions — the Main's file and the Worker's side (missions design §
     keys(M, "the Main of one mission", "**Main** of one mission");
     keys(M, "the Runtime facts name the mission; unassigned, bm_mission_start", "`## Runtime facts` name your mission", "none yet", "`bm_mission_start`");
     keys(M, "reads with bm_mission, keeps with bm_mission_update", "`bm_mission`", "`bm_mission_update`", "the plan", "done criterion", "evidence", "contract");
+    // ADR-045 decision 8.
+    keys(M, "the plan is steps only; a fact goes to memory or a contract", "the plan (steps only; a fact goes to `bm_memory` or a contract)");
     keys(M, "a sensitive change becomes the owner's m: card, said in one line", "the owner's `m:`", "card", "one line");
     keys(M, "what is left comes from the done criteria", "\"What is left\"", "open done criteria");
     // §9.6: work outside the goal is asked as a new mission; on the owner's yes the governor gets it, never the owner a chore.
@@ -991,19 +1007,27 @@ describe("missions — the Main's file and the Worker's side (missions design §
     expect(M.match(/`bm_repo`/g)).toHaveLength(1);
   });
 
-  it("gives work to Workers in the right repo, re-using the one on an area, splitting as staffing allows", () => {
+  it("gives work to Workers in the right repo, one request at a time, a parallel lane only on the owner's explicit word", () => {
     // Delivery line design §2.4: a finished or stopped request goes on as its continuation, which paseo-bm opens.
     // Delivery line design §19.12 (owner, 2026-10-25): only words about a running request's own work go to it; new work never to a busy Worker.
     keys(M, "words about a running request's own work go to it with about current; a finished or stopped one goes on as a new request", "Words about a running request's own work", "`bm_tell_worker`", '`about: "current"`', "its Worker while it runs", "`finished` or `stopped`", "new request that paseo-bm staffs and briefs");
     keys(M, "a new ask, a bug or a feature is new work, never a busy Worker's", "a new ask, a bug, a feature", "is new work, never a busy Worker's");
-    // ADR-038: independent work in a lane of its own, dependent work held by paseo-bm, overlaps stepped in on.
-    keys(M, "new work runs in a new lane", "`lane: \"new\"`", "its own lane, starting now", "up to 7 a repo");
+    // ADR-045 decision 1: one request at a time; new work is held to run next, a parallel lane needs the owner's explicit word.
+    keys(M, "while a request runs, new work is held to run next", "While a request runs", "`next: true`", "to run next");
+    keys(M, "parallel only on the owner's explicit word, quoted", "`parallel`", "only on the owner's explicit word for parallel work", "in the owner's own language", "quoted in double quotes as the reason", "an ordinary owner message is not that word");
+    keys(M, "BM-NEW-REQUEST quotes itself", "`parallel` quoting \"BM-NEW-REQUEST\"");
+    expect(M).not.toContain("`lane: \"new\"`");
     keys(M, "dependent work is held with after and cancelled with bm_hold_cancel", "needs another request first", "`after`", "paseo-bm starts it", "`bm_hold_cancel` drops it");
+    keys(M, "a stopped entry is released only on the owner's word", "`bm_hold_release` is only on the owner's word");
+    keys(W, "a step that is not the last ends with forNextStep", "`Step n of m`", "below m", "`forNextStep`");
+    keys(M, "a line tells the Main at a stop and at the end", "on a line you are told at a stop and at the end", "read the page or `bm_mission` otherwise");
+    keys(M, "a met criterion names the request that proved it while one could not run", "one met with its evidence", 'while a request reads "could not run"', "the request id that proved it, never that one");
     keys(M, "a lane overlap is stepped in on at once", "`BM-SIGNAL overlap`", "step in at once", "one lane waits");
     expect(M).not.toMatch(/area a Worker holds/);
     keys(M, "a new Worker in the repo it changes", "`bm_create_worker` in the repo it changes", "`project`");
-    keys(M, "parallel parts get a Worker each, within staffing", "side by side", "a Worker each", "`staffing`");
     keys(M, "the next planned step on proceed, else one line to the owner", "next planned step", "`proceed`", "ask in one line");
+    // ADR-045 decision 1: the owner approves a larger ask once, on one card.
+    keys(M, "a larger ask becomes ordered steps on one owner card; approved steps need no proceed", "A larger ask", "ordered `steps`", "`bm_mission_update`", "one owner card", "approved steps need no `proceed`");
   });
 
   it("links Workers who must agree and records the contract; another mission only through bm_ask_mission", () => {

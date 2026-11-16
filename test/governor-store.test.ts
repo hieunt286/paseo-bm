@@ -118,6 +118,40 @@ describe("ladderStepOf: the steps code takes (§9.3)", () => {
     expect(ladderStepOf(state, [stalled(false)], facts(minutes(57), 10)).action).toBe("reset");
   });
 
+  it("takes a quiet family (mess, drift) no further than step 1, and leaves one stored above it until its figures clear (ADR-045 decision 9)", () => {
+    const writers = (crossed: boolean): GovernorFigure => ({ family: "mess", id: "writersOnOneFile", value: crossed ? 2 : 0, threshold: 2, op: ">=", crossed, detail: null });
+    const outside = (crossed: boolean): GovernorFigure => ({ family: "drift", id: "outsideCharter", value: crossed ? 1 : 0, threshold: 1, op: ">=", crossed, detail: null });
+    for (const figure of [writers, outside]) {
+      const one = ladderStepOf(null, [figure(true)], facts(T0, 10));
+      expect(one.action).toBe("record");
+      expect(one.state).toMatchObject({ step: 1, since: T0.toISOString(), lastAction: { kind: "record" } });
+      // However long it stays crossed, and however many turns pass: no nudge, no re-plan due, a held or failed family included.
+      for (const state of [one.state, { ...one.state, held: { pool: "codeNudge" as const, until: minutes(1).toISOString() } }, { ...one.state, lastAction: { at: T0.toISOString(), kind: "nudge-failed" as const, id: null } }]) {
+        expect(ladderStepOf(state, [figure(true)], facts(minutes(600), 400))).toEqual({ state, action: "none" });
+      }
+      for (const step of [2, 3, 4]) {
+        const stored: FamilyState = { step, since: T0.toISOString(), figures: [figure(true)], lastAction: { at: T0.toISOString(), kind: "nudge", id: "cmd-1" }, mainTurnsAt: 3 };
+        expect(ladderStepOf(stored, [figure(true)], facts(minutes(600), 400))).toEqual({ state: stored, action: "none" });
+        // Figures clear for the window: it goes back to rest.
+        const under = ladderStepOf(stored, [figure(false)], facts(minutes(5))).state;
+        expect(under.step, `step ${step}`).toBe(step);
+        expect(ladderStepOf(under, [figure(false)], facts(minutes(35))).action, `step ${step}`).toBe("reset");
+      }
+    }
+  });
+
+  it("still climbs a family that is not quiet, as before (stuck, overengineering, budget)", () => {
+    const named = [
+      stalled(true),
+      { ...stalled(true), family: "overengineering", id: "tierRaised" },
+      { ...stalled(true), family: "budget", id: "requestsBudget" },
+    ] as const satisfies readonly GovernorFigure[];
+    for (const figure of named) {
+      const one = ladderStepOf(null, [figure], facts(T0, 10)).state;
+      expect(ladderStepOf(one, [figure], facts(minutes(1), 10)).action, figure.family).toBe("nudge");
+    }
+  });
+
   it("counts the window again from a bm_govern step on a family at step 1 or 2: both its minutes and its Main turns (governedLadderOf)", () => {
     const nudged = ladderStepOf(ladderStepOf(null, [stalled(true)], facts(T0, 10)).state, [stalled(true)], facts(minutes(1), 10)).state;
     expect(nudged).toMatchObject({ step: 2, mainTurnsAt: 10 });
@@ -301,6 +335,41 @@ describe("the store and the runner on a data folder", () => {
     clock = minutes(31);
     expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([{ family: "drift", action: "reset", commandId: null, reason: null }]);
     expect(DEFAULT_COORDINATION_SETTINGS.governor.outsideCharter).toBe(1);
+  });
+
+  it("a crossed drift family records at step 1 and sends no command; one stored at step 2 or 3 sends nothing and resets when its figures clear (ADR-045 decision 9)", async () => {
+    createMissionRoster(home, { env: {} }).add(MISSION_ID, { requestId: "req-20261009T110000Z", workspaceId: "repo-c", topic: "outside", workerId: "w2" });
+    expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([{ family: "drift", action: "record", commandId: null, reason: null }]);
+    expect(journal().at(-1)?.text).toContain("drift");
+    for (const minute of [1, 60, 600]) {
+      clock = minutes(minute);
+      expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([]);
+    }
+    expect(createGovernorStore(home).ladder(MISSION_ID).drift).toMatchObject({ step: 1, lastAction: { kind: "record" } });
+    expect(enqueue).not.toHaveBeenCalled();
+
+    for (const step of [2, 3]) {
+      createGovernorStore(home).put(MISSION_ID, { drift: { step, since: T0.toISOString(), figures: [], lastAction: { at: T0.toISOString(), kind: "nudge", id: "cmd-old" }, mainTurnsAt: 0 } });
+      clock = minutes(1_000 * step);
+      expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([]);
+      expect(createGovernorStore(home).ladder(MISSION_ID).drift).toMatchObject({ step, lastAction: { kind: "nudge", id: "cmd-old" } });
+    }
+    expect(enqueue).not.toHaveBeenCalled();
+
+    createCoordinationStore(home).set({ key: "governor.outsideCharter", value: 2 });
+    expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([]);
+    clock = minutes(3_031);
+    expect((await governor().recompute(MISSION_ID, paseo()))?.actions).toEqual([{ family: "drift", action: "reset", commandId: null, reason: null }]);
+    expect(createGovernorStore(home).ladder(MISSION_ID).drift).toMatchObject({ step: 0 });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("sends no daily digest for a family that was held before it went quiet", async () => {
+    const until = minutes(600).toISOString();
+    createGovernorStore(home).put(MISSION_ID, { mess: { step: 1, since: T0.toISOString(), figures: [], lastAction: { at: T0.toISOString(), kind: "record", id: null }, mainTurnsAt: null, held: { pool: "codeNudge", until } } });
+    const outcome = await governor().recompute(MISSION_ID, paseo());
+    expect(outcome?.digest).toBeUndefined();
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it("leaves the family at step 1 when the mission has no Main, and tries again after NUDGE_RETRY_MS", async () => {

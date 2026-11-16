@@ -1211,6 +1211,8 @@ describe("a finish, labelled: Done or Done — unverified, and each claim with i
       { key: "files", mark: "✓", text: "files: 2 changed · 1 detected, 1 self-reported", tone: "plain" },
       { key: "beads", mark: "✓", text: "beads: 1 closed · detected", tone: "plain" },
     ]);
+    // ADR-045 decision 13: a reused check counts as verified, a plain line.
+    expect(evidenceLines(finishedEntry({ ...verified, checks: "reused", named: [{ check: "npm test", label: "reused" }], files: [], beads: [] }), read, [])[0]).toEqual({ key: "checks", mark: "✓", text: "checks: npm test — reused", tone: "plain" });
     // Every check detected: a plain line; no bead claimed: the request's closed count stands in.
     expect(evidenceLines(finishedEntry({ ...verified, files: [{ path: "src/fees.ts", label: "self-reported" }], beads: [] }), read, [])).toEqual([
       { key: "checks", mark: "✓", text: "checks: npm test — detected ✓", tone: "plain" },

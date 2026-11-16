@@ -2508,7 +2508,7 @@ describe("admission evidence per error class (autonomy design §F.2; bead i8fc.3
     expect(evidence.verification).toEqual({
       finished: 5,
       labelled: 4,
-      byChecks: { detected: 1, "self-reported": 1, unverified: 1, "not-checked": 1 },
+      byChecks: { detected: 1, reused: 0, "self-reported": 1, unverified: 1, "not-checked": 1 },
       changedCode: 4,
       finishedUnverified: 2,
       // B and D over A, B and D: C's checks cannot be judged.

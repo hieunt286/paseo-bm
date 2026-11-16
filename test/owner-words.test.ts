@@ -158,7 +158,7 @@ describe("sendCommand: the owner's chosen option to a Worker", () => {
     const enqueue = steeringQueue(false);
     const result = await send(home, enqueue, true);
     expect(result).toMatchObject({ ok: true, outcome: "sent", steer: "steered", copy: "sent" });
-    expect(enqueue.mock.calls[0]![5]).toEqual({ steer: true });
+    expect(enqueue.mock.calls[0]![5]).toEqual({ wake: true, steer: true });
     expect(enqueue.mock.calls.map((call) => call[1])).not.toContain(turnReplacedKindOf("wrk"));
     expect(createAlertStore(home).list({ open: true })).toEqual([]);
   });
@@ -179,6 +179,6 @@ describe("sendCommand: the owner's chosen option to a Worker", () => {
     const enqueue = steeringQueue(true);
     const result = await send(home, enqueue, false);
     expect(result.ok && result.steer).toBe(undefined);
-    expect(enqueue.mock.calls[0]!.length).toBe(4);
+    expect(enqueue.mock.calls[0]![5]).toEqual({ wake: true });
   });
 });

@@ -55,8 +55,7 @@ describe("plugin manifest", () => {
   });
 
   // The payload ships as its own npm package, paseo-bm-plugin, and the
-  // paseo.cafe registry compares the version in git against the one it resolves
-  // on npm. Three files carry that version and none of them may drift:
+  // release workflow checks the version in git against the tag it publishes. Three files carry that version and none of them may drift:
   // package.json at the repo root is the source, and the build regenerates the
   // other two. ADR-009, design delta 20260923 §4.
   it("carries the same version in package.json, the payload package and PLUGIN_VERSION", () => {

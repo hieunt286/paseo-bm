@@ -28,6 +28,7 @@ import { firstLine } from "../plugin/server/request-trace";
 import { COMMAND_LIMIT_MESSAGE, COMMAND_LIMIT_PER_REQUEST, missionPoolSpentMessage } from "../plugin/server/command-send";
 import { isOwnerWord } from "../plugin/server/orchestrator-agent";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
+import { createOutbox } from "../plugin/server/outbox";
 import { createAlertStore } from "../plugin/server/alert-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
@@ -1530,7 +1531,9 @@ describe("bm_direct_worker (design §6B.4, ADR-016; missions design §9.1): only
     );
     expect(paseo.agents.ref).toHaveBeenCalledWith(WORKER);
     expect(sends).toEqual([{ id: WORKER, text: blockOf() }]);
-    expect(enqueue.mock.calls).toEqual([[MANAGER, "command:proposal-1", blockOf({ copy: true }), expect.anything()]]);
+    // ADR-045 decision 14: the copy is a note, for no Main turn.
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(createOutbox(home).list(WORKSPACE_ID)).toMatchObject([{ kind: "message", requestId: stop.requestId, from: "orchestrator", to: MANAGER, text: blockOf({ copy: true }), state: "delivered", reason: "no-turn" }]);
     expect(parseCommandBlock(blockOf())).toMatchObject({ intent: "stop", effects: [], approved: [], limits: ["no-commit-push-deploy", "no-real-data"] });
     expect(jsonOf(result)).toEqual({
       commandId: "proposal-1",
@@ -2032,10 +2035,10 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
   const tools = () => toolsWith(daemon().paseo);
 
   it("bm_govern sends the mission's current Main a governor command with no effect and the figures it names, and records it in the journal and on the ladder", async () => {
-    createGovernorStore(home).put(MISSION, { mess: family(3), drift: family(1, { at: at(0), kind: "record", id: null }) });
+    createGovernorStore(home).put(MISSION, { stuck: family(3), budget: family(1, { at: at(0), kind: "record", id: null }) });
     const text = "Two of your Workers write src/export.ts: say which one owns it, or re-plan.";
 
-    const result = await tools().call("bm_govern", { missionId: MISSION, step: "nudge", text, figures: ["writersOnOneFile"] });
+    const result = await tools().call("bm_govern", { missionId: MISSION, step: "nudge", text, figures: ["stalled"] });
 
     expect(result.ok, result.text).toBe(true);
     expect(result.text.split("\n")[0]).toBe(`Sent to ${MAIN}, the Main of mission EXP, as a BM-COMMAND on governor:nudge.`);
@@ -2043,17 +2046,17 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     const block = parseCommandBlock(enqueue.mock.calls[0]![2])!;
     expect(block).toMatchObject({ from: "orchestrator", to: "manager", copy: false, requestId: null, re: "Governor: nudge, mission EXP", intent: "other", effects: [], authority: "governor:nudge", approved: [] });
     expect(block.body.startsWith(text)).toBe(true);
-    expect(block.body).toContain("Figures:\n- writersOnOneFile 0 (threshold ≥ ");
+    expect(block.body).toContain("Figures:\n- stalled 0 (threshold ≥ ");
     expect(jsonOf(result)).toMatchObject({ commandId: "proposal-1", outcome: "sent", missionId: MISSION, mainId: MAIN });
     expect(createOrchestratorStore(home).listCommands()).toEqual([expect.objectContaining({ id: "proposal-1", managerId: MAIN, requestId: null, missionId: MISSION })]);
     expect(createMissionStore(home).journal(MISSION).at(-1)).toMatchObject({ kind: "governor", by: "orchestrator", text: `nudge: ${text}`, ref: "proposal-1" });
     // Only the family of the named figure records it; a nudge leaves a family at step 3 where it is.
     const ladder = createGovernorStore(home).ladder(MISSION);
-    expect(ladder.mess).toMatchObject({ step: 3, lastAction: { at: NOW.toISOString(), kind: "nudge", id: "proposal-1" } });
-    expect(ladder.drift).toEqual(family(1, { at: at(0), kind: "record", id: null }));
+    expect(ladder.stuck).toMatchObject({ step: 3, lastAction: { at: NOW.toISOString(), kind: "nudge", id: "proposal-1" } });
+    expect(ladder.budget).toEqual(family(1, { at: at(0), kind: "record", id: null }));
     // Missions design §9.3: the step is in the intervention log (A-12), with the families it concerns.
     expect(createInterventionStore(home).list()).toMatchObject([
-      { kind: "govern", step: "nudge", trigger: "governor", targetAgentId: MAIN, requestId: null, missionId: MISSION, families: ["mess"], commandId: "proposal-1", expected: "figures-clear", outcome: "pending" },
+      { kind: "govern", step: "nudge", trigger: "governor", targetAgentId: MAIN, requestId: null, missionId: MISSION, families: ["stuck"], commandId: "proposal-1", expected: "figures-clear", outcome: "pending" },
     ]);
   });
 
@@ -2068,8 +2071,9 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     const stopped = await toolsWith(fake.paseo).call("bm_direct_worker", stop);
     expect(stopped.ok, stopped.text).toBe(true);
     expect(fake.sends.map(({ id }) => id)).toEqual([MISSION_WORKER]);
-    expect(enqueue.mock.calls.map(([target]) => target)).toEqual([MAIN, MAIN]);
+    expect(enqueue.mock.calls.map(([target]) => target)).toEqual([MAIN]);
     expect(jsonOf(stopped)).toMatchObject({ managerId: MAIN, copy: "sent", interrupted: true });
+    expect(createOutbox(home).list(WORKSPACE_ID).map((note) => [note.to, note.reason])).toEqual([[MAIN, "no-turn"]]);
     // Missions design §9.3: the re-plan and the stop it opened, each in the intervention log with trigger governor.
     expect(createInterventionStore(home).list()).toMatchObject([
       { kind: "govern", step: "replan", trigger: "governor", targetAgentId: MAIN, missionId: MISSION, families: ["overengineering"], commandId: "proposal-1" },
@@ -2312,7 +2316,8 @@ describe("mission requests: the Orchestrator reaches the request's current Main 
     const result = await tools().call("bm_direct_worker", stop);
 
     expect(result.ok, result.text).toBe(true);
-    expect(enqueue.mock.calls.map((call) => call[0])).toEqual([MAIN]);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(createOutbox(home).list(WORKSPACE_ID).map((note) => [note.to, note.reason])).toEqual([[MAIN, "no-turn"]]);
     expect(jsonOf(result)).toMatchObject({ managerId: MAIN, copy: "sent" });
   });
 

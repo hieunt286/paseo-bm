@@ -94,10 +94,10 @@ export const traceErrorsSchema = z.object({
 export type TraceErrors = z.infer<typeof traceErrorsSchema>;
 
 /** How one claim of a report stands (autonomy design §C.2; `CLAIM_LABELS`, `shared/evidence.ts`). */
-export const claimLabelSchema = z.enum(["detected", "self-reported"]);
+export const claimLabelSchema = z.enum(["detected", "reused", "self-reported"]);
 
 /** How a request's checks stand as a whole (autonomy design §C.2; `CHECKS_VERDICTS`, `shared/evidence.ts`). */
-export const checksVerdictSchema = z.enum(["detected", "self-reported", "unverified", "not-checked"]);
+export const checksVerdictSchema = z.enum(["detected", "reused", "self-reported", "unverified", "not-checked"]);
 
 /**
  * A request's finish against its records (autonomy design §C.2, §C.3, §C.6;
@@ -117,7 +117,7 @@ export const traceVerificationSchema = z.object({
   beads: z.array(z.object({ id: z.string(), label: claimLabelSchema })),
   /** The report names a file changed, or a record of the request edited one. */
   changedFiles: z.boolean(),
-  /** Finished-unverified (§C.3): code changed and the named checks are not all detected; never for `not-checked`. */
+  /** Finished-unverified (§C.3): code changed and the named checks are not all detected or reused; never for `not-checked`. */
   unverified: z.boolean(),
 });
 

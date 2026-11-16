@@ -14,7 +14,7 @@
 - **Authentication is OIDC** (trusted publishing): there is no `NPM_TOKEN` and no other secret. The trusted publisher of **both** packages points at the file name `release.yml` (`paseo-bm`'s is kept for §7) — do not rename it and do not move it.
 - **The GitHub Release is the approval point.** After 72 hours there is no `unpublish`; the way back is always to release a patch.
 - **An agent never logs in to npm and never touches the owner's credentials.** The npm account has 2FA at `auth-and-writes`, so every write outside `release.yml` (`npm publish` by hand, `npm trust …`, `npm dist-tag add …`) asks for a one-time password and is the owner's job.
-- **Three version sources must agree**: `package.json`, `plugin/package.json`, `plugin/shared/version.ts` (`PLUGIN_VERSION`). The last two (and `plugin-package/package.json`) are generated from the first by `npm run build`, and a test fails when they disagree. In the workflow, `Resolve version, tag and dist-tag` requires the tag to be `v` + the root version, and `Assert the plugin version` checks `plugin/package.json` and `plugin-package/package.json` against it, before anything reaches npm. Why: [the paseo.cafe record](./paseo-bm-cafe-listing-20260923.md) §9.
+- **Three version sources must agree**: `package.json`, `plugin/package.json`, `plugin/shared/version.ts` (`PLUGIN_VERSION`). The last two (and `plugin-package/package.json`) are generated from the first by `npm run build`, and a test fails when they disagree. In the workflow, `Resolve version, tag and dist-tag` requires the tag to be `v` + the root version, and `Assert the plugin version` checks `plugin/package.json` and `plugin-package/package.json` against it, before anything reaches npm. Why: the tag, the published package and the plugin Paseo loads must all name the same version.
 - No `preinstall` / `install` / `postinstall` in the root `package.json`, `plugin/package.json` or `plugin-package/package.json` (the published one); the workflow's `Assert no npm install lifecycle scripts` checks all three.
 
 ## 1. Preparation (an agent can do this)
@@ -71,7 +71,6 @@ It passes when `paseo-bm-plugin` is at `<version>` on the dist-tag that matches 
 ## 4. After the release
 
 - **A stable release does not move `next`.** `next` still points at the last prerelease. To make `@next` give the stable version, the owner runs (a one-time password is needed): `npm dist-tag add paseo-bm-plugin@<version> next`. The same command with `latest` is the fallback if `latest` does not move after a publish.
-- **paseo.cafe**: if a caveat of the `registry/paseo-bm.json` entry names the number or the kind of version, fix it as [the listing record](./paseo-bm-cafe-listing-20260923.md) §9 says (Biome keeps a short array on one line; check the content is non-empty before writing it).
 - The real dist-tag state is always read with `npm view <package> dist-tags`, never copied into a document.
 
 ## 5. The way back

@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDecisionStore } from "../plugin/server/decision-store";
+import { createMissionRoster } from "../plugin/server/mission-roster";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -13,8 +15,12 @@ import {
   deliverRecord,
   deliveryTextOf,
   dropsCovered,
+  failedAnswersCovered,
   mainTargetOf,
+  newRecordId,
   newestReportRecordOf,
+  noTurnLeadOf,
+  noTurnNoteOf,
   reportPhaseOf,
   storeAndDeliver,
   usePeerTargets,
@@ -45,6 +51,7 @@ import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 
 const WS = "wks_1";
 const REQ = "req-20261003T100000Z";
+const OTHER_REQ = "req-20261003T110000Z";
 const T0 = new Date("2026-10-03T10:00:00.000Z");
 
 afterEach(() => {
@@ -52,7 +59,7 @@ afterEach(() => {
   removeDataFolders();
 });
 
-type Agent = { status: string; archivedAt?: string | null };
+type Agent = { status: string; archivedAt?: string | null; persistence?: { sessionId: string } };
 
 function world(initial: Record<string, Agent>) {
   const agents = new Map(Object.entries(initial).map(([id, agent]) => [id, { ...agent }]));
@@ -268,6 +275,94 @@ describe("delivery", () => {
     expect(createOutbox(home).list(WS).map((record) => record.state)).toEqual(["delivered", "delivered"]);
   });
 
+  it("delivers to a target Paseo closed after its idle hour: a report, a verdict or bm_tell_worker's message resumes it (ADR-042)", async () => {
+    const home = dataFolder();
+    const w = world({ "wrk-1": { status: "closed", persistence: { sessionId: "session-1" } } });
+    const { record, outcome } = await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Continue." }, deps(home, w));
+    expect(outcome).toBe("sent");
+    expect(stored(home, record.id)).toMatchObject({ state: "delivered" });
+    expect(createAlertStore(home).list({ open: true })).toEqual([]);
+  });
+
+  it("a failed answer's alert outlives a report to the Main, and clears once a message reaches the request (ADR-042)", async () => {
+    const home = dataFolder();
+    const id = `q:${REQ}:Q1`;
+    const store = createDecisionStore(home);
+    store.open({
+      id,
+      workspaceId: WS,
+      requestId: REQ,
+      askedBy: { role: "worker", agentId: "wrk-1" },
+      askedAt: T0.toISOString(),
+      round: 1,
+      question: "Which one?",
+      subject: null,
+      options: [
+        { key: "a", label: "This", recommended: true, effects: [] },
+        { key: "b", label: "That", recommended: false, effects: [] },
+      ],
+      status: "open",
+      settledAt: null,
+      needsConfirmation: null,
+      answer: null,
+      grant: null,
+      delivery: null,
+      supersedes: null,
+      supersededBy: null,
+    });
+    store.transition(id, (current) => ({ ok: true, decision: { ...current, delivery: { to: "wrk-1", kind: `answers:${REQ}`, at: T0.toISOString(), outcome: "failed" } } }), WS);
+    createAlertStore(home).raise({ workspaceId: WS, kind: "delivery-dropped", subject: REQ, detail: "the answers did not arrive" });
+    const w = world({ "mgr-1": { status: "idle" }, "wrk-2": { status: "idle" } });
+    await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, deps(home, w));
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toHaveLength(1);
+    await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-2", text: "Continue with a." }, deps(home, w));
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toEqual([]);
+  });
+
+  it("a dropped record of an open request tells its Main, unless the Main is the target (ADR-042 decision 5)", async () => {
+    const home = dataFolder();
+    createRequestRegistry(home, { backfill: () => [] }).register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+    const w = world({ "mgr-1": { status: "idle" } });
+    await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-gone", text: "Continue." }, deps(home, w));
+    await vi.waitFor(() => expect(w.sends.map((send) => send.id)).toEqual(["mgr-1"]));
+    expect(w.sends[0]!.text.split("\n")[0]).toBe("BM-DELIVERY-FAILED");
+
+    const quiet = world({});
+    await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, deps(home, quiet));
+    expect(quiet.sends).toEqual([]);
+  });
+
+  it("sends one BM-DELIVERY-FAILED per open alert (ADR-045 decision 14): a second drop adds none; once the alert clears, the next drop sends one", async () => {
+    const home = dataFolder();
+    createRequestRegistry(home, { backfill: () => [] }).register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+    const w = world({ "mgr-1": { status: "idle" } });
+    const notices = () => w.sends.filter((send) => send.text.startsWith("BM-DELIVERY-FAILED"));
+    const drop = async () => {
+      await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-gone", text: "Continue." }, { ...deps(home, w), newId: newRecordId });
+      w.set("mgr-1", { status: "idle" });
+    };
+    await drop();
+    await vi.waitFor(() => expect(notices()).toHaveLength(1));
+    await drop();
+    await vi.waitFor(() => expect(createOutbox(home).list(WS).filter((record) => record.state === "dropped")).toHaveLength(2));
+    expect(notices()).toHaveLength(1);
+    // The alert still names the newest drop.
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toHaveLength(1);
+
+    clearDroppedAlert(home, WS, REQ, null);
+    await drop();
+    await vi.waitFor(() => expect(notices()).toHaveLength(2));
+  });
+
+  it("a Main that is the target raises the alert and is sent no notice, however many drops", async () => {
+    const home = dataFolder();
+    createRequestRegistry(home, { backfill: () => [] }).register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+    const w = world({});
+    for (let n = 0; n < 2; n += 1) await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: REPORT }, { ...deps(home, w), newId: newRecordId });
+    expect(w.sends).toEqual([]);
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toHaveLength(1);
+  });
+
   it("drops a record whose target is gone, with its reason, one log line and the delivery-dropped Inbox alert naming the request", async () => {
     const home = dataFolder();
     const w = world({});
@@ -456,6 +551,324 @@ describe("after a reload", () => {
 
     await resend.run(after.paseo);
     expect(after.sends).toHaveLength(2);
+  });
+
+  describe("the start-up resend and a dormant mission (ADR-044, ADR-045 decision 14)", () => {
+    const RESTING = { status: "closed", persistence: { sessionId: "session-1" } };
+    const MID = "mis-0123456789";
+    const CARD = `m:${MID}:1`;
+    const OTHER = "req-20261003T090000Z";
+
+    function missionOf(home: string, mainId: string, earlier: string[] = []) {
+      const store = createMissionStore(home, { newId: () => MID, env: {} });
+      const made = store.create({ code: "PAS", name: "Site", goal: "g", repos: [WS], createdBy: "owner", mainId });
+      if (!made.ok) throw new Error(made.reasons.join("; "));
+      if (earlier.length > 0) store.update(MID, (current) => ({ ...current, mainHistory: [...earlier.map((agentId) => ({ agentId, from: T0.toISOString(), to: T0.toISOString(), reason: "replaced" as const })), ...current.mainHistory] }));
+    }
+    const card = (home: string, to: string) => createOutbox(home, { now: () => T0 }).add(WS, { kind: "message", requestId: CARD, from: "a", to, text: "old news" });
+    const resend = (home: string, w: ReturnType<typeof world>) => createOutboxResend({ home: () => home, queue: w.queue, log: () => {} }).run(w.paseo);
+    const active = (home: string) => createMissionRoster(home, { env: {} }).add(MID, { requestId: OTHER, workspaceId: WS, topic: "work", workerId: "wrk-9" });
+
+    it("settles a card an older build left open, of a mission with no active request, as a note: nothing sent, dropped or alerted", async () => {
+      const home = dataFolder();
+      missionOf(home, "main-1");
+      const record = card(home, "main-1");
+      const w = world({ "main-1": RESTING });
+      await resend(home, w);
+      expect(w.sends).toEqual([]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: "no-turn" });
+      expect(createAlertStore(home).list({ open: true })).toEqual([]);
+    });
+
+    it("wakes the Main of a mission that has an active request, however old the card is", async () => {
+      const home = dataFolder();
+      missionOf(home, "main-1");
+      active(home);
+      const record = card(home, "main-1");
+      const w = world({ "main-1": RESTING });
+      await resend(home, w);
+      expect(w.sends.map((send) => send.id)).toEqual(["main-1"]);
+      expect(stored(home, record.id)?.state).toBe("delivered");
+    });
+
+    it("wakes a resting Worker for a request still open, whatever its age: a verdict queued before a weekend", async () => {
+      const home = dataFolder();
+      createRequestRegistry(home, { backfill: () => [] }).register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+      const record = createOutbox(home, { now: () => new Date(T0.getTime() - 5 * 24 * 3_600_000) }).add(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "go on" });
+      const w = world({ "wrk-1": RESTING });
+      await resend(home, w);
+      expect(stored(home, record.id)?.state).toBe("delivered");
+    });
+
+    it("settles a message of a finished request for a resting agent as a note", async () => {
+      const home = dataFolder();
+      const registry = createRequestRegistry(home, { backfill: () => [] });
+      registry.register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+      registry.noteReport(WS, REQ, { tier: "Small", phase: "finished", at: T0.toISOString() });
+      const record = createOutbox(home, { now: () => T0 }).add(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "late" });
+      const w = world({ "wrk-1": RESTING });
+      await resend(home, w);
+      expect(w.sends).toEqual([]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: "no-turn" });
+    });
+
+    it("wakes a resting Worker for a finished request a follow-up reopened on the roster", async () => {
+      const home = dataFolder();
+      missionOf(home, "main-1");
+      const registry = createRequestRegistry(home, { backfill: () => [] });
+      registry.register(WS, REQ, { source: "tool", managerId: "main-1", workerId: "wrk-1" });
+      registry.noteReport(WS, REQ, { tier: "Small", phase: "finished", at: T0.toISOString() });
+      createMissionRoster(home, { env: {} }).add(MID, { requestId: REQ, workspaceId: WS, topic: "work", workerId: "wrk-1" });
+      const record = createOutbox(home, { now: () => T0 }).add(WS, { kind: "message", requestId: REQ, from: "main-1", to: "wrk-1", text: "follow-up" });
+      const w = world({ "wrk-1": RESTING });
+      await resend(home, w);
+      expect(stored(home, record.id)?.state).toBe("delivered");
+    });
+
+    it("delivers a record of a request paseo-bm does not know, as ADR-042 says", async () => {
+      const home = dataFolder();
+      const unknown = createOutbox(home, { now: () => T0 }).add(WS, { kind: "message", requestId: REQ, from: "a", to: "wrk-1", text: "x" });
+      const w = world({ "wrk-1": RESTING });
+      await resend(home, w);
+      expect(stored(home, unknown.id)?.state).toBe("delivered");
+    });
+
+    it.each([
+      ["a finished report", "report", "mgr-1", REPORT],
+      ["a peer record", "peer-message", "wrk-1", "x"],
+    ] as const)("never settles %s as a note, even on a finished request: the Main must still learn the work ended", async (_name, kind, to, text) => {
+      const home = dataFolder();
+      const registry = createRequestRegistry(home, { backfill: () => [] });
+      registry.register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+      registry.noteReport(WS, REQ, { tier: "Small", phase: "finished", at: T0.toISOString() });
+      const record = createOutbox(home, { now: () => T0 }).add(WS, { kind, requestId: REQ, from: "wrk-1", to, text });
+      const w = world({ [to]: RESTING });
+      await resend(home, w);
+      expect(stored(home, record.id)?.state).toBe("delivered");
+    });
+
+    it("judges the agent it would reach now: a resting current Main gets the note though the stored one is archived", async () => {
+      const home = dataFolder();
+      missionOf(home, "main-now", ["main-old"]);
+      const record = card(home, "main-old");
+      const w = world({ "main-old": { status: "idle", archivedAt: T0.toISOString() }, "main-now": RESTING });
+      await resend(home, w);
+      expect(w.sends).toEqual([]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: "no-turn", to: "main-now" });
+    });
+
+    it("judges the agent it would reach now: a live current Main gets it though the stored one rests", async () => {
+      const home = dataFolder();
+      missionOf(home, "main-now", ["main-old"]);
+      const record = card(home, "main-old");
+      const w = world({ "main-old": RESTING, "main-now": { status: "idle" } });
+      await resend(home, w);
+      expect(w.sends.map((send) => send.id)).toEqual(["main-now"]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", to: "main-now" });
+    });
+
+    it("settles a dormant card for a gone agent as before", async () => {
+      const home = dataFolder();
+      const record = createOutbox(home, { now: () => T0 }).add(WS, { kind: "message", requestId: CARD, from: "a", to: "mgr-gone", text: "old news" });
+      const w = world({});
+      await resend(home, w);
+      expect(stored(home, record.id)?.state).toBe("dropped");
+    });
+
+    it("delivers as before when the target cannot be read", async () => {
+      const home = dataFolder();
+      missionOf(home, "main-1");
+      const record = card(home, "main-1");
+      const w = world({ "main-1": { status: "idle" } });
+      let reads = 0;
+      const flaky = { agents: { ref: (id: string) => ({ ...w.paseo.agents.ref(id), refresh: async () => {
+        reads += 1;
+        if (reads === 1) throw new Error("socket closed");
+        return w.paseo.agents.ref(id).refresh();
+      } }) } };
+      await createOutboxResend({ home: () => home, queue: w.queue, log: () => {} }).run(flaky);
+      expect(stored(home, record.id)?.state).toBe("delivered");
+    });
+  });
+
+  describe("one delivery rule (ADR-045 decision 14): turn or note, at every attempt", () => {
+    const RESTING = { status: "closed", persistence: { sessionId: "session-1" } };
+    const MID = "mis-0123456789";
+    const CARD = `m:${MID}:1`;
+    const mission = (home: string) => {
+      const made = createMissionStore(home, { newId: () => MID, env: {} }).create({ code: "PAS", name: "Site", goal: "g", repos: [WS], createdBy: "owner", mainId: "main-1" });
+      if (!made.ok) throw new Error(made.reasons.join("; "));
+    };
+    const finishedRequest = (home: string) => {
+      const registry = createRequestRegistry(home, { backfill: () => [] });
+      registry.register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+      registry.noteReport(WS, REQ, { tier: "Small", phase: "finished", at: T0.toISOString() });
+    };
+    const init = (requestId: string, to: string, text = "old news", kind: "message" | "report" | "review" | "no-verdict" | "peer-message" = "message") => ({ kind, requestId, from: "plugin", to, text });
+
+    it("a message of no open work to a resting recipient, sent while the plugin runs, is a note: nothing enqueued, no alert, no BM-DELIVERY-FAILED", async () => {
+      const home = dataFolder();
+      mission(home);
+      const w = world({ "main-1": RESTING });
+      const { record, outcome } = await storeAndDeliver(WS, init(CARD, "main-1"), deps(home, w));
+      expect(outcome).toBe("no-turn");
+      expect(w.sends).toEqual([]);
+      expect(w.queue.pending("main-1")).toEqual([]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: "no-turn", to: "main-1" });
+      expect(createAlertStore(home).list({ open: true })).toEqual([]);
+    });
+
+    it.each([
+      ["the owner's answer on an m: card", "owner", CARD],
+      ["the owner's change to the mission", "owner", MID],
+      ["the Orchestrator's outcome on an m: card", "orchestrator", CARD],
+    ] as const)("%s wakes a resting Main of a mission with no active request: never a silent note", async (_name, from, requestId) => {
+      const home = dataFolder();
+      mission(home);
+      const w = world({ "main-1": RESTING });
+      const { record, outcome } = await storeAndDeliver(WS, { kind: "message", requestId, from, to: "main-1", text: "The owner answered your question." }, deps(home, w));
+      expect(outcome).toBe("sent");
+      expect(w.sends.map((send) => send.id)).toEqual(["main-1"]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: null });
+      expect(noTurnLeadOf(home, "main-1")).toBeNull();
+    });
+
+    it("the owner's words sent at once wake a resting Worker of a finished request; the Main's own late message stays a note", async () => {
+      const home = dataFolder();
+      finishedRequest(home);
+      const w = world({ "wrk-1": RESTING });
+      const late = await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "late" }, deps(home, w));
+      expect(late.outcome).toBe("no-turn");
+      expect(w.sends).toEqual([]);
+      const { record } = await storeAndDeliver(WS, { kind: "message", requestId: REQ, from: "mgr-1", to: "wrk-1", text: "Stop: the owner says so.", atOnce: true }, deps(home, w));
+      expect(w.sends.map((send) => send.id)).toEqual(["wrk-1"]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: null });
+    });
+
+    it.each([
+      ["the owner's answer", { from: "owner" }],
+      ["the Orchestrator's outcome on a card", { from: "orchestrator" }],
+      ["the owner's words sent at once", { from: "main-1", atOnce: true }],
+    ] as const)("%s left open at a plugin start wakes a resting Main of a dormant mission: one rule, never a silent note", async (_name, sender) => {
+      const home = dataFolder();
+      mission(home);
+      const record = createOutbox(home, { now: () => T0 }).add(WS, { kind: "message", requestId: CARD, to: "main-1", text: "The owner chose b.", ...sender });
+      const w = world({ "main-1": RESTING });
+      await createOutboxResend({ home: () => home, queue: w.queue, log: () => {} }).run(w.paseo);
+      expect(w.sends.map((send) => send.id)).toEqual(["main-1"]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: null });
+      expect(noTurnLeadOf(home, "main-1")).toBeNull();
+    });
+
+    it("a plugin's notice left open at a plugin start stays a note for a dormant mission (ADR-044's field case)", async () => {
+      const home = dataFolder();
+      mission(home);
+      const record = createOutbox(home, { now: () => T0 }).add(WS, { kind: "message", requestId: MID, from: "plugin", to: "main-1", text: "Daily digest." });
+      const w = world({ "main-1": RESTING });
+      await createOutboxResend({ home: () => home, queue: w.queue, log: () => {} }).run(w.paseo);
+      expect(w.sends).toEqual([]);
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: "no-turn" });
+    });
+
+    it.each([
+      ["live", { status: "idle" }, "delivered", 1],
+      ["gone", null, "dropped", 0],
+    ] as const)("a dormant message to a %s recipient behaves as before", async (_name, agent, state, sent) => {
+      const home = dataFolder();
+      finishedRequest(home);
+      const w = world(agent === null ? {} : { "wrk-1": agent });
+      const { record } = await storeAndDeliver(WS, init(REQ, "wrk-1"), deps(home, w));
+      expect(stored(home, record.id)?.state).toBe(state);
+      expect(stored(home, record.id)?.reason).not.toBe("no-turn");
+      expect(w.sends).toHaveLength(sent);
+    });
+
+    it.each(["report", "review", "no-verdict", "peer-message"] as const)("a %s to a resting recipient of a finished request is delivered as before", async (kind) => {
+      const home = dataFolder();
+      finishedRequest(home);
+      const w = world({ "wrk-1": RESTING });
+      const { record } = await storeAndDeliver(WS, init(REQ, "wrk-1", "x", kind), deps(home, w));
+      expect(stored(home, record.id)).toMatchObject({ state: "delivered", reason: null });
+      expect(w.sends.map((send) => send.id)).toEqual(["wrk-1"]);
+    });
+
+    it("a message of open work, and one about an unknown request, wake a resting recipient as before", async () => {
+      const home = dataFolder();
+      createRequestRegistry(home, { backfill: () => [] }).register(WS, REQ, { source: "tool", managerId: "mgr-1", workerId: "wrk-1" });
+      const w = world({ "wrk-1": RESTING, "wrk-2": RESTING });
+      const open = await storeAndDeliver(WS, init(REQ, "wrk-1"), deps(home, w));
+      const unknown = await storeAndDeliver(WS, init("req-20261003T090000Z", "wrk-2"), deps(home, w));
+      expect(stored(home, open.record.id)).toMatchObject({ state: "delivered", reason: null });
+      expect(stored(home, unknown.record.id)).toMatchObject({ state: "delivered", reason: null });
+      expect(w.sends.map((send) => send.id)).toEqual(["wrk-1", "wrk-2"]);
+    });
+
+    it("unreadable presence delivers as before: a read that fails, and no Paseo handle", async () => {
+      const home = dataFolder();
+      mission(home);
+      const w = world({ "main-1": { status: "idle" } });
+      const flaky = { agents: { ref: (id: string) => ({ ...w.paseo.agents.ref(id), refresh: vi.fn().mockRejectedValueOnce(new Error("socket closed")).mockImplementation(() => w.paseo.agents.ref(id).refresh()) }) } };
+      const read = await storeAndDeliver(WS, init(CARD, "main-1"), { ...deps(home, w), paseo: flaky });
+      expect(stored(home, read.record.id)?.reason).not.toBe("no-turn");
+
+      const enqueue = vi.fn(async () => "queued" as const);
+      const unbound = await storeAndDeliver(WS, init(CARD, "main-1"), { home, now: () => T0, log: () => {}, newId: () => "out-0000000000c1", queue: { enqueue } });
+      expect(enqueue).toHaveBeenCalledOnce();
+      expect(stored(home, unbound.record.id)).toMatchObject({ state: "pending", reason: null });
+    });
+
+    it("the next delivery to that recipient opens with the note, once", async () => {
+      const home = dataFolder();
+      mission(home);
+      const w = world({ "main-1": RESTING });
+      const d = deps(home, w);
+      const { record: note } = await storeAndDeliver(WS, init(CARD, "main-1"), d);
+      expect(noTurnLeadOf(home, "main-1")?.text).toBe(`noted: message ${note.id} from plugin: old news`);
+
+      w.set("main-1", { status: "idle" });
+      const report = await storeAndDeliver(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "main-1", text: REPORT }, d);
+      expect(report.outcome).toBe("sent");
+      expect(w.sends[0]!.text.split("\n").slice(0, 2)).toEqual([`BM-DELIVERY report ${report.record.id}`, `noted: message ${note.id} from plugin: old news`]);
+      expect(stored(home, note.id)?.shownAt).toBe(T0.toISOString());
+      expect(noTurnLeadOf(home, "main-1")).toBeNull();
+    });
+
+    it("writes a note of a record with no link as kind, id, sender and gist; a link's note keeps its line", () => {
+      const of = (text: string, kind: OutboxRecord["kind"] = "message") => noTurnNoteOf({ kind, id: "out-0000000000a1", from: "wrk-1", text });
+      expect(of("  Old\n\nnews  ")).toBe("noted: message out-0000000000a1 from wrk-1: Old news");
+      expect(of("BM-REPORT\nphase: beads-done\ntier: Small", "report")).toBe("noted: report out-0000000000a1 from wrk-1: phase: beads-done tier: Small");
+      expect(of("BM-COMMAND\nfrom: orchestrator\ncopy: yes\nre: Stop the push\nintent: stop\n\nStop.")).toBe("noted: message out-0000000000a1 from wrk-1: Stop the push");
+      expect(of("x".repeat(300))).toBe(`noted: message out-0000000000a1 from wrk-1: ${"x".repeat(199)}…`);
+      expect(of("")).toBe("noted: message out-0000000000a1 from wrk-1");
+      expect(of("link: peer-0000000000a1\nact: ack\n> Seen.", "peer-message")).toBe("noted: peer-0000000000a1 from wrk-1 (act: ack): Seen.");
+    });
+
+    it("a note of a report or message covers no drop and no failed answer; a link's note covers as before", () => {
+      const home = dataFolder();
+      const outbox = createOutbox(home, { now: () => T0 });
+      const dropped = outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "lost" });
+      outbox.settle(WS, dropped.id, "dropped", "gone");
+      outbox.add(WS, { kind: "report", requestId: REQ, from: "wrk-1", to: "mgr-1", text: "BM-REPORT\nphase: beads-done", noTurn: true });
+      const failedAt = [T0.toISOString()];
+      outbox.add(WS, { kind: "message", requestId: REQ, from: "orchestrator", to: "mgr-1", text: "a copy", noTurn: true });
+      const records = outbox.list(WS);
+      expect(dropsCovered(records, REQ)).toBe(false);
+      expect(failedAnswersCovered(records, REQ, failedAt)).toBe(false);
+
+      const peer = outbox.add(WS, { kind: "peer-message", requestId: OTHER_REQ, from: "wrk-1", to: "mgr-1", text: "lost" });
+      outbox.settle(WS, peer.id, "dropped", "gone");
+      outbox.add(WS, { kind: "peer-message", requestId: OTHER_REQ, from: "wrk-1", to: "mgr-1", text: "link: peer-0000000000a1\nact: ack", noTurn: true });
+      expect(dropsCovered(outbox.list(WS), OTHER_REQ)).toBe(true);
+    });
+
+    it("settleAsNote settles an open record once and never a settled one", () => {
+      const home = dataFolder();
+      const outbox = createOutbox(home, { now: () => T0 });
+      const { id } = outbox.add(WS, { kind: "message", requestId: REQ, from: "a", to: "b", text: "x" });
+      expect(outbox.settleAsNote(WS, id)).toMatchObject({ changed: true, record: { state: "delivered", reason: "no-turn", outcomeAt: T0.toISOString() } });
+      expect(outbox.settleAsNote(WS, id)).toMatchObject({ changed: false });
+      expect(outbox.settleAsNote(WS, "out-ffffffffffff")).toBeNull();
+    });
   });
 
   it("waits for a handle: a call without one does nothing", async () => {

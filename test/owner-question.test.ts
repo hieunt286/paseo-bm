@@ -14,6 +14,7 @@ import { createOwnerQuestionTools, settleOwnerQuestionAnswers } from "../plugin/
 import { createRequestRegistry } from "../plugin/server/request-registry";
 import { answerDecision } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
+import { fakePaseo } from "./helpers/fake-paseo";
 
 /**
  * Mission runtime design §4.4 and §4.6 (ADR-033 decision 3, REQ-204 d,
@@ -171,5 +172,17 @@ describe("bm_owner_question (design §4.6)", () => {
     if (mutation.status !== "updated") throw new Error("not answered");
     await applyMissionDecision(mutation.decision, deps());
     expect(toMain().map((record) => record.text.split("\n")[0])).toEqual([`The owner answered your question ${id}: b — Wait.`]);
+  });
+
+  it("an answer on the card wakes a resting Main of a mission with no active request: it is never settled as a silent note", async () => {
+    await tools().call("bm_owner_question", { question: "Open the MR?", options: [{ label: "Open it", recommended: true }, { label: "Wait" }], class: "release" }, CALLER);
+    createMissionRoster(home).setState(MISSION, REQ, "finished");
+    const id = `m:${MISSION}:1`;
+    const mutation = createMissionDecisionStore(home).transition(id, (decision) => answerDecision(decision, { via: "inbox", optionKey: "b", at: NOW.toISOString() }));
+    if (mutation.status !== "updated") throw new Error("not answered");
+    const fake = fakePaseo({ agents: [{ id: MAIN, workspaceId: HOME_WS, status: "closed", persistence: { sessionId: "session-1" } }] });
+    await applyMissionDecision(mutation.decision, { ...deps(), paseo: fake.paseo });
+    expect(fake.sends.map((send) => send.text)).toEqual([expect.stringContaining(`The owner answered your question ${id}: b — Wait.`)]);
+    expect(toMain()).toMatchObject([{ state: "delivered", reason: null, from: "owner" }]);
   });
 });

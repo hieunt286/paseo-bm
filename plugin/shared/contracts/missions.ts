@@ -151,6 +151,10 @@ export const missionWaitingSchema = z.discriminatedUnion("kind", [
     repo: z.string().nullable(),
     /** It asked for a free or new lane (`lane: "new"`). */
     newLane: z.boolean(),
+    /** Its place in an approved line (ADR-045 decision 5); absent for other held work and from an older server. */
+    step: z.object({ n: z.number().int(), of: z.number().int(), title: z.string() }).optional(),
+    /** Why it is `waiting-stopped`; absent otherwise and from an older server. */
+    why: z.string().optional(),
   }),
   z.object({
     kind: z.literal("tell"),
@@ -165,6 +169,29 @@ export const missionWaitingSchema = z.discriminatedUnion("kind", [
 ]);
 
 /**
+ * Where the mission's line stands (ADR-045 decision 5): the step it is at.
+ * `requestId` is the newest request of a started step's chain, null for a step
+ * not started; `why` says what it waits for or why it stopped, null otherwise.
+ */
+export const missionLineSchema = z.object({
+  n: z.number().int(),
+  of: z.number().int(),
+  title: z.string(),
+  state: z.enum(["running", "blocked", "stopped", "done"]),
+  requestId: z.string().nullable(),
+  why: z.string().nullable(),
+});
+
+/** Where one of the owner's standing grants for a repo stands. */
+const missionGrantStateSchema = z.object({
+  state: z.enum(["allowed", "waiting", "not-now", "revoked", "none"]),
+  /** When it was allowed or revoked; null otherwise. */
+  at: z.string().nullable(),
+  /** The card's id (`m:<missionId>:<n>`); null when none was opened. */
+  decisionId: z.string().nullable(),
+});
+
+/**
  * The repo row's placement (delivery line design §4.9, artboards I and J):
  * its line, and push and merge request — allowed since the grant, waiting
  * for the owner on the open integration card, not now, revoked, or not asked
@@ -172,13 +199,9 @@ export const missionWaitingSchema = z.discriminatedUnion("kind", [
  */
 export const missionPlacementSchema = z.object({
   ...missionLineFields,
-  integration: z.object({
-    state: z.enum(["allowed", "waiting", "not-now", "revoked", "none"]),
-    /** When it was allowed or revoked; null otherwise. */
-    at: z.string().nullable(),
-    /** The integration card's id (`m:<missionId>:<n>`); null when none was opened. */
-    decisionId: z.string().nullable(),
-  }),
+  integration: missionGrantStateSchema,
+  /** ADR-045 decision 4: the local fast-forward, read as push and merge request are. Optional: an older server sends none. */
+  localMerge: missionGrantStateSchema.optional(),
   /** Delivery line design §19.8 (mockup Q, R): the repo's live lanes, lane 1 first. Optional: an older server sends none. */
   lanes: z.array(missionLaneSchema).optional(),
   /** `MAX_LANES` (§19.1): "3 of 7 lanes". */
@@ -262,7 +285,7 @@ export const missionStateSchema = z.object({
       repo: z.string().nullable(),
       topic: z.string(),
       workerId: z.string().nullable(),
-      state: z.enum(["working", "waiting-owner", "waiting-main", "waiting-other", "finished", "stopped"]),
+      state: z.enum(["working", "undelivered", "waiting-owner", "waiting-main", "waiting-other", "finished", "stopped"]),
       lastReport: z.object({ phase: z.string(), at: z.string(), line: z.string() }).nullable(),
       followUpAt: z.string().nullable(),
       waitingOn: z.string().nullable(),
@@ -343,6 +366,8 @@ export const missionGetRpc = defineRpc({
     mainHistory: z.array(z.object({ agentId: z.string(), from: z.string(), to: z.string().nullable(), reason: z.string() })).optional(),
     /** In flight's Waiting part (delivery line design §19.8): the newest `MISSION_WAITING_SHOWN`, oldest first; absent from an older server. */
     waiting: z.array(missionWaitingSchema).optional(),
+    /** The mission's line, null with none (ADR-045 decision 5); absent from an older server. */
+    line: missionLineSchema.nullable().optional(),
   }),
 });
 
@@ -369,11 +394,12 @@ export const missionChangeRpc = defineRpc({
  * integration grant for one repo (delivery line design §4.3): `revokedAt` is
  * set, the placement's live Workers get `BM-SETTINGS`, the journal a
  * `decision` line. No worktree of the repo, or no grant to revoke →
- * `E_MISSION_INVALID`.
+ * `E_MISSION_INVALID`. `what: "local-merge"` revokes the local fast-forward
+ * instead (ADR-045 decision 4); absent is `push`.
  */
 export const missionIntegrationRevokeRpc = defineRpc({
   name: "mission.integration.revoke",
-  input: z.object({ missionId: z.string().min(1), repo: workspaceIdSchema }),
+  input: z.object({ missionId: z.string().min(1), repo: workspaceIdSchema, what: z.enum(["push", "local-merge"]).optional() }),
   output: z.object({ revokedAt: z.string(), notified: z.number().int().min(0) }),
 });
 
@@ -382,11 +408,12 @@ export const missionIntegrationRevokeRpc = defineRpc({
  * §4.3): a fresh owner-only integration card for the mission's worktree of
  * one repo, after "Not now" or a revoke. A card already open, a grant that
  * holds, no ready worktree of the repo, or a mission not open →
- * `E_MISSION_INVALID`.
+ * `E_MISSION_INVALID`. `what: "local-merge"` asks about the local fast-forward
+ * instead (ADR-045 decision 4); absent is `push`.
  */
 export const missionIntegrationAskRpc = defineRpc({
   name: "mission.integration.ask",
-  input: z.object({ missionId: z.string().min(1), repo: workspaceIdSchema }),
+  input: z.object({ missionId: z.string().min(1), repo: workspaceIdSchema, what: z.enum(["push", "local-merge"]).optional() }),
   output: z.object({ decisionId: z.string() }),
 });
 
@@ -424,6 +451,7 @@ export type MissionPlacement = z.infer<typeof missionPlacementSchema>;
 export type MissionLane = z.infer<typeof missionLaneSchema>;
 export type MissionOverlap = z.infer<typeof missionOverlapSchema>;
 export type MissionWaiting = z.infer<typeof missionWaitingSchema>;
+export type MissionLine = z.infer<typeof missionLineSchema>;
 export type MissionsListOutput = z.infer<typeof missionsListRpc.output>;
 export type MissionGetOutput = z.infer<typeof missionGetRpc.output>;
 export type MissionChangeInput = z.infer<typeof missionChangeRpc.input>;

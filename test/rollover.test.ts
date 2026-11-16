@@ -8,12 +8,14 @@ import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { createQuestionDecisionDelivery, soleWorkerOfRequest } from "../plugin/server/decision-delivery";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
-import { createDeliveringTools } from "../plugin/server/deliver-tools";
+import { batchesAwaitingVerdict, createDeliveringTools } from "../plugin/server/deliver-tools";
+import { createHandoffStore } from "../plugin/server/handoff-store";
 import { clearRequestIndexCache } from "../plugin/server/mission-roster";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
+import { createOutbox } from "../plugin/server/outbox";
 import type { DashboardPaseo } from "../plugin/server/paseo-directory";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
-import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
+import { clearRequestRegistryCache, createRequestRegistry, noteReviewResult } from "../plugin/server/request-registry";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { forgetModes } from "../plugin/server/role-mode";
 import { rolloverCrossingOf, rolloverFiguresOf, rolloverTurnRecorded } from "../plugin/server/rollover";
@@ -91,7 +93,7 @@ function setup() {
   const finish = (input: Record<string, unknown> = {}) =>
     tools.worker.call("bm_report", { requestId: REQ, phase: "finished", tier: { level: "Medium" }, buildAndTests: "`npm test` pass", ...input }, WORKER_CALLER);
   const asked = (level: "soft" | "now") => createRequestRegistry(home).noteRolloverAsked(WS, REQ, { level, figure: level === "soft" ? "10 turns" : "20 turns", at: T0.toISOString() });
-  return { home, repo, fake, logs, queue, finish, asked };
+  return { home, repo, fake, logs, queue, tools, finish, asked };
 }
 
 describe("the rollover figures and notices (delivery line design §2.6)", () => {
@@ -104,14 +106,14 @@ describe("the rollover figures and notices (delivery line design §2.6)", () => 
     ];
     expect(rolloverFiguresOf(records, REQ)).toEqual({ beads: 3, turns: 2, tokens: 0, context: null });
     const settings = DEFAULT_COORDINATION_SETTINGS;
-    expect(rolloverCrossingOf({ beads: 14, turns: 39, tokens: 49_000_000, context: 249_999 }, settings)).toBeNull();
+    expect(rolloverCrossingOf({ beads: 14, turns: 39, tokens: 49_000_000, context: 179_999 }, settings)).toBeNull();
     expect(rolloverCrossingOf({ beads: 15, turns: 0, tokens: 0, context: null }, settings)).toEqual({ level: "soft", figure: "15 beads closed" });
     expect(rolloverCrossingOf({ beads: 16, turns: 80, tokens: 0, context: null }, settings)).toEqual({ level: "now", figure: "80 turns" });
     expect(rolloverCrossingOf({ beads: 0, turns: 0, tokens: 100_400_000, context: null }, settings)).toEqual({ level: "now", figure: "100M tokens read" });
     expect(rolloverCrossingOf({ beads: 99, turns: 99, tokens: 0, context: 900_000 }, { rollover: { ...settings.rollover, enabled: false } })).toBeNull();
   });
 
-  it("ADR-036 §17.3: the judged turn's own context is a figure — soft at rollover.contextTokens (250k), now at ceilingFactor × it; never a sum over turns", () => {
+  it("ADR-036 §17.3: the judged turn's own context is a figure — soft at rollover.contextTokens (180k), now at ceilingFactor × it; never a sum over turns", () => {
     const usage = (contextUsed?: number) => ({ inputTokens: 1, cachedInputTokens: 1, outputTokens: 1, costUsd: null, costBasis: "unavailable" as const, model: "claude-opus-5", pricesUpdatedAt: null, ...(contextUsed === undefined ? {} : { contextUsed }) });
     const t1 = turn({ workspaceId: WS, agentId: WORKER, role: "worker", requestId: REQ, turnId: "t1", usage: usage(200_000) });
     const t2 = turn({ workspaceId: WS, agentId: WORKER, role: "worker", requestId: REQ, turnId: "t2", usage: usage(180_000) });
@@ -119,17 +121,17 @@ describe("the rollover figures and notices (delivery line design §2.6)", () => 
     expect(rolloverFiguresOf([t1, t2], REQ, t2).context).toBe(180_000);
     expect(rolloverFiguresOf([t1, t2], REQ, turn({ usage: usage() })).context).toBeNull();
     const settings = DEFAULT_COORDINATION_SETTINGS;
-    expect(settings.rollover.contextTokens).toBe(250_000);
+    expect(settings.rollover.contextTokens).toBe(180_000);
     const at = (context: number) => rolloverCrossingOf({ beads: 0, turns: 0, tokens: 0, context }, settings);
-    expect(at(249_999)).toBeNull();
-    expect(at(250_000)).toEqual({ level: "soft", figure: "context 250k" });
-    expect(at(262_400)).toEqual({ level: "soft", figure: "context 262k" });
-    expect(at(499_999)).toEqual({ level: "soft", figure: "context 500k" });
-    expect(at(500_000)).toEqual({ level: "now", figure: "context 500k" });
+    expect(at(179_999)).toBeNull();
+    expect(at(180_000)).toEqual({ level: "soft", figure: "context 180k" });
+    expect(at(192_400)).toEqual({ level: "soft", figure: "context 192k" });
+    expect(at(359_999)).toEqual({ level: "soft", figure: "context 360k" });
+    expect(at(360_000)).toEqual({ level: "now", figure: "context 360k" });
     expect(rolloverCrossingOf({ beads: 0, turns: 0, tokens: 0, context: 300_000 }, { rollover: { ...settings.rollover, contextTokens: 100_000, ceilingFactor: 3 } })).toEqual({ level: "now", figure: "context 300k" });
   });
 
-  it("at a recorded Worker turn, BM-ROLLOVER soft at 250k context and now at 500k (ADR-036 §17.3)", async () => {
+  it("at a recorded Worker turn, BM-ROLLOVER soft at 180k context and now at 360k (ADR-036 §17.3)", async () => {
     const { home } = setup();
     const sent: string[] = [];
     const queue = { enqueue: async (_to: string, _kind: string, text: string) => (sent.push(text), "sent" as const) };
@@ -147,15 +149,174 @@ describe("the rollover figures and notices (delivery line design §2.6)", () => 
       await appendRecord(location, record);
       return rolloverTurnRecorded(home, record, null, { queue, now: () => T0 });
     };
-    expect(await turnAt(1, 240_000)).toBeNull();
-    expect(await turnAt(2, 262_000)).toBe("soft");
-    expect(await turnAt(3, 400_000)).toBeNull();
-    expect(await turnAt(4, 510_000)).toBe("now");
+    expect(await turnAt(1, 170_000)).toBeNull();
+    expect(await turnAt(2, 192_000)).toBe("soft");
+    expect(await turnAt(3, 300_000)).toBeNull();
+    expect(await turnAt(4, 370_000)).toBe("now");
     expect(sent.map((text) => text.split("\n").slice(0, 2).join(" | "))).toEqual([
-      `BM-ROLLOVER soft | From the paseo-bm plugin, not the owner: request ${REQ} reached context 262k.`,
-      `BM-ROLLOVER now | From the paseo-bm plugin, not the owner: request ${REQ} reached context 510k.`,
+      `BM-ROLLOVER soft | From the paseo-bm plugin, not the owner: request ${REQ} reached context 192k.`,
+      `BM-ROLLOVER now | From the paseo-bm plugin, not the owner: request ${REQ} reached context 370k.`,
     ]);
-    expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toEqual({ level: "now", figure: "context 510k", at: T0.toISOString() });
+    expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toEqual({ level: "now", figure: "context 370k", at: T0.toISOString(), workerId: WORKER });
+  });
+
+  describe("a batch a BM-ROLLOVER now carries on with no verdict yet (ADR-046)", () => {
+    const REVIEWER = "agent-reviewer";
+    const BLOCKING = { severity: "blocking", location: "src/a.ts:3", reason: "Off by one.", suggestedFix: "Use <=." };
+    const reviewerCaller = { agentId: REVIEWER, role: "reviewer" as const, workspaceId: WS, requestId: REQ, parentId: WORKER, batchId: "b1" };
+    const review = (requestId = REQ) => ({ requestId, batchId: "b1", reviewKind: "first", checked: "src/a.ts; npm test pass", notChecked: "none", findings: [BLOCKING] });
+
+    const moved = async () => {
+      const context = setup();
+      createRequestRegistry(context.home).addReviewCall(WS, REQ, "b1", { callId: "call-b1", kind: "create", reviewerId: REVIEWER, at: new Date(T0.getTime() - 60_000).toISOString() }, "Review src/a.ts");
+      context.asked("now");
+      expect((await context.finish({ remaining: ["the rest"] })).ok).toBe(true);
+      await new Promise((resolve) => setImmediate(resolve));
+      const nextId = createRequestRegistry(context.home).get(WS, REQ)!.continuedBy!;
+      const workerId = createRequestRegistry(context.home).get(WS, nextId)!.workerIds.at(-1)!;
+      return { ...context, nextId, workerId };
+    };
+
+    it("is copied to the continuation, its newest call awaited, and its brief says the verdict is coming", async () => {
+      const { home, fake, nextId } = await moved();
+      const next = createRequestRegistry(home).get(WS, nextId)!;
+      expect(next.reviews.batches).toHaveLength(1);
+      expect(next.reviews.batches[0]).toMatchObject({ batchId: "b1", adoptedFrom: REQ, results: [] });
+      expect(next.reviews.batches[0]!.calls.map((call) => [call.callId, call.adopted, call.awaited])).toEqual([["call-b1", true, true]]);
+      expect(fake.creates.at(-1)!.options.prompt).toContain("review batches with a verdict on its way: b1: it comes to you");
+      expect(batchesAwaitingVerdict(next, createOutbox(home, { now: () => T0 }).list(WS), T0)).toEqual(["b1"]);
+    });
+
+    it("a verdict that lands after the batch moved is stored on the carried batch and reaches the continuation's Worker", async () => {
+      const { home, fake, tools, nextId, workerId } = await moved();
+      const answer = await tools.reviewer.call("bm_review", review(), reviewerCaller);
+      expect(answer.ok).toBe(true);
+      const registry = createRequestRegistry(home);
+      for (const id of [REQ, nextId]) {
+        expect(registry.get(WS, id)!.reviews.batches[0]!.results).toMatchObject([{ verdict: "changes-required", blocking: 1 }]);
+      }
+      const [record] = createOutbox(home, { now: () => T0 }).list(WS).filter((entry) => entry.kind === "review");
+      expect(record).toMatchObject({ requestId: REQ, batchId: "b1", to: workerId, state: "delivered" });
+      expect(fake.sends.filter((entry) => entry.id === workerId && entry.text.includes("verdict: changes-required"))).toHaveLength(1);
+      expect(fake.sends.filter((entry) => entry.id === WORKER)).toEqual([]);
+      expect(batchesAwaitingVerdict(registry.get(WS, nextId), createOutbox(home, { now: () => T0 }).list(WS), T0)).toEqual([]);
+    });
+
+    it("a no-verdict of it settles the copy too, and a chain of two continuations stores it on each", async () => {
+      const { home, tools, nextId } = await moved();
+      const registry = createRequestRegistry(home);
+      const lastId = "req-20261003T130000Z";
+      registry.register(WS, lastId, { source: "tool", managerId: MANAGER, workerId: "agent-last" });
+      registry.adoptReviewBatches(WS, lastId, registry.get(WS, nextId)!.reviews.batches, nextId);
+      registry.noteContinuedBy(WS, nextId, lastId, { reason: "size", figure: "20 turns", at: T0.toISOString() });
+      expect((await tools.reviewer.call("bm_review", review(), reviewerCaller)).ok).toBe(true);
+      for (const id of [REQ, nextId, lastId]) expect(createRequestRegistry(home).get(WS, id)!.reviews.batches[0]!.results).toHaveLength(1);
+    });
+
+    it("a batch the continuation opened itself under the same id takes no result of the predecessor's Reviewer", () => {
+      const { home } = setup();
+      const registry = createRequestRegistry(home);
+      const nextId = "req-20261003T130000Z";
+      registry.register(WS, nextId, { source: "tool", managerId: MANAGER, workerId: "agent-next" });
+      registry.addReviewCall(WS, nextId, "b1", { callId: "call-own", kind: "create", reviewerId: "agent-own", at: T0.toISOString() }, "Its own batch");
+      registry.addReviewCall(WS, REQ, "b1", { callId: "call-b1", kind: "create", reviewerId: REVIEWER, at: T0.toISOString() }, "Review src/a.ts");
+      registry.noteContinuedBy(WS, REQ, nextId, { reason: "size", figure: "20 turns", at: T0.toISOString() });
+      noteReviewResult(home, WS, { id: "out-1", kind: "no-verdict", requestId: REQ, batchId: "b1", from: REVIEWER, createdAt: T0.toISOString(), text: "" });
+      expect(registry.get(WS, REQ)!.reviews.batches[0]!.results).toHaveLength(1);
+      expect(registry.get(WS, nextId)!.reviews.batches[0]!.results).toHaveLength(0);
+    });
+
+    it("a batch answered before the finish goes on as any open batch, not awaited", async () => {
+      const context = setup();
+      const registry = createRequestRegistry(context.home);
+      registry.addReviewCall(WS, REQ, "b1", { callId: "call-b1", kind: "create", reviewerId: REVIEWER, at: new Date(T0.getTime() - 60_000).toISOString() }, "Review src/a.ts");
+      expect((await context.tools.reviewer.call("bm_review", review(), reviewerCaller)).ok).toBe(true);
+      context.asked("now");
+      expect((await context.finish({ remaining: ["the rest"] })).ok).toBe(true);
+      await new Promise((resolve) => setImmediate(resolve));
+      const nextId = createRequestRegistry(context.home).get(WS, REQ)!.continuedBy!;
+      expect(createRequestRegistry(context.home).get(WS, nextId)!.reviews.batches[0]!.calls.map((call) => call.awaited)).toEqual([undefined]);
+    });
+  });
+
+  describe("BM-ROLLOVER now goes to the request's current Worker, whatever its reviews (ADR-046)", () => {
+    const REVIEWER = "agent-reviewer";
+    const SUCCESSOR = "agent-successor";
+    const running = (home: string) => {
+      const sent: Array<[string, string]> = [];
+      const queue = { enqueue: async (to: string, _kind: string, text: string) => (sent.push([to, text.split("\n")[0]!]), "sent" as const) };
+      const location = { tracesDir: join(home, "traces") };
+      let i = 0;
+      const turnAt = async (contextUsed: number, agentId = WORKER) => {
+        i += 1;
+        const record = turn({
+          workspaceId: WS,
+          agentId,
+          role: "worker",
+          requestId: REQ,
+          turnId: `t${i}`,
+          at: `2026-10-03T10:${String(i).padStart(2, "0")}:00.000Z`,
+          usage: { inputTokens: 10, cachedInputTokens: contextUsed, outputTokens: 10, costUsd: null, costBasis: "unavailable", model: "claude-opus-5", pricesUpdatedAt: null, contextUsed },
+        });
+        await appendRecord(location, record);
+        return rolloverTurnRecorded(home, record, null, { queue, now: () => T0 });
+      };
+      return { sent, turnAt };
+    };
+
+    it("is sent while a review has no verdict, and finished with remaining is then accepted", async () => {
+      const { home, finish } = setup();
+      createRequestRegistry(home).addReviewCall(WS, REQ, "b1", { callId: "call-b1", kind: "create", reviewerId: REVIEWER, at: new Date(T0.getTime() - 60_000).toISOString() }, "Review src/a.ts");
+      const { sent, turnAt } = running(home);
+      expect(await turnAt(400_000)).toBe("now");
+      expect(sent).toEqual([[WORKER, "BM-ROLLOVER now"]]);
+      expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toEqual({ level: "now", figure: "context 400k", at: T0.toISOString(), workerId: WORKER });
+      expect((await finish({ remaining: ["the rest"] })).ok).toBe(true);
+    });
+
+    it("a finished without remaining, or after only the soft notice, still waits for the verdict", async () => {
+      const { home, finish, asked } = setup();
+      createRequestRegistry(home).addReviewCall(WS, REQ, "b1", { callId: "call-b1", kind: "create", reviewerId: REVIEWER, at: new Date(T0.getTime() - 60_000).toISOString() }, "Review src/a.ts");
+      asked("soft");
+      expect((await finish({ remaining: ["the rest"] })).text).toContain("a review of batch b1 has no verdict yet");
+      asked("now");
+      expect((await finish()).text).toContain("a review of batch b1 has no verdict yet");
+    });
+
+    it("is asked once per Worker: a later Worker of the request hears it too, and a soft figure never takes it back", async () => {
+      const { home } = setup();
+      const { sent, turnAt } = running(home);
+      expect(await turnAt(400_000)).toBe("now");
+      expect(await turnAt(400_000)).toBeNull();
+      createRequestRegistry(home).addWorker(WS, REQ, SUCCESSOR);
+      expect(await turnAt(190_000, SUCCESSOR)).toBeNull();
+      expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked?.workerId).toBe(WORKER);
+      expect(await turnAt(400_000, SUCCESSOR)).toBe("now");
+      expect(await turnAt(400_000, SUCCESSOR)).toBeNull();
+      expect(sent).toEqual([[WORKER, "BM-ROLLOVER now"], [SUCCESSOR, "BM-ROLLOVER now"]]);
+    });
+
+    it("a stored now from an older build, which names no Worker, is not asked again", async () => {
+      const { home, asked } = setup();
+      asked("now");
+      const { sent, turnAt } = running(home);
+      expect(await turnAt(400_000)).toBeNull();
+      expect(sent).toEqual([]);
+    });
+
+    it("is not sent to a Worker whose handoff has asked for its note; its successor is asked", async () => {
+      const { home } = setup();
+      const store = createHandoffStore(home);
+      const entry = store.add({ workspaceId: WS, requestId: REQ, workerId: WORKER, managerId: MANAGER, interventionId: null, reason: "It grew past the threshold." });
+      const { sent, turnAt } = running(home);
+      store.update(entry.id, (current) => ({ ...current, state: "noting", noteAskedAt: T0.toISOString() }));
+      expect(await turnAt(400_000)).toBeNull();
+      expect(sent).toEqual([]);
+      expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toBeUndefined();
+      createRequestRegistry(home).addWorker(WS, REQ, SUCCESSOR);
+      expect(await turnAt(400_000, SUCCESSOR)).toBe("now");
+      expect(sent).toEqual([[SUCCESSOR, "BM-ROLLOVER now"]]);
+    });
   });
 
   it("queues one BM-ROLLOVER soft per request, then BM-ROLLOVER now at twice the figure, to the request's newest Worker", async () => {
@@ -193,7 +354,7 @@ describe("the rollover figures and notices (delivery line design §2.6)", () => 
       `From the paseo-bm plugin, not the owner: request ${REQ} reached 20 turns.`,
       "Report `finished` with `remaining` at the end of this turn; put the work in progress in `remaining`.",
     ]);
-    expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toEqual({ level: "now", figure: "20 turns", at: T0.toISOString() });
+    expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toEqual({ level: "now", figure: "20 turns", at: T0.toISOString(), workerId: WORKER });
     // A Reviewer's turn, and an older Worker of the request, are never asked.
     expect(await rolloverTurnRecorded(home, turn({ workspaceId: WS, agentId: "agent-reviewer", role: "reviewer", requestId: REQ }), null, { queue })).toBeNull();
   });
@@ -301,9 +462,9 @@ describe("a finished with remaining after a rollover notice opens a size continu
     expect(fake.creates).toEqual([]);
   });
 
-  it("a review batch never crosses requests: finished with a verdict in flight is still refused, and nothing opens", async () => {
+  it("at the soft figure a finished with a verdict in flight is still refused, and nothing opens (at now it carries the batch on, ADR-046)", async () => {
     const { home, fake, finish, asked } = setup();
-    asked("now");
+    asked("soft");
     createRequestRegistry(home).addReviewCall(WS, REQ, "b1", { callId: "call-1", kind: "create", reviewerId: "agent-reviewer", at: T0.toISOString() }, "Review the export.");
     const answer = await finish({ remaining: ["bd-3"] });
     expect(answer).toEqual({ ok: false, text: "a review of batch b1 has no verdict yet: wait for its delivery, then report finished\nNothing was stored or sent." });

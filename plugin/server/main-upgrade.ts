@@ -12,6 +12,8 @@
  * - carries another `bm.instructions` hash than this build's for a Manager
  *   (`hasOutdatedInstructions`), and is older than `STAMP_GRACE_MS`;
  *
+ * and that has an active request on its roster (ADR-044: a dormant mission
+ * keeps its Main until it has work again, so no workspace appears for it),
  * is handed over to a successor through the one path a Main's code handoff
  * takes (`handOverMain`: the mission state brief, then `replaceMain`), with a
  * notice that tells the successor why and to say so to the owner in one line.
@@ -20,7 +22,9 @@
  */
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { INSTRUCTIONS_LABEL, hasOutdatedInstructions } from "./instructions-label";
+import { createMissionRoster } from "./mission-roster";
 import { createMissionStore } from "./mission-store";
+import { mainHandoffLineOf } from "./handoff";
 import { handOverMain, type MissionsHomeDeps, type MissionsPaseo } from "./missions-home";
 import { STAMP_GRACE_MS } from "./outdated-agents";
 import { errorText } from "./rpc-kit";
@@ -30,7 +34,7 @@ const handedOver = new Set<string>();
 
 /** The notice the successor reads after the mission state (§19.12). Pure. */
 export function upgradeHandoffLineOf(oldMainId: string): string {
-  return `You take this mission over from Main ${oldMainId}: it ran the instructions of an older paseo-bm, so after the update paseo-bm handed the mission over to you with the current ones. Its chat keeps the earlier conversation; start from the mission state above. In your first reply tell the owner in one line that you took over after the update and what is in flight, from that state.`;
+  return mainHandoffLineOf(oldMainId, "it ran the instructions of an older paseo-bm", "with the current ones, after the update");
 }
 
 /** The slice of a fetched agent this reads. */
@@ -72,6 +76,7 @@ export async function replaceOutdatedMains(home: string, paseo: unknown, deps: M
         agent = null;
       }
       if (!isIdleOutdatedMain(agent, now())) continue;
+      if (!createMissionRoster(home).list(entry.missionId).some((request) => request.state === "active")) continue;
       const mission = store.get(entry.missionId);
       if (mission === null || mission.mainId !== mainId) continue;
       handedOver.add(mainId);

@@ -34,6 +34,8 @@ import type {
 /** Agent facts reconstruction needs, from `agents.list` or the store. */
 export interface AgentFacts {
   id: string;
+  /** Closed by Paseo's idle collection, its session kept: a send resumes it (ADR-042). */
+  resting?: boolean;
   /**
    * `orchestrator` only from `bmAgentsOf(…, { includeOrchestrator: true })`,
    * which no reconstruction reads: the assessment agent is never part of a

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { COORDINATION_DIR_NAME, COORDINATION_SETTINGS_FILE, createCoordinationStore } from "../plugin/server/coordination-store";
+import { COORDINATION_DIR_NAME, COORDINATION_SETTINGS_FILE, createCoordinationStore, lineSupervisedOf } from "../plugin/server/coordination-store";
 import {
   handleCoordinationSet,
   handleCoordinationSettings,
@@ -310,6 +310,8 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       "maintenance.ceilingFactor",
       // ADR-036, delivery line design §17.1: CI, off by default.
       "integration.ci",
+      // ADR-045, The switch: the supervised line, on by default.
+      "line.supervised",
       // Missions Phase 2: the governor's thresholds and window (missions design §9.2, §9.3).
       ...GOVERNOR_SETTINGS.map((name) => `governor.${name}`),
     ]);
@@ -322,9 +324,10 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       handoff: { enabled: true, requestTokens: 150_000_000, maxPerRequest: 2 },
       main: { compact: true, contextShare: 0.6, contextTokens: 150_000, hardShare: 0.85 },
       review: { maxRereviews: 3, callsPerBatch: 3 },
-      rollover: { enabled: true, beads: 15, turns: 40, tokens: 50_000_000, contextTokens: 250_000, ceilingFactor: 2 },
+      rollover: { enabled: true, beads: 15, turns: 40, tokens: 50_000_000, contextTokens: 180_000, ceilingFactor: 2 },
       maintenance: { ceilingFactor: 2 },
       integration: { ci: "off" },
+      line: { supervised: true },
       governor: DEFAULT_COORDINATION_SETTINGS.governor,
       guard: { compact: { countsFrom: null, switchedOff: null }, handoff: { countsFrom: null, switchedOff: null } },
     });
@@ -379,7 +382,7 @@ describe("the rollover settings: keys, defaults and bounds (delivery line design
       { min: 3, max: 100, default: 15, whole: true },
       { min: 10, max: 500, default: 40, whole: true },
       { min: 10_000_000, max: 1_000_000_000, default: 50_000_000, whole: true },
-      { min: 100_000, max: 900_000, default: 250_000, whole: true },
+      { min: 100_000, max: 900_000, default: 180_000, whole: true },
       { min: 1.5, max: 5, default: 2, whole: false },
     ]);
     expect(coordinationRuleOf("rollover.enabled")).toBe("rollover.enabled must be true (on) or false (off)");
@@ -392,14 +395,17 @@ describe("the rollover settings: keys, defaults and bounds (delivery line design
     writeFile({ version: 1, review: { maxRereviews: 2 } });
     expect(store().read().rollover).toEqual(DEFAULT_COORDINATION_SETTINGS.rollover);
     writeFile({ version: 1, rollover: { enabled: false, beads: 2, turns: 30, ceilingFactor: 3.5 } });
-    expect(store().read().rollover).toEqual({ enabled: false, beads: 15, turns: 30, tokens: 50_000_000, contextTokens: 250_000, ceilingFactor: 3.5 });
+    expect(store().read().rollover).toEqual({ enabled: false, beads: 15, turns: 30, tokens: 50_000_000, contextTokens: 180_000, ceilingFactor: 3.5 });
     expect(codeOf(() => handleCoordinationSet({ key: "rollover.tokens", value: 9_999_999 }, deps))).toBe("E_COORDINATION_INVALID");
     // ADR-036 §17.3: rollover.contextTokens in 100k to 900k; out of its bounds, read at its default.
     for (const value of [99_999, 900_001]) expect(codeOf(() => handleCoordinationSet({ key: "rollover.contextTokens", value }, deps))).toBe("E_COORDINATION_INVALID");
     writeFile({ version: 1, rollover: { contextTokens: 50_000 } });
-    expect(store().read().rollover.contextTokens).toBe(250_000);
+    expect(store().read().rollover.contextTokens).toBe(180_000);
     writeFile({ version: 1, rollover: { contextTokens: 400_000 } });
     expect(store().read().rollover.contextTokens).toBe(400_000);
+    // ADR-045 decision 10: a file that holds the figure keeps it, the old default included.
+    writeFile({ version: 1, rollover: { contextTokens: 250_000 } });
+    expect(store().read().rollover.contextTokens).toBe(250_000);
   });
 });
 
@@ -516,6 +522,7 @@ describe("the compaction and handoff settings in the store and the owner's RPCs"
     "rollover.ceilingFactor": { value: 2.5, read: (settings) => settings.rollover.ceilingFactor },
     "maintenance.ceilingFactor": { value: 3, read: (settings) => settings.maintenance.ceilingFactor },
     "integration.ci": { value: "on", read: (settings) => settings.integration.ci },
+    "line.supervised": { value: false, read: (settings) => settings.line.supervised },
     ...Object.fromEntries(
       GOVERNOR_SETTINGS.map((name) => [`governor.${name}`, { value: GOVERNOR_BOUNDS[name].default + 1, read: (settings: CoordinationSettings) => settings.governor[name] }]),
     ),
@@ -545,6 +552,23 @@ describe("the compaction and handoff settings in the store and the owner's RPCs"
     for (const value of [true, 1, "yes", null]) {
       expect(coordinationSetRpc.input.safeParse({ key: "integration.ci", value }).success, String(value)).toBe(false);
       expect(() => handleCoordinationSet({ key: "integration.ci", value }, deps)).toThrow('integration.ci must be "off" or "on"; nothing was saved');
+    }
+    expect(fileBytes()).toBe(before);
+  });
+
+  it("line.supervised (ADR-045, The switch): on by default and in a file without it; true or false only, refused otherwise with its rule", () => {
+    expect(handleCoordinationSettings(deps).settings.line).toEqual({ supervised: true });
+    expect(coordinationSettingsOf({ version: 1 }).line).toEqual({ supervised: true });
+    expect(coordinationSettingsOf({ version: 1, line: { supervised: "off" } }).line).toEqual({ supervised: true });
+    expect(coordinationSettingsOf({ version: 1, line: { supervised: false } }).line).toEqual({ supervised: false });
+    expect(lineSupervisedOf(home)).toBe(true);
+    expect(handleCoordinationSet({ key: "line.supervised", value: false }, deps).settings.line).toEqual({ supervised: false });
+    expect(lineSupervisedOf(home)).toBe(false);
+    expect(handleCoordinationSet({ key: "line.supervised", value: true }, deps).settings.line).toEqual({ supervised: true });
+    const before = fileBytes();
+    for (const value of ["off", 0, null]) {
+      expect(coordinationSetRpc.input.safeParse({ key: "line.supervised", value }).success, String(value)).toBe(false);
+      expect(() => handleCoordinationSet({ key: "line.supervised", value }, deps)).toThrow("line.supervised must be true (on) or false (off); nothing was saved");
     }
     expect(fileBytes()).toBe(before);
   });

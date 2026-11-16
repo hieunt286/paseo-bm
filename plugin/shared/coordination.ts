@@ -114,7 +114,7 @@ export const ROLLOVER_TOKENS: CoordinationBounds = { min: 10_000_000, max: 1_000
  * real context at a recorded turn's end — that turn's own `contextUsed`, never
  * a sum over turns.
  */
-export const ROLLOVER_CONTEXT_TOKENS: CoordinationBounds = { min: 100_000, max: 900_000, default: 250_000, whole: true };
+export const ROLLOVER_CONTEXT_TOKENS: CoordinationBounds = { min: 100_000, max: 900_000, default: 180_000, whole: true };
 /** `rollover.ceilingFactor`: where the soft rollover becomes `now`. */
 export const ROLLOVER_CEILING_FACTOR: CoordinationBounds = { min: 1.5, max: 5, default: 2, whole: false };
 
@@ -278,6 +278,14 @@ const maintenanceSchema = z.object({
 const integrationSchema = z.object({ ci: z.enum(INTEGRATION_CI_MODES) });
 
 /**
+ * `line.supervised` (ADR-045, The switch; mission line plan §5.12): on by
+ * default. Off, for every mission: held entries start on `finished` alone, the
+ * sequential slot refuses nothing and reports are delivered normally. The gate
+ * is still recorded, and a local merge still needs its grant and a passed gate.
+ */
+const lineSchema = z.object({ supervised: z.boolean() });
+
+/**
  * What the plugin keeps beside a mechanism's switch for the A-12 guard
  * (§G.3): `countsFrom` — A-12 counts only the entries recorded from this time,
  * when the owner last turned the mechanism on (null: every entry); and
@@ -307,6 +315,7 @@ export const coordinationSettingsSchema = z.object({
   rollover: rolloverSchema,
   maintenance: maintenanceSchema,
   integration: integrationSchema,
+  line: lineSchema,
   governor: governorSchema,
   guard: z.object({ compact: switchGuardSchema, handoff: switchGuardSchema }),
 });
@@ -337,6 +346,7 @@ export const DEFAULT_COORDINATION_SETTINGS: CoordinationSettings = {
   rollover: { enabled: true, beads: ROLLOVER_BEADS.default, turns: ROLLOVER_TURNS.default, tokens: ROLLOVER_TOKENS.default, contextTokens: ROLLOVER_CONTEXT_TOKENS.default, ceilingFactor: ROLLOVER_CEILING_FACTOR.default },
   maintenance: { ceilingFactor: MAINTENANCE_CEILING_FACTOR.default },
   integration: { ci: "off" },
+  line: { supervised: true },
   governor: Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [name, GOVERNOR_BOUNDS[name].default])) as Record<GovernorSetting, number>,
   guard: { compact: NO_GUARD, handoff: NO_GUARD },
 };
@@ -379,6 +389,7 @@ const liveChangeMembers = [
   z.object({ key: z.literal("rollover.ceilingFactor"), value: rolloverSchema.shape.ceilingFactor }),
   z.object({ key: z.literal("maintenance.ceilingFactor"), value: maintenanceSchema.shape.ceilingFactor }),
   z.object({ key: z.literal("integration.ci"), value: integrationSchema.shape.ci }),
+  z.object({ key: z.literal("line.supervised"), value: lineSchema.shape.supervised }),
   ...GOVERNOR_SETTINGS.map((name) => z.object({ key: z.literal(`governor.${name}` as GovernorKey), value: boundedSchema(GOVERNOR_BOUNDS[name]) as z.ZodNumber })),
 ] as const;
 
@@ -433,6 +444,8 @@ export const COORDINATION_KEYS: readonly CoordinationKey[] = [
   "maintenance.ceilingFactor",
   // ADR-036, delivery line design §17.1: CI, off by default.
   "integration.ci",
+  // ADR-045, The switch: the supervised line, on by default.
+  "line.supervised",
   // Missions Phase 2: the governor's thresholds come last (missions design §9.2).
   ...GOVERNOR_SETTINGS.map((name): GovernorKey => `governor.${name}`),
 ];
@@ -443,8 +456,8 @@ export function governorSettingOf(key: GovernorKey): GovernorSetting {
 }
 
 /** The keys whose value is true (on) or false (off). */
-type SwitchKey = "compact.enabled" | "handoff.enabled" | "main.compact" | "rollover.enabled";
-const isSwitchKey = (key: CoordinationKey): key is SwitchKey => key === "compact.enabled" || key === "handoff.enabled" || key === "main.compact" || key === "rollover.enabled";
+type SwitchKey = "compact.enabled" | "handoff.enabled" | "main.compact" | "rollover.enabled" | "line.supervised";
+const isSwitchKey = (key: CoordinationKey): key is SwitchKey => key === "compact.enabled" || key === "handoff.enabled" || key === "main.compact" || key === "rollover.enabled" || key === "line.supervised";
 
 /** The keys whose value is one of a few words. */
 type ChoiceKey = "integration.ci";
@@ -533,6 +546,7 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
   const rollover = objectOf(root?.["rollover"]);
   const maintenance = objectOf(root?.["maintenance"]);
   const integration = objectOf(root?.["integration"]);
+  const line = objectOf(root?.["line"]);
   const governor = objectOf(root?.["governor"]);
   const guard = objectOf(root?.["guard"]);
   const shape = { compact: compactSchema.shape, handoff: handoffSchema.shape, review: reviewSchema.shape };
@@ -571,6 +585,8 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
     maintenance: { ceilingFactor: valueOr(maintenanceSchema.shape.ceilingFactor, maintenance?.["ceilingFactor"], defaults.maintenance.ceilingFactor) },
     // ADR-036: absent from a file an older build wrote, so off.
     integration: { ci: valueOr(integrationSchema.shape.ci, integration?.["ci"], defaults.integration.ci) },
+    // ADR-045, The switch: absent from a file an older build wrote, so on.
+    line: { supervised: valueOr(lineSchema.shape.supervised, line?.["supervised"], defaults.line.supervised) },
     governor: Object.fromEntries(
       GOVERNOR_SETTINGS.map((name) => [name, valueOr(governorSchema.shape[name], governor?.[name], defaults.governor[name])]),
     ) as Record<GovernorSetting, number>,
@@ -630,6 +646,8 @@ export function applyCoordinationChange(settings: CoordinationSettings, change: 
       return { ...settings, maintenance: { ceilingFactor: change.value } };
     case "integration.ci":
       return { ...settings, integration: { ci: change.value } };
+    case "line.supervised":
+      return { ...settings, line: { supervised: change.value } };
     case "main.contextShare":
       return { ...settings, main: { ...settings.main, contextShare: change.value } };
     case "main.contextTokens":

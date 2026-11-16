@@ -185,6 +185,8 @@ const placementSchema = z.object({
   createdAt: z.string(),
   deps: z.object({ cloned: z.array(z.string()), at: isoOrNull, note: z.string().nullable() }),
   integration: integrationGrantSchema.nullable(),
+  /** ADR-045 decision 4: the owner's local fast-forward grant, on the mission branch's placement; absent until the owner said yes. */
+  localMerge: z.object({ state: z.enum(["granted", "revoked"]), decisionId: z.string(), grantedAt: z.string(), revokedAt: isoOrNull, target: z.string() }).optional(),
   /** The exact `workspaces.create` options sent under `requestKey` (§3.3 step 1): a retry resends them byte for byte. */
   requestBody: z.string().optional(),
   /** Why it is `failed` (§3.3 step 3). */
@@ -234,6 +236,8 @@ export const missionSchema = z.object({
   contracts: z.array(contractSchema),
   /** Its worktree per repo (delivery line design §3.2); absent: none, its agents run in each repo's root. */
   placements: z.array(placementSchema).optional(),
+  /** A live root workspace → the repo key it answers as, once its own root is archived (ADR-043). */
+  repoAliases: z.record(z.string(), z.string()).optional(),
 });
 
 export type Mission = z.infer<typeof missionSchema>;
@@ -393,6 +397,8 @@ export interface MissionStore {
   list(): MissionIndexEntry[];
   /** The index's placements map (delivery line design §3.1), rebuilt with the index. Never throws. */
   placements(): PlacementIndex;
+  /** The index's repo aliases (ADR-043): a live root → its repo key. Apart from the placements, which older readers trust. Never throws. */
+  repoAliases(): Record<string, string>;
   /** The open mission with this code, else the closed one closed last (else created last), else null. Never throws. */
   byCode(code: string): MissionIndexEntry | null;
   /** The open mission whose current Main is `agentId`, or null. Never throws. */
@@ -422,6 +428,8 @@ export interface MissionStore {
 interface MissionIndex {
   missions: MissionIndexEntry[];
   placements: PlacementIndex;
+  /** A live root → its repo key (ADR-043): its own map, so a reader of `placements` never takes a root for a placement. */
+  repoAliases: Record<string, string>;
 }
 
 /** A mission file's content: the mission, or `{}` for a missing one. */
@@ -472,8 +480,8 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     version: MISSIONS_VERSION,
     versionKey: "schemaVersion",
     // An index written before placements has none: none of its missions had one.
-    parse: (body) => ({ missions: entriesOf(indexEntrySchema, body["missions"]), placements: placementIndexSchema.catch({}).parse(body["placements"] ?? {}) }),
-    empty: () => ({ missions: [], placements: {} }),
+    parse: (body) => ({ missions: entriesOf(indexEntrySchema, body["missions"]), placements: placementIndexSchema.catch({}).parse(body["placements"] ?? {}), repoAliases: z.record(z.string(), z.string()).catch({}).parse(body["repoAliases"] ?? {}) }),
+    empty: () => ({ missions: [], placements: {}, repoAliases: {} }),
     codes: { unwritable: UNWRITABLE },
     // Derived from the mission files: an unusable index is simply rebuilt.
   });
@@ -532,7 +540,11 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
       const mission = get(file.missionId);
       return mission === null ? [] : [mission];
     });
-    const rebuilt: MissionIndex = { missions: missions.map(indexEntryOf), placements: Object.assign({}, ...missions.map(placementIndexOf)) as PlacementIndex };
+    const rebuilt: MissionIndex = {
+      missions: missions.map(indexEntryOf),
+      placements: Object.assign({}, ...missions.map(placementIndexOf)) as PlacementIndex,
+      repoAliases: Object.assign({}, ...missions.map((mission) => mission.repoAliases ?? {})) as Record<string, string>,
+    };
     if (files.length > 0) writeIndex(rebuilt);
     return rebuilt;
   };
@@ -554,7 +566,7 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     const before = index.missions.filter((entry) => entry.missionId !== mission.missionId);
     const placements = Object.fromEntries(Object.entries(index.placements).filter(([, entry]) => entry.missionId !== mission.missionId));
     const written = missionFile(mission.missionId).write(mission) as Mission;
-    writeIndex({ missions: [...before, indexEntryOf(written)], placements: { ...placements, ...placementIndexOf(written) } });
+    writeIndex({ missions: [...before, indexEntryOf(written)], placements: { ...placements, ...placementIndexOf(written) }, repoAliases: { ...index.repoAliases, ...written.repoAliases } });
     return written;
   };
 
@@ -593,6 +605,7 @@ export function createMissionStore(home: string, deps: MissionStoreDeps = {}): M
     get,
     list,
     placements: () => readIndex().placements,
+    repoAliases: () => readIndex().repoAliases,
     byCode(code) {
       const named = list().filter((entry) => entry.code === code);
       const open = named.find((entry) => entry.state === "open");

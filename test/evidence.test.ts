@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Evidence } from "../plugin/shared/contracts";
-import { isFinishedUnverified, namedChecksOf, requestFinishOf, verificationOf, type VerificationInput, type VerificationRecord } from "../plugin/shared/evidence";
+import { checksVerified, isFinishedUnverified, namedChecksOf, requestFinishOf, verificationOf, type VerificationInput, type VerificationRecord } from "../plugin/shared/evidence";
+import { checkLabelText, checksText, verificationDetailLines } from "../plugin/client/verification-view";
+import { verifiedOf } from "../plugin/server/line-state";
 
 /**
  * Detected, self-reported and unverified report claims (autonomy design §C.2,
@@ -31,6 +33,79 @@ describe("named checks", () => {
     expect(namedChecksOf("``npm test`` pass")).toEqual(["npm test"]);
     expect(namedChecksOf("npm test pass")).toEqual([]);
     expect(namedChecksOf(null)).toEqual([]);
+  });
+});
+
+describe("a reused check (ADR-045 decision 13)", () => {
+  const reusedClause = "`npm test` pass, reused from the run before the rebase";
+
+  it("is reused when its clause says so and an earlier passing run exists, before the last edit", () => {
+    const result = verify(reusedClause, [shell("npm test", 1), edit("src/a.ts", 2)]);
+    expect(result.named).toEqual([{ check: "npm test", label: "reused" }]);
+    expect(result.checks).toBe("reused");
+  });
+
+  it("is reused when the run came after the last edit but before a handoff", () => {
+    const records: VerificationRecord[] = [
+      { agentId: "agent-old", role: "worker", endedAt: at(10), evidence: [edit("src/a.ts", 1), { ...shell("npm test", 2), agentId: "agent-old" }] },
+      { agentId: WORKER, role: "worker", startedAt: at(20), endedAt: at(30), evidence: [] },
+    ];
+    const result = verificationOf({ report: { buildAndTests: reusedClause, filesChanged: [], beadsClosed: [] }, records, workspaceDirectory: WORKSPACE, handoffSuccessors: new Set([WORKER]) });
+    expect(result.named[0]?.label).toBe("reused");
+  });
+
+  it("counts an earlier passing run by a handed-off Worker of the request", () => {
+    const records: VerificationRecord[] = [
+      { agentId: "agent-old", role: "worker", endedAt: at(10), evidence: [{ ...shell("npm test", 2), agentId: "agent-old" }] },
+      { agentId: WORKER, role: "worker", startedAt: at(20), endedAt: at(30), evidence: [edit("src/a.ts", 21)] },
+    ];
+    expect(verificationOf({ report: { buildAndTests: reusedClause, filesChanged: [], beadsClosed: [] }, records, workspaceDirectory: WORKSPACE, handoffSuccessors: new Set([WORKER]) }).checks).toBe("reused");
+  });
+
+  it("is self-reported when no such run exists, and when the earlier run failed or its status does not vouch for it", () => {
+    expect(labelOf(reusedClause, [edit("src/a.ts", 2)])).toBe("self-reported");
+    expect(labelOf(reusedClause, [shell("npm test", 1, { status: "failed" }), edit("src/a.ts", 2)])).toBe("self-reported");
+    expect(labelOf(reusedClause, [shell("npm test | tail -5", 1), edit("src/a.ts", 2)])).toBe("self-reported");
+  });
+
+  it("counts a run under the && rule, as a detected check does", () => {
+    expect(labelOf(reusedClause, [shell("npm run lint && npm test", 1), edit("src/a.ts", 2)])).toBe("reused");
+  });
+
+  it("stays detected when it ran after the last edit, even when its clause says reused", () => {
+    expect(labelOf(reusedClause, [edit("src/a.ts", 1), shell("npm test", 2)])).toBe("detected");
+  });
+
+  it("reads only the check's own clause, split at a semicolon or a newline, the word on its own, case aside", () => {
+    const earlier = [shell("npm test", 1), shell("npm run lint", 1), edit("src/a.ts", 2)];
+    expect(verify("`npm test` pass; `npm run lint` REUSED from b1", earlier).named.map((claim) => claim.label)).toEqual(["self-reported", "reused"]);
+    expect(verify("`npm test` reused from b1\n`npm run lint` pass", earlier).named.map((claim) => claim.label)).toEqual(["reused", "self-reported"]);
+    expect(labelOf("`npm test` pass, not reusedfoo", earlier)).toBe("self-reported");
+  });
+
+  it("gives the verdict: detected when all are, reused when all are detected or reused with one reused, else as before", () => {
+    const evidence = [shell("npm run lint", 1), edit("src/a.ts", 2), shell("npm test", 3)];
+    expect(verify("`npm test` pass; `npm run lint` reused from b1", evidence).checks).toBe("reused");
+    expect(verify("`npm test` pass; `npm run build` reused from b1", evidence).checks).toBe("self-reported");
+    expect(verify("`npm test` pass", evidence).checks).toBe("detected");
+    expect(verify("not run", evidence).checks).toBe("unverified");
+  });
+
+  it("is not finished-unverified and reads verified with CI off", () => {
+    expect(isFinishedUnverified({ checks: "reused", changedFiles: true })).toBe(false);
+    expect(checksVerified("reused")).toBe(true);
+    expect(checksVerified("detected")).toBe(true);
+    expect(checksVerified("self-reported")).toBe(false);
+    expect(checksVerified(null)).toBe(false);
+    expect(verifiedOf({ ci: "off", committed: true, aheadOfOrigin: null, checks: "reused" })).toBe("verified");
+    expect(verifiedOf({ ci: "off", committed: false, aheadOfOrigin: null, checks: "reused" })).toBe("unverified");
+  });
+
+  it("shows on the card's and Work's lines", () => {
+    const verification = { checks: "reused" as const, named: [{ check: "npm test", label: "reused" as const }], files: [], beads: [], changedFiles: true, unverified: false, reportAt: at(5) };
+    expect(checkLabelText(verification, { label: "reused" })).toBe("reused");
+    expect(checksText(verification)).toBe("npm test — reused");
+    expect(verificationDetailLines(verification)).toEqual(["Checks: reused", "Check: npm test — reused"]);
   });
 });
 

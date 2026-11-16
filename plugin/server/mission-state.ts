@@ -12,6 +12,7 @@
  * (§4.6). Never throws: a store it cannot read leaves its part empty and
  * names it in `unknown`. Text is masked with `redactText`.
  */
+import { createAlertStore } from "./alert-store";
 import { join } from "node:path";
 import { deciderOf, type AuthorityFacts } from "../shared/authority";
 import { figureText } from "../shared/governor-figures";
@@ -233,6 +234,8 @@ export function missionStateOf(home: string, missionId: string, deps: MissionSta
   };
   // Delivery line design §4.9: the newest git fields reported in each placement.
   const reportedIn = new Map<string, ReportedLine>();
+  // ADR-042: a delivery that failed and nothing covers yet shows on the request.
+  const undelivered = new Set(quietly("the alerts", () => createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] }), []).map((alert) => `${alert.workspaceId}::${alert.subject}`));
   const requests: MissionStateRequest[] = roster.flatMap((entry) => {
     const report = quietly(`the reports of ${entry.requestId}`, () => newestReport(home, entry), null);
     const reported = report === null ? null : reportedLineOf(report);
@@ -272,6 +275,7 @@ export function missionStateOf(home: string, missionId: string, deps: MissionSta
           openDeciders: open.map((question) => question.decider),
           waitingOn,
           bound: isBoundRequest(registered),
+          undelivered: undelivered.has(`${entry.workspaceId}::${entry.requestId}`),
         }),
         lastReport: report === null ? null : { phase: report.phase, at: report.at, line: text(report.line, 200) },
         followUpAt,
@@ -281,6 +285,8 @@ export function missionStateOf(home: string, missionId: string, deps: MissionSta
         continuedBy: registered?.continuedBy ?? null,
         chainPosition: chainPositionOf(entry.continuationOf ?? registered?.continuationOf, previousOf),
         ...(line === null ? {} : { committed: line.committed, verified, commit: line.committed ? (reported?.integration.commit ?? null) : null }),
+        // ADR-045 decision 6: accepted and flagged.
+        ...(registered?.proof?.kind === "could-not-run" ? { couldNotRun: true } : {}),
       },
     ];
   });

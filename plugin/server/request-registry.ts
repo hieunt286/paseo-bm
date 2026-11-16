@@ -68,6 +68,10 @@ const reviewCallSchema = z.object({
   tree: z.string().optional(),
   /** ADR-041: a re-review's own bounded brief, also used by a replacement Reviewer. */
   brief: z.string().optional(),
+  /** ADR-045 decision 10: made on a predecessor and copied with its batch; its verdict is settled and it charges nothing here. */
+  adopted: z.literal(true).optional(),
+  /** ADR-046: adopted while its verdict was still on its way, so the continuation waits for it; the verdict's record names the request that made the call. */
+  awaited: z.literal(true).optional(),
 });
 
 /**
@@ -92,7 +96,14 @@ const reviewBatchSchema = z.object({
   milestone: z.enum(REVIEW_MILESTONES).optional(),
   /** Delivery line design §5.2: its results, oldest first; none on a batch an older build opened (read from the trace instead). */
   results: z.array(reviewResultSchema).optional(),
+  /** ADR-045 decision 10: the request a continuation copied this batch from; absent on a batch opened here. */
+  adoptedFrom: z.string().regex(REQUEST_ID_PATTERN).optional(),
 });
+
+/** ADR-045 decision 2: whether the request, read over its chain, may go further, why not, when, and the chain's newest reported commit. */
+const finishGateSchema = z.object({ passed: z.boolean(), reasons: z.array(z.string()), at: z.string(), commit: z.string().nullable() });
+const forNextStepSchema = z.object({ summary: z.string(), contract: z.string().optional(), remaining: z.string().optional(), branch: z.string().optional() });
+const runtimeProofSchema = z.object({ kind: z.enum(["ran", "could-not-run"]), what: z.string(), showed: z.string().optional(), at: z.string() });
 
 const requestSchema = z.object({
   requestId: z.string().regex(REQUEST_ID_PATTERN),
@@ -118,7 +129,7 @@ const requestSchema = z.object({
   /** Delivery line design §2.2: why this request was continued, by what figure, and when. */
   rollover: z.object({ reason: z.enum(["follow-up", "size"]), figure: z.string(), at: z.string() }).optional(),
   /** Delivery line design §2.6: the newest rollover notice its Worker got (`soft` or `now`), at what figure, and when. */
-  rolloverAsked: z.object({ level: z.enum(["soft", "now"]), figure: z.string(), at: z.string() }).optional(),
+  rolloverAsked: z.object({ level: z.enum(["soft", "now"]), figure: z.string(), at: z.string(), /** ADR-046: the Worker a `now` was addressed to; a later Worker of the request is asked again. Absent on a soft notice and on a record of an older build. */ workerId: z.string().optional() }).optional(),
   /** Delivery line design §6.2: what a `blocked` report waits on, by id; absent (or null) = no structured wait. */
   waiting: waitingSchema.nullable().optional(),
   /**
@@ -126,9 +137,21 @@ const requestSchema = z.object({
    * records and traces stay readable under those. Absent: it never moved.
    */
   movedFrom: z.array(z.object({ workspaceId: z.string().min(1), at: z.string() })).optional(),
+  /** ADR-045 decision 2: created on a build with the finish gate, so a missing result fails; absent on a request from before it. */
+  gated: z.literal(true).optional(),
+  /** ADR-045 decision 2: the gate's final result, written before the roster turns finished (`noteFinishGate`). */
+  finishGate: finishGateSchema.optional(),
+  /** ADR-045 decision 3: what a finished step left for the next step's Worker, with the branch of its commit; read when that step starts. */
+  forNextStep: forNextStepSchema.optional(),
+  /** ADR-045 decision 6: what its `finished` ran for real, or why it could not; masked. */
+  proof: runtimeProofSchema.optional(),
 });
 
 export type RegisteredRequest = z.infer<typeof requestSchema>;
+/** A request's stored finish gate result (ADR-045 decision 2). */
+export type FinishGateResult = z.infer<typeof finishGateSchema>;
+export type ForNextStep = z.infer<typeof forNextStepSchema>;
+export type RuntimeProof = z.infer<typeof runtimeProofSchema>;
 
 /**
  * True for a bound request (delivery line design §2.3): one the plugin's tools
@@ -187,7 +210,8 @@ function nonEmpty(value: unknown): string | null {
 }
 
 function newEntry(workspaceId: string, requestId: string, createdAt: string, source: RequestSource, managerId: string | null, workerIds: string[]): RegisteredRequest {
-  return { requestId, workspaceId, createdAt, source, managerId, workerIds, tier: null, finishedAt: null, reviews: { batches: [], grants: [] } };
+  // ADR-045 decision 2: a backfilled entry is a request from before this build, not one it creates.
+  return { requestId, workspaceId, createdAt, source, managerId, workerIds, tier: null, finishedAt: null, reviews: { batches: [], grants: [] }, ...(source === "backfill" ? {} : { gated: true as const }) };
 }
 
 /**
@@ -296,6 +320,16 @@ export interface RequestRegistry {
    */
   noteReport(workspaceId: string, requestId: string, report: { tier: "Small" | "Medium" | "Large"; phase: string; at: string }): boolean;
   /**
+   * ADR-045 decision 2: the request's finish gate result, final when written.
+   * False when the request is not registered. Throws when the file cannot be
+   * written, and then no result is stored.
+   */
+  noteFinishGate(workspaceId: string, requestId: string, finishGate: FinishGateResult): boolean;
+  /** ADR-045 decision 3: what a finished step left for the next one. False when the request is not registered. Throws when the file cannot be written. */
+  noteForNextStep(workspaceId: string, requestId: string, forNextStep: ForNextStep): boolean;
+  /** Stores what its `finished` ran for real (ADR-045 decision 6); false when the request is not there. */
+  noteProof(workspaceId: string, requestId: string, proof: RuntimeProof): boolean;
+  /**
    * Delivery line design §2.2, §2.4: the request `continuedBy` continues this
    * one, why and by what figure. False when the request is not registered.
    * Throws when the file cannot be written.
@@ -324,6 +358,13 @@ export interface RequestRegistry {
     brief?: string,
     milestone?: ReviewMilestone,
   ): "added" | "no-request" | "no-batch" | "batch-taken";
+  /**
+   * ADR-045 decision 10: copies `batches` onto a continuation, as they stand
+   * with `adoptedFrom` and each call marked `adopted`. A batch id the request
+   * holds already is left as it is. The number copied. Throws when the file
+   * cannot be written.
+   */
+  adoptReviewBatches(workspaceId: string, requestId: string, batches: readonly ReviewBatch[], adoptedFrom: string): number;
   /**
    * Appends one result to its batch (delivery line design §5.2), once per
    * record. A batch an older build opened has no `results` and gets none
@@ -403,6 +444,10 @@ export function newestCallOf(batch: Pick<ReviewBatch, "calls">, keep: (call: Rev
   }
   return newest;
 }
+/** The calls of a batch its own request made: the adopted ones are charged to the request that made them (ADR-045 decision 10). */
+export function ownCallsOf(batch: Pick<ReviewBatch, "calls">): ReviewCall[] {
+  return batch.calls.filter((call) => call.adopted !== true);
+}
 /** One grant of a `review-budget` decision (design §16.4, §16.8). */
 export type ReviewBudgetGrant = RegisteredRequest["reviews"]["grants"][number];
 
@@ -457,7 +502,15 @@ export function noteReviewResult(
       result = { at: record.createdAt, recordId: record.id, verdict: review.verdict!, blocking: review.blockingCount };
     }
     const place = requestIndexOf(home, record.requestId)?.workspaceId ?? workspaceId;
-    createRequestRegistry(home, { log }).addReviewResult(place, record.requestId, record.batchId, result);
+    const registry = createRequestRegistry(home, { log });
+    registry.addReviewResult(place, record.requestId, record.batchId, result);
+    // ADR-046: a batch a `BM-ROLLOVER now` carried on with its verdict in flight gets that verdict on every copy down the chain.
+    const seen = new Set([record.requestId]);
+    for (let next = registry.get(place, record.requestId)?.continuedBy; next !== undefined && !seen.has(next); next = registry.get(place, next)?.continuedBy) {
+      seen.add(next);
+      if (registry.get(place, next)?.reviews.batches.find((batch) => batch.batchId === record.batchId)?.adoptedFrom === undefined) break;
+      registry.addReviewResult(place, next, record.batchId, result);
+    }
   } catch (error) {
     log(`[paseo-bm] could not record the result ${record.id} of batch ${record.batchId} of ${record.requestId}: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -618,6 +671,36 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
       });
       return found;
     },
+    noteFinishGate(workspaceId, requestId, finishGate) {
+      let found = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          found = true;
+          return { ...request, finishGate };
+        }),
+      );
+      return found;
+    },
+    noteForNextStep(workspaceId, requestId, forNextStep) {
+      let found = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          found = true;
+          return { ...request, forNextStep };
+        }),
+      );
+      return found;
+    },
+    noteProof(workspaceId, requestId, proof) {
+      let found = false;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          found = true;
+          return { ...request, proof };
+        }),
+      );
+      return found;
+    },
     noteContinuedBy(workspaceId, requestId, continuedBy, rollover) {
       let found = false;
       update(workspaceId, (requests) =>
@@ -691,6 +774,18 @@ export function createRequestRegistry(home: string, deps: RequestRegistryDeps = 
         }),
       );
       return removed;
+    },
+    adoptReviewBatches(workspaceId, requestId, batches, adoptedFrom) {
+      let copied = 0;
+      update(workspaceId, (requests) =>
+        withRequest(requests, requestId, (request) => {
+          const held = new Set(request.reviews.batches.map((batch) => batch.batchId));
+          const fresh = batches.filter((batch) => !held.has(batch.batchId)).map((batch) => ({ ...batch, adoptedFrom, calls: batch.calls.map((call) => ({ ...call, adopted: true as const })) }));
+          copied = fresh.length;
+          return fresh.length === 0 ? null : { ...request, reviews: { ...request.reviews, batches: [...request.reviews.batches, ...fresh] } };
+        }),
+      );
+      return copied;
     },
     addReviewResult(workspaceId, requestId, batchId, result) {
       let outcome: "added" | "known" | "no-request" | "no-batch" | "older-batch" = "no-request";

@@ -41,6 +41,7 @@
  * - **Each request is delivered by one run at a time**; a settlement during a
  *   run makes that run look once more. Never throws: a failure is one log line.
  */
+import { tellFailedDelivery } from "./delivery-failure";
 import type { TraceRecord } from "../shared/contracts";
 import { answersText, type Pick as AnswerPick, type Question } from "../shared/bm-questions";
 import { decisionKindOf, type Decision, type DecisionDelivery } from "../shared/decisions";
@@ -298,10 +299,14 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
     const pending = undelivered(store, workspaceId, requestId);
     if (pending.length === 0) return;
     const kind = answersKindOf(requestId);
+    /** ADR-042 decision 5: answers that reached nobody are told, never only recorded. */
+    const tell = (to: string, why: string): void =>
+      void tellFailedDelivery({ workspaceId, requestId, what: `the answers ${pending.map((decision) => decision.id).join(", ")}`, to, reason: why }, { home, queue, paseo, now, log });
     const failAll = (to: string | null, why: string): void => {
       log(`[paseo-bm] the answers ${pending.map((decision) => decision.id).join(", ")} were not delivered: ${why}.`);
       const at = now().toISOString();
       for (const decision of pending) record(store, decision, { to: to ?? decision.askedBy.agentId ?? "worker", kind, at, outcome: "failed" });
+      tell(to ?? "its Worker", why);
     };
     let workerId: string | null;
     try {
@@ -339,13 +344,19 @@ export function createQuestionDecisionDelivery(deps: QuestionDeliveryDeps = {}):
       const write = (outcome: DecisionDelivery["outcome"]): void => writeDeliveries(home, pending, { to: workerId, kind, at: now().toISOString(), outcome }, log);
       for (const decision of pending) queuedHere.delete(decision.id);
       write("queued");
-      const released = await releaseWait(gate.release, { key: kind, block: text, settles: gate.settles, refs, callbacks: { onSent: () => write("sent"), onDropped: () => write("failed"), onHeld: heldAtSend } }, { home, queue, paseo, log, now });
+      const released = await releaseWait(gate.release, { key: kind, block: text, settles: gate.settles, refs, callbacks: { onSent: () => write("sent"), onDropped: (_target, _kind, reason) => { write("failed"); tell(workerId, reason); }, onHeld: heldAtSend } }, { home, queue, paseo, log, now });
       if (released === "dropped") log(`[paseo-bm] the answers ${pending.map((decision) => decision.id).join(", ")} were not delivered: Worker ${workerId} is archived, closed or gone, or the send failed.`);
       return;
     }
     let heldNow = false;
-    const outcome = await queue.enqueue(workerId, kind, text, paseo, { onHeld: () => ((heldNow = true), heldAtSend()) }, { isHeld: holdsAtSend(home, workerId, "answers", refs, { workspaceId, requestId }, { now, log }) });
-    if (heldNow) return;
+    // Told at once or at a later turn end: a queued block can still fail. Never for a block a newer one replaced.
+    let droppedNow = false;
+    const onDropped = (_target: string, _kind: string, reason: string): void => {
+      droppedNow = true;
+      failAll(workerId, reason);
+    };
+    const outcome = await queue.enqueue(workerId, kind, text, paseo, { onHeld: () => ((heldNow = true), heldAtSend()), onDropped }, { wake: true, isHeld: holdsAtSend(home, workerId, "answers", refs, { workspaceId, requestId }, { now, log }) });
+    if (heldNow || droppedNow) return;
     if (outcome === "dropped") {
       failAll(workerId, `Worker ${workerId} is archived, closed or gone, or the send failed`);
       return;

@@ -325,6 +325,40 @@ Read-only replay of the whole store after bead `i8fc.1`: 0 pairs of agents writi
 
 The owner chooses per project, in Settings → Autonomy, the action boundary (change-010) and the challenger; the choices are recorded here when made.
 
+## 7. A Worker's fixed context: the plugin's share (mission line, WP-207, 2026-11-10)
+
+ADR-045 decision 11: measure what the plugin adds to a session's fixed context, trim it to the measured budget, and report what lies outside its reach. The field baseline is 57k tokens (mission AIX, ADR-045 Context). Every figure below is computed from source by `test/eval-worker-baseline.test.ts` (`npm run test:eval -- test/eval-worker-baseline.test.ts`) at 3.6 characters a token; no agent record, token or live session is read. "Before" is the tree of 2026-11-10 ahead of this trim.
+
+### 7.1 Figures, before and after
+
+| Part | Before: characters | Before: tokens | After: characters | After: tokens |
+|---|---:|---:|---:|---:|
+| `plugin/roles/worker.md` | 16,618 | 4,617 | 16,779 | 4,661 |
+| Runtime facts of a typical mission Worker (bound, in a placement, action boundary on, no precedent) | 218 | 61 | 218 | 61 |
+| A `workerBriefOf` sample at the full memory budget (6,000 characters of memory, a 194-character request) | 6,618 | 1,839 | 6,618 | 1,839 |
+| The Worker's eight `bm_` tool faces, `JSON.stringify` | 23,651 | 6,570 | 20,286 | 5,635 |
+| **The plugin's total** | **47,105** | **13,085** | **43,901** | **12,195** |
+
+- **The plugin's share of 57k:** 23.0% before, 21.4% after.
+- **What remains outside (about 43.9k tokens, 57k less the 13.1k before the trim):** Claude Code's own system prompt, its built-in tool definitions, the skills listing, the repository's `CLAUDE.md` or `AGENTS.md`, and the Paseo tool definitions. Those parts are not the plugin's text and are not chased (ADR-045 decision 11).
+- **The Paseo tools a Worker is given** (ADR-020, `rolePaseoToolsPolicy("worker")`, printed by the test): every tool of Paseo's server except `kill_agent`, `archive_agent`, `archive_workspace`, `respond_to_permission`, `list_pending_permissions`, `set_agent_mode`, `update_agent`, the schedule and heartbeat tools, `create_workspace` and `rename_workspace`. The plugin picks the list; their definitions are Paseo's and unmeasured here (no live session is read), and cutting a tool a Worker needs is out of scope.
+- **A Worker's precedents** are not in the sample: each adds one fact line, at most `MAX_INJECTED_PRECEDENTS` of them.
+
+### 7.2 What can go without dropping a rule, and what was trimmed
+
+| Where | What went | Saved |
+|---|---|---:|
+| `bm_` tool faces | Explanations a Worker does not act on: what paseo-bm does internally with a call, what a refusal already says when it comes (the tail of `DELIVERED`), the effects-to-class mapping `bm_questions` applies itself, the format a `pattern` or `maxLength` already enforces, an item description that repeats its array's, and wording the role file states | 3,365 |
+| `worker.md` | The bead-slug example shortened; the text is otherwise rules that `test/roles-content.test.ts` pins, so the quiet-check forms (ADR-045 decision 12) add 179 characters, net +161 | -161 |
+| Worker lines of `role-instructions.ts` | Nothing: a bound mission Worker's facts are three short fact lines (218 characters), each pinned; the hand path is for an unbound Worker and is not in this figure | 0 |
+| The brief | Nothing: its size is the owner's memory budget (`BRIEF_MEMORY_CHARS`) | 0 |
+
+No rule, limit or required field was removed or weakened: `test/roles-content.test.ts` and `test/bm-tools.test.ts` pin them.
+
+### 7.3 The target and the ratchet
+
+The target is what the trim reached, **at most 12,200 tokens of the plugin's fixed context** (it reached 12,195 tokens, 43,901 characters), about 21.4% of 57k. `test/eval-worker-baseline.test.ts` pins each part and the total as a ratchet: a higher figure is a decision, not a drift. The 57k to 40k direction is beyond the plugin's reach: a session with no plugin text at all would still start at about 44k.
+
 ## Revision History
 
 Rows up to 2026-10-02 are archived in [paseo-bm-eval-baseline-revision-history-to-20261002.md](../archive/operations/paseo-bm-eval-baseline-revision-history-to-20261002.md); git holds the full audit trail.
@@ -332,3 +366,4 @@ Rows up to 2026-10-02 are archived in [paseo-bm-eval-baseline-revision-history-t
 | Date | Author | Change |
 |---|---|---|
 | 2026-10-02 | Claude (owner request) | Documentation restructure: earlier rows moved to the archive; stale, retired and duplicated content condensed to the current state (section numbers and REQ ids kept) |
+| 2026-11-10 | Claude (mission line WP-207, owner's agreed recommendations) | §7 added: a Worker's fixed context, the plugin's share before and after the trim, what lies outside its reach, and the ratchet |

@@ -30,6 +30,8 @@ import { carriesPreparedChange, decisionKindOf, type Decision } from "./decision
 export const REVIEW_CAP_SUBJECT = "review-cap";
 /** The subject of the owner's one integration card per mission and repo (delivery line design §4.3). */
 export const INTEGRATION_SUBJECT = "integration";
+/** The subject of the owner's one local-merge card per mission and repo (ADR-045 decision 4). */
+export const LOCAL_MERGE_SUBJECT = "local-merge";
 
 /**
  * The subjects code owns. `askedBy: "plugin"`: paseo-bm opens the question
@@ -40,6 +42,7 @@ export const CODE_SUBJECTS = {
   "review-cap": { precedent: false, askedBy: "plugin" },
   "review-budget": { precedent: false, askedBy: "retired" },
   integration: { precedent: false, askedBy: "plugin", when: "once per mission and repository" },
+  "local-merge": { precedent: false, askedBy: "plugin", when: "once per mission and repository" },
 } as const;
 
 export type CodeSubject = keyof typeof CODE_SUBJECTS;

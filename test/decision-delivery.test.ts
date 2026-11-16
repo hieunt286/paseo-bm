@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isPluginNotice } from "../plugin/shared/notices";
 import {
   answersKindOf,
@@ -12,6 +12,7 @@ import {
 } from "../plugin/server/decision-delivery";
 import { materialiseTurn } from "../plugin/server/decision-materialiser";
 import { handleDecisionsAnswer, settledByKind } from "../plugin/server/decision-rpc";
+import { createAlertStore } from "../plugin/server/alert-store";
 import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/decision-store";
 import { createNoticeQueue, type NoticeQueue } from "../plugin/server/notice-queue";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
@@ -35,7 +36,7 @@ let root: string;
 let home: string;
 let logs: string[];
 
-type Agent = { status: string; archivedAt?: string | null };
+type Agent = { status: string; archivedAt?: string | null; persistence?: { sessionId: string } };
 
 /** A fake Paseo: `refresh()` answers the scripted status; a `send()` starts a turn (the agent becomes `running`). */
 function world(initial: Record<string, Agent> = { [WORKER]: { status: "idle" } }) {
@@ -335,6 +336,14 @@ describe("a Worker waiting by structure (delivery line design §6.4)", () => {
     expect([1, 2].map((n) => get(n).delivery?.outcome)).toEqual(["sent", "sent"]);
   });
 
+  it("an answer given while the plugin was down still wakes a resting Worker at the plugin's start (ADR-044)", async () => {
+    answer(1);
+    const w = world({ [WORKER]: { status: "closed", persistence: { sessionId: "session-1" } } });
+    await delivery(w.queue).resume(w.paseo);
+    expect(parseAnswers(w.sends[0]!.text)?.answers.map((entry) => entry.id)).toEqual(["Q1"]);
+    expect(get(1).delivery?.outcome).toBe("sent");
+  });
+
   it("held answers are gated again after a reload, and stay held while the wait is not met", async () => {
     waitOn([1, 2]);
     const w = world();
@@ -387,6 +396,50 @@ describe("a Worker that cannot be reached", () => {
     expect(w.sends).toEqual([]);
     expect(get(1).delivery).toEqual({ to: WORKER, kind: answersKindOf(REQUEST), at: NOW.toISOString(), outcome: "failed" });
     expect(logs.join("\n")).toContain("has no single live Worker");
+  });
+
+  it("a Worker Paseo closed after its idle hour gets the answers: a blocked Worker waits as long as the owner takes (ADR-042)", async () => {
+    const w = world({ [WORKER]: { status: "closed", persistence: { sessionId: "session-1" } } });
+    await delivery(w.queue).onSettled([answer(1)], { paseo: w.paseo });
+    expect(parseAnswers(w.sends[0]!.text)?.answers.map((entry) => entry.id)).toEqual(["Q1"]);
+    expect(get(1).delivery?.outcome).toBe("sent");
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toEqual([]);
+  });
+
+  it("answers that reach nobody raise the delivery-dropped alert and tell the request's Main (ADR-042 decision 5)", async () => {
+    createRequestRegistry(home, { backfill: () => [] }).register(WORKSPACE, REQUEST, { source: "tool", managerId: "main-1", workerId: WORKER });
+    const w = world({ [WORKER]: { status: "idle", archivedAt: "2026-09-29T07:55:00.000Z" }, "main-1": { status: "idle" } });
+    await delivery(w.queue).onSettled([answer(1)], { paseo: w.paseo });
+    await vi.waitFor(() => expect(w.sends.map((send) => send.id)).toEqual(["main-1"]));
+    expect(w.sends[0]!.text).toContain("BM-DELIVERY-FAILED");
+    expect(w.sends[0]!.text).toContain(idOf(1));
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toMatchObject([{ workspaceId: WORKSPACE, subject: REQUEST }]);
+  });
+
+  it("a queued block that fails at a later turn end is recorded failed and told once, never read as sent (ADR-042 decision 5)", async () => {
+    createRequestRegistry(home, { backfill: () => [] }).register(WORKSPACE, REQUEST, { source: "tool", managerId: "main-1", workerId: WORKER });
+    const w = world({ [WORKER]: { status: "running" }, "main-1": { status: "idle" } });
+    const deliver = delivery(w.queue);
+    await deliver.onSettled([answer(1)], { paseo: w.paseo });
+    expect(get(1).delivery?.outcome).toBe("queued");
+    w.set(WORKER, { archivedAt: "2026-09-29T07:55:00.000Z" });
+    await w.turnEnds();
+    await vi.waitFor(() => expect(w.sends.map((send) => send.id)).toEqual(["main-1"]));
+    expect(get(1).delivery?.outcome).toBe("failed");
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toHaveLength(1);
+    // A later settlement finds it failed, not a queued block that went out.
+    await deliver.onSettled([answer(2)], { paseo: w.paseo });
+    expect(get(1).delivery?.outcome).toBe("failed");
+  });
+
+  it("a block a newer one replaced in the queue is not a failure", async () => {
+    const w = world({ [WORKER]: { status: "running" } });
+    const deliver = delivery(w.queue);
+    await deliver.onSettled([answer(1)], { paseo: w.paseo });
+    await deliver.onSettled([answer(2)], { paseo: w.paseo });
+    await w.turnEnds();
+    expect(parseAnswers(w.sends[0]!.text)?.answers.map((entry) => entry.id)).toEqual(["Q1", "Q2"]);
+    expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toEqual([]);
   });
 
   it("an archived or gone Worker: the queue drops it, recorded failed, and a failed answer is not retried", async () => {

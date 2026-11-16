@@ -570,6 +570,25 @@ describe("the git fields (delivery line design §4.4)", () => {
     expect(loose?.integration).toEqual({ branch: "m/ABC/fe", pushed: false });
   });
 
+  it("reads a runtime proof line back, ran or could not run; a report without one has no such field (ADR-045 decision 6)", () => {
+    expect(parseReports([...head, "runtimeProof: ran — opened the page; showed: it renders; and scrolls"].join("\n"), ctx)[0]?.runtimeProof).toEqual({ kind: "ran", what: "opened the page", showed: "it renders; and scrolls" });
+    expect(parseReports([...head, "runtimeProof: could not run — it needs a login; there is none here"].join("\n"), ctx)[0]?.runtimeProof).toEqual({ kind: "could-not-run", what: "it needs a login; there is none here" });
+    const unknownShape = parseReports([...head, "runtimeProof: maybe"].join("\n"), ctx)[0];
+    expect(unknownShape).not.toHaveProperty("runtimeProof");
+    expect(unknownShape?.unparsedFields).toEqual([]);
+    expect(parseReports(PRIOR_FORMAT, ctx)[0]).not.toHaveProperty("runtimeProof");
+  });
+
+  it("reads a received's goal and acceptance back; a report without them has neither (ADR-045 decision 7)", () => {
+    const [report] = parseReports(["BM-REPORT", "requestId: req-20261021T100000Z", "phase: received", "goal: The invoices page lists every invoice", "acceptance: The page lists them; An empty list reads as empty", "blockers: none"].join("\n"), ctx);
+    expect(report).toMatchObject({ goal: "The invoices page lists every invoice", acceptance: ["The page lists them", "An empty list reads as empty"] });
+    expect(report?.unparsedFields).toEqual([]);
+    for (const older of [PRIOR_FORMAT, CURRENT_FORMAT, head.join("\n")]) {
+      expect(parseReports(older, ctx)[0]).not.toHaveProperty("goal");
+      expect(parseReports(older, ctx)[0]).not.toHaveProperty("acceptance");
+    }
+  });
+
   it("a report written before them has no integration field", () => {
     expect(parseReports(PRIOR_FORMAT, ctx)[0]).not.toHaveProperty("integration");
     expect(parseReports(CURRENT_FORMAT, ctx)[0]).not.toHaveProperty("integration");

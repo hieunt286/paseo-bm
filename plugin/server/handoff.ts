@@ -333,7 +333,7 @@ async function within<T>(budget: number, work: () => Promise<T> | T): Promise<T 
 }
 
 /** A plan, a design or another document among the files changed. */
-const DOC_PATH = /(?:^|\/)(?:docs?|plans?|design|adr)\/|\.(?:md|mdx|rst|adoc)$/i;
+export const DOC_PATH = /(?:^|\/)(?:docs?|plans?|design|adr)\/|\.(?:md|mdx|rst|adoc)$/i;
 
 /** `text` cut at a word's end to at most `max` characters (mid-word only for one word longer than `max`). */
 function wordCut(text: string, max: number): string {
@@ -615,9 +615,9 @@ export function handoffInfoCommandOf(entry: Pick<HandoffEntry, "id" | "requestId
  * The line a Main's successor gets after its brief (missions design §9.5):
  * whom it takes the mission over from, and why.
  */
-export function mainHandoffLineOf(oldMainId: string, crossing: ThresholdCrossing | string): string {
+export function mainHandoffLineOf(oldMainId: string, crossing: ThresholdCrossing | string, how = "in a fresh context"): string {
   const why = typeof crossing === "string" ? crossing : crossingWordsOf(crossing);
-  return `You take this mission over from Main ${oldMainId}: ${why}, so paseo-bm handed the mission over to you in a fresh context. Its chat keeps the earlier conversation; start from the mission state above. In your first reply tell the owner in one line that you took over and what is in flight, from that state.`;
+  return `You take this mission over from Main ${oldMainId}: ${why}, so paseo-bm handed the mission over to you ${how}. Its chat keeps the earlier conversation; start from the mission state above. In your first reply tell the owner in one line that you took over and what is in flight, from that state.`;
 }
 
 /**

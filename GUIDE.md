@@ -73,8 +73,7 @@ No `sudo` is needed, and nothing is written to your machine until you open the p
 
 ## Install
 
-Needs Paseo 0.9.0 or newer. Either install from **[paseo.cafe](https://paseo.cafe)**, the plugin
-listing inside the Paseo app, or run:
+Needs Paseo 0.9.0 or newer. Paseo installs the plugin from npm:
 
 ```bash
 paseo plugin add npm:paseo-bm-plugin

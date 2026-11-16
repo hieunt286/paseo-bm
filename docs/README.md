@@ -2,7 +2,7 @@
 
 Everything in `docs/` except `archive/` is **living documentation**: it describes the product **as it runs now** (0.5.x), is edited in place in the same commit as the code, and gains one Revision History line per change. Git is the audit trail; superseded documents and old history live in [`archive/`](archive/README.md). How much process a change needs (Direct / Tracked / Designed) is in [`AGENTS.md`](../AGENTS.md), section *Process*.
 
-paseo-bm is one package, the Paseo plugin `paseo-bm-plugin`, installed from paseo.cafe or with `paseo plugin add npm:paseo-bm-plugin` ([ADR-012](adr/ADR-012-plugin-is-the-product.md)). What is published is `plugin-package/`, generated from `plugin/` ([ADR-026](adr/ADR-026-published-plugin-is-bundled.md)).
+paseo-bm is one package, the Paseo plugin `paseo-bm-plugin`, installed from npm with `paseo plugin add npm:paseo-bm-plugin` ([ADR-012](adr/ADR-012-plugin-is-the-product.md), [ADR-048](adr/ADR-048-no-dependency-on-paseo-cafe-and-no-bundle-size-limit.md)). What is published is `plugin-package/`, generated from `plugin/` ([ADR-026](adr/ADR-026-published-plugin-is-bundled.md)).
 
 ## What the product does — `product/`
 
@@ -46,10 +46,10 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [006](adr/ADR-006-role-registration.md) | Roles registered as derived providers and agent profiles | Amended by 012; decision 9 superseded by 020 |
 | [007](adr/ADR-007-dashboard-trace-store.md) | Trace store in the install home, deletable by the user | Accepted |
 | [008](adr/ADR-008-role-settings-written-by-plugin.md) | The plugin writes role settings through `config.patch`; fallback aliases | Amended by 012 |
-| [009](adr/ADR-009-payload-as-npm-package.md) | The payload is its own npm package, `paseo-bm-plugin` | Decisions 4–5 superseded by 012; the published form by 026 |
+| [009](adr/ADR-009-payload-as-npm-package.md) | The payload is its own npm package, `paseo-bm-plugin` | Decisions 4–5 superseded by 012; the published form by 026; amended by 048 |
 | [010](adr/ADR-010-plugin-hosted-agent-tools.md) | The plugin serves schema-typed tools to agents over MCP HTTP | Accepted |
 | [011](adr/ADR-011-manager-coordinates-workers.md) | The Manager coordinates Workers within the scope the user decided | Amended by 016 |
-| [012](adr/ADR-012-plugin-is-the-product.md) | The plugin from npm / paseo.cafe is the whole product; `npx paseo-bm` 0.4.0 only migrates | Accepted; the published form amended by 026 |
+| [012](adr/ADR-012-plugin-is-the-product.md) | The plugin from npm / paseo.cafe is the whole product; `npx paseo-bm` 0.4.0 only migrates | Accepted; the published form amended by 026; amended by 048 |
 | [013](adr/ADR-013-orchestrator-assess-and-nudge.md) | The first Orchestrator: an assessment per click, nudges sent by the plugin | Superseded by 014 (never released) |
 | [014](adr/ADR-014-orchestrator-agent-proposes-owner-approves.md) | One machine-wide Orchestrator agent proposes; the owner approves | Accepted; decisions 4–5 superseded by 015 |
 | [015](adr/ADR-015-orchestrator-autopilot-per-project.md) | Autopilot per project; the owner's word in chat counts as approval | Accepted; amended by 016 |
@@ -63,22 +63,29 @@ An ADR is never rewritten; a later ADR supersedes or amends it.
 | [023](adr/ADR-023-delegation-without-eligibility.md) | No eligibility gate; agreement is information | Accepted; partly superseded by 025 |
 | [024](adr/ADR-024-structure-tells-stops-and-waits.md) | A cut turn is told from the owner's stop by structure (`BM-INTERRUPTED`) | Accepted |
 | [025](adr/ADR-025-autonomy-levels.md) | Five autonomy levels per project; no owner-only class; overrides recorded | Accepted |
-| [026](adr/ADR-026-published-plugin-is-bundled.md) | The published plugin is `plugin-package/`, each entry bundled | Accepted; decisions 2 and 6 amended by 030 |
+| [026](adr/ADR-026-published-plugin-is-bundled.md) | The published plugin is `plugin-package/`, each entry bundled | Accepted; decisions 2 and 6 amended by 030; amended by 048 |
 | [027](adr/ADR-027-agents-write-content-code-carries-it.md) | Agents write the content; the plugin's code creates, routes and delivers | Accepted |
 | [028](adr/ADR-028-projects-ask-each-other-through-the-plugin.md) | Projects ask each other through the plugin: peer links; every Manager bound | Accepted; decision 3 superseded by 029 |
 | [029](adr/ADR-029-missions-mains-and-a-process-governor.md) | Missions and their Mains in a shared home; the Orchestrator governs the process | Accepted |
-| [030](adr/ADR-030-published-bundle-minifies-identifiers.md) | The published bundle minifies identifiers and keeps names | Accepted |
+| [030](adr/ADR-030-published-bundle-minifies-identifiers.md) | The published bundle minifies identifiers and keeps names | Accepted; amended by 048 |
 | [031](adr/ADR-031-orchestrator-decisions-grant-no-effects.md) | An answer to an Orchestrator decision grants no effect (amends ADR-017 decision 4) | Accepted |
 | [032](adr/ADR-032-one-governor-a-mission-per-wake.md) | One governor for the machine, a mission per wake, a disposable conversation; `danger` goes to the Main first; measured before splitting | Accepted; decisions 2 and 4 amended by 033 |
 | [033](adr/ADR-033-the-mission-is-the-system-of-record.md) | The mission is the system of record; the Main is long-lived; one authority, one owner, a signal budget | Accepted |
 | [034](adr/ADR-034-each-mission-has-its-own-workspace.md) | Each mission has its own workspace in the Mission-List project | Accepted |
-| [035](adr/ADR-035-a-delivery-line.md) | A delivery line: bounded requests, a branch per mission, integration as a stage, limits that hold | Accepted; supersedes parts of 027, 029, 033 and 034 |
-| [036](adr/ADR-036-no-agent-waits-on-machines.md) | No agent waits on machines: CI off, re-reviews of the fix diff by a fresh Reviewer, Workers capped by context | Accepted; amends 035 decisions 1, 3, 4 |
+| [035](adr/ADR-035-a-delivery-line.md) | A delivery line: bounded requests, a branch per mission, integration as a stage, limits that hold | Accepted; supersedes parts of 027, 029, 033 and 034; decisions 1 and 3 amended by 045 |
+| [036](adr/ADR-036-no-agent-waits-on-machines.md) | No agent waits on machines: CI off, re-reviews of the fix diff by a fresh Reviewer, Workers capped by context | Accepted; amends 035 decisions 1, 3, 4; the context figure's default amended by 045 |
 | [037](adr/ADR-037-agents-are-given-a-bounded-context.md) | Agents are given a bounded context: scoped memory, budgeted briefs, summary reads, a Main compacted by tokens | Accepted; amends 029's memory in briefs and the mission runtime's §3.2 |
-| [038](adr/ADR-038-parallel-lanes-and-a-held-queue.md) | Parallel lanes in a repository, owner's words steered into a running turn, and a held queue | Accepted; amends 035 decision 2 and the delivery line design §3.7 |
-| [039](adr/ADR-039-new-work-never-into-a-busy-worker.md) | New work never goes into a busy Worker; outdated Mains are handed over when idle | Accepted; amends 038 decisions 3 and 4 |
+| [038](adr/ADR-038-parallel-lanes-and-a-held-queue.md) | Parallel lanes in a repository, owner's words steered into a running turn, and a held queue | Accepted; amends 035 decision 2 and the delivery line design §3.7; decisions 3 and 5 amended by 045 |
+| [039](adr/ADR-039-new-work-never-into-a-busy-worker.md) | New work never goes into a busy Worker; outdated Mains are handed over when idle | Accepted; amends 038 decisions 3 and 4; decision 1's route amended by 045 |
 | [040](adr/ADR-040-the-main-resolves-its-requests-fallback.md) | The Main resolves its requests' delegated provider fallback | Accepted; amends 033 decision 3 |
-| [041](adr/ADR-041-incremental-review-and-affected-checks.md) | Review completed implementation once, later deltas and open findings only; affected validation with valid evidence reused | Accepted; amends 036 decision 2 |
+| [041](adr/ADR-041-incremental-review-and-affected-checks.md) | Review completed implementation once, later deltas and open findings only; affected validation with valid evidence reused | Accepted; amends 036 decision 2; decision 4 amended by 045 |
+| [042](adr/ADR-042-a-collected-agent-rests-and-a-failed-delivery-is-told.md) | A collected agent rests and wakes for what someone waits on; a failed delivery is told and shown on the request (clarifies ADR-005 decision 5) | Accepted; decisions 2, 5 and 6 amended by 045 |
+| [043](adr/ADR-043-a-repository-outlives-its-root-workspace.md) | A repository outlives its root workspace: a proved alias keeps its key, and a refused Worker goes to the owner (amends ADR-035 decision 2) | Accepted |
+| [044](adr/ADR-044-a-restart-does-not-revive-dormant-missions.md) | A plugin start does not revive a dormant mission: old news does not wake a resting agent, and an outdated Main is handed over only while its mission has work (amends ADR-042 decision 2 and ADR-039) | Accepted; decision 1 amended by 045 |
+| [045](adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) | A mission runs as a supervised line of approved steps: one sequential slot, a finish gate, the plugin advances, a local fast-forward, runtime proof, one delivery rule | Accepted; amends 035 decisions 1 and 3, 036, 038 decisions 3 and 5, 039 decision 1, 041 decision 4, 042 decisions 2, 5 and 6, and 044 decision 1; decision 10 amended by 046 |
+| [046](adr/ADR-046-rollover-now-is-never-deferred-for-a-review.md) | `BM-ROLLOVER now` is never deferred for a review: a size finish carries a batch with no verdict onto its continuation, and the notice follows the request's current Worker | Accepted; amends 045 decision 10 and 035 decision 1 |
+| [047](adr/ADR-047-a-repo-alias-reaches-later-missions-and-a-peer-answer-takes-no-slot.md) | A repo's alias reaches later missions, and a peer answer takes no slot | Accepted; amends 043 and 045 decision 1 |
+| [048](adr/ADR-048-no-dependency-on-paseo-cafe-and-no-bundle-size-limit.md) | paseo-bm does not depend on paseo.cafe, and the published bundle has no size limit | Accepted; amends 009, 012, 026 and 030 decision 2 |
 
 ## Work in progress — `plans/`
 
@@ -87,13 +94,14 @@ A plan exists only for a piece of Designed work and moves to the archive when it
 | Plan | State |
 |---|---|
 | Autonomy programme: [phase1b](plans/paseo-bm-plan-autonomy-phase1b.md), [phase2](plans/paseo-bm-plan-autonomy-phase2.md), [phase3](plans/paseo-bm-plan-autonomy-phase3.md), [phase4](plans/paseo-bm-plan-autonomy-phase4.md), [phase5](plans/paseo-bm-plan-autonomy-phase5.md), [phase6](plans/paseo-bm-plan-autonomy-phase6.md) | Every phase is built and shipped in 0.5.0. What is open is each phase's exit, judged together in the combined field period (bead `bm-autonomy-phase6-i8fc.6`), then the programme evaluation. The change-deltas 001–014 are applied and [archived](archive/README.md#the-autonomy-programmes-change-deltas) |
+| [Mission line](plans/paseo-bm-mission-line.md) ([ADR-045](adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md)) | Active, Phases 1 and 2: in beads labelled `feature:mission-line`; both built and verified, the owner's install and acceptance next; no release in this plan |
 
 ## Running it — `operations/`
 
 | Document | Use it when |
 |---|---|
 | [Release runbook](operations/paseo-bm-release-runbook.md) | Releasing a version |
-| [paseo.cafe listing record](operations/paseo-bm-cafe-listing-20260923.md) | Changing the paseo.cafe entry; the registry's traps |
+| [paseo.cafe listing record](operations/paseo-bm-cafe-listing-20260923.md) | History: the paseo.cafe listing, not maintained since ADR-048 |
 | [Evaluation baseline](operations/paseo-bm-eval-baseline.md) | Comparing a phase's figures with the programme's baseline |
 | [Specialist admission template](operations/paseo-bm-specialist-admission-template.md) | Proposing a new agent role or model (autonomy design §F.2) |
 | Upstream requests: [cancel an agent](operations/paseo-upstream-request-agent-cancel.md), [timeline navigation](operations/paseo-upstream-request-timeline-navigation.md) | Two drafts for the Paseo maintainers, not sent yet |

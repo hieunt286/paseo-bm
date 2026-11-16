@@ -220,10 +220,12 @@ The Main's tools are bound Manager tools. Rows marked † are new.
 
 | Tool | Input | Does | Refusals |
 |---|---|---|---|
-| † `bm_mission` | — | Reads the caller's mission: charter, plan, contracts, roster with each active request's repo, Worker, phase, newest report and open questions, each settled one as a line (the newest 20), the mission level, the newest 20 journal lines; `requestId` and `journal` ask for more (delivery line design §18.3) | not a Main of a mission |
+| † `bm_mission` | — | Reads the caller's mission: charter, plan (with `planNote` when a stored plan is not all numbered lines: it may be stale, ADR-045 decision 8), contracts, roster with each active request's repo, Worker, phase, newest report and open questions, each settled one as a line (the newest 20), the mission level, the newest 20 journal lines; `requestId` and `journal` ask for more (delivery line design §18.3) | not a Main of a mission |
 | † `bm_mission_start` | `name`, `code`, `goal`, `repos` (workspace ids or folders) | An unassigned Main's first act: records a **proposed** mission (keyed by the Main and its turn's start mark); at the turn's end it settles only if the turn holds the owner's own message (as `bm_answers`). Creates the mission, labels and binds the Main | already in a mission; code taken; a repo unknown or a plugin home |
-| † `bm_mission_update` | any of `name`, `code`, `goal`, `nonGoals`, `doneCriteria` (add, edit text, set status), `budget`, `plan`, `contracts` (add, new version), `repos` (add or remove), `confirmCharter`, `close` | **Free for the Main:** `plan`, `contracts`, criterion **status** with evidence, new criteria; adding a repo at mission level `scope-repo`. **On the owner's card:** everything else — `name`, `code`, `goal`, `nonGoals`, `budget`, `confirmCharter`, `close`, removing a repo, editing or dropping a criterion, adding a repo without `scope-repo` — opens an `m:` decision (§4.1) whose options are "apply" and "keep as is", the change attached as a prepared change; the plugin applies it on the owner's tap. Each applied change adds a journal line | code taken; a repo unknown, archived or a plugin home; `close` while a Worker of the mission runs |
+| † `bm_mission_update` | any of `name`, `code`, `goal`, `nonGoals`, `doneCriteria` (add, edit text, set status), `budget`, `plan` (1 to 30 one-line steps of at most 200 characters, stored as `1. …` lines; a fact goes to `bm_memory` or a contract, ADR-045 decision 8; refused while a line is live), `steps` (an ordered list the owner approves once on one card, ADR-045 decision 1, delivery line design §19.6), `contracts` (add, new version), `repos` (add or remove), `confirmCharter`, `close` | **Free for the Main:** `plan`, `contracts`, criterion **status** with evidence, new criteria; adding a repo at mission level `scope-repo`. **On the owner's card:** everything else — `name`, `code`, `goal`, `nonGoals`, `budget`, `confirmCharter`, `close`, removing a repo, editing or dropping a criterion, adding a repo without `scope-repo` — opens an `m:` decision (§4.1) whose options are "apply" and "keep as is", the change attached as a prepared change; the plugin applies it on the owner's tap. Each applied change adds a journal line | code taken; a repo unknown, archived or a plugin home; `close` while a Worker of the mission runs |
 | `bm_create_worker` | + `project` (required when the mission has more than one repo) | `project` must be in the charter's `repos`. The Worker's `cwd` is that repo's directory; its binding `{ role: "worker", workspaceId: <repo>, requestId, parentId: <Main>, missionId }`; the request is registered **in that repo** with `managerId` and `missionId`; the roster gains it; the creation project (child mode, action boundary, autonomy) is that repo's. The brief adds `mission: <code> <name>`, the request's place in the plan, the repo's memory (§7, the newest 30 active entries and every `contract` entry that names the repo), and the mission's contracts touching the repo. Without `staffing` delegated, refused when the mission already has a live Worker in that repo or `charter.budget.workers` live Workers in all | `project` outside the scope, archived or a plugin home; the `staffing` rule above; the other refusals of base design §7.15 |
+| `bm_create_worker` (the line) | + `after` (`req-…` or `hold-…`), `next`, `parallel` | One sequential request at a time across the mission's repos (delivery line design §19.6): while one runs, `next` holds new work, `after` holds work that needs a result, `parallel` opens a lane on the owner's quoted word. `line.supervised` off refuses nothing for the slot | a word the owner did not type; none of the three beside a running request |
+| † `bm_hold_release` | `holdId`, `why` | On the owner's word: a `waiting-stopped` entry starts past its stop; the budget cap holds (delivery line design §19.6) | a started step; any other state |
 | `bm_tell_worker` | as now | The request is found through the request index; the caller must be the request's `managerId` (the mission's current Main) | — |
 | † `bm_link_workers` | `requestIds` (exactly 2, both of the caller's mission, live Workers), `topic` (≤ 2,000) | Opens a `worker` link, `taken` at once, from the first request's Worker to the second's; delivers to each a `peer-message` from the Main: "Your Main linked you with <other Worker> (<repo>, request <id>) about: <topic>. Talk on link <id> with bm_peer_reply." Adds a journal line | not two live requests of the caller's mission; a link between them already live (its id returned) |
 | † `bm_ask_mission` | `mission` (a code), `text`, `kind?` | Opens a `mission` link to that mission's Main; delivers `BM-DELIVERY peer` with "from mission <code>"; the other Main answers with `bm_peer_reply` | unknown or closed mission; the caller's own |
@@ -336,6 +338,8 @@ Recomputed on each recorded turn of a mission's agents and on the 60-second pass
 | **stuck** | stalls, unanswered links (`peer-unanswered`), cards older than 24 h | each |
 | **budget** | requests, Workers, review calls or days against `charter.budget` | ≥ 100% |
 
+*Since 2026-11-10 ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 9):* every figure above is still computed and shown; the `mess` and `drift` families are quiet on the ladder (§9.3).
+
 ### 9.3 The ladder (`orchestrator/governor.json`)
 
 `missions: { <missionId>: { <family>: { step: 0..4, since, figures, lastAction: { at, kind, id } | null } } }`
@@ -348,6 +352,7 @@ Recomputed on each recorded turn of a mission's agents and on the 60-second pass
 | 4 escalate or stop | the model | It escalates with `bm_ask_owner`, or stops a Worker (`bm_direct_worker` stop) on real risk |
 
 - A figure back under its threshold resets the family to 0, with a journal line, only after it stays under for `governor.windowMinutes` (30 by default; `underSince`). Crossing again restarts the wait (delivery line design §8.4).
+- **A quiet family** (`QUIET_FAMILIES`: `mess`, `drift`; ADR-045 decision 9) records at step 1 and goes no further: `ladderStepOf` never returns `nudge` or `replan-due` for it, one stored above step 1 stays there until its figures clear, and it is in no digest. `stuck`, `overengineering` and `budget` keep their ladders. `dropped` and `uncommittedHours` are `mess` figures: those are left to the alert, the page and the owner.
 - **A spent code-nudge pool** holds the family at its step (`held: { pool, until }`, one journal line, no retry). The figures go into a daily digest to the Main: a `message` from `plugin`, at most once per 24 h, kept in `governor.json` `digests` (delivery line design §8.3).
 - **Step 4's `bm_ask_owner`** about a mission's process is the only way the governor reaches the owner. Below step 4 it is refused, except in two cases:
   - the owner wrote to the Orchestrator in the last 2 hours;
@@ -370,6 +375,7 @@ Recomputed on each recorded turn of a mission's agents and on the 60-second pass
 - A command entry carries `governorStep` and `by` (code or model).
 - A repeat `bm_arbitrate` of an area already decided returns the standing arbitration, and a repeat re-plan with figures no worse returns the standing re-plan. Neither sends or spends anything.
 - A command addressed by mission is delivered to whichever Main holds the mission when it is sent.
+- A `nudge` whose named figures are all of quiet families (§9.3) is refused in one line and sends nothing. A `replan`, or a `nudge` naming another family or no figure, goes.
 
 ### 9.5 Compaction and handoff in code
 
@@ -398,6 +404,8 @@ The safe-point runners of `compaction.ts` and `handoff.ts` run by themselves whe
 | `mission.scope` | a request or link targets a repo outside the charter and the Main cannot add it (`scope-repo` not delegated), and the Main has not asked the owner within the window |
 | `mission.review` | every 10 finished requests of a mission, or at 50% and 100% of a budget |
 | `worker.signal danger` | a mission's Worker: as its Main's backup, from `backupAt` (§20); another Worker: in the policy's scope |
+
+On a wake, `mission.scope` is a `bm_note` unless the goal changes (then `bm_ask_owner`), and `mission.review` governs only stuck work, overengineering and budget (`roles/orchestrator.md`, ADR-045 decision 9).
 
 Events are batched in `BM-EVENTS`, one mission per message with its brief (§20), at most one wake per mission per 15 minutes except `danger`. A wake that ends with no action is recorded per event type (M-26).
 
@@ -433,6 +441,7 @@ The owner approved the mockup on 2026-10-10 ([`mockups/missions-screen.html`](mo
 | Contracts | id and title; "provider → consumers"; "v<version> · <time>" |
 | Journal | the newest lines, "HH:MM <text>" (desktop 5, phone sub-view 20) |
 | Plan | the plan text, "updated <time> by the Main · read-only" |
+| The line (In flight, Waiting) | `mission.get.line { n, of, title, state, requestId, why }` (`mission-page-lanes.ts`; ADR-045 decision 5): one row "Step 2 of 4 · title · repo", what runs and where it is blocked; a started step that stopped still reads as started; a held step in Waiting shows `step` |
 | New mission (E; since 2026-10-21 its Projects part is [mission-projects.html](mockups/mission-projects.html) artboards L and M) | Name (≤ 80), Short code (`MISSION_CODE_PATTERN`), Goal; **Projects** — one row per Paseo project (not per workspace), named as Paseo's sidebar names it (`projectCustomName` or `projectDisplayName`), its folder shortened underneath, a checkbox, "N chosen", "Find a project…" past 6 projects (phone: 4 rows then "+ N more"). The value is the project's root workspace (its main checkout), opened by the form when none is open; paseo-bm's homes, mission placements and worktree-only projects are left out. Mission level `Segmented` with its sentence; "Cancel", "Create and open Main" |
 | Project memory (F) | "Memory · <repo>", "<n> entries"; a row per entry: kind chip, text, source ("owner, Q2 · <date>", "Worker <id 7>", "owner · all projects") |
 
@@ -766,3 +775,5 @@ Every stored change is additive. An older build ignores the wake fields and `dan
 | 2026-10-25 | hieu.nt10 (owner's answers; written by Claude) | §2.5 scope and life of memory entries, the bound counts live entries; §7 the brief's memory budget and the Main's index read ([ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md)) |
 | 2026-10-25 | hieu.nt10 (owner's answers; written by Claude) | Pointer to parallel lanes, `after` and `bm_hold_cancel` ([ADR-038](../adr/ADR-038-parallel-lanes-and-a-held-queue.md); delivery line design §19) |
 | 2026-10-26 | Codex (owner request, ADR-040) | §19: route delegated request fallback to the Main instead of leaving recovery dependent on an unrelated governor wake |
+| 2026-11-10 | Claude (as built, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) Phase 2) | §4: `steps`, `bm_create_worker` in the line, `bm_hold_release`; §10.2: the line's row on the mission page |
+| 2026-11-10 | Claude (as built, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) Phase 1) | §4: `plan` holds only one-line steps, an older plan reads possibly stale; §9.2, §9.3, §9.4, §9.7: no `mess` or `drift` nudges, by code or by the Orchestrator |

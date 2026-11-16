@@ -9,7 +9,7 @@
  */
 import type { Decider } from "./authority";
 
-export const REQUEST_STATES = ["working", "waiting-owner", "waiting-main", "waiting-other", "finished", "stopped"] as const;
+export const REQUEST_STATES = ["working", "undelivered", "waiting-owner", "waiting-main", "waiting-other", "finished", "stopped"] as const;
 export type MissionRequestState = (typeof REQUEST_STATES)[number];
 
 /** The rendering's cap (design §2.2): the `BM-STATE` brief's. */
@@ -43,6 +43,8 @@ export interface MissionStateRequest {
   verified?: MissionLineVerified | null;
   /** Delivery line design §4.4: the commit its `finished` reported; absent or null when not committed or none was named. */
   commit?: string | null;
+  /** ADR-045 decision 6: its `finished` could not be run for real; absent otherwise. */
+  couldNotRun?: boolean;
 }
 
 /** Delivery line design §4.6: verified, CI red, CI pending or unverified (`server/line-state.ts` `Verified`). */
@@ -173,8 +175,10 @@ export interface MissionState {
  * A request's state (design §2.1), the first that holds: finished or stopped
  * by the roster (unless a follow-up came after the newest report — never for
  * a bound request, whose finished or stopped is final, delivery line design
- * §2.3); an open question for the owner; one for the Main; a `blocked` report
- * waiting on something else; otherwise working. Pure.
+ * §2.3); an open question for the owner, who is the one holding the request
+ * (ADR-045 decision 14); a delivery that failed and nothing covers yet
+ * (ADR-042); an open question for the Main; a `blocked` report waiting on
+ * something else; otherwise working. Pure.
  */
 export function requestStateOf(input: {
   rosterState: "active" | "finished" | "stopped";
@@ -184,11 +188,14 @@ export function requestStateOf(input: {
   waitingOn: string | null;
   /** True for a request the plugin's tools created (delivery line design §2.3); absent = the hand path. */
   bound?: boolean;
+  /** An open `delivery-dropped` alert of the request (ADR-042). */
+  undelivered?: boolean;
 }): MissionRequestState {
   const reportAt = input.lastReport === null ? Number.NEGATIVE_INFINITY : Date.parse(input.lastReport.at) || 0;
   const followedUp = input.bound !== true && input.followUpAt !== null && (Date.parse(input.followUpAt) || 0) > reportAt;
   if ((input.rosterState === "finished" || input.rosterState === "stopped") && !followedUp) return input.rosterState;
   if (input.openDeciders.some((decider) => decider === "owner")) return "waiting-owner";
+  if (input.undelivered === true) return "undelivered";
   if (input.openDeciders.some((decider) => decider === "main")) return "waiting-main";
   if (!followedUp && input.lastReport?.phase === "blocked" && input.waitingOn !== null) return "waiting-other";
   return "working";
@@ -197,6 +204,7 @@ export function requestStateOf(input: {
 /** The words of a request state. */
 export const REQUEST_STATE_WORDS: Readonly<Record<MissionRequestState, string>> = {
   working: "working",
+  undelivered: "delivery failed",
   "waiting-owner": "waiting for the owner",
   "waiting-main": "waiting for you (the Main)",
   "waiting-other": "waiting on other work",
@@ -292,7 +300,7 @@ export function renderMissionState(state: MissionState, options: { maxChars?: nu
         const waiting = request.state === "waiting-other" && request.waitingOn !== null ? `; waits on ${cut(request.waitingOn, 120)}` : "";
         // Delivery line design §2.7: a finished request that was continued names its continuation.
         const words = request.state === "finished" && typeof request.continuedBy === "string" ? `finished → ${request.continuedBy}` : REQUEST_STATE_WORDS[request.state];
-        return `- ${request.requestId} in ${request.repo ?? repoName(request.workspaceId)}: ${words}${committedWords(request)}; Worker ${request.workerId ?? "none"}; ${report}${follow}${waiting}${request.topic === "" ? "" : `; asked: ${cut(request.topic, 120)}`}`;
+        return `- ${request.requestId} in ${request.repo ?? repoName(request.workspaceId)}: ${words}${committedWords(request)}${request.couldNotRun === true ? ", could not run" : ""}; Worker ${request.workerId ?? "none"}; ${report}${follow}${waiting}${request.topic === "" ? "" : `; asked: ${cut(request.topic, 120)}`}`;
       }),
     },
     // Delivery line design §4.9: one line per repo; a mission with no placement has no section.

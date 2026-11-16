@@ -6,10 +6,13 @@ import {
   REVIEW_KEYS,
   REVIEW_WORDS,
   CI_CARD_WORDS,
+  LINE_CARD_WORDS,
   changedReview,
   changedThresholds,
   ciCardView,
   ciToggleChange,
+  lineCardView,
+  lineToggleChange,
   coordinationDefaultsDraft,
   coordinationInputText,
   helpedText,
@@ -261,7 +264,7 @@ describe("the rollover card (delivery line design §2.6, §6.6, §12 item 4)", (
       ["rollover.beads", "A request has closed beads", "15", "15 beads"],
       ["rollover.turns", "Or its Worker turns reach", "40", "40 turns"],
       ["rollover.tokens", "Or it has read", "50 M", "50M tokens read"],
-      ["rollover.contextTokens", "Or its context reaches", "250 K", "context 250k"],
+      ["rollover.contextTokens", "Or its context reaches", "180 K", "context 180k"],
       ["rollover.ceilingFactor", "Finish now at, × a figure", "2 ×", "2×"],
       ["maintenance.ceilingFactor", "Skip the safe point at, × a threshold", "2 ×", "2×"],
     ]);
@@ -332,6 +335,42 @@ describe("the CI card (ADR-036, delivery line design §17.1)", () => {
     const nodes = renderTree(MechanismCard({ view: ciCardView(D, false), inputs: {}, dialog: null, busy: false, error: null, onToggle, onConfirm: noop, onCancel: noop, onInput: noop, onSave: noop, styles, theme }));
     expect(texts(nodes)).toEqual(["CI", CI_CARD_WORDS.meaning]);
     const toggle = allNodes(nodes).find((node) => node.props["accessibilityLabel"] === "Turn CI on now");
+    expect(toggle).toBeDefined();
+    (toggle!.props["onPress"] as () => void)();
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the supervised line's card (ADR-045, The switch)", () => {
+  const off: CoordinationSettings = { ...D, line: { supervised: false } };
+
+  it("is on by default: On, Turn off at once; off: Off, Turn on at once; no figures, no Save, no reset", () => {
+    expect(lineCardView(D, false)).toEqual({
+      mechanism: "line",
+      title: "Supervised line",
+      helped: null,
+      meaning: LINE_CARD_WORDS.meaning,
+      note: null,
+      status: { text: "On", tone: "success" },
+      toggle: { turnsOn: false, enabled: true, label: "Turn off", accessibilityLabel: "Turn the supervised line off now" },
+      rows: [],
+      save: { enabled: false, label: "Save", accessibilityLabel: "Save the supervised line setting" },
+      reset: null,
+    });
+    expect(lineCardView(off, false)).toMatchObject({ status: { text: "Off", tone: "muted" }, toggle: { turnsOn: true, enabled: true, label: "Turn on", accessibilityLabel: "Turn the supervised line on now" } });
+    expect(lineCardView(D, true).toggle.enabled).toBe(false);
+  });
+
+  it("its switch saves line.supervised the other way", () => {
+    expect(lineToggleChange(D)).toEqual({ key: "line.supervised", value: false });
+    expect(lineToggleChange(off)).toEqual({ key: "line.supervised", value: true });
+  });
+
+  it("MechanismCard draws it with its title, what it means and its switch, and no foot", () => {
+    const onToggle = vi.fn();
+    const nodes = renderTree(MechanismCard({ view: lineCardView(D, false), inputs: {}, dialog: null, busy: false, error: null, onToggle, onConfirm: noop, onCancel: noop, onInput: noop, onSave: noop, styles, theme }));
+    expect(texts(nodes)).toEqual(["Supervised line", LINE_CARD_WORDS.meaning]);
+    const toggle = allNodes(nodes).find((node) => node.props["accessibilityLabel"] === "Turn the supervised line off now");
     expect(toggle).toBeDefined();
     (toggle!.props["onPress"] as () => void)();
     expect(onToggle).toHaveBeenCalledTimes(1);

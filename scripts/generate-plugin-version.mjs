@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const packageUrl = new URL("../package.json", import.meta.url);
 const targetUrl = new URL("../plugin/shared/version.ts", import.meta.url);
 // The payload is published as its own npm package, `paseo-bm-plugin`, and the
-// paseo.cafe registry compares the version in git against the one on npm, so
+// release workflow checks the version in git against the tag it publishes, so
 // the two package.json files must never drift. See ADR-009 and
 // docs/archive/design/paseo-bm-delta-20260923-payload-npm-package.md §4.
 const payloadPackageUrl = new URL("../plugin/package.json", import.meta.url);

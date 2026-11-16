@@ -83,6 +83,7 @@ describe("the registry", () => {
       "review-cap": { precedent: false, askedBy: "plugin" },
       "review-budget": { precedent: false, askedBy: "retired" },
       integration: { precedent: false, askedBy: "plugin", when: "once per mission and repository" },
+      "local-merge": { precedent: false, askedBy: "plugin", when: "once per mission and repository" },
     });
     // Delivery line design §4.3: the owner's integration card is never a precedent's.
     expect(isCodeSubject(INTEGRATION_SUBJECT)).toBe(true);

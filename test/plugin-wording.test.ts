@@ -68,7 +68,7 @@ describe("the payload's own wording", () => {
   });
 });
 
-describe("the plugin package's README, shown on npm and paseo.cafe", () => {
+describe("the plugin package's README, shown on npm", () => {
   const readme = readFileSync(join(payload, "README.md"), "utf8");
 
   it("names `npx paseo-bm` only in the section for users coming from it", () => {
@@ -107,10 +107,10 @@ describe("the plugin package", () => {
     dependencies?: Record<string, string>;
   };
 
-  it("describes the paseo.cafe install, not the retired one", () => {
+  it("describes the install from npm, not the retired one (ADR-048)", () => {
     expect(pkg.description).toBe(
       "Beads Management for Paseo: a Beads Manager agent that hands each request to a Beads Worker, " +
-        'with an Inbox, Missions, Projects, Settings and Tools & skills. Install from paseo.cafe or with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+).',
+        'with an Inbox, Missions, Projects, Settings and Tools & skills. Install with "paseo plugin add npm:paseo-bm-plugin" (Paseo 0.9+).',
     );
   });
 

@@ -21,8 +21,11 @@ import {
   WORKER_TITLE,
   workerTitleOf,
   createWorkerCreationTools,
+  slotRefusalOf,
+  staffingReasons,
   workerBriefOf,
 } from "../plugin/server/create-worker";
+import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { peerBlockOf } from "../plugin/server/handoff";
 import { AGENT_TOOLS_OFF_SWITCH_MESSAGE, AGENT_TOOLS_OFF_TOOL_MESSAGE } from "../plugin/server/manager";
@@ -34,10 +37,12 @@ import { boundToolFacesFor } from "../plugin/shared/bm-tools";
 import { originOf } from "../plugin/shared/message-origin";
 import { PLUGIN_VERSION } from "../plugin/shared/version";
 import { createMemoryStore } from "../plugin/server/memory-store";
-import { cancelHeld, heldRequestsOf, startHeldRequests } from "../plugin/server/held-requests";
+import { cancelHeld, heldRequestsOf, holdRequest, startHeldRequests } from "../plugin/server/held-requests";
+import { listedWorkspaces } from "../plugin/server/paseo-directory";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
 import { clearRequestIndexCache, createMissionRoster, requestIndexOf } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
+import { createMissionTools } from "../plugin/server/mission-tools";
 import { ensureMissionsHome, missionsHomeDirOf } from "../plugin/server/missions-home";
 import { fakePaseo, type FakeAgent, type FakeCreateRequest } from "./helpers/fake-paseo";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
@@ -566,7 +571,7 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
     expect((await call({ project: "wks_orch" })).text).toBe("project wks_orch is a paseo-bm home, not a repo\nNothing was created.");
     createMissionStore(home).update(missionId, (current) => ({ ...current, state: "closed", closedAt: "2026-10-09T00:00:00.000Z" }));
     expect((await call({ project: BACK })).text).toBe("mission SHOP is closed\nNothing was created.");
-    expect(await call({ project: BACK }, MANAGER_CALLER)).toEqual({ ok: false, text: "project, planStep, lane and after are for the Main of a mission, and you are none: leave them out. Nothing was created." });
+    expect(await call({ project: BACK }, MANAGER_CALLER)).toEqual({ ok: false, text: "project, planStep, lane, after, next and parallel are for the Main of a mission, and you are none: leave them out. Nothing was created." });
     expect(await call({}, { ...caller, agentId: "agent-unassigned", missionId: null })).toEqual({
       ok: false,
       text: "You have no mission yet: record it with bm_mission_start before you create a Worker. Nothing was created.",
@@ -593,24 +598,297 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
     createMissionAutonomyStore(home).setLevel(missionId, 1);
     createMissionStore(home).update(missionId, (current) => ({ ...current, charter: { ...current.charter, budget: { requests: null, workers: 1, reviewCalls: null, days: null } } }));
     const tools = toolsOf(home, fake, store);
-    const call = (project: string) => tools.call("bm_create_worker", { request: "Do it.", context: [], project }, caller);
-    const first = await call(BACK);
+    const first = await tools.call("bm_create_worker", { request: "Do it.", context: [], project: BACK }, caller);
     expect(first.ok, first.text).toBe(true);
     const { requestId } = JSON.parse(first.text) as { requestId: string };
     const ask = "staffing is not delegated in this mission, so ask the owner first";
-    expect((await call(BACK)).text).toBe(
-      [
-        `mission SHOP already has a live Worker in back (request ${requestId}): give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or ${ask}`,
-        `mission SHOP has 1 live Workers and its budget allows 1: ${ask}`,
-        "Nothing was created.",
-      ].join("\n"),
-    );
-    expect((await call(WS)).text).toBe(`mission SHOP has 1 live Workers and its budget allows 1: ${ask}\nNothing was created.`);
-    expect(fake.creates).toHaveLength(1);
+    // The rule itself; bm_create_worker's slot refusal comes first while a sequential request runs (below).
+    const current = createMissionStore(home).get(missionId)!;
+    const listed = await listedWorkspaces(fake.paseo as never);
+    const reasonsFor = (workspaceId: string, options?: { lane?: "new"; parallel?: boolean }) => staffingReasons(home, fake.paseo as never, current, workspaceId, listed, options);
+    expect(await reasonsFor(BACK)).toEqual([
+      `mission SHOP already has a live Worker in back (request ${requestId}): words about its work go to it with bm_tell_worker; next: true for new work, held to run next; after: ["${requestId}"] when it needs that request's result; parallel only with the owner's explicit word quoted; or ${ask}`,
+      `mission SHOP has 1 live Workers and its budget allows 1: ${ask}`,
+    ]);
+    expect(await reasonsFor(WS)).toEqual([`mission SHOP has 1 live Workers and its budget allows 1: ${ask}`]);
+    expect(await reasonsFor(BACK, { lane: "new" })).toEqual([`a new lane adds a live Worker to mission SHOP in back: ${ask}`, `mission SHOP has 1 live Workers and its budget allows 1: ${ask}`]);
+    // The owner's explicit word is the new lane's yes; the budget still holds.
+    expect(await reasonsFor(BACK, { parallel: true })).toEqual([`mission SHOP has 1 live Workers and its budget allows 1: ${ask}`]);
     // Delegated (the default level), the Main staffs as it sees fit.
     createMissionAutonomyStore(home).setLevel(missionId, 2);
-    expect((await call(BACK)).ok).toBe(true);
-    expect(fake.creates).toHaveLength(2);
+    expect(await reasonsFor(BACK)).toEqual([]);
+  });
+
+  /** Mission line plan §5.8, ADR-045 decision 1: one sequential request at a time, across the mission's repos. */
+  describe("the sequential slot (§5.8)", () => {
+    const fakeQueue = () => ({ enqueue: vi.fn(async () => "sent" as const), enqueueBatch: vi.fn(async (_target: string, _batch: unknown, items: unknown[]) => items.map(() => "sent" as const)) }) as never;
+    const typed = (text: string) => [{ item: { type: "user_message", text, clientMessageId: "m-1" }, timestamp: "2026-11-10T08:00:00.000Z" }];
+
+    /** A mission on two repos with one request at work in BACK. */
+    async function running(home: string, store: BindingStore) {
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [WS, BACK]);
+      const tools = toolsOf(home, fake, store);
+      const first = await tools.call("bm_create_worker", { request: "Build the API.", context: [], project: BACK }, caller);
+      expect(first.ok, first.text).toBe(true);
+      const { requestId } = JSON.parse(first.text) as { requestId: string };
+      const pass = () => startHeldRequests(home, { create: (input, as) => tools.call("bm_create_worker", input, as), queue: fakeQueue(), paseo: fake.paseo as never, log: () => {} });
+      return { fake, missionId, caller, tools, requestId, pass };
+    }
+    const finishWith = (home: string, missionId: string, requestId: string, passed: boolean) => {
+      createRequestRegistry(home, { log: () => {} }).noteFinishGate(BACK, requestId, { passed, reasons: passed ? [] : ["review batch b1 has not passed"], at: "2026-11-10T07:30:00.000Z", commit: null });
+      createMissionRoster(home).setState(missionId, requestId, "finished");
+    };
+
+    it("a request running in one repo refuses a new Worker for another repo with none of the three, naming the choices; nothing is created", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, caller, tools, requestId } = await running(home, store);
+      const answer = await tools.call("bm_create_worker", { request: "Style the screens.", context: [], project: WS }, caller);
+      expect(answer).toEqual({ ok: false, text: slotRefusalOf({ requestId }, "SHOP") });
+      expect(answer.text).toContain(`Request ${requestId} is running`);
+      expect(answer.text).toContain("next: true for new work");
+      expect(answer.text).toContain(`after: ["${requestId}"] when it needs that request's result`);
+      expect(answer.text).toContain("parallel only with the owner's explicit word quoted");
+      expect(answer.text.split("\n")).toHaveLength(1);
+      expect(fake.creates).toHaveLength(1);
+    });
+
+    /** ADR-047 decision 2: the running request waits on its own ask, so holding the answer would never end. */
+    it("a Worker for the open ask of the running request is created beside it, marked parallel; an ask of another request still gets the refusal", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools, requestId } = await running(home, store);
+      const askOf = (linkId: string, asker: string) =>
+        createPeerLinkStore(home, { newId: () => linkId }).createLink({ kind: "question", route: "ask-main", missionId, from: { workspaceId: BACK, requestId: asker, agentId: "wrk-back", role: "worker" }, to: { workspaceId: WS, managerId: MAIN }, text: "Which shape does the screen need?" });
+      askOf("peer-00000000000b", "req-20261008T100000Z");
+      const other = await tools.call("bm_create_worker", { request: "Answer the API's question.", context: [], project: WS, peerLink: "peer-00000000000b" }, caller);
+      expect(other).toEqual({ ok: false, text: slotRefusalOf({ requestId }, "SHOP") });
+      askOf("peer-00000000000c", requestId);
+      const answer = await tools.call("bm_create_worker", { request: "Answer the API's question.", context: [], project: WS, peerLink: "peer-00000000000c" }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      const made = JSON.parse(answer.text) as { requestId: string; peerLinkNotTaken?: string };
+      expect(made.peerLinkNotTaken).toBeUndefined();
+      expect(createMissionRoster(home).list(missionId).find((entry) => entry.requestId === made.requestId)).toMatchObject({ parallel: true, state: "active" });
+      expect(fake.creates).toHaveLength(2);
+      expect(heldRequestsOf(home, missionId)).toEqual([]);
+    });
+
+    it("lane: \"new\" without parallel gets the same refusal", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, caller, tools, requestId } = await running(home, store);
+      expect(await tools.call("bm_create_worker", { request: "Style the screens.", context: [], project: WS, lane: "new" }, caller)).toEqual({ ok: false, text: slotRefusalOf({ requestId }, "SHOP") });
+      expect(fake.creates).toHaveLength(1);
+    });
+
+    it.each([
+      ["failed its gate", (home: string, missionId: string, requestId: string) => finishWith(home, missionId, requestId, false)],
+      ["stopped", (home: string, missionId: string, requestId: string) => void createMissionRoster(home).setState(missionId, requestId, "stopped")],
+    ])("next is held with an empty after, and starts when the slot is free, before the next step of a live line, even if the running step %s", async (_name, end) => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools, requestId, pass } = await running(home, store);
+      // The next step of the line, held first: oldest first alone would start it.
+      const step = holdRequest(home, missionId, { after: [], step: { lineId: "line-1", n: 2, of: 3, title: "Step two", acceptance: ["works"] }, input: { request: "Step two.", context: [], project: BACK }, topic: "Step two", by: MAIN }, new Date("2026-11-10T07:00:00.000Z"));
+      if (!step.ok) throw new Error(step.reason);
+      const answer = await tools.call("bm_create_worker", { request: "Fix the footer.", context: [], project: BACK, next: true }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      const held = JSON.parse(answer.text) as { held: string; after: string[] };
+      expect(held.after).toEqual([]);
+      expect(heldRequestsOf(home, missionId).find((entry) => entry.holdId === held.held)).toMatchObject({ next: true, after: [], state: "held", input: { request: "Fix the footer.", context: [], project: BACK } });
+      expect(fake.creates).toHaveLength(1);
+
+      // Silent while the sequential request runs.
+      await pass();
+      expect(fake.creates).toHaveLength(1);
+      expect(heldRequestsOf(home, missionId).find((entry) => entry.holdId === held.held)!.note).toBeUndefined();
+
+      end(home, missionId, requestId);
+      await pass();
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Build the API.", "Fix the footer."]);
+      expect(heldRequestsOf(home, missionId).find((entry) => entry.holdId === step.entry.holdId)!.state).toBe("held");
+    });
+
+    it("an agent list that cannot be read is a held slot: every way of asking is refused, and nothing is created or held", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools } = await running(home, store);
+      const created = fake.creates.length;
+      fake.paseo.agents.list.mockRejectedValue(new Error("offline"));
+      const refused = { ok: false, text: NO_PASEO_MESSAGE };
+      expect(await tools.call("bm_create_worker", { request: "Style the screens.", context: [], project: WS }, caller)).toEqual(refused);
+      expect(await tools.call("bm_create_worker", { request: "Fix the footer.", context: [], project: BACK, next: true }, caller)).toEqual(refused);
+      expect(fake.creates).toHaveLength(created);
+      expect(heldRequestsOf(home, missionId)).toEqual([]);
+    });
+
+    it("the owner's switch off: a live Worker's refusal offers what still works, not next", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, requestId } = await running(home, store);
+      createMissionAutonomyStore(home).setLevel(missionId, 1);
+      createCoordinationStore(home).set({ key: "line.supervised", value: false });
+      const current = createMissionStore(home).get(missionId)!;
+      expect(await staffingReasons(home, fake.paseo as never, current, BACK, await listedWorkspaces(fake.paseo as never))).toEqual([
+        `mission SHOP already has a live Worker in back (request ${requestId}): give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or staffing is not delegated in this mission, so ask the owner first`,
+      ]);
+    });
+
+    it("next or after alone starts one at a time, and next starts at once with nothing running", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools, requestId, pass } = await running(home, store);
+      await tools.call("bm_create_worker", { request: "One.", context: [], project: BACK, next: true }, caller);
+      await tools.call("bm_create_worker", { request: "Two.", context: [], project: BACK, next: true }, caller);
+      finishWith(home, missionId, requestId, true);
+      await pass();
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Build the API.", "One."]);
+
+      const quiet = dataFolder();
+      const quietStore = createBindingStore(quiet);
+      const empty = await missionDaemon(quiet, quietStore);
+      const fresh = mission(quiet, [BACK]);
+      const now = await toolsOf(quiet, empty, quietStore).call("bm_create_worker", { request: "Start.", context: [], next: true }, fresh.caller);
+      expect(now.ok, now.text).toBe(true);
+      expect(JSON.parse(now.text)).toHaveProperty("workerId");
+      expect(heldRequestsOf(quiet, fresh.missionId)).toEqual([]);
+    });
+
+    it("next does not go with after or parallel", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, caller, tools, requestId } = await running(home, store);
+      const refusal = { ok: false, text: "next is for new work on no request's result, so it does not go with after or parallel: give one of them. Nothing was created." };
+      expect(await tools.call("bm_create_worker", { ...{ request: "X.", context: [] }, next: true, after: [requestId] }, caller)).toEqual(refusal);
+      expect(await tools.call("bm_create_worker", { ...{ request: "X.", context: [] }, next: true, parallel: 'owner said "now"' }, caller)).toEqual(refusal);
+      expect(fake.creates).toHaveLength(1);
+    });
+
+    it("parallel with words the owner did not type, none quoted, or an unreadable page is refused; quoted words the owner typed get past the check", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools } = await running(home, store);
+      const call = (parallel: string) => tools.call("bm_create_worker", { request: "Fix it.", context: [], project: BACK, parallel }, caller);
+      const none = "parallel must quote the owner's explicit word in double quotes. Nothing was created.";
+      const notTyped = "parallel quotes words the owner did not type: only the owner's explicit word, as they typed it, opens a parallel lane; otherwise use next or after. Nothing was created.";
+      const unreadable = "parallel could not be checked, because your chat could not be read: use next or after, or try again. Nothing was created.";
+      expect(await call("the owner wants this now")).toEqual({ ok: false, text: none });
+      expect(await call('the owner said "song song"')).toEqual({ ok: false, text: unreadable });
+      // An agent's or the plugin's message is not the owner's.
+      fake.setTimeline(MAIN, [
+        { item: { type: "user_message", text: "song song" }, timestamp: "2026-11-10T08:00:00.000Z" },
+        { item: { type: "user_message", text: "BM-DELIVERY report song song", clientMessageId: "m-2" }, timestamp: "2026-11-10T08:00:01.000Z" },
+        ...typed("Add the export too."),
+      ]);
+      expect(await call('the owner said "song song"')).toEqual({ ok: false, text: notTyped });
+      fake.setTimeline(MAIN, typed("Làm   SONG  song giúp mình"));
+      const passed = await call('the owner said "song song"');
+      expect(passed.text).toBe("lanes need the mission's worktrees, which start after this repo's cut-over: leave lane and parallel out. Nothing was created.");
+      expect(fake.creates).toHaveLength(1);
+      expect(heldRequestsOf(home, missionId)).toEqual([]);
+    });
+
+    it("the owner's switch off: a new Worker is created beside a running request with no field, and nothing is held for the slot", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools } = await running(home, store);
+      createCoordinationStore(home).set({ key: "line.supervised", value: false });
+      const answer = await tools.call("bm_create_worker", { request: "Style the screens.", context: [], project: WS }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).toHaveProperty("workerId");
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Build the API.", "Style the screens."]);
+      expect(heldRequestsOf(home, missionId)).toEqual([]);
+    });
+
+    it("the owner's switch off: an after that finished starts at once, even with a failed gate; one still running is held until it finishes", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools, requestId } = await running(home, store);
+      createCoordinationStore(home).set({ key: "line.supervised", value: false });
+      const done = createRequestRegistry(home, { log: () => {} }).generate(BACK, { managerId: MAIN, missionId }).requestId;
+      createMissionRoster(home).add(missionId, { requestId: done, workspaceId: BACK, topic: "done work", workerId: "w-done" });
+      finishWith(home, missionId, done, false);
+      const answer = await tools.call("bm_create_worker", { request: "Next work.", context: [], project: BACK, after: [done] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).toHaveProperty("workerId");
+      expect(fake.creates).toHaveLength(2);
+      const held = await tools.call("bm_create_worker", { request: "Later work.", context: [], project: BACK, after: [requestId] }, caller);
+      expect(held.ok, held.text).toBe(true);
+      const parsedHeld = JSON.parse(held.text) as { held: string; note: string };
+      expect(parsedHeld.held).toMatch(/^hold-/);
+      expect(parsedHeld.note).toContain(`when ${requestId} finishes,`);
+      expect(parsedHeld.note).not.toContain("finish gate");
+      expect(fake.creates).toHaveLength(2);
+    });
+
+    it("the owner's switch off: the pass starts a due entry beside a running request, with no wait for the slot", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, pass } = await running(home, store);
+      const done = createRequestRegistry(home, { log: () => {} }).generate(BACK, { managerId: MAIN, missionId }).requestId;
+      createMissionRoster(home).add(missionId, { requestId: done, workspaceId: BACK, topic: "done work", workerId: "w-done" });
+      finishWith(home, missionId, done, false);
+      const held = holdRequest(home, missionId, { after: [done], input: { request: "Held work.", context: [], project: BACK }, topic: "Held work", by: MAIN }, new Date("2026-11-10T07:00:00.000Z"));
+      if (!held.ok) throw new Error(held.reason);
+      createCoordinationStore(home).set({ key: "line.supervised", value: false });
+      await pass();
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Build the API.", "Held work."]);
+      expect(heldRequestsOf(home, missionId)[0]).toMatchObject({ state: "started" });
+    });
+
+    it("a satisfied after with the slot taken is held; with the slot free it starts", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const { fake, missionId, caller, tools, requestId, pass } = await running(home, store);
+      const done = createRequestRegistry(home, { log: () => {} }).generate(BACK, { managerId: MAIN, missionId }).requestId;
+      createMissionRoster(home).add(missionId, { requestId: done, workspaceId: BACK, topic: "done work", workerId: "w-done" });
+      finishWith(home, missionId, done, true);
+
+      const answer = await tools.call("bm_create_worker", { request: "Next work.", context: [], project: BACK, after: [done] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).toMatchObject({ after: [done] });
+      expect(fake.creates).toHaveLength(1);
+      await pass();
+      expect(fake.creates).toHaveLength(1);
+      finishWith(home, missionId, requestId, true);
+      await pass();
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Build the API.", "Next work."]);
+
+      // With the slot free, a satisfied after creates at once.
+      const quiet = dataFolder();
+      const quietStore = createBindingStore(quiet);
+      const empty = await missionDaemon(quiet, quietStore);
+      const fresh = mission(quiet, [BACK]);
+      const earlier = createRequestRegistry(quiet, { log: () => {} }).generate(BACK, { managerId: MAIN, missionId: fresh.missionId }).requestId;
+      createMissionRoster(quiet).add(fresh.missionId, { requestId: earlier, workspaceId: BACK, topic: "done work", workerId: "w-done" });
+      finishWith(quiet, fresh.missionId, earlier, true);
+      const started = await toolsOf(quiet, empty, quietStore).call("bm_create_worker", { request: "Next work.", context: [], after: [earlier] }, fresh.caller);
+      expect(started.ok, started.text).toBe(true);
+      expect(JSON.parse(started.text)).toHaveProperty("workerId");
+    });
+
+    it("with nothing running it starts on lane 1", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { caller } = mission(home, [BACK]);
+      const answer = await toolsOf(home, fake, store).call("bm_create_worker", { request: "Start.", context: [] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).not.toHaveProperty("lane");
+    });
+
+    it("a running parallel request does not refuse the next sequential one", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      fake.agents.push({ id: "w-par", provider: "bm-worker/claude-opus-5", status: "running", workspaceId: BACK, cwd: BACK_FOLDER, labels: { "bm.role": "worker", "bm.requestId": "req-20261110T060000Z" } });
+      createMissionRoster(home).add(missionId, { requestId: "req-20261110T060000Z", workspaceId: BACK, topic: "side work", workerId: "w-par", parallel: true });
+      const answer = await toolsOf(home, fake, store).call("bm_create_worker", { request: "Sequential.", context: [] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).toHaveProperty("workerId");
+    });
   });
 
   /** Delivery line design §19.6 (ADR-038): work after other requests is held by paseo-bm and starts by itself. */
@@ -656,6 +934,8 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
       const afterStopped = await tools.call("bm_create_worker", { request: "Other work.", context: [], after: ["req-20261025T010000Z"] }, caller);
       expect(afterStopped.text).toContain("req-20261025T010000Z stopped, so work after it would never start");
       roster.setState(missionId, "req-20261025T010000Z", "finished");
+      // A request from before the finish gate: no stamp, so finished passes.
+      createRequestRegistry(home).register(BACK, "req-20261025T010000Z", { source: "backfill" });
       const now = await tools.call("bm_create_worker", { request: "Other work.", context: [], after: ["req-20261025T010000Z"] }, caller);
       expect(now.ok, now.text).toBe(true);
       expect(JSON.parse(now.text)).toHaveProperty("workerId");
@@ -682,6 +962,7 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
       expect(cancelHeld(home, missionId, second.held, "again", new Date())).toBe(`held request ${second.held} is already cancelled`);
 
       roster.setState(missionId, "req-20261025T010000Z", "finished");
+      createRequestRegistry(home).register(BACK, "req-20261025T010000Z", { source: "backfill" });
       await startHeldRequests(home, { create, queue, log: () => {} });
       expect(fake.creates).toHaveLength(1);
       expect(fake.creates[0]!.options.prompt).toContain("> Wire the screens.");
@@ -712,6 +993,178 @@ describe("bm_create_worker for a Main: Workers in the mission's repos (missions 
       expect(told).toHaveLength(1);
       expect(told[0]).toContain(`held request ${held.held} ("Wire the screens.") waits for req-20261025T010000Z, which stopped`);
       expect(heldRequestsOf(home, missionId)[0]!.state).toBe("waiting-stopped");
+      expect(fake.creates).toHaveLength(0);
+    });
+
+    /** A request of the mission as this build makes it: stamped `gated`, on the roster. */
+    function gatedRequest(home: string, missionId: string, continuationOf?: string): string {
+      const registry = createRequestRegistry(home, { log: () => {} });
+      const { requestId } = registry.generate(BACK, { managerId: MAIN, missionId, ...(continuationOf === undefined ? {} : { continuationOf }) });
+      createMissionRoster(home).add(missionId, { requestId, workspaceId: BACK, topic: "earlier work", workerId: `w-${requestId}`, ...(continuationOf === undefined ? {} : { continuationOf }) });
+      if (continuationOf !== undefined) registry.noteContinuedBy(BACK, continuationOf, requestId, { reason: "size", figure: "180k", at: "2026-11-10T07:00:00.000Z" });
+      return requestId;
+    }
+    const finished = (home: string, missionId: string, requestId: string, gate: { passed: boolean; reasons?: string[] } | null) => {
+      if (gate !== null) createRequestRegistry(home, { log: () => {} }).noteFinishGate(BACK, requestId, { passed: gate.passed, reasons: gate.reasons ?? [], at: "2026-11-10T07:30:00.000Z", commit: null });
+      createMissionRoster(home).setState(missionId, requestId, "finished");
+    };
+    const ask = { request: "Next work.", context: [] };
+
+    it("after names a held entry: held, and started once that entry started and its request finished and passed", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const tools = toolsOf(home, fake, store);
+      const first = gatedRequest(home, missionId);
+      const step = JSON.parse((await tools.call("bm_create_worker", { request: "Step two.", context: [], after: [first] }, caller)).text) as { held: string };
+      const answer = await tools.call("bm_create_worker", { request: "Step three.", context: [], after: [step.held] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      const later = JSON.parse(answer.text) as { held: string; after: string[] };
+      expect(later.after).toEqual([step.held]);
+      expect(fake.creates).toHaveLength(0);
+
+      const { queue } = fakeQueue();
+      const create = (input: Record<string, unknown>, as: ToolCaller) => tools.call("bm_create_worker", input, as);
+      finished(home, missionId, first, { passed: true });
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Step two."]);
+      const startedAs = heldRequestsOf(home, missionId).find((entry) => entry.holdId === step.held)!.startedAs!;
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates).toHaveLength(1);
+
+      finished(home, missionId, startedAs, { passed: true });
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Step two.", "Step three."]);
+    });
+
+    it("after a finished request whose gate failed is held, not created", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const failed = gatedRequest(home, missionId);
+      finished(home, missionId, failed, { passed: false, reasons: ["review batch b1 has not passed"] });
+      const answer = await toolsOf(home, fake, store).call("bm_create_worker", { ...ask, after: [failed] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).toHaveProperty("held");
+      expect(fake.creates).toHaveLength(0);
+    });
+
+    it("after a rolled-over request whose continuation runs is held, and it is not released until the chain's head passes", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const tools = toolsOf(home, fake, store);
+      const root = gatedRequest(home, missionId);
+      finished(home, missionId, root, { passed: false, reasons: ["it left work for a continuation"] });
+      const head = gatedRequest(home, missionId, root);
+      expect(createMissionRoster(home).get(missionId, root)?.state).toBe("finished");
+      const answer = await tools.call("bm_create_worker", { ...ask, after: [root] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).toHaveProperty("held");
+      expect(fake.creates).toHaveLength(0);
+
+      const { queue } = fakeQueue();
+      const create = (input: Record<string, unknown>, as: ToolCaller) => tools.call("bm_create_worker", input, as);
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates).toHaveLength(0);
+      finished(home, missionId, head, { passed: true });
+      await startHeldRequests(home, { create, queue, log: () => {} });
+      expect(fake.creates).toHaveLength(1);
+    });
+
+    it("a gated head with no result is held; a head from before this build is created at once", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const tools = toolsOf(home, fake, store);
+      const gated = gatedRequest(home, missionId);
+      finished(home, missionId, gated, null);
+      expect(JSON.parse((await tools.call("bm_create_worker", { ...ask, after: [gated] }, caller)).text)).toHaveProperty("held");
+      expect(fake.creates).toHaveLength(0);
+
+      const older = "req-20261001T010000Z";
+      createRequestRegistry(home).register(BACK, older, { source: "backfill" });
+      createMissionRoster(home).add(missionId, { requestId: older, workspaceId: BACK, topic: "older", workerId: "w-older" });
+      createMissionRoster(home).setState(missionId, older, "finished");
+      const answer = await tools.call("bm_create_worker", { ...ask, after: [older] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      expect(JSON.parse(answer.text)).toHaveProperty("workerId");
+      expect(fake.creates).toHaveLength(1);
+    });
+
+    it("an unknown or cancelled hold id is refused, naming bm_mission", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      const tools = toolsOf(home, fake, store);
+      const first = gatedRequest(home, missionId);
+      const unknownId = "hold-20261110T010101Z";
+      const refusal = (id: string) => ({ ok: false, text: `${id} is unknown or cancelled in mission SHOP: name what still stands (bm_mission lists it). Nothing was created.` });
+      expect(await tools.call("bm_create_worker", { ...ask, after: [unknownId] }, caller)).toEqual(refusal(unknownId));
+      const step = JSON.parse((await tools.call("bm_create_worker", { request: "Step two.", context: [], after: [first] }, caller)).text) as { held: string };
+      expect(cancelHeld(home, missionId, step.held, "not needed", new Date())).toBeNull();
+      expect(await tools.call("bm_create_worker", { ...ask, after: [step.held] }, caller)).toEqual(refusal(step.held));
+      expect(heldRequestsOf(home, missionId)).toHaveLength(1);
+      expect(fake.creates).toHaveLength(0);
+    });
+
+    it("bm_hold_release lets a stopped entry start past the slot and the one-live-Worker line, journals why, and the budget still holds", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { missionId, caller } = mission(home, [BACK]);
+      createMissionAutonomyStore(home).setLevel(missionId, 1);
+      const tools = toolsOf(home, fake, store);
+      const answer = await tools.call("bm_create_worker", { request: "Build the API.", context: [] }, caller);
+      expect(answer.ok, answer.text).toBe(true);
+      const failed = gatedRequest(home, missionId);
+      finished(home, missionId, failed, { passed: false, reasons: ["review batch b1 has not passed"] });
+      const held = JSON.parse((await tools.call("bm_create_worker", { ...ask, after: [failed] }, caller)).text) as { held: string };
+      const { queue, told } = fakeQueue();
+      const create = (input: Record<string, unknown>, as: ToolCaller) => tools.call("bm_create_worker", input, as);
+      const pass = () => startHeldRequests(home, { create, queue, paseo: fake.paseo as never, log: () => {} });
+      await pass();
+      expect(heldRequestsOf(home, missionId)[0]!.state).toBe("waiting-stopped");
+      expect(told).toHaveLength(1);
+      expect(fake.creates).toHaveLength(1);
+
+      const missionTools = createMissionTools({ paseo: () => fake.paseo, home: () => home, log: () => {} });
+      expect((await missionTools.call("bm_hold_release", { holdId: "hold-20261110T010101Z", why: "go on" }, caller)).text).toContain("no held request");
+      // The budget cap is not the owner's release: it still refuses, and the entry stays released for the next pass.
+      createMissionStore(home).update(missionId, (current) => ({ ...current, charter: { ...current.charter, budget: { requests: null, workers: 1, reviewCalls: null, days: null } } }));
+      const released = await missionTools.call("bm_hold_release", { holdId: held.held, why: "The owner said to go on without the review." }, caller);
+      expect(released.ok, released.text).toBe(true);
+      expect(JSON.parse(released.text)).toMatchObject({ released: held.held });
+      expect(createMissionStore(home).journal(missionId).at(-1)).toMatchObject({ kind: "note", by: "main", text: `Held request ${held.held} released: The owner said to go on without the review.`, ref: held.held });
+      await pass();
+      expect(fake.creates).toHaveLength(1);
+      expect(told.at(-1)).toContain("could not start");
+      expect(told.at(-1)).toContain("budget allows 1");
+      expect(heldRequestsOf(home, missionId)[0]).toMatchObject({ state: "held", released: true });
+
+      createMissionStore(home).update(missionId, (current) => ({ ...current, charter: { ...current.charter, budget: { requests: null, workers: 2, reviewCalls: null, days: null } } }));
+      await pass();
+      expect(fake.creates.map((entry) => entry.options.title)).toEqual(["Build the API.", "Next work."]);
+      expect(heldRequestsOf(home, missionId)[0]!.state).toBe("started");
+      // A started entry is never released, so no second Worker is made for it.
+      expect((await missionTools.call("bm_hold_release", { holdId: held.held, why: "again" }, caller)).text).toBe(`held request ${held.held} is started, and only a waiting-stopped one is released. Nothing was changed.`);
+      await pass();
+      expect(fake.creates).toHaveLength(2);
+    });
+
+    it("the after field takes a request or a held entry, and nothing else", async () => {
+      const home = dataFolder();
+      const store = createBindingStore(home);
+      const fake = await missionDaemon(home, store);
+      const { caller } = mission(home, [BACK]);
+      const answer = await toolsOf(home, fake, store).call("bm_create_worker", { ...ask, after: ["step-3"] }, caller);
+      expect(answer.ok).toBe(false);
+      expect(answer.text).toContain("input.after[0]: must match");
       expect(fake.creates).toHaveLength(0);
     });
   });

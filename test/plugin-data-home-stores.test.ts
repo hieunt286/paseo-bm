@@ -17,7 +17,7 @@ const readText = (path: string): string => readFileSync(path, "utf8");
  *
  * This is the compatibility seam, so it is tested from the outside — the
  * collector hook, two RPCs — rather than at the resolver. What matters is
- * that a paseo.cafe install with no `install.json` records traces and settings
+ * that an install from npm with no `install.json` records traces and settings
  * at all (it did not before), that a 0.3.x user's folder is still the one used,
  * and that an unusable folder disables rather than silently writing somewhere
  * else.

@@ -23,13 +23,14 @@ import {
   registerMissionsRpcs,
 } from "../plugin/server/missions-rpc";
 import { ensureMissionsHome, missionsHomeDirOf, type MissionsPaseo } from "../plugin/server/missions-home";
+import { createAlertStore } from "../plugin/server/alert-store";
 import { createOutbox } from "../plugin/server/outbox";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
 import { clearLinksCache } from "../plugin/server/links";
 import { clearRequestRegistryCache } from "../plugin/server/request-registry";
 import { clearTraceStoreCache } from "../plugin/server/trace-store";
 import { mainTitleOf } from "../plugin/server/role-title";
-import { memoryListRpc, missionChangeRpc, missionGetRpc, missionsListRpc } from "../plugin/shared/contracts";
+import { memoryListRpc, missionChangeRpc, missionGetRpc, missionIntegrationAskRpc, missionIntegrationRevokeRpc, missionsListRpc } from "../plugin/shared/contracts";
 import { answerDecision } from "../plugin/shared/decisions";
 import { makeDecision } from "./helpers/decisions";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
@@ -286,6 +287,8 @@ describe("mission.get (§10.4)", () => {
     const { fake, web } = await fixture();
     const page = missionGetRpc.output.parse(await handleMissionGet({ missionId: web.missionId }, fake.paseo, deps()));
     expect(page.summary.code).toBe("WEB");
+    // ADR-045 decision 5: a mission with no line carries none.
+    expect(page.line).toBeNull();
     // ADR-036 (§17.1): the owner's integration.ci, off by default, so the repo rows show no CI.
     expect(page.summary.ci).toBe("off");
     expect(page.charter).toEqual({
@@ -341,6 +344,14 @@ describe("mission.get (§10.4)", () => {
     expect(page.rows.map((row) => row.phase)).toEqual(["blocked", "working", "stopped"]);
   });
 
+  it("a row is blocked while a delivery of its request stands failed (ADR-042)", async () => {
+    const { fake, web } = await fixture();
+    createOutbox(home, { now: () => ago(5) }).add("wks-b", { kind: "report", requestId: REQ2, from: "wkr-2", to: MAIN, text: "BM-REPORT\nphase: bead-implementing" });
+    createAlertStore(home).raise({ workspaceId: "wks-b", kind: "delivery-dropped", subject: REQ2, detail: "the answers did not arrive" });
+    const page = await handleMissionGet({ missionId: web.missionId }, fake.paseo, deps());
+    expect(page.rows.find((row) => row.requestId === REQ2)?.phase).toBe("blocked");
+  });
+
   it("reads a closed mission's governor as quiet", async () => {
     const { fake, ops } = await fixture();
     const page = await handleMissionGet({ missionId: ops.missionId }, fake.paseo, deps());
@@ -360,6 +371,16 @@ describe("mission.change (§10.4)", () => {
     mission: createMissionStore(home).get(missionId),
     journal: createMissionStore(home).journal(missionId, 1_000).length,
     told: createOutbox(home).list("wks-own").length,
+  });
+
+  it("the owner's change wakes a resting Main of a mission with no active request: it is never settled as a silent note", async () => {
+    const { fake, web } = await fixture();
+    const { cli } = fakeCli();
+    for (const requestId of [REQ1, REQ2]) createMissionRoster(home).setState(web.missionId, requestId, "finished");
+    fake.setAgents(fake.agents.map((agent) => (agent.id === MAIN ? { ...agent, status: "closed", persistence: { sessionId: "session-1" } } : agent)));
+    await handleMissionChange({ missionId: web.missionId, name: "Website v2" }, fake.paseo, deps({ cli }));
+    expect(createOutbox(home).list("wks-own")).toMatchObject([{ kind: "message", requestId: web.missionId, from: "owner", to: MAIN, state: "delivered", reason: null }]);
+    expect(fake.sends.filter((send) => send.id === MAIN).map((send) => send.text)).toEqual([expect.stringContaining('The owner changed your mission from the Missions screen: rename it "Website v2".')]);
   });
 
   it("applies the owner's change at once: the mission, a charter journal line by owner, the Main told, retitled and relabelled", async () => {
@@ -479,6 +500,19 @@ describe("memory.list (§10.4)", () => {
       [first.id, "fact", "owner, Q2"],
       [here.id, "precedent", "q:req-1:Q2"],
     ]);
+  });
+});
+
+describe("mission.integration.ask and .revoke: what (ADR-045 decision 4)", () => {
+  const INPUT = { missionId: "mis-0123456789", repo: "wks_repo" };
+
+  it("what is optional, and only push or local-merge", () => {
+    for (const rpc of [missionIntegrationAskRpc, missionIntegrationRevokeRpc]) {
+      expect(rpc.input.parse(INPUT)).toEqual(INPUT);
+      expect(rpc.input.parse({ ...INPUT, what: "push" })).toEqual({ ...INPUT, what: "push" });
+      expect(rpc.input.parse({ ...INPUT, what: "local-merge" })).toEqual({ ...INPUT, what: "local-merge" });
+      expect(rpc.input.safeParse({ ...INPUT, what: "merge" }).success).toBe(false);
+    }
   });
 });
 

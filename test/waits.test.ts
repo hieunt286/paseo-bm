@@ -266,7 +266,7 @@ describe("what settles an item (design §6.3)", () => {
     const { home, fake, tools, idle, tick } = setup();
     expect((await tools.worker.call("bm_report", { ...REPORT, waitingOnRequests: [OTHER] }, WORKER_CALLER)).ok).toBe(true);
     tick(60_000);
-    const finished = { ...REPORT, requestId: OTHER, phase: "finished", buildAndTests: "npm test pass", filesChanged: ["api.ts"] };
+    const finished = { ...REPORT, requestId: OTHER, phase: "finished", buildAndTests: "npm test pass", filesChanged: ["api.ts"], runtimeProof: { kind: "ran", what: "called the API", showed: "it answered 200" } };
     expect((await tools.worker.call("bm_report", finished, WORKER_2_CALLER)).ok).toBe(true);
     // Met, so released (design §6.4): the wait is cleared and the Worker woken with the fact.
     await flush();

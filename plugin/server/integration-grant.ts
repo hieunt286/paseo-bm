@@ -27,16 +27,25 @@
  *   `revokedAt` is set, the placement's live Workers get `BM-SETTINGS`, the
  *   journal a `decision` line.
  *
+ * **The local merge** (ADR-045 decision 4, mission line plan §5.3) follows the
+ * same card: one `ownerOnly` `m:` card per mission × repo, subject
+ * `local-merge`, opened at the first `finished` that passes the finish gate
+ * with a commit (`openLocalMergeCardIfNeeded`), its option a carrying
+ * `integration.local-merge`, so only the owner's own tap grants. The grant is
+ * `Placement.localMerge` on the mission branch's placement, and holds while its
+ * target is the placement's (`localMergeHolds`). Its Yes and Revoke tell the
+ * journal and the Main; Workers have nothing to change.
+ *
  * Never throws: a failure is a refusal or one log line.
  */
 import { UNSETTLED_STATUSES, type Decision } from "../shared/decisions";
 import type { HeldFinding, MissionBranch } from "../shared/effectful-actions";
-import type { IntegrationGrantAction } from "../shared/mission-change";
-import { INTEGRATION_SUBJECT } from "../shared/question-subjects";
+import type { IntegrationGrantAction, IntegrationLocalMergeAction } from "../shared/mission-change";
+import { INTEGRATION_SUBJECT, LOCAL_MERGE_SUBJECT } from "../shared/question-subjects";
 import { createMissionDecisionStore, missionOfDecisionId } from "./mission-decisions";
 import { createMissionStore, journalQuietly, type Mission, type Placement } from "./mission-store";
 import { tellMain, type MissionAnswerDeps } from "./mission-tools";
-import { placementEntryOf } from "./placements";
+import { laneOf, placementEntryOf } from "./placements";
 import { errorText } from "./rpc-kit";
 import { integrationNotice, notifyPlacementWorkers, type SettingsNoticeDeps, type SettingsPaseo } from "./settings-notices";
 
@@ -195,7 +204,8 @@ export function askIntegrationAgain(home: string, missionId: string, repo: strin
 
 /** Why the owner's answer `optionKey` on an integration card cannot be applied now; none for "Not now" or words. Never throws. */
 export function integrationAnswerRefusalsOf(decision: Decision, optionKey: string | null, home: string): string[] {
-  const action = grantActionOf(decision.options.find((option) => option.key === optionKey));
+  const chosen = decision.options.find((option) => option.key === optionKey);
+  const action = grantActionOf(chosen) ?? localMergeActionOf(chosen);
   if (action === null) return [];
   try {
     const mission = createMissionStore(home).get(action.missionId);
@@ -220,24 +230,31 @@ export interface IntegrationDeps {
   enqueue?: SettingsNoticeDeps["enqueue"];
 }
 
-/** Writes the placement's grant as `next` makes it; the placement after the write, or the refusal. */
-function writeGrant(home: string, missionId: string, repo: string, next: (placement: Placement) => Placement["integration"] | { refusal: string }): { ok: true; placement: Placement } | { ok: false; reasons: string[] } {
+/** Writes the placement `find` picks as `next` makes it; the placement after the write, or the refusal. */
+function writePlacement(home: string, missionId: string, repo: string, find: (mission: Mission, repo: string) => { index: number; placement: Placement } | null, next: (placement: Placement) => Placement | { refusal: string }): { ok: true; placement: Placement } | { ok: false; reasons: string[] } {
   const out: { written: Placement | null; refusal: string | null } = { written: null, refusal: null };
   const result = createMissionStore(home).update(missionId, (mission) => {
-    const found = newestPlacement(mission, repo);
+    const found = find(mission, repo);
     if (found === null) return { reasons: [`mission ${mission.code} has no worktree of ${repo}`] };
-    const integration = next(found.placement);
-    if (integration !== null && "refusal" in integration) {
-      out.refusal = integration.refusal;
+    const written = next(found.placement);
+    if ("refusal" in written) {
+      out.refusal = written.refusal;
       return null;
     }
-    const written: Placement = { ...found.placement, integration };
     out.written = written;
     return { ...mission, placements: (mission.placements ?? []).map((placement, index) => (index === found.index ? written : placement)) };
   });
   if (out.refusal !== null) return { ok: false, reasons: [out.refusal] };
   if (!result.ok) return { ok: false, reasons: result.reasons };
   return out.written === null ? { ok: false, reasons: [`mission ${missionId} has no worktree of ${repo}`] } : { ok: true, placement: out.written };
+}
+
+/** Writes the placement's grant as `next` makes it; the placement after the write, or the refusal. */
+function writeGrant(home: string, missionId: string, repo: string, next: (placement: Placement) => Placement["integration"] | { refusal: string }): { ok: true; placement: Placement } | { ok: false; reasons: string[] } {
+  return writePlacement(home, missionId, repo, newestPlacement, (placement) => {
+    const integration = next(placement);
+    return integration !== null && "refusal" in integration ? integration : { ...placement, integration };
+  });
 }
 
 /** Tells the placement's live Workers their new `Integration:` line (§3.4); 0 without a Paseo handle or workspace. */
@@ -305,6 +322,163 @@ export async function revokeIntegration(missionId: string, repo: string, deps: I
     const store = createMissionStore(deps.home, { now: () => deps.now });
     journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `The owner revoked pushing ${written.placement.branch} and its merge request into ${written.placement.target}.`, ...(written.placement.integration === null ? {} : { ref: written.placement.integration.decisionId }) }, deps.log);
     return { ok: true, placement: written.placement, notified: await notifyWorkers(written.placement, deps) };
+  } catch (error) {
+    return { ok: false, reasons: [`the mission cannot be written: ${errorText(error)}`] };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The local merge (ADR-045 decision 4).
+// ---------------------------------------------------------------------------
+
+/** True while the placement's local-merge grant is `granted` and names its target. Pure. */
+export function localMergeHolds(placement: Pick<Placement, "target" | "localMerge">): boolean {
+  return placement.localMerge?.state === "granted" && placement.localMerge.target === placement.target;
+}
+
+/** The local-merge card's question, word for word. */
+export function localMergeQuestionOf(placement: Pick<Placement, "branch" | "target">): string {
+  return `Merge \`${placement.branch}\` into your local \`${placement.target}\` by fast-forward whenever a request passes its checks? Nothing is pushed; push and tag stay yours.`;
+}
+
+/** The local-merge action a card's option carries, or null. Pure. */
+function localMergeActionOf(option: Decision["options"][number] | undefined): IntegrationLocalMergeAction | null {
+  return option?.action?.kind === "integration.local-merge" ? option.action : null;
+}
+
+/** True for the plugin's local-merge card: an `m:` card one of whose options carries `integration.local-merge`. Pure. */
+export function isLocalMergeCard(decision: Pick<Decision, "options">): boolean {
+  return decision.options.some((option) => localMergeActionOf(option) !== null);
+}
+
+/** The local-merge card of the mission branch's placement: `ownerOnly`, release, a "Yes" carrying the grant and a "Not now"; none recommended. Pure. */
+export function localMergeCardOf(id: string, missionId: string, placement: Placement, requestId: string | null, at: string): Decision {
+  return {
+    ...integrationCardOf(id, missionId, placement, requestId, at),
+    question: localMergeQuestionOf(placement),
+    subject: LOCAL_MERGE_SUBJECT,
+    options: [
+      { key: "a", label: "Yes, for this mission and repository", recommended: false, effects: ["commit"], action: { kind: "integration.local-merge", missionId, repo: placement.repo } },
+      { key: "b", label: "Not now — keep the work on its branch", recommended: false, effects: ["none"] },
+    ],
+  };
+}
+
+/** The mission branch's placement of `repo`, with its index; null when it has none. */
+function missionBranchPlacement(mission: Mission, repo: string): { index: number; placement: Placement } | null {
+  const placements = mission.placements ?? [];
+  for (let index = placements.length - 1; index >= 0; index -= 1) if (placements[index]!.repo === repo && laneOf(placements[index]!) === 1) return { index, placement: placements[index]! };
+  return null;
+}
+
+/** A local-merge card of `repo` in `cards`. */
+const asksLocalMergeOf = (decision: Decision, repo: string): boolean => decision.options.some((option) => localMergeActionOf(option)?.repo === repo);
+
+/**
+ * Opens the owner's local-merge card for the mission's `repo` when its mission
+ * branch's placement is `ready`, has no grant and no card for it was ever
+ * opened. Called from `bm_report` on a `finished` that passed the finish gate
+ * with a commit. Returns the card's id, or null when none was opened. Never
+ * throws.
+ */
+export function openLocalMergeCardIfNeeded(home: string, missionId: string, repo: string, deps: { now: Date; log: (message: string) => void; requestId?: string | null }): string | null {
+  try {
+    const store = createMissionStore(home);
+    const mission = store.get(missionId);
+    if (mission === null || mission.state !== "open") return null;
+    const found = missionBranchPlacement(mission, repo);
+    if (found === null || found.placement.state !== "ready" || found.placement.localMerge !== undefined) return null;
+    const cards = createMissionDecisionStore(home);
+    // Asked once: an open card waits, a "Not now" stands; the owner reopens it from the mission page.
+    if (cards.list(missionId).some((decision) => asksLocalMergeOf(decision, repo))) return null;
+    const id = cards.nextId(missionId);
+    cards.open(localMergeCardOf(id, missionId, found.placement, deps.requestId ?? null, deps.now.toISOString()));
+    journalQuietly(store, missionId, { kind: "decision", by: "plugin", text: `The owner is asked on ${id} to allow fast-forwarding ${found.placement.target} to what ${found.placement.branch} passes.`, ref: id }, deps.log);
+    return id;
+  } catch (error) {
+    deps.log(`[paseo-bm] the local-merge card of mission ${missionId} for ${repo} could not be opened: ${errorText(error)}`);
+    return null;
+  }
+}
+
+/**
+ * The owner's "Ask me again" for the local merge (`mission.integration.ask`,
+ * `what: "local-merge"`): a fresh card, as the plugin's first one. Refused when
+ * the mission is not open, has no ready worktree of `repo`, the grant holds, or
+ * a card for it is open. Never throws.
+ */
+export function askLocalMergeAgain(home: string, missionId: string, repo: string, deps: { now: Date; log: (message: string) => void }): { ok: true; decisionId: string } | { ok: false; reasons: string[] } {
+  try {
+    const store = createMissionStore(home);
+    const mission = store.get(missionId);
+    if (mission === null) return { ok: false, reasons: [`unknown mission ${missionId}`] };
+    if (mission.state !== "open") return { ok: false, reasons: [`mission ${mission.code} is not open`] };
+    const found = missionBranchPlacement(mission, repo);
+    if (found === null) return { ok: false, reasons: [`mission ${mission.code} has no worktree of ${repo}`] };
+    if (found.placement.state !== "ready") return { ok: false, reasons: [`the worktree of ${repo} in mission ${mission.code} is ${found.placement.state}`] };
+    if (localMergeHolds(found.placement)) return { ok: false, reasons: [`the local merge into ${found.placement.target} is already allowed; nothing was asked`] };
+    const cards = createMissionDecisionStore(home);
+    const open = cards.list(missionId, UNSETTLED_STATUSES).find((decision) => asksLocalMergeOf(decision, repo));
+    if (open !== undefined) return { ok: false, reasons: [`${open.id} already asks you about the local merge into ${found.placement.target}; nothing was asked`] };
+    const id = cards.nextId(missionId);
+    cards.open(localMergeCardOf(id, missionId, found.placement, null, deps.now.toISOString()));
+    journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `The owner asked again on ${id} to allow fast-forwarding ${found.placement.target} to what ${found.placement.branch} passes.`, ref: id }, deps.log);
+    return { ok: true, decisionId: id };
+  } catch (error) {
+    return { ok: false, reasons: [`the mission cannot be written: ${errorText(error)}`] };
+  }
+}
+
+/**
+ * After the owner's answer on a local-merge card is recorded: on their own
+ * "Yes", the mission branch's placement gets the grant and the journal and the
+ * Main are told; "Not now" or words is a journal line and a word to the Main.
+ * Never throws.
+ */
+export async function applyLocalMergeDecision(decision: Decision, deps: IntegrationDeps): Promise<void> {
+  const missionId = missionOfDecisionId(decision.id);
+  const answer = decision.answer;
+  if (missionId === null || answer === null || decision.status !== "answered") return;
+  const store = createMissionStore(deps.home, { now: () => deps.now });
+  const tell: MissionAnswerDeps = { home: deps.home, now: deps.now, log: deps.log, ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }), ...(deps.cli === undefined ? {} : { cli: deps.cli }) };
+  try {
+    const action = answer.by === "owner" ? localMergeActionOf(decision.options.find((option) => option.key === answer.optionKey)) : null;
+    if (action === null) {
+      const how = answer.optionKey === null ? `answered in words: ${answer.words ?? ""}` : "chose not now: nothing is merged";
+      journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `On the local merge (${decision.id}) the owner ${how}.`, ref: decision.id }, deps.log);
+      await tellMain(missionId, decision.id, `On local-merge card ${decision.id} the owner ${how}.`, tell);
+      return;
+    }
+    const at = deps.now.toISOString();
+    const written = writePlacement(deps.home, missionId, action.repo, missionBranchPlacement, (placement) => ({ ...placement, localMerge: { state: "granted", decisionId: decision.id, grantedAt: at, revokedAt: null, target: placement.target } }));
+    if (!written.ok) {
+      journalQuietly(store, missionId, { kind: "decision", by: "plugin", text: `${decision.id} could not be applied: ${written.reasons.join("; ")}`, ref: decision.id }, deps.log);
+      return;
+    }
+    const { branch, target } = written.placement;
+    journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `The owner allowed fast-forwarding ${target} to what ${branch} passes (${decision.id}).`, ref: decision.id }, deps.log);
+    await tellMain(missionId, decision.id, `The owner allowed fast-forwarding the local ${target} to what ${branch} passes, on card ${decision.id}; nothing is pushed.`, tell);
+  } catch (error) {
+    deps.log(`[paseo-bm] applying ${decision.id} failed: ${errorText(error)}`);
+  }
+}
+
+/**
+ * The owner's revoke of the local merge (`mission.integration.revoke`, `what:
+ * "local-merge"`): `revokedAt` is set and the journal gets a `decision` line.
+ * Refused when the mission has no worktree of `repo` or no grant to revoke.
+ * Never throws.
+ */
+export function revokeLocalMerge(missionId: string, repo: string, deps: Pick<IntegrationDeps, "home" | "now" | "log">): { ok: true; placement: Placement } | { ok: false; reasons: string[] } {
+  try {
+    const at = deps.now.toISOString();
+    const written = writePlacement(deps.home, missionId, repo, missionBranchPlacement, (placement) =>
+      placement.localMerge?.state === "granted" ? { ...placement, localMerge: { ...placement.localMerge, state: "revoked", revokedAt: at } } : { refusal: `the local merge into ${placement.target} is not allowed; nothing was changed` },
+    );
+    if (!written.ok) return written;
+    const store = createMissionStore(deps.home, { now: () => deps.now });
+    journalQuietly(store, missionId, { kind: "decision", by: "owner", text: `The owner revoked fast-forwarding ${written.placement.target} to what ${written.placement.branch} passes.`, ...(written.placement.localMerge === undefined ? {} : { ref: written.placement.localMerge.decisionId }) }, deps.log);
+    return written;
   } catch (error) {
     return { ok: false, reasons: [`the mission cannot be written: ${errorText(error)}`] };
   }

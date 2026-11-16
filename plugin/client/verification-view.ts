@@ -4,10 +4,10 @@
  * finished card (`chat-card-frame.ts`) share these words.
  *
  * - A request whose latest report is `finished`, whose code changed and whose
- *   named checks are not all detected is **finished-unverified**: "Done —
+ *   named checks are not all detected or reused is **finished-unverified**: "Done —
  *   unverified" on the stage bar, "Finished — unverified" on the card, both
  *   in the warning tone.
- * - Each check the report names carries its label — detected ✓,
+ * - Each check the report names carries its label — detected ✓, reused,
  *   self-reported, or unverified when the report says nothing ran — and the
  *   files changed and beads closed carry theirs (detected, self-reported).
  * - A request that is **not checked** (recorded before shell entries carried
@@ -38,10 +38,10 @@ export function isShownVerification(verification: TraceVerification | null | und
 
 type Claim = TraceVerification["named"][number];
 
-/** One check's label as the owner reads it: `detected ✓`, `self-reported`, or `unverified` when the report says nothing ran. */
+/** One check's label as the owner reads it: `detected ✓`, `reused`, `self-reported`, or `unverified` when the report says nothing ran. */
 export function checkLabelText(verification: Pick<TraceVerification, "checks">, claim: Pick<Claim, "label">): string {
   if (verification.checks === "unverified") return "unverified";
-  return claim.label === "detected" ? "detected ✓" : "self-reported";
+  return claim.label === "detected" ? "detected ✓" : claim.label;
 }
 
 /** The checks on one line: `npm test — detected ✓ · npm run lint — self-reported`, or the verdict when none is named. */

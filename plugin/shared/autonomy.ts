@@ -295,7 +295,7 @@ export function commandActsOnFinish(command: { approved: readonly Effect[]; inte
  */
 export function unverifiedFinishText(requestId: string | null, instead: string): string {
   const request = requestId === null ? "its request" : `request ${requestId}`;
-  return `${request} finished unverified: its code changed and not every check its report names was seen to pass after the last edit, so a commit or release on it is the owner's to decide; ${instead}`;
+  return `${request} finished unverified: its code changed and not every check its report names was seen to pass after the last edit or reused from an earlier pass, so a commit or release on it is the owner's to decide; ${instead}`;
 }
 
 /**

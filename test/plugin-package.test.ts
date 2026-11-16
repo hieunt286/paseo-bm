@@ -7,20 +7,16 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 /**
- * plugin-package/, the published form of the plugin (ADR-026): what the
- * paseo.cafe listing reads in Git and what npm publishes. It is generated from
- * plugin/ by `npm run build` and committed, so these checks hold it to the
- * source and to the limits of paseo.cafe's security scan.
+ * plugin-package/, the published form of the plugin (ADR-026): what npm
+ * publishes. It is generated from plugin/ by `npm run build` and committed, so
+ * these checks hold it to the source. Its size has no limit (ADR-048).
  */
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const packageRoot = join(repoRoot, "plugin-package");
 const read = (name: string) => readFileSync(join(packageRoot, name), "utf8");
 
-/** paseo.cafe's scan: at most 200 reachable files and 2,000,000 bytes (static-scan.ts, paseo-cafe 4608732). */
-const SCAN_MAX_BYTES = 2_000_000;
-
-/** Modules Paseo provides at run time, as the scan's `isHostProvidedModule` lists them. */
+/** Modules Paseo provides at run time: the only imports a bundle may keep. */
 const HOST_PROVIDED = /^(?:@getpaseo\/plugin(?:\/.*)?|zod(?:\/.*)?|react(?:\/.*)?|react-native(?:\/.*)?|@tanstack\/react-query)$/;
 const NODE_BUILTIN = (specifier: string) => specifier.startsWith("node:") || builtinModules.includes(specifier);
 
@@ -55,11 +51,6 @@ describe("plugin-package/ (ADR-026)", () => {
     const files = filesUnder(packageRoot).sort();
     const images = readdirSync(join(repoRoot, "plugin", "images")).filter((name) => !name.startsWith(".")).map((name) => `images/${name}`);
     expect(files).toEqual(["LICENSE", "README.md", "index.client.tsx", "index.server.ts", "package.json", "paseo-plugin.json", ...images].sort());
-  });
-
-  it("stays within paseo.cafe's scan budget", () => {
-    const bytes = Buffer.byteLength(read("index.server.ts")) + Buffer.byteLength(read("index.client.tsx"));
-    expect(bytes).toBeLessThanOrEqual(SCAN_MAX_BYTES);
   });
 
   it("copies the manifest, README.md and LICENSE from plugin/ byte for byte", () => {

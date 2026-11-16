@@ -18,7 +18,7 @@
  *   drawn — never a "?" (concept §4.2).
  * - **A finish, labelled** (autonomy design §C.3, §C.6; REQ-130): once the
  *   request's latest report is `finished`, the row's `verification` labels
- *   each check it names (detected ✓, self-reported, unverified) and the files
+ *   each check it names (detected ✓, reused, self-reported, unverified) and the files
  *   and beads it claims (detected, self-reported); a finished-unverified
  *   request reads "Done — unverified" in the warning tone
  *   (`verification-view.ts`). A request that is not checked reads as before.
@@ -53,6 +53,7 @@ import { plural, shorten } from "../shared/text";
 import { LEVELS, type AutonomyLevelReading } from "../shared/autonomy";
 import { WINDOW_LABELS, WINDOW_SHORT_LABELS, processCells, roleTokenRows, turnsCell, type RoleTokenRow } from "./insights-model";
 import { DONE_UNVERIFIED_LABEL, checksText, claimCountsText, isShownVerification, verificationDetailLines } from "./verification-view";
+import { checksVerified } from "../shared/evidence";
 
 /** How often Projects reads its rows and an open project's requests while they show. */
 export const WORK_POLL_MS = 10_000;
@@ -633,8 +634,8 @@ function openDecisions(decisions: readonly Decision[], requestId: string | null)
  * bead claimed, the request's closed count stands in, as before.
  */
 function finishLines(verification: TraceVerification, closed: TraceSummary["beadCounts"]["closed"]): EvidenceLine[] {
-  const detected = verification.checks === "detected";
-  const lines: EvidenceLine[] = [{ key: "checks", mark: detected ? "✓" : "!", text: `checks: ${checksText(verification)}`, tone: detected ? "plain" : "warning" }];
+  const verified = checksVerified(verification.checks);
+  const lines: EvidenceLine[] = [{ key: "checks", mark: verified ? "✓" : "!", text: `checks: ${checksText(verification)}`, tone: verified ? "plain" : "warning" }];
   if (verification.files.length > 0) {
     lines.push({ key: "files", mark: "✓", text: `files: ${verification.files.length} changed · ${claimCountsText(verification.files)}`, tone: "plain" });
   }

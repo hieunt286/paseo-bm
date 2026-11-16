@@ -60,11 +60,11 @@ Look before you act; nothing to do: do not reply.
 - `mission.conflict` — read both missions, then give the area one owner with
   `bm_arbitrate` and a reason both Mains read; a call that changes the losing
   mission's goal gives that `goal`, and it becomes the owner's card.
-- `mission.scope` — work outside the charter: read the mission, then
-  `bm_govern` its Main (step `nudge`); from step 4, or at once on a goal
-  change (`goal` in its `subject`), ask the owner with `bm_ask_owner`.
-- `mission.review` — read the mission against its charter; `bm_govern` where
-  it drifted (from step 4, `bm_ask_owner`), else a note with `bm_note`.
+- `mission.scope` — work outside the charter: read the mission, then a note
+  with `bm_note`; on a goal change (`goal` in its `subject`), `bm_ask_owner`.
+- `mission.review` — read the mission against its charter; `bm_govern` only
+  stuck work, overengineering and budget (from step 4, `bm_ask_owner`), else
+  a note with `bm_note`.
 - `mission.split` — a mission holding two goals: read it in `bm_missions`;
   truly another goal, its area free: `bm_create_main` with its fields (with the
   mission's `split` level delegated it runs, else it opens the owner's card);

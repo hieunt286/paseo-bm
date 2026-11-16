@@ -686,6 +686,10 @@ describe("Decided for you: what the policy and precedents answered since the own
       const face = [row.what, row.where, row.reason ?? "", row.time, row.accessibilityLabel, row.override?.state === "offered" ? row.override.accessibilityLabel : (row.override?.text ?? "")].join(" ");
       for (const id of [decision.id, "req-A", "p:9f1c", "wks_1"]) expect(face).not.toContain(id);
     }
+    // ADR-045 decision 1: a step list's acceptance criteria, on a tap.
+    const line = { lineId: "line-1", steps: [{ title: "Build the API", acceptance: ["GET /orders answers 200"] }, { title: "Wire the screens", acceptance: ["The page lists them"] }] };
+    const lineDetails = digestRowOf({ ...byPrecedent, options: [{ key: "apply", label: "Apply the change", recommended: false, effects: [], action: { kind: "mission-change", missionId: "mis-0123456789", change: { line } } }, ...byPrecedent.options] }, input()).details;
+    expect(lineDetails).toEqual(expect.arrayContaining(["Step 1: Build the API", "- GET /orders answers 200", "Step 2: Wire the screens", "- The page lists them"]));
     expect(digestRowOf(byPrecedent, input()).details).toEqual([
       "Decision: q:req-A:Q3",
       "Request: req-A",

@@ -121,6 +121,27 @@ describe("the wait action", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it("resumes an agent Paseo closed during the wait: a limit outlasts its idle hour (ADR-042)", async () => {
+    write([incident()]);
+    const notify = vi.fn(async () => undefined);
+    const waiter = createFallbackWaiter({ home, log, notify });
+    const { paseo, sent } = fakeAgents({ status: "closed", persistence: { sessionId: "session-1" }, labels: {} });
+    await waiter.wait(incident(), paseo, { home });
+    await vi.advanceTimersByTimeAsync(3 * 60 * 60 * 1000);
+    expect(sent.map((message) => message.text)).toEqual([RESUME_NOTICE]);
+    expect(read()[0]).toMatchObject({ status: "resumed" });
+  });
+
+  it("marks the incident expired when the closed agent has no session to resume", async () => {
+    write([incident()]);
+    const waiter = createFallbackWaiter({ home, log, notify: vi.fn(async () => undefined) });
+    const { paseo, sent } = fakeAgents({ status: "closed", labels: {} });
+    await waiter.wait(incident(), paseo, { home });
+    await vi.advanceTimersByTimeAsync(3 * 60 * 60 * 1000);
+    expect(sent).toEqual([]);
+    expect(read()[0]).toMatchObject({ status: "expired" });
+  });
+
   it("ends the wait when the incident's status changes: nothing is sent at the reset", async () => {
     write([incident()]);
     const waiter = createFallbackWaiter({ home, log });

@@ -11,6 +11,9 @@
 export const GOVERNOR_FAMILIES = ["mess", "overengineering", "drift", "stuck", "budget"] as const;
 export type GovernorFamily = (typeof GOVERNOR_FAMILIES)[number];
 
+/** The families whose figures are still computed and shown, but which the governor no longer nudges for (ADR-045 decision 9). */
+export const QUIET_FAMILIES: readonly GovernorFamily[] = ["mess", "drift"];
+
 /** Every figure and its family, in the order of the design's table. */
 export const GOVERNOR_FIGURES = {
   writersOnOneFile: "mess",

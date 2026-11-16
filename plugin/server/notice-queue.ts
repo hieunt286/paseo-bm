@@ -103,8 +103,13 @@
  *   the SAME kind for the SAME target and moves to the back of that target's
  *   queue; other kinds and other targets are kept.
  * - **Lifecycle belongs to the user (ADR-005).** `send()` un-archives an
- *   archived agent and starts a turn on it, so an archived, closed or unknown
- *   target is never sent to: its queued notices are dropped with one log line.
+ *   archived agent and starts a turn on it, so an archived, unknown or
+ *   otherwise gone target is never sent to: its queued notices are dropped
+ *   with one log line.
+ * - **A resting target wakes only for a `wake` notice (ADR-042).** Paseo closes
+ *   an idle runtime and a send resumes it (`presenceOf`). A notice someone
+ *   waits on says `wake` and goes; any other is dropped, so nothing wakes an
+ *   agent only to inform it.
  * - **Keyed by agent id and kind, never by turn id.** Paseo reuses turn ids
  *   inside one agent (AGENTS.md).
  * - **In memory only.** A plugin reload loses the queue; each consumer
@@ -114,6 +119,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { presenceOf } from "./agent-presence";
 import { roleOfProvider } from "./agent-role";
 import { aliasBases } from "./alias-bases";
 import { providerId } from "./provider-id";
@@ -137,6 +143,8 @@ export interface NoticeAgentSnapshot {
   provider?: string | null;
   /** The foreground turn while one runs (Paseo's `activeTurn`); read only for a steer. */
   activeTurn?: { turnId?: string | null } | null;
+  /** Its stored session; read only for a closed target (`presenceOf`). */
+  persistence?: unknown;
 }
 
 /** The SDK slice this module uses; `PaseoApi` from a hook or handler context is structurally assignable. */
@@ -225,6 +233,8 @@ export interface BatchItem {
   /** Dedupe key: a newer item of the same key replaces a queued one. */
   key: string;
   line: string;
+  /** Someone waits on it: it resumes a resting target (ADR-042). */
+  wake?: boolean;
   /**
    * Read at the idle moment, synchronously, just before the batch is sent:
    * false drops the item (its subject settled before delivery). A throw counts
@@ -259,6 +269,8 @@ export interface EnqueueOptions {
   first?: boolean;
   /** Read just before the send: true holds it instead (delivery line design §6.4: the wake gate at the send). */
   isHeld?: () => boolean;
+  /** Someone waits on it: it resumes a resting target (ADR-042). */
+  wake?: boolean;
   /** The owner's words (delivery line design §19.5): steered into a running turn when every guard holds (`steerRefusalOf`). */
   steer?: boolean;
 }
@@ -311,6 +323,7 @@ interface Entry extends QueuedNotice {
   group?: string;
   first?: boolean;
   isHeld?: () => boolean;
+  wake?: boolean;
   /** Set on a notice, single or batched, whose sender wants its outcome. */
   callbacks?: NoticeCallbacks;
 }
@@ -436,6 +449,19 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
     for (const entry of list) tell(targetId, entry, "dropped", "the target is archived, closed or gone");
   }
 
+  /** A resting target: what no one waits on is dropped, so it does not wake the agent (ADR-042). */
+  function dropUnwaking(targetId: string): void {
+    const list = queued.get(targetId) ?? [];
+    const kept = list.filter((entry) => entry.wake === true);
+    const dropped = list.filter((entry) => entry.wake !== true);
+    if (dropped.length === 0) return;
+    if (kept.length === 0) queued.delete(targetId);
+    else queued.set(targetId, kept);
+    for (const entry of dropped) entry.state = "dropped";
+    log(`[paseo-bm] ${targetId} is resting; dropped the notices that do not wake it (${dropped.map((entry) => entry.kind).join(", ")}).`);
+    for (const entry of dropped) tell(targetId, entry, "dropped", "the target is resting and this notice does not wake it");
+  }
+
   /** The notice that goes next: the oldest `first` notice or item of a `first` group, else the oldest notice. */
   function headOf(targetId: string): Entry | undefined {
     const list = queued.get(targetId);
@@ -453,9 +479,14 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       log(`[paseo-bm] could not read ${targetId} to deliver its ${head.kind} notice: ${errorText(error)}; it waits for that agent's next turn end.`);
       return "unknown";
     }
-    if (agent === null || agent.archivedAt != null || agent.status === "closed") {
+    const presence = presenceOf(agent);
+    if (agent === null || presence === "gone") {
       dropAll(targetId);
       return "gone";
+    }
+    if (presence === "resting") {
+      dropUnwaking(targetId);
+      if (!queued.has(targetId)) return "gone";
     }
     if (isBusy(agent.status)) return "busy";
     const next = headOf(targetId);
@@ -612,6 +643,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
       if (callbacks !== undefined) entry.callbacks = callbacks;
       if (options?.first === true) entry.first = true;
       if (typeof options?.isHeld === "function") entry.isHeld = options.isHeld;
+      if (options?.wake === true) entry.wake = true;
       if (options?.steer === true) {
         const steering = handleFor(paseo);
         const steered = steering === null ? null : await trySteer(targetId, entry, steering);
@@ -645,6 +677,7 @@ export function createNoticeQueue(deps: NoticeQueueDeps = {}): NoticeQueue {
         if (nonEmpty(item.group)) entry.group = item.group;
         if (item.first === true) entry.first = true;
         if (typeof item.isHeld === "function") entry.isHeld = item.isHeld;
+        if (item.wake === true) entry.wake = true;
         if (item.callbacks !== undefined) entry.callbacks = item.callbacks;
         put(targetId, entry);
         return entry;

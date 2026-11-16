@@ -181,6 +181,11 @@ export const parsedReportSchema = z.object({
   handoffNote: z.string().optional(),
   /** What a size rollover's `finished` leaves to its continuation (delivery line design §2.6); absent otherwise. */
   remaining: z.array(z.string()).optional(),
+  /** ADR-045 decision 7: the goal and the acceptance a Medium or Large `received` restates; absent from any other report. */
+  goal: z.string().optional(),
+  acceptance: z.array(z.string()).optional(),
+  /** ADR-045 decision 6: what a `finished` ran for real, or why it could not; absent from any other report. */
+  runtimeProof: z.object({ kind: z.enum(["ran", "could-not-run"]), what: z.string(), showed: z.string().optional() }).optional(),
   /**
    * The report's git fields (delivery line design §4.4): the mission branch,
    * the commit, whether it is pushed, the merge request and its CI, as the

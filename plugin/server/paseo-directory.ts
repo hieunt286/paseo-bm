@@ -11,6 +11,7 @@
  * archived — and each caller says what that means for it.
  */
 import { basename } from "node:path";
+import { presenceOf } from "./agent-presence";
 import { listAllAgents, parentOf, roleOfAgent } from "./agent-role";
 import type { AgentFacts } from "./traces";
 import { withoutRoleMarker } from "./role-title";
@@ -175,6 +176,7 @@ export async function bmAgentsOf(
       role: fact.role,
       labelled: fact.labelled,
       status: String(agent["status"] ?? "closed"),
+      ...(presenceOf(agent) === "resting" ? { resting: true } : {}),
       parentAgentId,
       createdAt: typeof agent["createdAt"] === "string" ? (agent["createdAt"] as string) : null,
       // Design §16.4: the label only as far as the plugin trusts it.

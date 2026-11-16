@@ -77,6 +77,7 @@ There is one function: `openContinuation(home, prev, { reason, text, figure })` 
 
 - `continues: <prev> (<reason>: <figure>)` and `chain: root <id>, request <n>`;
 - from the predecessor's final report: tier, `beadsClosed`, `beadsReady`, `reviewFindingsOpen`, `decided`, `suggestions`, `buildAndTests`, and `remaining` (for a size rollover);
+- the batches it inherits (§2.6), one line: `open review batches: b1 (changes-required, 2 blocking): use bm_rereview`;
 - the `feature:<slug>` labels of the chain's beads, which are still in `.beads/`;
 - the chain's unsettled questions ("their answers come to you") and live links (§2.7);
 - the placement and its branch (§3.4);
@@ -85,6 +86,8 @@ There is one function: `openContinuation(home, prev, { reason, text, figure })` 
 ### 2.6 Size rollover
 
 *Since 2026-10-23 ([ADR-036](../adr/ADR-036-no-agent-waits-on-machines.md)):* a context figure, `rollover.contextTokens`, joins the figures below (§17.3).
+
+*Since 2026-11-10 ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 10):* the context figure's soft default is 180,000; a continuation inherits the batches that did not pass; [ADR-046](../adr/ADR-046-rollover-now-is-never-deferred-for-a-review.md): `BM-ROLLOVER now` is never deferred for a review, and a batch with no verdict goes onto the continuation.
 
 New Coordination settings (`shared/coordination.ts`):
 
@@ -97,9 +100,10 @@ New Coordination settings (`shared/coordination.ts`):
 | `rollover.ceilingFactor` | 2 | 1.5–5 | where soft becomes hard |
 
 - **Soft.** At a Worker's recorded turn end (the hook the handoff uses), once a figure is reached, the plugin queues `BM-ROLLOVER soft` once per request: "Finish the bead in progress, review as your tier says, and report `finished` with `remaining`; paseo-bm opens the continuation."
-- **Hard.** At `ceilingFactor` × any figure, it queues `BM-ROLLOVER now`: "Report `finished` with `remaining` at the end of this turn; put the work in progress in `remaining`." This is delivered at once (§6.4).
+- **Hard.** At `ceilingFactor` × any figure, it queues `BM-ROLLOVER now`: "Report `finished` with `remaining` at the end of this turn; put the work in progress in `remaining`." This is delivered at once (§6.4) and never waits for a review: under it, a `finished` with `remaining` is accepted while a review has no verdict delivered (`batchesAwaitingVerdict`). It belongs to the request's current Worker: `rolloverAsked.workerId` names who heard it, a later Worker of the request is asked again, and a Worker whose handoff has asked for its note is not asked.
 - **What carries over:**
-  - A review batch never crosses requests. `finished` with a verdict in flight is still refused, as today. Open findings become `remaining` items.
+  - A continuation inherits its predecessor's review batches that did not pass (`openBatchesOf`, `server/continuation.ts`; amends ADR-035 decision 1), so its Worker goes on with `bm_rereview` (§5.2). A batch is copied when its newest real verdict is no pass and a result answers its newest call, with its `results`, `calls`, `brief` and Reviewers; `adoptedFrom` names the predecessor and each call is marked `adopted`. A passed batch, one with no verdict, one from an older build with no `results`, and one whose verdict is still in flight stay behind, except that a finish at `BM-ROLLOVER now` also carries each batch still awaiting its verdict, its newest call marked `awaited`. That verdict's record keeps naming the predecessor: `noteReviewResult` stores it on every copy down the chain, and `verdictTargetOf` delivers it to the chain head's Worker.
+  - `finished` with a verdict in flight is still refused, as today, for a call of the request's own and for an `awaited` one, except a `finished` with `remaining` at `now`: any other inherited call waits for nothing. Open findings become `remaining` items.
   - At the soft figure, the Worker settles its open questions and links before it finishes.
   - At the hard figure they move instead:
     - a `size` finish skips expiring its questions and closing its links;
@@ -194,6 +198,15 @@ Readers that change (each passes its workspace id through `repoKeyOf`):
 | The Main's `bm_repo` | reads the mission's placement of the repo (its own branch); the Orchestrator's keeps the root |
 | `missionOfWorkspace` | an exact placement match returns its mission, so a Manager opened in a worktree never starts a legacy mission |
 | Work launcher, `classifyWorkspaces` | a placement shows nested under its repo |
+
+**A repo outlives its root workspace (ADR-043).** Archiving the root and opening the folder again gives a new workspace id; the repo key does not change.
+
+- `Mission.repoAliases` (additive, optional) maps a live root workspace to the repo key. The index keeps them in their own `repoAliases` map, so `repoKeyOf` and `effectivePolicy` read through them and a reader of `placements` never takes a root for a placement. In the effective policy an alias reads exactly as its repo (`policyWithAliases`), never with cells of its own.
+- `withLiveRoots` (`repo-aliases.ts`) runs in `bm_create_worker`. For a charter repo whose root is gone and that has a placement, it looks for a live root, no worktree or directory workspace, at exactly the folder and project a placement recorded in its `requestBody`, whose git holds one of the mission's branches of the repo.
+- Workspaces of one folder are aliased together. Two recorded folders with the proof are ambiguous, and neither is taken.
+- The proved root then answers under the old key for that call. A repo with no proved root refuses with what the owner can do.
+- A charter repo is matched by its key ([ADR-047](../adr/ADR-047-a-repo-alias-reaches-later-missions-and-a-peer-answer-takes-no-slot.md) decision 1): `inCharter` compares keys and `charterKeysOf` counts repos by key. A live charter workspace that is another key's alias adds that key to the charter, so a later mission on the live workspace is staffed under the key; `repos.remove` removes every id of the key.
+- Peer links store the key and Paseo is addressed at `liveRootOf`; `bm_peers` lists one project per repo by it.
 
 ### 3.2 The record (additive, on the mission)
 
@@ -387,6 +400,13 @@ IntegrationGrant = {
   - `mission.integration.revoke { missionId, repo }` sets `revokedAt`, sends `BM-SETTINGS` to the placement's live Workers and journals a `decision` line.
 - **With the boundary off** (the default, autonomy design §D.5), rule 1 and `danger` are the guards, as for every push today. The grant is what makes a push allowed: a push without it is a `danger`.
 
+**The local merge** ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 4) is a second grant, on the same route: `Placement.localMerge { state, decisionId, grantedAt, revokedAt, target }` on the mission branch's placement.
+
+- **Asked once** per mission and repository, at the first `finished` that passes the finish gate (§4.6) with a commit: one `ownerOnly` `m:` card, subject `local-merge`, whose option a carries `integration.local-merge { missionId, repo }` (`server/integration-grant.ts`). "Merge `m/ABC/fe` into your local `develop` by fast-forward whenever a request passes its checks? Nothing is pushed; push and tag stay yours." Only the owner's own tap grants it. `mission.integration.ask` and `.revoke` take `what: "push" | "local-merge"`, `push` by default.
+- **What it does.** After a passed gate, while the grant is `granted` and names the placement's target, `localMergeRefusalOf` (`server/lane-merge.ts`) moves the target to the newest commit reported in the chain, never the branch head: `git merge --ff-only <sha>` where the target is checked out in a worktree, else `git update-ref refs/heads/<target> <sha> <old>` after `merge-base --is-ancestor <old> <sha>`. A lane n ≥ 2 merges only once `mergeLane` merged it.
+- **Refused**, by divergence or a conflict with uncommitted work, it changes nothing: a journal line, `finishGate.passed` false with the reason, and the Main told in the delivery. No retry, no push, no tag.
+- **Shown and revoked** on the mission page's repo row, beside push and merge request. Its Yes and Revoke tell the journal and the Main; Workers have nothing to change.
+
 ### 4.4 The report's git fields
 
 These are additive. `bm_report` is a consumed contract, so the old shape is still read.
@@ -395,6 +415,11 @@ These are additive. `bm_report` is a consumed contract, so the old shape is stil
   - `buildReport` writes the lines `branch:`, `commit:`, `pushed:`, `mr:` and `ci:`.
   - `REPORT_KEYS`, `parseReports` and `parsedReportSchema` read them.
 - **Refusal.** A bound Worker in a placement that sends `finished` with `filesChanged` and no `integration.commit` is refused with "commit on `m/ABC/fe` and report its sha". Nothing is stored.
+- **What reads it.** The newest `integration.commit` reported in the chain is the commit the finish gate (§4.6) checks and the local merge (§4.3) moves to.
+- **Added by the mission line** ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decisions 3, 6, 7; optional fields a report built before ignores):
+  - `runtimeProof { kind: "ran" | "could-not-run", what, showed? }`, masked, required on a `finished` with a Medium or Large tier whose `filesChanged` holds a non-document path and no size-rollover `remaining`; the registry notes it, and "could not run" is shown and blocks a `met` done criterion on that request (missions design §4).
+  - `goal` and `acceptance[]`, required on a Medium or Large `received` outside a step and rendered as lines for the Main.
+  - `forNextStep { summary, contract?, remaining? }`, required on a step's `finished` that has a next step, stored beside the finish gate for that step's brief (§19.6).
 
 ### 4.5 Reading the line's state
 
@@ -414,14 +439,26 @@ These are additive. `bm_report` is a consumed contract, so the old shape is stil
   - The plugin's read-only git in the placement: `rev-list --left-right --count origin/<target>...HEAD`, `status --porcelain`, `log -1 --format=%cI` and `rev-parse HEAD`.
   - The descriptor's fields are used when present.
   - Merge request and CI come from the Worker's `glab mr view -F json` and `glab ci status` (`forgeRead`), or from `githubRuntime.pullRequest` when it is filled. Spike S4 could not observe a GitLab merge request without opening one, so the first real merge request settles which source applies.
+- **The finish gate** (§4.6) reads committed from this same read-only git (`committedOf`).
+- **Could not run.** A request whose `runtimeProof` is `could-not-run` shows it in the mission state ("could not run", §4.4).
 
 ### 4.6 Finished → committed → verified
 
 *Since 2026-10-23 (ADR-036):* with `integration.ci` off, verified means a check paseo-bm detected in the request's own turns; a pipeline is never evidence (§17.1).
 
 - **Committed.** A placement request's `finished` counts as committed when the plugin confirms all of these: the reported sha is an ancestor of `HEAD` (`merge-base --is-ancestor`), the current branch is the mission branch, and the tree is clean apart from ignored files. Otherwise the Main's delivery reads "finished, uncommitted".
-- **Verified.** It is verified when the merge request's `checksStatus` is `success` on a head that contains the sha (pushed, with `aheadOfOrigin` 0). Before a merge request exists, a check the plugin detects (`shared/evidence.ts`, unchanged) is enough. `failure` reads **CI red**.
+- **Verified.** It is verified when the merge request's `checksStatus` is `success` on a head that contains the sha (pushed, with `aheadOfOrigin` 0). Before a merge request exists, a check the plugin detects (`shared/evidence.ts`, unchanged) is enough. `failure` reads **CI red**. *Since 2026-11-10 ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 13):* a check the report names as reused, which the request's full records show passing earlier, is labelled `reused` and counts as verified.
 - The target repositories' CI runs only on a merge request or a tag. So the CI of record exists once the merge request exists.
+- **The finish gate** ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 2; amends ADR-035 decision 3's Evidence clause). Every `finished` records `finishGate { passed, reasons, at, commit }` on its registry entry, as the first act of storing it, so whatever sees `finished` sees the final result; the delivery gains one line when it failed. It reads the continuation chain, root to head (`finishGateOf`, `server/finish-gate.ts`), and fails on:
+  - the head's `finished` with `remaining`;
+  - a Medium or Large chain with changed files whose newest `wave` or `finished` batch has no passing latest result;
+  - any adopted batch without a passing latest result (§2.6);
+  - `reviewFindingsOpen`;
+  - changed files with checks neither `detected` nor `reused`, from the newest report of the chain that names checks, read against every record of every Worker of the chain and the reporter's live tail;
+  - changed files not committed by the chain's newest reported commit, or changed outside a placement;
+  - with `integration.ci` on, a CI `failure`. A green or pending pipeline adds nothing: the checks are local either way.
+
+  A reported commit counts as a change even with no file named or edited: a shell-only merge, cherry-pick or generated commit goes through the same review, checks and commit reading before its sha can reach the local merge. A Reviewer's file or run counts for nothing, only the chain's Workers do. A request with no predecessor and no changed file passes; a continuation with none is judged on its chain. Every request created on this build is stamped `gated: true`, so a head with no stored result fails with a named reason; only a head from before this build reads as passed. A refused local merge (§4.3) is a failure of the gate.
 
 ### 4.7 Conflicts surface at integration
 
@@ -537,6 +574,7 @@ These are additive. `bm_report` is a consumed contract, so the old shape is stil
   - They are stored on the batch: `batches[].results: [{ at, recordId, verdict, blocking: number | null }]`, appended by `bm_review` from the report's `blockingCount`, by the unbound final-answer path, and as `null` on no-verdict.
   - They are not read from the outbox, which keeps records for 7 days.
   - An older batch falls back to the trace's `reviews[]` by `batchId`.
+- **An adopted batch** (§2.6, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 10) keeps its results and calls, so the rule counts its earlier re-reviews and the next re-review's diff starts from its last completed snapshot.
 - **When it stops converging**, the refusal reads: "Batch b2 stopped converging (blocking 3 → 3)" or "Batch b2 had its 3 re-reviews". It goes on: "Fix what you can and open the next milestone batch, or send `finished` with the open blocking findings in `reviewFindingsOpen`. Nothing was sent."
   - No question is asked.
   - A finding that would remove asked-for work stays a scope question.
@@ -552,7 +590,7 @@ cap(request) = review.callsPerBatch × min(M, Mmax[tier])
 ```
 
 - The defaults give at most 3 / 6 / 12 calls, never below the old 2 / 2 / 4. The calls are pooled across the request's batches.
-- The count is the Dashboard's (`requestReviewCountOf`).
+- The count is the Dashboard's (`requestReviewCountOf`). An adopted batch's inherited calls are not in it: the request that made them paid for them (`ownCallsOf`, ADR-045 decision 10). The batch still counts in M.
 - One function, `reviewCapOf(tier, milestones, settings)`, is used by the tools, the `review.over-budget` rule (its id is kept), the stall reason, `overrunOf` and the governor.
 
 ### 5.4 Past the cap: one owner decision per request
@@ -677,6 +715,7 @@ A settled request or link puts its fact in the wake ("req-X finished: `<summary>
   - override delivery.
 - **Holding.** A held outbox record gets the new state `held`, an open state that survives a reload and is gated again then. A held answer is recorded as `delivery.outcome: "held"`.
 - **The release** is one message through a Worker channel that reuses the Main's: `BM-UPDATES <n>`, with the settling item first. One held item alone goes as its own block.
+- **No turn at all** ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decisions 2, 7, 14). A step's `finished` that has a next step and a Small or a step's `received`, like `beads-done`, are stored as notes with `noTurn`; the Main reads them at the head of its next delivery. The owner's switch (§19.6) delivers the first three normally.
 - **Always at once:**
   - the owner's chat, which Paseo delivers directly;
   - `BM-STOP` and stop propagation;
@@ -943,6 +982,11 @@ export function precedentEligibility(subject, decision?): { eligible: true } | {
   - `ack` and `close` start no turn. They are stored with outbox outcome `delivered`, reason `no-turn`, and appended to the link. The receiver sees them in `BM-STATE` and as the first line of its next delivery.
   - `close` closes the link.
 - **The link message** gains optional `act` and `refs`. The delivered text gains one header line: `act: agree · refs: C2@v3`.
+- **One delivery rule** ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 14). At every delivery the plugin asks whether the record needs a turn or is only a note.
+  - A `beads-done` report and a command's `copy: yes` block are stored as notes, like `ack` and `close`, and never enqueued.
+  - A `message` of no open work (`isDormantRecord`) whose recipient, as resolved now, reads `resting` is settled at once as `delivered`, reason `no-turn`, with no alert and no drop (`settleAsNote`). This replaces ADR-044's skip at start-up: `createOutboxResend` simply delivers again, so a record an older build left open becomes a note at the next start. A record that carries the owner's decision or words (`from` `owner` or `orchestrator`, or `atOnce`) is never such a message, at a plugin start either: it wakes its reader, since nothing else would, and ADR-044 decision 3 keeps a woken dormant Main from making a successor or a workspace. A presence that cannot be read delivers as before.
+  - A note with no link reads `noted: <kind> <id> from <agent>: <gist>` at the head of its target's next delivery (`noTurnNoteOf`).
+  - An open `delivery-dropped` alert gets exactly one `BM-DELIVERY-FAILED`, sent when the alert opens; `undelivered` ranks below a question waiting for the owner (mission runtime design §2.1).
 
 ### 9.2 Contracts
 
@@ -1130,9 +1174,11 @@ Each phase ends with one full `npm run verify` and its automated acceptance (PRD
 
 ### 17.3 A Worker rolls over by its real context
 
-- **The setting.** `rollover.contextTokens`: default 250,000, bounds 100,000–900,000.
+*Since 2026-11-10 ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decision 10):* the default is 180,000, so a session ends near 200k. A settings file that holds the figure keeps it; the owner changes it in Settings.
+
+- **The setting.** `rollover.contextTokens`: default 180,000, bounds 100,000–900,000.
 - **When it applies.** At a Worker's recorded turn end, the turn's `contextUsed` at or above it is a size figure like the others of §2.6. The soft notice fires at the figure, and the `now` notice at `rollover.ceilingFactor` × it.
-- **The figure** reads "context 262k".
+- **The figure** reads "context 192k".
 - **Compaction** is untouched (the owner's switch).
 
 ### 17.4 Tests
@@ -1323,6 +1369,15 @@ The evidence is the [context review](../archive/operations/paseo-bm-context-revi
   - When a named request is `stopped`, the Main is told and the held request stays held.
 - **Cancel.** The Main cancels with `bm_hold_cancel` (`requestId`, `why`).
 - **Display.** `bm_mission` lists held requests with what they wait for.
+- **The supervised line** ([ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) decisions 1, 2, 3 and The switch; `server/held-requests.ts`, mission line plan §5.8, §5.9, §5.12). Held work is kept in `<data>/missions/<missionId>.held.json`.
+  - **Reading `after`.** Each id is a `req-…` or a `hold-…`, read through the newest request of its continuation chain and that head's stored finish gate (§4.6), at creation as at every pass. A `gated` head with no stored result fails; only a head without the stamp, from before this build, reads as passed.
+  - **One sequential slot.** A mission runs one sequential request at a time, across its repositories. While one runs, `bm_create_worker` takes `next: true` (held, runs when the slot is free, ahead of the remaining steps, on no request's result), `after` (it needs that request's result) or `parallel` (a double-quoted span the owner typed, checked on the Main's newest timeline page; a new lane, journalled and marked on the roster); a Worker for an open peer link of the mission that a running request's chain asked is created at once, marked parallel, in a lane of its own ([ADR-047](../adr/ADR-047-a-repo-alias-reaches-later-missions-and-a-peer-answer-takes-no-slot.md) decision 2); anything else, `lane: "new"` included, is refused, with the choices named. A slot Paseo's agent list cannot show is held, never free: `bm_create_worker` refuses and the pass leaves the entry as it is.
+  - **A step list.** `bm_mission_update.steps`, 2 to 12 of `{ title ≤ 70, request, acceptance[] 1–6 ≤ 200, project?, context? ≤ 16 }`, stores `proposed` entries and opens one owner card whose details list the criteria; the owner's apply makes them `held` and writes the plan from the titles, "keep as is" cancels them. While a line is live, `plan` is refused. A first step has an empty `after`: the slot orders it.
+  - **The pass.** Due entries that are not steps first, oldest first, then steps, oldest first, one at a time; a due entry waits silently while a sequential request runs. On a pass a step starts with no Main turn; its start is a note.
+  - **Stops.** A failed gate, a stopped request, a cancelled entry, an active head with an open `request-stalled` alert or no unarchived Worker, or one idle past the stall window (24 hours) with no alert and no live turn, since the stall watcher looks no further back and an abandoned request would otherwise hold the slot unseen. A held entry is `waiting-stopped` with its reasons, and returns to `held` when the stop no longer holds; a stall stop ends only when the head has new activity or has ended. A `started` step stays `started`, with a `stopNote` the page reads, and clears through a continuation or `bm_hold_cancel`. The Main gets one notice per distinct failure (`toldKey`) that names the real options. A notice that comes back dropped, at once or later from the queue, clears the key, so a later pass tells it again.
+  - **Release.** `bm_hold_release { holdId, why }`, on the owner's word, lets a `waiting-stopped` entry start past the gate, the slot and the staffing rule's one-live-Worker line; the budget cap holds; the why is journalled. A release or a cancel is for one entry: it clears the failure's `toldKey`, so whatever else that failure stops, now or later, is told rather than left to wait unseen. A `started` step is never released.
+  - **The result travels.** A step that starts gets, as context facts prepended to what it is given, the previous step's commit and branch, summary, contract and what it left, each cut to 500 characters, source `the previous step's finished report`; the stored entry is not changed.
+  - **The owner's switch** (`line.supervised`, default on, machine-wide, Settings → Coordination, `coordination.set`). Off, for every mission: a head satisfies `after` at `finished` alone (`holdStateOf` skips the gate and the stall and no-Worker stops; a stopped request and a cancelled entry still stop), the pass and `bm_create_worker` wait for nothing at the slot and a satisfied `after` starts at once, and `bm_report` delivers `received` and a step's `finished` normally. The gate is still recorded, and a local merge still needs its grant and a passed gate; the staffing rule, `beads-done` and command copies are unchanged.
 
 ### 19.7 Roles
 
@@ -1427,13 +1482,20 @@ Those are the cases a replacement can follow, so §19.5's guards cover all but a
 - **`manager.md` step 2.** Words about a running request's own work (a fix, a stop, an answer) go to it with `about: "current"`. A new ask, a bug or a feature is new work, never a busy Worker's: it goes to `lane: "new"` or `after`.
 - **Outdated Mains** (`main-upgrade.ts`). This runs in the minute pass (`index.server.ts`).
   - **What qualifies:** each open mission's Main that is live, idle (not `running` or `initializing`), not replaced, and on another `bm.instructions` hash than this build's. A Main with no label qualifies only once `STAMP_GRACE_MS` has passed.
-  - **The handover:** `handOverMain` with `upgradeHandoffLineOf`, which tells the successor to say in one line that it took over after the update. The reason recorded is `handoff`, so an older build still reads the mission.
+  - **The handover:** `handOverMain` with `upgradeHandoffLineOf`, `mainHandoffLineOf` with the reason and "with the current ones, after the update": the successor says in one line that it took over and what is in flight. The reason recorded is `handoff`, so an older build still reads the mission.
+  - **Only while the mission has work (ADR-044):** the mission needs an active request on its roster. A dormant mission keeps its Main until it next has an active request, so neither a successor nor a workspace appears for it.
   - One try per Main per process. Workers and Reviewers are untouched.
 
 ## 16. Revision History
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-11-10 | Claude (as built, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) Phase 2) | §4.4, §4.5, §6.4, §19.6: runtime proof, the goal restated at `received`, what the next step needs; steps and reports that cost no turn; the supervised line (steps, the slot, stops, release, the result that travels) and the owner's switch |
+| 2026-11-10 | Claude (coordinator's decision, [ADR-046](../adr/ADR-046-rollover-now-is-never-deferred-for-a-review.md)) | §2.6: `BM-ROLLOVER now` is never deferred for a review; a batch with no verdict goes onto the continuation; the notice follows the current Worker |
+| 2026-11-10 | Claude (as built, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) Phase 1) | §2.5, §2.6, §4.3–§4.6, §5.2, §5.3, §9.1, §17.3: finish gate and `reused` checks, the owner's local-merge grant, one delivery rule, a 180k soft default, batches adopted by a continuation, `BM-ROLLOVER now` held for a verdict |
+| 2026-11-10 | Claude (owner request, ADR-044) | §19.12: an outdated Main is handed over only while its mission has work |
+| 2026-11-11 | Claude (owner request, [ADR-047](../adr/ADR-047-a-repo-alias-reaches-later-missions-and-a-peer-answer-takes-no-slot.md)) | §3.1: a charter repo is matched by its key; the supervised line: a peer answer of the running request takes no slot |
+| 2026-11-06 | Claude (owner request, ADR-043) | §3.1: a repo outlives its root workspace, through a proved alias |
 | 2026-10-27 | Codex (authorised AIX recovery) | §19.1, §19.11: skip branch names occupied by unmanaged or unmerged draft work when allocating a new lane, preserving those branches and the seven-live-lane cap |
 | 2026-10-20 | Claude (owner's decisions and delegation) | Created from ADR-035 and the field review of 2026-10-20. `design-ready`: PASS (Claude under the owner's delegation) |
 | 2026-10-20 | Claude (WP-8.0 spikes) | §3.3 idempotence, §3.5 setup source, §4.5 read-only git as the primary source, §4.7 the beads rule, §4.8 the checkpoint as a branch, §14 results, from spikes S1–S4 |
@@ -1453,3 +1515,5 @@ Those are the cases a replacement can follow, so §19.5's guards cover all but a
 | 2026-10-25 | Claude (as built) | §19.11: the screen (WP-11.8), M-44 and the close of ADR-038 Phase 11 (beads `bm-lanes-9cjg.8`, `.9`) |
 | 2026-10-25 | hieu.nt10 (owner's three answers after a field case; written by Claude) | §19.12 added: `bm_tell_worker` `about`, steer only for corrections, outdated Mains handed over when idle ([ADR-039](../adr/ADR-039-new-work-never-into-a-busy-worker.md)) |
 | 2026-11-05 | hieu.nt10 (owner request; written by Codex) | §5.1, §5.5, §17.2: completed-review baselines across implementation batches, fix-only fallback briefs, optional per-call brief persistence, and affected checks without a full-suite finish gate ([ADR-041](../adr/ADR-041-incremental-review-and-affected-checks.md), `bm-eb46`). `design-ready`: PASS; backward compatibility and isolated Git/role/contract proof specified. |
+| 2026-11-10 | Claude (review b2 of the mission line, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md)) | §4.6: a reported commit counts as a change, and only the chain's Workers' records are read; §9.1: a record carrying the owner's decision or words is never a note |
+| 2026-11-10 | Claude (review b3 of the mission line, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md)) | §19.6: an unreadable agent list holds the slot; a head idle past the stall window is a stall stop; a dropped notice is told again; a release or a cancel re-tells what its failure still stops |

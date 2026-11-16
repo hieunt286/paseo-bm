@@ -34,7 +34,7 @@ afterAll(() => {
   rmSync(isolatedHome, { recursive: true, force: true });
 });
 
-type Agent = { status: string; archivedAt?: string | null };
+type Agent = { status: string; archivedAt?: string | null; persistence?: { sessionId: string } };
 
 function world(initial: Record<string, Agent>) {
   const agents = new Map(Object.entries(initial).map(([id, agent]) => [id, { ...agent }]));
@@ -270,6 +270,49 @@ describe("enqueue", () => {
     expect(sends).toEqual([]);
     expect(queue.pending("mgr")).toEqual([]);
     expect(logs).toEqual(["[paseo-bm] mgr is archived, closed or gone; dropped its queued notices (BM-TOOLS)."]);
+  });
+
+  describe("a resting target (ADR-042)", () => {
+    const RESTING: Agent = { status: "closed", persistence: { sessionId: "session-1" } };
+
+    it("sends a wake notice: the owner's answer reaches a Worker Paseo closed after its idle hour", async () => {
+      const { paseo, sends, queue } = world({ wrk: RESTING });
+      await expect(queue.enqueue("wrk", "answers:req-1", "the answers", paseo, undefined, { wake: true })).resolves.toBe("sent");
+      expect(sends).toEqual([{ id: "wrk", text: "the answers" }]);
+    });
+
+    it("drops a notice that does not wake it, with its reason, and sends nothing", async () => {
+      const { paseo, sends, logs, queue } = world({ wrk: RESTING });
+      const reasons: string[] = [];
+      await expect(queue.enqueue("wrk", "BM-ROLLOVER", "rollover", paseo, { onDropped: (_id, _kind, reason) => reasons.push(reason) })).resolves.toBe("dropped");
+      expect(sends).toEqual([]);
+      expect(reasons).toEqual(["the target is resting and this notice does not wake it"]);
+      expect(logs).toEqual(["[paseo-bm] wrk is resting; dropped the notices that do not wake it (BM-ROLLOVER)."]);
+    });
+
+    it("keeps the wake notices of a target that came to rest while they were queued, and drops the rest", async () => {
+      const { paseo, sends, set, queue, turnEnded } = world({ wrk: { status: "running" } });
+      await queue.enqueue("wrk", "BM-TOOLS", "tools", paseo);
+      await queue.enqueue("wrk", "answers:req-1", "the answers", paseo, undefined, { wake: true });
+      set("wrk", RESTING);
+      await turnEnded("wrk");
+      expect(sends).toEqual([{ id: "wrk", text: "the answers" }]);
+      expect(queue.pending("wrk")).toEqual([]);
+    });
+
+    it("wakes it for a batch item marked wake, and not for one that is not", async () => {
+      const batch = { name: "BM-UPDATES", compose: (lines: readonly string[]) => lines.join("\n") };
+      const { paseo, sends, queue } = world({ wrk: RESTING, other: RESTING });
+      await expect(queue.enqueueBatch("wrk", batch, [{ key: "a", line: "update", wake: true }], paseo)).resolves.toEqual(["sent"]);
+      await expect(queue.enqueueBatch("other", batch, [{ key: "a", line: "update" }], paseo)).resolves.toEqual(["dropped"]);
+      expect(sends).toEqual([{ id: "wrk", text: "update" }]);
+    });
+
+    it("never sends to an archived target, however the notice is marked (ADR-005 decision 5)", async () => {
+      const { paseo, sends, queue } = world({ wrk: { ...RESTING, archivedAt: "2026-11-06T00:00:00.000Z" } });
+      await expect(queue.enqueue("wrk", "answers:req-1", "the answers", paseo, undefined, { wake: true })).resolves.toBe("dropped");
+      expect(sends).toEqual([]);
+    });
   });
 
   it("drops the queued notices of a target that is gone by its turn end", async () => {

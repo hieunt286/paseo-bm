@@ -53,7 +53,7 @@ import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
 import { applyMissionDecision, missionAnswerRefusalsOf } from "./mission-tools";
 import { applyGovernorDecision, governorAnswerRefusalsOf, isGovernorCard, type GovernorMissionDeps } from "./governor-tools";
 import { applyOwnershipDecision, isOwnershipCard, ownershipAnswerRefusalsOf } from "./mission-ownership";
-import { applyIntegrationDecision, integrationAnswerRefusalsOf, isIntegrationCard } from "./integration-grant";
+import { applyIntegrationDecision, applyLocalMergeDecision, integrationAnswerRefusalsOf, isIntegrationCard, isLocalMergeCard } from "./integration-grant";
 import { applyCheckpointDecision, isCheckpointCard, prepareCheckpointAnswer } from "./checkpoint-card";
 import type { PaseoCliDeps } from "./paseo-cli";
 import { handleDecisionsOverride, ownerViewsOf } from "./decision-override";
@@ -195,9 +195,11 @@ async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown
   const owned = !governed && isOwnershipCard(current);
   // Delivery line design §4.3: the owner's integration card writes the placement's grant.
   const integration = !governed && !owned && isIntegrationCard(current);
+  // ADR-045 decision 4: so does its local-merge card, on the same route.
+  const localMerge = !governed && !owned && !integration && isLocalMergeCard(current);
   // Delivery line design §4.8: the owner's tap on the checkpoint card makes the checkpoint before the answer is stored.
   const checkpoint =
-    !governed && !owned && !integration && isCheckpointCard(home, current)
+    !governed && !owned && !integration && !localMerge && isCheckpointCard(home, current)
       ? await prepareCheckpointAnswer(home, current, { via: input.via ?? "inbox", optionKey: input.optionKey ?? null, words: input.words ?? null, at: at.toISOString() })
       : null;
   const refusals =
@@ -207,7 +209,7 @@ async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown
         ? await governorAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home, at)
         : owned
           ? await ownershipAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home)
-          : integration
+          : integration || localMerge
             ? integrationAnswerRefusalsOf(current, input.optionKey ?? null, home)
             : await missionAnswerRefusalsOf(current, input.optionKey ?? null, paseo, home);
   if (refusals.length > 0) throw new DashboardError("E_MISSION_INVALID", refusals.join("; "));
@@ -223,6 +225,7 @@ async function answerMissionDecision(input: DecisionsAnswerInput, paseo: unknown
     const bindings = deps.missions?.bindings?.() ?? undefined;
     await applyOwnershipDecision(settled, { ...applyDeps, ...(bindings ? { bindings } : {}) });
   } else if (integration) await applyIntegrationDecision(settled, applyDeps);
+  else if (localMerge) await applyLocalMergeDecision(settled, applyDeps);
   else if (checkpoint !== null) await applyCheckpointDecision(settled, checkpoint.made, applyDeps);
   else await applyMissionDecision(settled, applyDeps);
   return { decision: store.get(settled.id) ?? settled };

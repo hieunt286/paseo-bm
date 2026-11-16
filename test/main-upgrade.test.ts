@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { currentInstructionsHash } from "../plugin/server/instructions-label";
 import { clearHandedOverMains, isIdleOutdatedMain, replaceOutdatedMains, upgradeHandoffLineOf } from "../plugin/server/main-upgrade";
+import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 
@@ -36,6 +37,7 @@ describe("an outdated Main", () => {
     const home = dataFolder();
     const made = createMissionStore(home, { now: () => NOW }).create({ code: "AIX", name: "Forms", goal: "g", repos: [], createdBy: "owner", mainId: "main-old" });
     if (!made.ok) throw new Error(made.reasons.join("\n"));
+    createMissionRoster(home, { env: {} }).add(made.mission.missionId, { requestId: "req-20261025T060000Z", workspaceId: "wks_1", topic: "Forms", workerId: "w1" });
     let status = "running";
     const paseo = { agents: { ref: () => ({ refresh: async () => ({ agent: { status, labels: OLD } }) }) } };
     const handOver = vi.fn<(...args: unknown[]) => Promise<string>>(async () => "main-new");
@@ -49,6 +51,27 @@ describe("an outdated Main", () => {
     expect(upgradeHandoffLineOf("main-old")).toContain("it ran the instructions of an older paseo-bm");
     expect(log).toHaveBeenCalledWith("[paseo-bm] Main main-old of mission AIX ran older instructions; it was handed over to main-new while idle.");
     await replaceOutdatedMains(home, paseo, { home, handOver, log, now: () => NOW });
+    expect(handOver).toHaveBeenCalledTimes(1);
+  });
+
+  it("is left alone while its mission has no active request, and handed over once it has one (ADR-044)", async () => {
+    const home = dataFolder();
+    const made = createMissionStore(home, { now: () => NOW }).create({ code: "PASE", name: "Site", goal: "g", repos: ["wks_1"], createdBy: "owner", mainId: "main-old" });
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    const paseo = { agents: { ref: () => ({ refresh: async () => ({ agent: { status: "idle", labels: OLD } }) }) } };
+    const handOver = vi.fn<(...args: unknown[]) => Promise<string>>(async () => "main-new");
+    const roster = createMissionRoster(home, { env: {} });
+
+    await replaceOutdatedMains(home, paseo, { home, handOver, log: vi.fn(), now: () => NOW });
+    expect(handOver).not.toHaveBeenCalled();
+
+    roster.add(made.mission.missionId, { requestId: "req-20261025T060000Z", workspaceId: "wks_1", topic: "Old", workerId: "w1" });
+    roster.setState(made.mission.missionId, "req-20261025T060000Z", "finished");
+    await replaceOutdatedMains(home, paseo, { home, handOver, log: vi.fn(), now: () => NOW });
+    expect(handOver).not.toHaveBeenCalled();
+
+    roster.add(made.mission.missionId, { requestId: "req-20261025T070000Z", workspaceId: "wks_1", topic: "New", workerId: "w2" });
+    await replaceOutdatedMains(home, paseo, { home, handOver, log: vi.fn(), now: () => NOW });
     expect(handOver).toHaveBeenCalledTimes(1);
   });
 });

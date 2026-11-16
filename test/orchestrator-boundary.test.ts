@@ -11,6 +11,7 @@ import { ORCHESTRATOR_INSTRUCTIONS_HASH, ORCHESTRATOR_PROVIDER_ID } from "../plu
 import { registerOrchestratorRpcs, type OrchestratorRpcDeps } from "../plugin/server/orchestrator-rpc";
 import { createMemoryStore } from "../plugin/server/memory-store";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
+import { createOutbox } from "../plugin/server/outbox";
 import { createOrchestratorTools, type OrchestratorTools } from "../plugin/server/orchestrator-tools";
 import { GIT_READ_ONLY_PREFIX, runGit } from "../plugin/server/repo-tool";
 import type * as PaseoCli from "../plugin/server/paseo-cli";
@@ -465,7 +466,13 @@ function snapshotDir(dir: string, skip: readonly string[] = []): Record<string, 
 }
 
 /** paseo-bm's data folder outside its own stores: where the retired role instructions were, and anything else kept there. */
-const dataOutsideStores = () => snapshotDir(home, ["orchestrator", "traces", "decisions", "inbox", "handoffs", "memory", "missions"]);
+const dataOutsideStores = () => snapshotDir(home, ["orchestrator", "traces", "decisions", "inbox", "handoffs", "memory", "missions", "outbox"]);
+
+/** ADR-045 decision 14: everything in the outbox, every workspace's; the one thing the Orchestrator's paths write there is a command's copy, as a note. */
+const outboxRecords = () => {
+  const outbox = createOutbox(home);
+  return outbox.workspaces().flatMap((workspaceId) => outbox.list(workspaceId));
+};
 
 /**
  * The owner puts a project in the events' scope (autonomy design §A.8): one
@@ -640,7 +647,7 @@ const isHandoffNoteRequest = (text: string): boolean => text.startsWith(`${HANDO
  * reaches it twice (change-004).
  */
 function expectBoundary(
-  options: { creates?: number; sendsTo?: readonly string[]; limits?: boolean; deliveries?: boolean; compaction?: boolean; handoff?: boolean } = {},
+  options: { creates?: number; sendsTo?: readonly string[]; atOnce?: boolean; limits?: boolean; deliveries?: boolean; compaction?: boolean; handoff?: boolean } = {},
 ): void {
   expect(boundary.violations).toEqual([]);
   // Autonomy design §G.5: what `bm_compact` sends the Manager or Worker it names — the provider's /compact and the
@@ -679,8 +686,9 @@ function expectBoundary(
     [...fake.sends.filter((sent) => sent.id === id).map((sent) => sent.text), ...noticeQueue.pending(id).map((queued) => queued.text)]
       .filter(isCommand)
       .map((text) => parseCommandBlock(text)!);
+  expect(outboxRecords().filter((record) => record.kind !== "message" || record.reason !== "no-turn" || !isCommand(record.text))).toEqual([]);
   const toWorker = blocksTo(WORKER);
-  const toManager = blocksTo(MANAGER);
+  const toManager = [...blocksTo(MANAGER), ...outboxRecords().filter((record) => record.to === MANAGER).map((record) => parseCommandBlock(record.text)!)];
   for (const block of toWorker) {
     expect(block).toMatchObject({ from: "orchestrator", to: "worker", copy: false });
     expect(toManager).toContainEqual({ ...block, copy: true });
@@ -698,7 +706,9 @@ function expectBoundary(
     expect(fake.sends).toEqual([]);
   } else {
     const allowed = new Set(options.sendsTo);
-    expect(queuedTo).not.toHaveLength(0);
+    // A stop sent at once goes past the queue, and its Main's copy is a note: nothing is queued at all.
+    if (options.atOnce === true) expect(queuedTo).toEqual([]);
+    else expect(queuedTo).not.toHaveLength(0);
     expect(queuedTo.filter((target) => !allowed.has(target))).toEqual([]);
     expect(fake.sends.map((sent) => sent.id).filter((id) => !allowed.has(id))).toEqual([]);
     expect([...fake.sends.map((sent) => sent.id), ...options.sendsTo.flatMap((id) => noticeQueue.pending(id).map(() => id))]).not.toHaveLength(0);
@@ -998,6 +1008,8 @@ interface BoundaryPath {
   creates?: number;
   /** The only agents the path may send to: a Manager (bm_govern, a prepared command, a stop's copy), a Worker (bm_direct_worker) or the Orchestrator (BM-EVENTS, BM-ANSWER). */
   sendsTo?: readonly string[];
+  /** A `bm_direct_worker` stop sent at once: its Worker gets it past the queue, and its Manager's copy is a note. */
+  atOnce?: boolean;
   /** What the path sends the Manager or the Worker is the Orchestrator's (its tools, or a command it prepared): each block carries the limits. Otherwise none does. */
   limits?: boolean;
   /** The plugin delivers stored answers to the Worker (`BM-DELIVERY answers`): the path settles Worker questions. */
@@ -1350,7 +1362,8 @@ const PATHS: BoundaryPath[] = [
     name: "tool bm_direct_worker right after the owner's own message, the Worker's danger open: the stop at once to that Worker, the copy to its Manager",
     rpc: null,
     tool: "bm_direct_worker",
-    sendsTo: [WORKER, MANAGER],
+    sendsTo: [WORKER],
+    atOnce: true,
     limits: true,
     run: async () => {
       seedOrchestrator([pluginNotice(EVENTS_NOTICE, T(0)), ownerMessage("Stop the Worker now.", T(1))]);
@@ -1358,10 +1371,8 @@ const PATHS: BoundaryPath[] = [
       fake.policy.sendTo.add(WORKER);
       fake.policy.sendTo.add(MANAGER);
       expect(await callTool("bm_direct_worker", STOP)).toMatchObject({ isError: false, text: expect.stringMatching(/^Stopped:/) });
-      expect(fake.sends).toEqual([
-        { id: WORKER, text: stopBlock() },
-        { id: MANAGER, text: stopBlock({ copy: true }) },
-      ]);
+      expect(fake.sends).toEqual([{ id: WORKER, text: stopBlock() }]);
+      expect(outboxRecords()).toMatchObject([{ to: MANAGER, text: stopBlock({ copy: true }), reason: "no-turn" }]);
       expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ to: "worker", workerId: WORKER, managerId: MANAGER, source: "chat" }]);
       // Only the Orchestrator's own chat was read for the check.
       expect(fake.reads).toEqual([ORCHESTRATOR_ID]);
@@ -1371,7 +1382,8 @@ const PATHS: BoundaryPath[] = [
     name: "tool bm_direct_worker stopping a Worker's open danger: the stop that names the push un-negated is gated like any command, even to that Worker; one whose stop word negates the push passes to that Worker only",
     rpc: null,
     tool: "bm_direct_worker",
-    sendsTo: [WORKER, MANAGER],
+    sendsTo: [WORKER],
+    atOnce: true,
     limits: true,
     run: async () => {
       ownerDelegatesAll();
@@ -1392,10 +1404,8 @@ const PATHS: BoundaryPath[] = [
       const negated = { ...f2, command: "Stop the git push runs and the waits now. Send your report: what git said each time." };
       expect((await callTool("bm_direct_worker", negated)).isError).toBe(false);
       const onPolicy = { re: f2.re, body: negated.command, authority: "policy:reversible-technical" } as const;
-      expect(fake.sends).toEqual([
-        { id: WORKER, text: stopBlock(onPolicy) },
-        { id: MANAGER, text: stopBlock({ ...onPolicy, copy: true }) },
-      ]);
+      expect(fake.sends).toEqual([{ id: WORKER, text: stopBlock(onPolicy) }]);
+      expect(outboxRecords()).toMatchObject([{ to: MANAGER, text: stopBlock({ ...onPolicy, copy: true }), reason: "no-turn" }]);
       expect(createOrchestratorStore(home).listCommands()).toMatchObject([{ to: "worker", workerId: WORKER, managerId: MANAGER }]);
     },
   },
@@ -1857,6 +1867,7 @@ describe("REQ-079 (a-c), O-2 — across every Orchestrator path, no forbidden ac
       expectBoundary({
         creates: path.creates ?? 0,
         ...(path.sendsTo === undefined ? {} : { sendsTo: path.sendsTo }),
+        atOnce: path.atOnce === true,
         limits: path.limits === true,
         deliveries: path.deliveries === true,
         compaction: path.compaction === true,

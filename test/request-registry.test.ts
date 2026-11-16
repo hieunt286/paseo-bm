@@ -138,7 +138,7 @@ describe("the store (design §16.4)", () => {
     const body = JSON.parse(readFileSync(join(dir, `${WS}.json`), "utf8"));
     expect(Object.keys(body)).toEqual(["schemaVersion", "requests"]);
     expect(body.schemaVersion).toBe(1);
-    expect(body.requests[0]).toEqual(request("req-20261003T100000Z", { createdAt: T0.toISOString(), source: "tool" }));
+    expect(body.requests[0]).toEqual(request("req-20261003T100000Z", { createdAt: T0.toISOString(), source: "tool", gated: true }));
   });
 
   it("never writes a file a newer paseo-bm wrote, nor one it cannot read, and refuses a workspace id that is not a file name", () => {
@@ -333,7 +333,7 @@ describe("the backfill (design §16.4)", () => {
     expect(registry.list(WS)).toEqual([
       request("req-20260920T090000Z", { source: "backfill", createdAt: "2026-09-20T09:00:00.000Z", managerId: "mgr-1", workerIds: ["wrk-1", "wrk-2"] }),
       request("req-20260921T080000Z", { source: "backfill", createdAt: "2026-09-21T08:00:00.000Z", managerId: "mgr-1" }),
-      request("req-20261003T100000Z", { createdAt: T0.toISOString(), managerId: "mgr-1" }),
+      request("req-20261003T100000Z", { createdAt: T0.toISOString(), managerId: "mgr-1", gated: true }),
     ]);
     // The trace store is only read.
     expect(readdirSync(join(home, "traces"), { recursive: true }).map(String).sort()).toEqual(before);

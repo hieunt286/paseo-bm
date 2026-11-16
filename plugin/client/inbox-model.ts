@@ -44,6 +44,7 @@ import { ALERT_KINDS, type Alert, type AlertKind } from "../shared/alerts";
 import { isDecidedForOwner, overrideIdOf } from "../shared/decision-override";
 import { decisionClassOf, decisionKindOf, isAnswerable, policyPredictorOf, type Decision } from "../shared/decisions";
 import type { ExpectedOutcome, InterventionKind, InterventionOutcome, InterventionTrigger } from "../shared/interventions";
+import { missionLineDetailsOf } from "../shared/mission-change";
 import type { WorkerSignal } from "../shared/orchestrator";
 import { decisionCardOf, type ChatCard, type DecisionSeed } from "./chat-card-parse";
 import type { Tone } from "./tone";
@@ -721,6 +722,7 @@ export function digestRowOf(
       `Decision: ${decision.id}`,
       ...(decision.requestId === null ? [] : [`Request: ${decision.requestId}`]),
       `Class: ${answer?.class ?? decisionClassOf(decision)}`,
+      ...missionLineDetailsOf(decision.options),
       ...(answer?.precedentId === undefined ? [] : [`Precedent: ${answer.precedentId}`]),
       `Answered: ${answer?.at ?? "unknown"}`,
       ...(decision.delivery === null ? [] : [`Delivery: ${decision.delivery.outcome} to ${decision.delivery.to} at ${decision.delivery.at}`]),

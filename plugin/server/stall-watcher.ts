@@ -72,6 +72,7 @@
  * Nothing here throws into the plugin: a failure is one log line and the next
  * pass tries again.
  */
+import { isReachable } from "./agent-presence";
 import { join } from "node:path";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME, resolveDataHome, type DataHomeDeps } from "./data-home";
@@ -386,7 +387,7 @@ export function createStallWatcher(deps: StallWatcherDeps = {}): StallWatcher {
     const keyOf = repoKeysIn(home);
     const liveAgents = new Set(
       snapshot.bm
-        .filter(({ facts }) => !facts.archived && facts.status !== "closed" && (facts.replacedBy ?? null) === null)
+        .filter(({ facts }) => isReachable(facts) && (facts.replacedBy ?? null) === null)
         .flatMap(({ workspaceId, facts }) => [facts.id, ...(facts.requestIdLabel === null || facts.role === "manager" ? [] : [`${workspaceId === null ? null : keyOf(workspaceId)}::${facts.requestIdLabel}`])]),
     );
     const answering = (link: PeerLink): boolean =>

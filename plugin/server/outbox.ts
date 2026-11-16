@@ -50,12 +50,17 @@
  * which also tells the request's Main and opens the owner's `turn-replaced`
  * Inbox alert (`reportTurnReplaced`).
  *
- * **No turn** (delivery line design §9.1): an `ack` or `close` on a link is
- * stored `delivered` with reason `no-turn` (`add` with `noTurn`) and never
- * enqueued, so neither the queue nor the wake gate sees it. Its target reads
- * it at the head of its next outbox delivery (`noTurnLeadOf`: every such
+ * **No turn** (delivery line design §9.1, ADR-045 decision 14): an `ack` or
+ * `close` on a link, a `beads-done` report and a command's `copy: yes` block
+ * are stored `delivered` with reason `no-turn` (`add` with `noTurn`) and never
+ * enqueued, so neither the queue nor the wake gate sees them. Its target reads
+ * one at the head of its next outbox delivery (`noTurnLeadOf`: every such
  * note no delivery carried yet; `shownAt` once one was sent) and in its
- * `BM-STATE`.
+ * `BM-STATE`. `deliverRecord` asks the same question at every attempt: a
+ * `message` of no open work whose target, as resolved now, rests is settled
+ * as such a note (`settleAsNote`), with no alert and no drop. A record that
+ * carries the owner's decision or words is never such a message, at a plugin
+ * start either (`carriesOwnerDecision`): nothing else would wake its reader.
  *
  * **Peer deliveries** (design §7.17.4): a `peer`, `peer-reply` or
  * `peer-message` record's target is resolved again at every attempt — the
@@ -85,7 +90,9 @@
  *
  * **After a reload** (`createOutboxResend`): at the first hook or RPC with a
  * Paseo handle, every open record of every workspace — `pending` or `held` —
- * is enqueued again, through the wake gate.
+ * goes through `deliverRecord` again, so a record an older build left open
+ * becomes a note there too (ADR-045 decision 14), unless it carries the
+ * owner's decision or words.
  * One sent just before the reload, whose outcome was not written yet, reaches
  * its target twice: nothing drops the second copy (the agent reads both), and
  * the trace reconstruction counts it once, by its record id.
@@ -103,11 +110,14 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { DELIVERY_KINDS, OUTBOX_RECORD_ID_PATTERN, PEER_DELIVERY_KINDS, deliveryLineOf, type DeliveryKind } from "../shared/notices";
-import { createAlertStore, type AlertInput } from "./alert-store";
+import { presenceOf } from "./agent-presence";
+import { createAlertStore } from "./alert-store";
 import { redactText } from "./collector";
 import { capBy, createJsonFileStore, entriesOf, type JsonFileStore } from "./data-files";
-import { missionManagerOf, requestIndexOf } from "./mission-roster";
+import { createMissionRoster, missionManagerOf, requestIndexOf } from "./mission-roster";
 import { MISSION_ID_PATTERN, createMissionStore } from "./mission-store";
+import { createDecisionStore } from "./decision-store";
+import { tellFailedDelivery } from "./delivery-failure";
 import { enqueueNotice, type ChannelQueue } from "./main-channel";
 import { noticeQueue, type NoticeCallbacks, type NoticeOutcome, type NoticePaseo, type SteerResult } from "./notice-queue";
 import { isOwnerWords, reportTurnReplaced } from "./owner-words";
@@ -165,9 +175,10 @@ export interface OutboxInit {
   /** Past the wake gate (delivery line design §6.4): `bm_tell_worker` with `now: true`. */
   atOnce?: boolean;
   /**
-   * Starts no turn (delivery line design §9.1: an `ack` or a `close`): stored
-   * `delivered` with reason `no-turn`, never enqueued; its target reads it at
-   * the head of its next delivery (`noTurnLeadOf`).
+   * Starts no turn (delivery line design §9.1: an `ack` or a `close`; ADR-045
+   * decision 14: a `beads-done` report, a command's copy): stored `delivered`
+   * with reason `no-turn`, never enqueued; its target reads it at the head of
+   * its next delivery (`noTurnLeadOf`).
    */
   noTurn?: boolean;
 }
@@ -232,6 +243,14 @@ export interface Outbox {
    * none. `reason` is kept for `dropped`. Throws when the file cannot be written.
    */
   settle(workspaceId: string, id: string, state: "delivered" | "dropped", reason?: string | null): { record: OutboxRecord; changed: boolean } | null;
+  /**
+   * Settles an open record as a note that started no turn (ADR-045 decision
+   * 14): `delivered`, reason `no-turn`, so `noTurnLeadOf` shows it at the head
+   * of its target's next delivery. A settled record never changes; returns the
+   * record as it is now, or null when there is none. Throws when the file
+   * cannot be written.
+   */
+  settleAsNote(workspaceId: string, id: string): { record: OutboxRecord; changed: boolean } | null;
   /** Writes a new target on a `pending` record (§7.17.4); returns it as it is now, or null when there is none. Throws when the file cannot be written. */
   retarget(workspaceId: string, id: string, to: string): OutboxRecord | null;
   /**
@@ -328,6 +347,23 @@ export function createOutbox(home: string, deps: OutboxDeps = {}): Outbox {
       });
       return result;
     },
+    settleAsNote(workspaceId, id) {
+      requireWorkspace(workspaceId);
+      let result: { record: OutboxRecord; changed: boolean } | null = null;
+      fileOf(workspaceId).update((current) => {
+        const index = current.records.findIndex((record) => record.id === id);
+        if (index === -1) return null;
+        const found = current.records[index]!;
+        if (!isOpenRecord(found)) {
+          result = { record: found, changed: false };
+          return null;
+        }
+        const next: OutboxRecord = { ...found, state: "delivered", outcomeAt: now().toISOString(), reason: NO_TURN_REASON };
+        result = { record: next, changed: true };
+        return { records: current.records.map((record, at) => (at === index ? next : record)) };
+      });
+      return result;
+    },
     retarget(workspaceId, id, to) {
       requireWorkspace(workspaceId);
       let result: OutboxRecord | null = null;
@@ -415,18 +451,31 @@ export function isNoTurnRecord(record: Pick<OutboxRecord, "state" | "reason">): 
   return record.state === "delivered" && record.reason === NO_TURN_REASON;
 }
 
-/** The note a no-turn record leaves at the head of its target's next delivery: `noted: <link> from <agent> (act: ack · refs: …): <gist>`. Pure. */
-export function noTurnNoteOf(record: Pick<OutboxRecord, "from" | "text">): string {
-  const link = /^link: (\S+)$/m.exec(record.text)?.[1] ?? "a link";
+/** At most 200 characters of `text`, on one line. Pure. */
+function gistOf(text: string): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length <= 200 ? line : `${line.slice(0, 199)}…`;
+}
+
+/**
+ * The note a no-turn record leaves at the head of its target's next delivery.
+ * On a link: `noted: <link> from <agent> (act: ack · refs: …): <gist>`. With
+ * no link (ADR-045 decision 14): `noted: <kind> <id> from <agent>: <gist>`, the
+ * gist a command's `re:`, else the text without its marker line. Pure.
+ */
+export function noTurnNoteOf(record: Pick<OutboxRecord, "kind" | "id" | "from" | "text">): string {
+  const link = /^link: (\S+)$/m.exec(record.text)?.[1];
+  if (link === undefined) {
+    const gist = gistOf(/^re: (.+)$/m.exec(record.text)?.[1] ?? record.text.replace(/^BM-[A-Z-]+\n/, ""));
+    return `noted: ${record.kind} ${record.id} from ${record.from}${gist === "" ? "" : `: ${gist}`}`;
+  }
   const header = /^(act: .+)$/m.exec(record.text)?.[1] ?? "act: ack";
   const quote = record.text
     .split("\n")
     .filter((line) => line.startsWith(">"))
     .map((line) => line.replace(/^>\s?/, ""))
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const gist = quote.length <= 200 ? quote : `${quote.slice(0, 199)}…`;
+    .join(" ");
+  const gist = gistOf(quote);
   return `noted: ${link} from ${record.from} (${header})${gist === "" ? "" : `: ${gist}`}`;
 }
 
@@ -465,7 +514,7 @@ export function noTurnLeadOf(home: string, targetId: string): NoTurnLead | null 
 }
 
 /** Marks the records of `lead` shown (delivery line design §9.1). A failure is one log line: the note is shown again. */
-function markLeadShown(home: string, lead: NoTurnLead | null, now: () => Date, log: (message: string) => void): void {
+export function markLeadShown(home: string, lead: NoTurnLead | null, now: () => Date, log: (message: string) => void): void {
   if (lead === null) return;
   const outbox = createOutbox(home, { now });
   const at = now().toISOString();
@@ -539,14 +588,14 @@ export interface OutboxDeliveryDeps extends OutboxDeps {
   log?: (message: string) => void;
 }
 
-/** The `delivery-dropped` alert of a record (§16.7): about its request, the record in its detail. */
-function droppedAlertOf(workspaceId: string, record: OutboxRecord): AlertInput {
-  return {
-    workspaceId,
-    kind: "delivery-dropped",
-    subject: record.requestId,
-    detail: `The ${record.kind} ${record.id} from ${record.from} to ${record.to} was not delivered: ${record.reason ?? "not delivered"}.`,
-  };
+/** The line of a record's `delivery-dropped` alert (§16.7). */
+function droppedDetailOf(record: OutboxRecord): string {
+  return `The ${record.kind} ${record.id} from ${record.from} to ${record.to} was not delivered: ${record.reason ?? "not delivered"}.`;
+}
+
+/** True for a `report` or `message` stored as a note (ADR-045 decision 14): storing it reached nobody, so it covers no drop. A link's note covers as before. Pure. */
+function coversNoDrop(record: OutboxRecord): boolean {
+  return isNoTurnRecord(record) && (record.kind === "report" || record.kind === "message");
 }
 
 /**
@@ -561,28 +610,44 @@ export function dropsCovered(records: readonly OutboxRecord[], requestId: string
     .filter((record) => record.state === "dropped")
     .every((drop) =>
       ofRequest.some(
-        (later) => later.state === "delivered" && later.to === drop.to && later.kind === drop.kind && timeOrZero(later.createdAt) >= timeOrZero(drop.outcomeAt ?? drop.createdAt),
+        (later) => later.state === "delivered" && !coversNoDrop(later) && later.to === drop.to && later.kind === drop.kind && timeOrZero(later.createdAt) >= timeOrZero(drop.outcomeAt ?? drop.createdAt),
       ),
     );
 }
 
 /**
+ * True when every failed answer of the request was followed by a `message`
+ * delivered on it (ADR-042): what `BM-DELIVERY-FAILED` asks the Main to send.
+ * A report on its way to the Main recovers nothing. Pure.
+ */
+export function failedAnswersCovered(records: readonly OutboxRecord[], requestId: string, failedAt: readonly string[]): boolean {
+  const told = records.filter((record) => record.requestId === requestId && record.kind === "message" && record.state === "delivered" && !coversNoDrop(record));
+  return failedAt.every((at) => told.some((message) => timeOrZero(message.createdAt) >= timeOrZero(at)));
+}
+
+/**
  * Clears the `delivery-dropped` alert of `requestId` (§16.7, As built): when
  * `delivered` (a record of the request that just reached its target) leaves
- * every drop of the request covered (`dropsCovered`), or outright when the
- * request reported `finished` or `stopped` (`delivered` null). Returns the
- * cleared keys. Throws when the alert store cannot be written.
+ * every drop and failed answer of the request covered (`dropsCovered`,
+ * `failedAnswersCovered`), or outright when the request reported `finished` or
+ * `stopped` (`delivered` null). Returns the cleared keys. Throws when the
+ * alert store cannot be written.
  */
 export function clearDroppedAlert(home: string, workspaceId: string, requestId: string, delivered: OutboxRecord | null, deps: Pick<OutboxDeps, "now"> = {}): string[] {
-  if (delivered !== null && !dropsCovered(createOutbox(home).list(workspaceId), requestId)) return [];
+  if (delivered !== null) {
+    const records = createOutbox(home).list(workspaceId);
+    const failedAt = createDecisionStore(home).list({ workspaceId, requestId }).flatMap((decision) => (decision.delivery?.outcome === "failed" ? [decision.delivery.at] : []));
+    if (!dropsCovered(records, requestId) || !failedAnswersCovered(records, requestId, failedAt)) return [];
+  }
   return createAlertStore(home, deps).clearWhere((alert) => alert.kind === "delivery-dropped" && alert.workspaceId === workspaceId && alert.subject === requestId);
 }
 
 /**
  * Records a record's outcome (§16.7 step 3): `delivered` hands a peer record
  * to the delivered hook and clears what it covers of the request's drops;
- * `dropped` costs one log line and raises the `delivery-dropped` alert. A
- * failure is one log line.
+ * `dropped` costs one log line and goes through `tellFailedDelivery`: the
+ * `delivery-dropped` alert, and one notice per alert that opens. A failure is
+ * one log line.
  */
 function recordOutcome(workspaceId: string, record: OutboxRecord, state: "delivered" | "dropped", reason: string | null, deps: OutboxDeliveryDeps): void {
   const log = deps.log ?? ((message: string) => console.warn(message));
@@ -605,18 +670,17 @@ function recordOutcome(workspaceId: string, record: OutboxRecord, state: "delive
       return;
     }
     log(`[paseo-bm] the ${record.kind} ${record.id} of request ${record.requestId} to ${record.to} was not delivered: ${result.record.reason ?? "not delivered"}.`);
-    try {
-      createAlertStore(deps.home, deps).raise(droppedAlertOf(workspaceId, result.record));
-    } catch (error) {
-      log(`[paseo-bm] could not raise the delivery-dropped alert of ${record.id}: ${errorText(error)}`);
-    }
+    void tellFailedDelivery(
+      { workspaceId, requestId: record.requestId, what: `the ${record.kind} ${record.id}`, to: record.to, reason: result.record.reason ?? "not delivered", detail: droppedDetailOf(result.record) },
+      { home: deps.home, ...(deps.queue === undefined ? {} : { queue: deps.queue }), ...(deps.paseo === undefined ? {} : { paseo: deps.paseo }), ...(deps.now === undefined ? {} : { now: deps.now }), log },
+    );
   } catch (error) {
     log(`[paseo-bm] could not record the outcome of the ${record.kind} ${record.id}: ${errorText(error)}`);
   }
 }
 
-/** What a delivery came to: the queue's outcome, or `held` by the wake gate (delivery line design §6.4). */
-export type RecordOutcome = NoticeOutcome | "held";
+/** What a delivery came to: the queue's outcome, `held` by the wake gate (delivery line design §6.4), or `no-turn`: settled as a note, never enqueued (ADR-045 decision 14). */
+export type RecordOutcome = NoticeOutcome | "held" | "no-turn";
 
 /** The wait items a record settles as it is delivered (delivery line design §6.3): a review's or no-verdict's batch. */
 function waitRefsOfRecord(record: OutboxRecord): WaitRef[] {
@@ -834,6 +898,16 @@ export async function deliverRecord(workspaceId: string, given: OutboxRecord, de
   // §3.4: a record addressed to a Main goes to the mission's Main now.
   const main = mainTarget?.() ?? null;
   if (main !== null && main.to !== record.to) retarget(main.to);
+  // ADR-045 decision 14: a message of no open work for a target at rest is a note, at every attempt. No alert, no drop.
+  if (await needsNoTurn(deps.home, workspaceId, record, deps.paseo)) {
+    try {
+      createOutbox(deps.home, deps).settleAsNote(workspaceId, record.id);
+      return "no-turn";
+    } catch (error) {
+      log(`[paseo-bm] could not settle the ${record.kind} ${record.id} as a note; it stays open: ${errorText(error)}`);
+      return "queued";
+    }
+  }
   // Delivery line design §9.1: what reached the target without a turn heads this delivery, and is shown once it is sent.
   const notes = noTurnLeadOf(deps.home, record.to);
   if (notes !== null) lead = continuedLine === null ? notes.text : `${notes.text}\n${continuedLine}`;
@@ -888,9 +962,57 @@ export interface OutboxResend {
 }
 
 /**
- * Re-sends the outbox once per run, at the first hook or RPC that brings a
- * Paseo handle (§16.7): every `pending` record of every workspace is enqueued
- * again.
+ * True for a record that carries the owner's decision or words: what `tellMain`
+ * says of a card's outcome or a change to the mission (`from` owner, or the
+ * Orchestrator on the governor's split or arbitration) and a
+ * `bm_tell_worker` with `now: true` (`atOnce`, `isOwnerWords`). Receiving it is
+ * the reader's work, whatever the roster says. Pure.
+ */
+function carriesOwnerDecision(record: Pick<OutboxRecord, "from" | "atOnce">): boolean {
+  return record.atOnce === true || record.from === "owner" || record.from === "orchestrator";
+}
+
+/**
+ * True when `record` is a message on which no work is open (ADR-044): about a
+ * mission with no active request, or a request that finished. Only a `message`
+ * can be: a report, a verdict or a peer record is someone's result or ask, and
+ * a request paseo-bm does not know proves nothing, and a record that carries
+ * the owner's decision or words is always work. An unreadable roster reads as
+ * no work. Never throws.
+ */
+function isDormantRecord(home: string, workspaceId: string, record: OutboxRecord): boolean {
+  if (record.kind !== "message" || carriesOwnerDecision(record)) return false;
+  try {
+    const missionId = missionOfReference(record.requestId);
+    if (missionId !== null) return !createMissionRoster(home).list(missionId).some((request) => request.state === "active");
+    const request = createRequestRegistry(home).get(workspaceId, record.requestId);
+    if (request === null || request === undefined || request.finishedAt === null) return false;
+    // A hand-path request reopened by a follow-up is active on the roster before its Worker reports.
+    const place = requestIndexOf(home, record.requestId);
+    return place === null || !createMissionRoster(home).list(place.missionId).some((entry) => entry.requestId === record.requestId && entry.state === "active");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `record` needs no turn now (ADR-045 decision 14): no work is open
+ * on it and `record.to`, its target as resolved, rests, so sending would revive
+ * an agent nobody waits on. With no Paseo handle, or a target that cannot be
+ * read, it is delivered as before. Never rejects.
+ */
+async function needsNoTurn(home: string, workspaceId: string, record: OutboxRecord, paseo: NoticePaseo | undefined): Promise<boolean> {
+  if (paseo === undefined || !isDormantRecord(home, workspaceId, record)) return false;
+  try {
+    return presenceOf((await paseo.agents.ref(record.to).refresh())?.agent) === "resting";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delivers the outbox again once per run, at the first hook or RPC that brings
+ * a Paseo handle (§16.7): `deliverRecord` for every open record of every workspace.
  */
 export function createOutboxResend(deps: Omit<OutboxDeliveryDeps, "home" | "paseo"> & { home: () => string | null }): OutboxResend {
   let done = false;

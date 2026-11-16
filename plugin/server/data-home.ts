@@ -20,7 +20,7 @@
  *    would have no way to tell.
  *
  * `install.json` is deliberately not read: it was the old installer's
- * ownership record, and a paseo.cafe install has none, which is exactly the
+ * ownership record, and an install from npm has none, which is exactly the
  * case that used to leave the Dashboard empty.
  */
 import { lstatSync, mkdirSync, readFileSync as nodeReadFileSync } from "node:fs";

@@ -130,6 +130,33 @@ function toolsWith(paseo: unknown) {
 
 const answer = (id: string, optionKey: string, paseo: unknown) => handleDecisionsAnswer({ id, optionKey }, paseo, { home, now: () => NOW, log: () => {}, cli: missions.cli!, missions });
 
+describe("bm_govern (ADR-045 decision 9)", () => {
+  const govern = (figures: string[] | undefined, step = "nudge") => {
+    const tools = toolsWith(daemon().paseo);
+    return tools.call("bm_govern", { missionId: A, step, text: "Say who owns the file.", ...(figures === undefined ? {} : { figures }) });
+  };
+
+  it("refuses, in one line, a nudge citing only mess or drift figures, and sends nothing", async () => {
+    twoMissions();
+    const refused = await govern(["writersOnOneFile", "dropped", "outsideCharter"]);
+    expect(refused).toEqual({ ok: false, text: expect.stringContaining("a nudge for mess or drift figures alone is not sent") });
+    expect(refused.text.split("\n")).toHaveLength(1);
+    expect(refused.text).toContain("nothing was sent");
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(createOrchestratorStore(home).listCommands()).toEqual([]);
+    expect(createMissionStore(home).journal(A).filter((line) => line.kind === "governor")).toEqual([]);
+  });
+
+  it("still sends a nudge citing another family or no figure, and a re-plan citing a quiet one", async () => {
+    twoMissions();
+    for (const [figures, step] of [[["writersOnOneFile", "stalled"], "nudge"], [undefined, "nudge"], [["outsideCharter"], "replan"]] as const) {
+      const result = await govern(figures === undefined ? undefined : [...figures], step);
+      expect(result.ok, result.text).toBe(true);
+    }
+    expect(enqueue).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("bm_arbitrate (§9.6)", () => {
   it("records the call, journals both missions, sends both Mains governor:arbitrate, and opens the losing mission's card when it changes the goal", async () => {
     twoMissions();

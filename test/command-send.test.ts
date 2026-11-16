@@ -18,6 +18,7 @@ import { createCoordinationStore } from "../plugin/server/coordination-store";
 import { COORDINATION_HANDOFF_AUTHORITY, HANDOFF_INTENT, governorAuthorityOf, type CommandInput } from "../plugin/shared/orchestrator-command";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { createOrchestratorStore } from "../plugin/server/orchestrator-store";
+import { createOutbox, noTurnLeadOf } from "../plugin/server/outbox";
 import { fakePaseo } from "./helpers/fake-paseo";
 
 let home: string;
@@ -89,6 +90,38 @@ describe("sendCommand: the stored copy (base design §9)", () => {
       redactEnv: { PASEO_DAEMON_PASSWORD: "daemon-pass-77" },
     });
     expect(readFileSync(join(home, "orchestrator", "proposals.json"), "utf8")).not.toContain("daemon-pass-77");
+  });
+});
+
+describe("sendCommand: the Manager's copy is a note (ADR-045 decision 14)", () => {
+  const NOW = new Date("2026-10-03T10:00:00.000Z");
+  const toWorker: CommandInput = { from: "orchestrator", via: "chat", to: "worker", requestId: "req-20261003T090000Z", re: "Stop the push", body: "Stop it, secret-77.", intent: "stop", effects: [], authority: "policy:reversible-technical", approved: [] };
+  const send = (over: Partial<Parameters<typeof sendCommand>[0]>, enqueue = vi.fn(async () => "sent" as const)) =>
+    sendCommand({ home, now: NOW, paseo: fakePaseo().paseo as never, workspaceId: "ws-1", command: toWorker, targetId: "wrk", copyTo: "main", backstop: false, loopGuard: "count", intervention: null, queue: { enqueue }, store: { newId: () => "cmd-1" }, redactEnv: { PASEO_DAEMON_PASSWORD: "secret-77" }, log: () => {}, ...over });
+
+  it("stores it as a no-turn message to the copy's recipient, never enqueued: the Worker gets the only send, and the next delivery opens with it", async () => {
+    const enqueue = vi.fn(async () => "sent" as const);
+    const result = await send({}, enqueue);
+    expect(result).toMatchObject({ ok: true, copy: "sent" });
+    expect(enqueue.mock.calls.map((call) => (call as unknown[])[0])).toEqual(["wrk"]);
+    const [note] = createOutbox(home).list("ws-1");
+    expect(note).toMatchObject({ kind: "message", requestId: toWorker.requestId, from: "orchestrator", to: "main", state: "delivered", reason: "no-turn" });
+    expect(note!.text).toContain("copy: yes");
+    expect(note!.text).not.toContain("secret-77");
+    expect(noTurnLeadOf(home, "main")?.text).toBe(`noted: message ${note!.id} from orchestrator: Stop the push`);
+  });
+
+  it("names the mission, else the Worker, when the command concerns no request", async () => {
+    await send({ command: { ...toWorker, requestId: null }, missionId: "mis-0123456789" });
+    await send({ command: { ...toWorker, requestId: null }, store: { newId: () => "cmd-2" } });
+    expect(createOutbox(home).list("ws-1").map((note) => note.requestId)).toEqual(["mis-0123456789", "wrk"]);
+  });
+
+  it("reports failed when the write fails, and the command still went; none without a recipient", async () => {
+    const enqueue = vi.fn(async () => "sent" as const);
+    expect(await send({ workspaceId: "ws/1" }, enqueue)).toMatchObject({ ok: true, copy: "failed" });
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(await send({ copyTo: null })).toMatchObject({ ok: true, copy: null });
   });
 });
 

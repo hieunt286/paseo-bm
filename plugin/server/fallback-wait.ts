@@ -20,6 +20,7 @@
  * the owner's decision was settled when the wait began). Never throws into a
  * timer: failures cost one log line.
  */
+import { presenceOf } from "./agent-presence";
 import { unusableDataHomeMessage } from "./data-home";
 import { decidePending, type FallbackAction, type FallbackRpcDeps } from "./fallback-rpc";
 import { readIncidents, updateIncidents } from "./fallback-state";
@@ -119,7 +120,8 @@ export function createFallbackWaiter(deps: WaiterDeps = {}): FallbackWaiter {
       const snapshot = asRecord((await ref.refresh())?.agent);
       const status = snapshot?.["status"];
       const labels = asRecord(snapshot?.["labels"]) ?? {};
-      const gone = snapshot === null || snapshot["archivedAt"] != null || status === "closed";
+      // ADR-042: a wait for a limit outlasts Paseo's idle hour; a resting agent resumes on the send.
+      const gone = presenceOf(snapshot) === "gone";
       const busy = status === "running" || status === "initializing";
       if (gone || busy || Object.prototype.hasOwnProperty.call(labels, REPLACED_BY_LABEL)) {
         await finish(home, incidentId, "expired");

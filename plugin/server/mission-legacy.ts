@@ -273,7 +273,7 @@ export async function handleManagerEnsure(
   // A Main its label never reached (the CLI refused it) is still the mission's: opened unless it is replaced.
   const unlabelled = managers.find((agent) => agent.id === mission.mainId);
   const opened =
-    unlabelled !== undefined && (await findMain(paseo, mission.missionId)).length === 0 && !(input.replaceOutdated === true && hasOutdatedInstructions(unlabelled.labels, "manager"))
+    unlabelled !== undefined && (await findMain(paseo, mission.missionId, mission.mainId)).length === 0 && !(input.replaceOutdated === true && hasOutdatedInstructions(unlabelled.labels, "manager"))
       ? { agentId: unlabelled.id, created: false, replacedMainId: null, toolsNotice: null }
       : await handleMissionEnsure({ missionId: mission.missionId, ...(input.replaceOutdated === true ? { replace: "outdated" as const } : {}) }, paseo, deps);
   return {
@@ -312,7 +312,7 @@ export async function adoptComposerManager(
     const handle = paseo as MissionsPaseo;
     const mission = missionOfWorkspace(home, workspaceId);
     if (mission === null) return (await migrateWorkspace(handle, workspaceId, deps, { prefer: agent.id })) === null ? null : "mission";
-    const live = (await findMain(handle, mission.missionId)).length > 0 || (mission.mainId !== null && (await findLiveManagers(handle, workspaceId, { home, log })).some((entry) => entry.id === mission.mainId));
+    const live = (await findMain(handle, mission.missionId, mission.mainId)).length > 0 || (mission.mainId !== null && (await findLiveManagers(handle, workspaceId, { home, log })).some((entry) => entry.id === mission.mainId));
     // The owner opened the wrong door: the outdated-agents pass flags it as an extra Manager.
     if (live) return "extra";
     await markMain(agent.id, mission, { bindings: bindingsOf(home, deps), cli: deps.cli, log });

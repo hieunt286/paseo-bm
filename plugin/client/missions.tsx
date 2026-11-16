@@ -59,6 +59,7 @@ import {
   nameAndCodeErrors,
   renameInputOf,
   revokeIntegrationDialog,
+  revokeLocalMergeDialog,
   toggleRepo,
   type MemoryView,
   type MissionCardView,
@@ -450,7 +451,7 @@ export interface PageUi {
   /** "+ Add"'s panel (artboard N): what is ticked and "Find a project…". */
   addChosen: readonly string[];
   addFilter: string;
-  confirm: { kind: "close" } | { kind: "level"; level: MissionLevel } | { kind: "revoke"; repo: string } | null;
+  confirm: { kind: "close" } | { kind: "level"; level: MissionLevel } | { kind: "revoke"; repo: string; what?: "local-merge" } | null;
   /** What runs now ("Opening…", "Saving…"); null when nothing. */
   busy: string | null;
   error: string | null;
@@ -474,9 +475,9 @@ export interface MissionPageActions {
   /** Opens the Inbox, where an open question's card is answered (mission runtime design §7). */
   openInbox?: () => void;
   /** Revokes push and merge request for a repo, once confirmed (delivery line design §4.3). */
-  revoke?: (repo: string) => void;
+  revoke?: (repo: string, what?: "local-merge") => void;
   /** Opens a fresh integration card for a repo after not now or a revoke (delivery line design §4.3). */
-  askAgain?: (repo: string) => void;
+  askAgain?: (repo: string, what?: "local-merge") => void;
 }
 
 export interface MissionPageBodyProps {
@@ -840,16 +841,25 @@ function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<Mission
   if (repositories === null) return null;
   const { colors } = theme;
   const pending = ui.confirm?.kind === "revoke" ? ui.confirm.repo : null;
+  const pendingWhat = ui.confirm?.kind === "revoke" ? ui.confirm.what : undefined;
   const ask = (repo: string) => on.ui({ confirm: { kind: "revoke", repo }, menu: false, rename: null });
   const confirmOf = (row: (typeof repositories.rows)[number]) =>
     pending !== row.workspaceId || on.revoke === undefined ? null : (
       <View key="confirm" style={{ paddingVertical: 8 }}>
-        <ConfirmBlock dialog={revokeIntegrationDialog(page.code, row)} busy={ui.busy !== null} busyLabel="Revoking…" onConfirm={() => on.revoke!(row.workspaceId)} onCancel={() => on.ui({ confirm: null })} styles={styles} theme={theme} />
+        <ConfirmBlock dialog={pendingWhat === "local-merge" ? revokeLocalMergeDialog(page.code, row) : revokeIntegrationDialog(page.code, row)} busy={ui.busy !== null} busyLabel="Revoking…" onConfirm={() => (pendingWhat === undefined ? on.revoke!(row.workspaceId) : on.revoke!(row.workspaceId, pendingWhat))} onCancel={() => on.ui({ confirm: null })} styles={styles} theme={theme} />
       </View>
     );
   const canRevoke = (row: (typeof repositories.rows)[number]) => row.push.action === "revoke" && on.revoke !== undefined && page.open;
   const canAnswer = (row: (typeof repositories.rows)[number]) => row.push.action === "answer" && on.openInbox !== undefined;
   const canAsk = (row: (typeof repositories.rows)[number]) => row.push.action === "ask" && on.askAgain !== undefined && page.open;
+  /** ADR-045 decision 4: the local merge's one control, the same Revoke, Answer and Ask me again as push and merge request. */
+  const localMergeControl = (row: (typeof repositories.rows)[number]): { label: string; a11y: string; press: () => void } | null => {
+    const action = row.localMerge?.action ?? null;
+    if (action === "revoke" && on.revoke !== undefined && page.open) return { label: "Revoke", a11y: `Revoke the local merge for ${row.name}`, press: () => on.ui({ confirm: { kind: "revoke", repo: row.workspaceId, what: "local-merge" }, menu: false, rename: null }) };
+    if (action === "answer" && on.openInbox !== undefined) return { label: "Answer", a11y: `Answer the local merge for ${row.name} in the Inbox`, press: () => on.openInbox?.() };
+    if (action === "ask" && on.askAgain !== undefined && page.open) return { label: "Ask me again", a11y: `Ask me again about the local merge for ${row.name}`, press: () => on.askAgain!(row.workspaceId, "local-merge") };
+    return null;
+  };
   const mrLink = (row: (typeof repositories.rows)[number], label: string) =>
     row.mr === null ? null : (
       <Text accessibilityRole="link" accessibilityLabel={`Open merge request ${row.mr.short} of ${row.name}`} onPress={() => void Linking.openURL(row.mr!.url)} style={{ color: toneColor(theme, row.mr.tone) }}>
@@ -917,6 +927,22 @@ function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<Mission
                     </Text>
                   </>
                 ) : null}
+              </Text>
+            )}
+            {row.localMerge === null || row.localMerge.phone === null ? null : (
+              <Text style={{ fontSize: 12, color: colors.foreground }}>
+                <Text style={{ color: toneColor(theme, row.localMerge.tone) }}>{row.localMerge.phone}</Text>
+                {(() => {
+                  const control = localMergeControl(row);
+                  return control === null ? null : (
+                    <>
+                      {" · "}
+                      <Text accessibilityRole="button" accessibilityLabel={control.a11y} onPress={ui.busy !== null ? undefined : control.press} style={{ color: toneColor(theme, "info") }}>
+                        {control.label}
+                      </Text>
+                    </>
+                  );
+                })()}
               </Text>
             )}
             {/* Artboard R: one muted line per lane, its state in its tone; then the overlap lines. */}
@@ -1000,6 +1026,11 @@ function RepositoriesCard({ page, ui, compact, on, styles, theme }: Pick<Mission
                   ) : canAsk(row) ? (
                     <Button label="Ask me again" kind="secondary" accessibilityLabel={`Ask me again about push and merge request for ${row.name}`} disabled={ui.busy !== null} onPress={() => on.askAgain!(row.workspaceId)} styles={styles} style={CELL_BUTTON} textStyle={BUTTON_TEXT} />
                   ) : null}
+                  {row.localMerge === null ? null : <Text style={{ fontSize: 12, color: toneColor(theme, row.localMerge.tone) }}>{row.localMerge.short}</Text>}
+                  {(() => {
+                    const control = localMergeControl(row);
+                    return control === null ? null : <Button label={control.label} kind="secondary" accessibilityLabel={control.a11y} disabled={ui.busy !== null && control.label !== "Answer"} onPress={control.press} styles={styles} style={CELL_BUTTON} textStyle={BUTTON_TEXT} />;
+                  })()}
                 </View>,
               ]}
             />
@@ -1188,6 +1219,17 @@ function WaitingPart({ rows, styles, theme }: { rows: readonly WaitingRowView[];
   );
 }
 
+/** The mission's line in one row of In flight (ADR-045 decision 5): the step, its repo, where it stands. */
+function LineRow({ line, fontSize, theme }: { line: NonNullable<NonNullable<MissionPageView["inFlight"]>["line"]>; fontSize: number; theme: Theme }) {
+  return (
+    <Text style={{ fontSize, color: theme.colors.foreground }}>
+      <Text style={{ fontWeight: "700" }}>{line.text}</Text>
+      {" · "}
+      <Text style={{ color: toneColor(theme, line.state.tone) }}>{line.state.text}</Text>
+    </Text>
+  );
+}
+
 /** The In flight card (mission runtime design §7, artboards G and H; its lanes and Waiting part, delivery line design §19.8, artboards Q and R): what the Main knows — requests and whom they wait on, open questions, the Main's asks, live links. */
 function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBodyProps, "page" | "compact" | "on" | "styles" | "theme">) {
   const flight = page.inFlight;
@@ -1207,6 +1249,7 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
     return (
       <Card styles={styles} theme={theme}>
         <Text style={styles.sectionLabel}>In flight</Text>
+        {flight.line === null ? null : <LineRow line={flight.line} fontSize={12} theme={theme} />}
         {flight.requests.length === 0 ? <Small tone="muted" theme={theme}>Nothing in flight.</Small> : null}
         {active.map((request) => (
           <View key={request.requestId}>
@@ -1264,6 +1307,7 @@ function InFlightCard({ page, compact, on, styles, theme }: Pick<MissionPageBody
         <Text style={styles.sectionLabel}>In flight</Text>
         <Small tone="muted" theme={theme}>{flight.meta}</Small>
       </View>
+      {flight.line === null ? null : <LineRow line={flight.line} fontSize={13} theme={theme} />}
       {flight.requests.length === 0 ? (
         <Small tone="muted" theme={theme}>Nothing in flight.</Small>
       ) : (
@@ -1844,8 +1888,8 @@ export function MissionsScreen({ theme, layout, navigation, projects, repoIndex,
               if (pending !== null) run("Saving…", "Could not set the mission level", () => setMissionLevel({ missionId: view.missionId, level: pending, confirmed: true }), { confirm: null });
             },
             memory: (workspaceId) => setPlace({ view: "memory", workspaceId, repos: view.charter.repos, back: { view: "page", missionId: view.missionId, code: view.code } }),
-            revoke: (repo) => run("Revoking…", "Could not revoke push and merge request", () => revokeIntegration({ missionId: view.missionId, repo }), { confirm: null }),
-            askAgain: (repo) => run("Asking…", "Could not ask again", () => askIntegration({ missionId: view.missionId, repo })),
+            revoke: (repo, what) => run("Revoking…", what === undefined ? "Could not revoke push and merge request" : "Could not revoke the local merge", () => revokeIntegration({ missionId: view.missionId, repo, ...(what === undefined ? {} : { what }) }), { confirm: null }),
+            askAgain: (repo, what) => run("Asking…", "Could not ask again", () => askIntegration({ missionId: view.missionId, repo, ...(what === undefined ? {} : { what }) })),
             ...(openAgent === undefined ? {} : { openAgent: (agentId: string) => openAgent({ agentId }) }),
             ...(onOpenInbox === undefined ? {} : { openInbox: onOpenInbox }),
           }}

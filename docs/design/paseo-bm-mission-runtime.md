@@ -32,7 +32,7 @@ interface MissionState {
              repos: Array<{ workspaceId; name | null }>; mainId: string | null;
              mainHistory: Array<{ agentId; from; to: string | null; reason }> };
   requests: Array<{ requestId; workspaceId; topic; workerId: string | null;
-                    state: "working" | "waiting-owner" | "waiting-main" | "waiting-other" | "finished" | "stopped";
+                    state: "working" | "undelivered" | "waiting-owner" | "waiting-main" | "waiting-other" | "finished" | "stopped";
                     lastReport: { phase; at; line } | null;   // line: the report's first summary line, ≤ 200
                     followUpAt: string | null;                // a follow-up told after the newest report
                     waitingOn: string | null }>;              // the blocked report's "waiting for …", ≤ 200
@@ -62,10 +62,11 @@ interface MissionState {
 
 **A request's `state`.** Read in order, the first that holds:
 1. `finished` or `stopped`: the roster state, unless `followUpAt` is later than the newest report, which reads `working`.
-2. `waiting-owner`: an open question whose decider is the owner.
-3. `waiting-main`: an open question whose decider is the Main.
-4. `waiting-other`: the newest report is `blocked` with a `waiting for` line and no open question.
-5. Otherwise `working`.
+2. `waiting-owner`: an open question whose decider is the owner, who is the one holding the request (ADR-045 decision 14).
+3. `undelivered`: an open `delivery-dropped` alert of the request (ADR-042).
+4. `waiting-main`: an open question whose decider is the Main.
+5. `waiting-other`: the newest report is `blocked` with a `waiting for` line and no open question.
+6. Otherwise `working`.
 
 ### 2.2 The rendering
 
@@ -504,3 +505,5 @@ The role-file changes flag running Mains outdated once.
 | 2026-10-21 | Claude (as built, ADR-035 Phases 8–9) | §2.2 the Lines and Contracts sections, links by their latest message, the Worker brief's links and contracts |
 | 2026-10-25 | hieu.nt10 (owner's answer; written by Claude) | §3.2: a Main crosses at its window share or `main.contextTokens`, whichever comes first ([ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md)) |
 | 2026-10-26 | Codex (owner request, ADR-040) | §4.1/§4.5.1: the Main resolves delegated request fallback, receives durable notices and recovers pending incidents; additive tool with negative authority and delivery proof |
+| 2026-11-06 | Claude (owner request, ADR-042) | §2.1: the `undelivered` request state |
+| 2026-11-10 | Claude (as built, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) Phase 1) | §2.1: `undelivered` ranks below a question waiting for the owner |

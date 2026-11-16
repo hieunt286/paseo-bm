@@ -19,6 +19,7 @@ const EVAL = [
   "test/eval-scenarios.test.ts",
   "test/eval-score.test.ts",
   "test/eval-suite.test.ts",
+  "test/eval-worker-baseline.test.ts",
 ];
 
 export default defineWorkspace([

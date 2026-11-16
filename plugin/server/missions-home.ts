@@ -42,9 +42,9 @@ import {
   type MissionsCreateOutput,
 } from "../shared/contracts";
 import { levelOf } from "../shared/autonomy";
+import { effectivePolicy } from "./placements";
 import { roleOfProvider } from "./agent-role";
 import { NO_BINDER, type AgentBinder, type BindingStore } from "./agent-bindings";
-import { readAutonomyPolicy } from "./autonomy-rpc";
 import { createJsonFileStore, ensureDataDir, writeFileAtomically } from "./data-files";
 import { UI_DIR_NAME } from "./data-home";
 import { hasOutdatedInstructions } from "./instructions-label";
@@ -299,7 +299,8 @@ export function mainFactsOf(home: string | null, missionId: string | null): Main
     if (mission === null) return { mission: null };
     const autonomy = createMissionAutonomyStore(home).get(missionId);
     const delegated = MISSION_CLASSES.filter((name) => autonomy.cells[name].mode === "delegate");
-    const policy = readAutonomyPolicy({ home, log: () => {} });
+    // ADR-047: a live id reads its repo key's policy, as decisions do.
+    const policy = effectivePolicy(home);
     return {
       mission: { missionId, code: mission.code, name: mission.name },
       level: { level: autonomy.level, delegated, owner: MISSION_CLASSES.filter((name) => !delegated.includes(name)) },
@@ -509,7 +510,7 @@ export async function handleMissionEnsure(input: MissionEnsureInput, paseo: Miss
   const mission = store.get(input.missionId);
   if (mission === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
   if (mission.state !== "open") throw missionInvalid([`mission ${mission.code} is closed`]);
-  const [chosen] = await findMain(paseo, mission.missionId);
+  const [chosen] = await findMain(paseo, mission.missionId, mission.mainId);
   const replace = chosen !== undefined && (input.replace === "owner" || (input.replace === "outdated" && hasOutdatedInstructions(chosen.labels, "manager")));
   const bindings = deps.bindings?.() ?? undefined;
   const replaceDeps = {
@@ -729,7 +730,7 @@ export function createMainSuccession(deps: MissionsHomeDeps = {}) {
         const entry = missionId === undefined ? undefined : awaiting.get(missionId);
         if (placed !== null && entry === undefined && nonEmpty(labels[VERSION_LABEL]) === null) {
           // The owner opened it in the mission's workspace: its Main when the mission has none live; else an extra chat, left alone.
-          const live = (await findMain(paseo as MissionsPaseo, placed)).filter((candidate) => candidate.id !== agent.id);
+          const live = (await findMain(paseo as MissionsPaseo, placed, createMissionStore(home).get(placed)?.mainId ?? null)).filter((candidate) => candidate.id !== agent.id);
           if (live.length > 0) return null;
           return (await adopt(placed, agent.id, own !== null, paseo)) ? placed : null;
         }

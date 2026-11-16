@@ -24,7 +24,7 @@ import { reviewerReplacementsFor } from "./fallback-state";
 import { agentFactsOf, type DashboardPaseo } from "./paseo-directory";
 import { readRecords, readWorkspaceMeta, storedWorkspaceIds, type TraceStoreLocation } from "./trace-store";
 import { reconstructTraces, reviewCallsOf, toolCallsOf, type AgentFacts, type ReconstructedTrace, type RequestReviewFacts } from "./traces";
-import { createRequestRegistry, type RegisteredRequest } from "./request-registry";
+import { createRequestRegistry, ownCallsOf, type RegisteredRequest } from "./request-registry";
 import { isLiveLink, type PeerLink } from "./peer-links";
 import { createMissionRoster, requestIndexOf } from "./mission-roster";
 import { timeOrZero } from "../shared/time";
@@ -186,8 +186,13 @@ export async function workspaceTracesOf(deps: RequestTraceDeps, workspaceId: str
   ]);
   // Design §16.8: the request registry's review tool records, counted with the activity stream.
   const requests = registeredRequestsOf(deps, workspaceId);
-  const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds, requests: withMissionsOf(homeOf(deps), requests) });
+  const traces = reconstructTraces({ records, agents: [...agents.values()], replacementIds, requests: withMissionsOf(homeOf(deps), requests.map(withOwnCallsOf)) });
   return { records, agents, traces, requests, notices };
+}
+
+/** A request as the count reads it (ADR-045 decision 10): an adopted batch's inherited calls are its predecessor's. Pure. */
+function withOwnCallsOf(request: RegisteredRequest): RegisteredRequest {
+  return { ...request, reviews: { ...request.reviews, batches: request.reviews.batches.map((batch) => ({ ...batch, calls: ownCallsOf(batch) })) } };
 }
 
 function homeOf(deps: Pick<RequestTraceDeps, "location" | "home">): string {
@@ -252,7 +257,7 @@ export async function requestReviewCountOf(deps: RequestTraceDeps, workspaceId: 
   const reviewerIds = [...agents.values()]
     .filter((agent) => agent.role === "reviewer" && (agent.requestIdLabel === requestId || (agent.parentAgentId !== null && workerIds.has(agent.parentAgentId))))
     .map((agent) => agent.id);
-  return { calls: reviewCallsOf(reviewerIds, records, replacementIds, toolCallsOf(request)) ?? 0, trace: null };
+  return { calls: reviewCallsOf(reviewerIds, records, replacementIds, toolCallsOf(request === null ? null : withOwnCallsOf(request))) ?? 0, trace: null };
 }
 
 /** The request a Worker or Reviewer belongs to, or undefined when it is linked to none. */

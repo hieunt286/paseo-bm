@@ -290,6 +290,9 @@ const REPORT_KEYS = new Map<string, keyof ParsedReport | "phase" | "tier" | "gua
   ["blockers", "blockers"],
   ["handoffnote", "handoffNote"],
   ["remaining", "remaining"],
+  ["goal", "goal"],
+  ["acceptance", "acceptance"],
+  ["runtimeproof", "runtimeProof"],
   ["branch", "integration"],
   ["commit", "integration"],
   ["pushed", "integration"],
@@ -366,6 +369,21 @@ function handoffNoteOf(raw: string | undefined): { handoffNote?: string } {
 function remainingOf(raw: string | undefined): { remaining?: string[] } {
   const items = parseDecided(raw);
   return items.length === 0 ? {} : { remaining: items };
+}
+
+/** `{ goal, acceptance }` of a `received` that restates them (ADR-045 decision 7), each only when present: older reports keep their exact shape. */
+function restatedGoalOf(field: (key: string) => string | undefined): { goal?: string; acceptance?: string[] } {
+  const goal = valueOrNull(field("goal"));
+  const acceptance = parseDecided(field("acceptance"));
+  return { ...(goal === null ? {} : { goal }), ...(acceptance.length === 0 ? {} : { acceptance }) };
+}
+
+/** `{ runtimeProof }` from the one line `bm_report` writes (ADR-045 decision 6), else nothing: older reports keep their exact shape. */
+function runtimeProofOf(raw: string | undefined): { runtimeProof?: NonNullable<ParsedReport["runtimeProof"]> } {
+  const value = valueOrNull(raw);
+  const found = value === null ? null : /^(ran|could not run) — (.*?)(?:; showed: (.*))?$/.exec(value);
+  if (found === null) return {};
+  return { runtimeProof: { kind: found[1] === "ran" ? "ran" : "could-not-run", what: found[2]!, ...(found[3] === undefined ? {} : { showed: found[3] }) } };
 }
 
 /**
@@ -461,6 +479,10 @@ export function parseReports(text: string, context: ParseContext): ParsedReport[
       ...handoffNoteOf(field("handoffnote")),
       // Only a size rollover's finished carries it (delivery line design §2.6): absent otherwise.
       ...remainingOf(field("remaining")),
+      // Only a bound Worker's received outside a step carries them (ADR-045 decision 7): absent otherwise.
+      ...restatedGoalOf(field),
+      // Only a bound Worker's finished carries it (ADR-045 decision 6): absent otherwise.
+      ...runtimeProofOf(field("runtimeproof")),
       // Only a report on a mission branch carries them (delivery line design §4.4): absent otherwise.
       ...integrationOf(field),
       // Only a bound Worker's blocked report that waits by id carries them (delivery line design §6.2).

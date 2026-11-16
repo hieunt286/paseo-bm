@@ -3,8 +3,8 @@
  * (autonomy design §C.2, §C.6; REQ-130). Each check the report names in
  * `buildAndTests`, each file of `filesChanged` and each bead of `beadsClosed`
  * is `detected` when the evidence shows it and `self-reported` when only the
- * report says so; the request's checks as a whole are `detected`,
- * `self-reported`, `unverified` or `not-checked`.
+ * report says so, and a check may also be `reused`; the request's checks as a
+ * whole are `detected`, `reused`, `self-reported`, `unverified` or `not-checked`.
  *
  * - **Named checks** are the backtick spans of `buildAndTests`, as the Worker
  *   is told to write them (`roles/worker.md`, "Proving a change"). A value
@@ -23,6 +23,11 @@
  *   A line also joined by `;`, `||`, `|` or `&` ends as its last part does, so
  *   it proves none of them (`andChainOf`): a piped `npm test | tail -5` is
  *   never detected, whether named or run.
+ * - **A reused check** (ADR-045 decision 13) is one not detected whose clause
+ *   of `buildAndTests` (split at `;` or a newline) holds the word `reused`,
+ *   case aside, and which a successful shell entry of the request ran, whichever
+ *   of its Workers ran it, under the same `&&` rule, at any time: before the
+ *   last edit or a handoff too. Such a claim with no such run is self-reported.
  * - **Success** is `shellSucceeded`: an exit code, when present, decides;
  *   otherwise `status: completed`.
  * - **One call, its latest state.** The running and the finished entry of a
@@ -43,8 +48,8 @@
  *   same `&&` rule as checks, at any time.
  * - **Finished-unverified** (§C.3, `requestFinishOf`): a request whose latest
  *   report is `finished`, whose code changed and whose named checks are not
- *   all detected. Work, the finished card, `request.finished` and the
- *   delegation refusal (§C.6, change-008 C4) all read it from here.
+ *   all detected or reused. Work, the finished card, `request.finished` and
+ *   the delegation refusal (§C.6, change-008 C4) all read it from here.
  *
  * `shared/`, pure: no Node and no React Native imports, so the client can
  * read it too.
@@ -56,12 +61,17 @@ import { andChainOf, brActions, normalisedCommand, shellSucceeded } from "./shel
 import { timeOrZero } from "./time";
 
 /** How one claim of a report stands. */
-export const CLAIM_LABELS = ["detected", "self-reported"] as const;
+export const CLAIM_LABELS = ["detected", "reused", "self-reported"] as const;
 export type ClaimLabel = (typeof CLAIM_LABELS)[number];
 
 /** How a request's checks stand as a whole (design §C.2). */
-export const CHECKS_VERDICTS = ["detected", "self-reported", "unverified", "not-checked"] as const;
+export const CHECKS_VERDICTS = ["detected", "reused", "self-reported", "unverified", "not-checked"] as const;
 export type ChecksVerdict = (typeof CHECKS_VERDICTS)[number];
+
+/** True for a verdict whose checks count as verified (design §C.2, ADR-045 decision 13): `detected` or `reused`. Pure. */
+export function checksVerified(verdict: ChecksVerdict | null | undefined): boolean {
+  return verdict === "detected" || verdict === "reused";
+}
 
 export interface CheckClaim {
   /** The check as named, normalised. */
@@ -83,7 +93,8 @@ export interface BeadClaim {
 /** A report's claims, labelled. */
 export interface Verification {
   /**
-   * The request's checks: `detected` when every named check is; `unverified`
+   * The request's checks: `detected` when every named check is; `reused` when
+   * every one is detected or reused and at least one is reused; `unverified`
    * when none is named or the report says nothing ran; `not-checked` for a
    * request recorded before shell entries carried a status; `self-reported`
    * otherwise.
@@ -128,6 +139,15 @@ export function namedChecksOf(buildAndTests: string | null): string[] {
     if (check !== "") named.add(check);
   }
   return [...named];
+}
+
+/** The checks of the `buildAndTests` clauses that say `reused` (ADR-045 decision 13): a clause ends at `;` or a newline. Pure. */
+function reusedChecksOf(buildAndTests: string | null): Set<string> {
+  const reused = new Set<string>();
+  for (const clause of (buildAndTests ?? "").split(/[;\n]/)) {
+    if (/\breused\b/i.test(clause)) for (const check of namedChecksOf(clause)) reused.add(check);
+  }
+  return reused;
 }
 
 /** Where an entry falls: its time, then its record's place, then its own. */
@@ -262,15 +282,20 @@ export function verificationOf(input: VerificationInput): Verification {
     .filter((call) => (lastEdit === null || isAfter(call.began, lastEdit)) && (lastHandoff === null || isAfter(call.began, lastHandoff)))
     .map((call) => chainOf(call.command))
     .filter((parts): parts is string[] => parts !== null);
+  // Reused (ADR-045 decision 13): the clause says so, and a successful run of the same command exists, at any time.
+  const anyRuns = succeeded.map((call) => chainOf(call.command)).filter((parts): parts is string[] => parts !== null);
+  const reused = reusedChecksOf(report.buildAndTests);
   const named: CheckClaim[] = namedChecksOf(report.buildAndTests).map((check) => {
     const wanted = chainOf(check);
-    const detected = wanted !== null && provingRuns.some((parts) => containsRun(parts, wanted));
-    return { check, label: detected ? "detected" : "self-reported" };
+    if (wanted !== null && provingRuns.some((parts) => containsRun(parts, wanted))) return { check, label: "detected" };
+    if (wanted !== null && reused.has(check) && anyRuns.some((parts) => containsRun(parts, wanted))) return { check, label: "reused" };
+    return { check, label: "self-reported" };
   });
   let checks: ChecksVerdict;
   if (found.shellEntries > 0 && found.shellEntriesWithStatus === 0) checks = "not-checked";
   else if (reportChecksOf(report.buildAndTests) === null) checks = "unverified";
   else if (named.length > 0 && named.every((claim) => claim.label === "detected")) checks = "detected";
+  else if (named.length > 0 && named.every((claim) => claim.label !== "self-reported")) checks = "reused";
   else checks = "self-reported";
 
   // Files: an edit or a write of the same path, relative to the workspace folder.
@@ -301,8 +326,8 @@ export function verificationOf(input: VerificationInput): Verification {
 /**
  * Finished-unverified (design §C.3): the request's code changed — its report
  * names a file, or a record edited one — and its named checks are not all
- * detected (`self-reported` or `unverified`). A request that is not checked
- * (§C.2) never is: it is shown as before. Pure.
+ * detected or reused (`self-reported` or `unverified`). A request that is not
+ * checked (§C.2) never is: it is shown as before. Pure.
  */
 export function isFinishedUnverified(verification: Pick<Verification, "checks" | "changedFiles">): boolean {
   return verification.changedFiles && (verification.checks === "self-reported" || verification.checks === "unverified");

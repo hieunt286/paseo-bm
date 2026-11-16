@@ -10,7 +10,7 @@
  *
  * Pure: no React, no React Native, no `server/` import.
  */
-import type { MemoryListOutput, MissionFigure, MissionGetOutput, MissionLane, MissionPlacement, MissionRow, MissionSignal, MissionSummary, MissionWaiting, MissionsCreateInput } from "../shared/contracts";
+import type { MemoryListOutput, MissionFigure, MissionGetOutput, MissionLane, MissionLine, MissionPlacement, MissionRow, MissionSignal, MissionSummary, MissionWaiting, MissionsCreateInput } from "../shared/contracts";
 import { MISSION_CLASSES, DEFAULT_MISSION_LEVEL, type MissionClass, type MissionLevel } from "../shared/autonomy";
 import { MISSION_CHANGE_CODE_PATTERN } from "../shared/mission-change";
 import { ago, clockText, localTimeText, ordinal, shortRequestOf, shortSpan } from "./format";
@@ -518,6 +518,8 @@ export interface RepoRowView {
   /** "CI passed", "CI failed", "CI running", "CI not run"; null when unknown, and always while `integration.ci` is off. */
   ci: Badge | null;
   push: RepoPushView;
+  /** ADR-045 decision 4: the local fast-forward in the same shape; null before any card, and from an older server. */
+  localMerge: RepoPushView | null;
   /** Delivery line design §19.8 (mockup Q, R): "3 of 7 lanes"; null from an older server. */
   lanesLine: string | null;
   /** Its lanes, lane 1 first; none from an older server. */
@@ -645,6 +647,8 @@ export interface InFlightView {
   repoHeader: string;
   /** The Waiting part (delivery line design §19.8); null from an older server. */
   waiting: WaitingRowView[] | null;
+  /** The mission's line, one row (ADR-045 decision 5); null with none and from an older server. */
+  line: { text: string; state: Badge } | null;
 }
 
 /** One line of In flight's Waiting part (§19.8, mockup Q and R): a held request or a tell to a busy Worker. */
@@ -728,6 +732,7 @@ type MissionState = NonNullable<MissionGetOutput["inFlight"]>;
 
 const REQUEST_STATE_TONES: Readonly<Record<MissionState["requests"][number]["state"], Tone>> = {
   working: "info",
+  undelivered: "warning",
   "waiting-owner": "warning",
   "waiting-main": "warning",
   "waiting-other": "plain",
@@ -753,7 +758,7 @@ export function laneIndexOf(summary: Pick<MissionSummary, "repos">): LaneIndex {
 }
 
 /** The In flight card from `mission.get`'s `inFlight` (mission runtime design §7, artboards G and H; lanes and Waiting, mockup Q and R); null from an older server. */
-export function inFlightOf(state: MissionState | undefined, now: Date, lanes: LaneIndex = new Map(), waiting?: readonly MissionWaiting[]): InFlightView | null {
+export function inFlightOf(state: MissionState | undefined, now: Date, lanes: LaneIndex = new Map(), waiting?: readonly MissionWaiting[], line?: MissionLine | null): InFlightView | null {
   if (state === undefined) return null;
   const topicOf = new Map(state.requests.map((request) => [request.requestId, request.topic]));
   const qnsOf = (requestId: string, decider: "owner" | "main") =>
@@ -839,8 +844,21 @@ export function inFlightOf(state: MissionState | undefined, now: Date, lanes: La
     asks,
     links,
     repoHeader: lanes.size === 0 ? "Repository" : "Repository · lane",
-    waiting: waiting === undefined ? null : waiting.map((line) => waitingRowOf(line, now)),
+    waiting: waiting === undefined ? null : waiting.map((entry) => waitingRowOf(entry, now)),
+    line: line == null ? null : lineRowOf(line, requests),
   };
+}
+
+const shortIdsIn = (text: string): string => text.replace(REQUEST_ID_IN_TEXT, (id) => shortRequestOf(id));
+
+const LINE_TONES: Readonly<Record<MissionLine["state"], Tone>> = { running: "info", blocked: "warning", stopped: "warning", done: "success" };
+
+/** The line's row: "Step 2 of 4 · its title · its repo" and where it stands; a started step that stopped still reads as started (ADR-045 decision 5). Pure. */
+function lineRowOf(line: MissionLine, requests: readonly InFlightRequestView[]): NonNullable<InFlightView["line"]> {
+  const repo = requests.find((request) => request.requestId === line.requestId)?.repo;
+  const why = line.why === null ? "" : `: ${shortIdsIn(line.why)}`;
+  const words = line.state === "stopped" && line.requestId !== null ? "started, stopped" : line.state;
+  return { text: [`Step ${line.n} of ${line.of}`, line.title, ...(repo === undefined ? [] : [repo])].join(" · "), state: { text: `${words}${why}`, tone: LINE_TONES[line.state] } };
 }
 
 /** Since when, and how long: "04:09 · 31 min". */
@@ -860,17 +878,18 @@ export function waitingRowOf(line: MissionWaiting, now: Date): WaitingRowView {
   if (line.kind === "held") {
     const stopped = line.state === "waiting-stopped";
     const where = line.repo === null ? "a new Worker of the mission" : line.newLane ? `a new Worker in a free lane of ${line.repo}` : `a new Worker in ${line.repo}`;
-    const status: Badge | null = stopped ? { text: "a request it waits for stopped", tone: "warning" } : null;
+    const status: Badge | null = stopped ? { text: line.why === undefined ? "a request it waits for stopped" : shortIdsIn(line.why), tone: "warning" } : null;
+    const what = line.step === undefined ? line.topic : `Step ${line.step.n} of ${line.step.of} · ${line.step.title}`;
     return {
       id: line.id,
-      what: line.topic,
+      what,
       note: "a request paseo-bm starts by itself",
       worker: null,
       after: line.after.map((entry) => ({ request: shortRequestOf(entry.requestId), topic: entry.topic })),
       status,
       since: sinceAndAge(line.since, now),
       then: stopped ? { text: "it does not start by itself: the Main gives it again or cancels it", tone: "warning" } : { text: where, tone: "muted" },
-      phone: { lead: line.topic, bold: true, rest: ` · after ${line.after.map((entry) => entry.topic ?? shortRequestOf(entry.requestId)).join(", ")}`, status: stopped ? { text: "stopped", tone: "warning" } : null, age },
+      phone: { lead: what, bold: true, rest: ` · after ${line.after.map((entry) => entry.topic ?? shortRequestOf(entry.requestId)).join(", ")}`, status: stopped ? { text: "stopped", tone: "warning" } : null, age },
     };
   }
   const words = TELL_WORDS[line.state];
@@ -928,6 +947,22 @@ function pushOf(integration: MissionPlacement["integration"], now: Date): RepoPu
     }
     default:
       return { text: "—", short: "—", tone: "muted", phone: null, action: null, decisionId: id };
+  }
+}
+
+/** The local fast-forward in the row's words (ADR-045 decision 4); null before any card. */
+function localMergeOf(state: MissionPlacement["localMerge"], now: Date): RepoPushView | null {
+  if (state === undefined || state.state === "none") return null;
+  const view = (text: string, tone: Tone, phone: string, action: RepoPushView["action"], short = text): RepoPushView => ({ text, short, tone, phone, action, decisionId: state.decisionId });
+  switch (state.state) {
+    case "allowed":
+      return view(`local merge allowed since ${state.at === null ? "—" : timeOrDate(state.at, now)}`, "plain", "Local merge allowed", "revoke", "local merge allowed");
+    case "waiting":
+      return view("local merge: waiting for you", "warning", "Local merge: waiting for you", "answer");
+    case "not-now":
+      return view("local merge: not now", "muted", "Local merge: not now", "ask");
+    default:
+      return view(`local merge: revoked${state.at === null ? "" : ` ${timeOrDate(state.at, now)}`}`, "muted", "Local merge: revoked", "ask");
   }
 }
 
@@ -1022,6 +1057,7 @@ export function repositoriesOf(summary: Pick<MissionSummary, "code" | "repos" | 
       })(),
       ci: !ciShown || placement.ci === null ? null : (CI_WORDS[placement.ci] ?? null),
       push: pushOf(placement.integration, now),
+      localMerge: localMergeOf(placement.localMerge, now),
       lanesLine: placement.lanes === undefined || placement.maxLanes === undefined ? null : `${placement.lanes.length} of ${placement.maxLanes} lanes`,
       lanes: (placement.lanes ?? []).map((lane) => laneRowOf(lane, now, stateOf)),
       overlaps: (placement.overlaps ?? []).map((overlap) => overlapOf(overlap, repo.name, now)),
@@ -1049,6 +1085,19 @@ export function revokeIntegrationDialog(code: string, row: Pick<RepoRowView, "na
   };
 }
 
+/** The in-place confirmation of revoking the local merge (ADR-045 decision 4). */
+export function revokeLocalMergeDialog(code: string, row: Pick<RepoRowView, "name" | "branch" | "target">): ConfirmDialog {
+  return {
+    title: `Revoke the local merge for ${row.name}?`,
+    body: `${code}'s finished requests stop moving your local ${row.target} forward; ${row.branch} goes on as it is. What was merged stays.`,
+    bodyTone: "plain",
+    confirmLabel: "Revoke",
+    confirmKind: "danger",
+    cancelLabel: "Cancel",
+    defaultAction: "cancel",
+  };
+}
+
 /** A mission's page from `mission.get`. */
 export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf = () => null): MissionPageView {
   const { summary, charter } = page;
@@ -1063,7 +1112,7 @@ export function missionPageOf(page: MissionGetOutput, now: Date, nameOf: NameOf 
   const stopped = rows.filter((row) => !row.active && row.phase.tone !== "success").length;
   const rest = [...(finished > 0 ? [`${finished} finished`] : []), ...(stopped > 0 ? [`${stopped} stopped`] : [])];
   // Delivery line design §19.8: In flight names each request's lane and lists what waits.
-  const inFlight = inFlightOf(page.inFlight, now, laneIndexOf(summary), page.waiting);
+  const inFlight = inFlightOf(page.inFlight, now, laneIndexOf(summary), page.waiting, page.line);
   return {
     missionId: summary.missionId,
     code: summary.code,

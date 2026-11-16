@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { PENDING_CALLER_MESSAGE, PENDING_TTL_MS, clearBindingCache, createBindingStore, type BindingStore } from "../plugin/server/agent-bindings";
+import { snapshotTree } from "../plugin/server/checkpoint";
 import { settleCreatedAgent } from "../plugin/server/creation-settle";
 import { answer, binderOf, withAgentTools } from "../plugin/server/agent-tools";
 import { createCoordinationStore } from "../plugin/server/coordination-store";
@@ -9,8 +11,8 @@ import { clearDecisionStoreCache } from "../plugin/server/decision-store";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE } from "../plugin/server/manager";
 import { createNoticeQueue } from "../plugin/server/notice-queue";
 import { createOutbox } from "../plugin/server/outbox";
-import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
-import { workspaceTracesOf } from "../plugin/server/request-trace";
+import { clearRequestRegistryCache, createRequestRegistry, type ReviewBatch } from "../plugin/server/request-registry";
+import { requestReviewCountOf, workspaceTracesOf } from "../plugin/server/request-trace";
 import {
   CONVERGENCE_STOP_TAIL,
   NO_REPORT_YET_MESSAGE,
@@ -88,15 +90,18 @@ interface DaemonOptions {
   refuseAfterHook?: () => string | null;
   store?: BindingStore;
   onSend?: (message: { id: string; text: string }) => void;
+  /** The Worker's folder; a made-up path unless a test needs real git. */
+  folder?: string;
 }
 
 function daemon(options: DaemonOptions = {}) {
+  const folder = options.folder ?? FOLDER;
   return fakePaseo({
     agents: [
-      { id: MANAGER, provider: "bm-manager/claude-opus-5", status: "idle", workspaceId: WS, cwd: FOLDER, labels: { "bm.role": "manager" } },
-      { id: WORKER, provider: "bm-worker/claude-opus-5", status: "running", workspaceId: WS, cwd: FOLDER, labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER } },
+      { id: MANAGER, provider: "bm-manager/claude-opus-5", status: "idle", workspaceId: WS, cwd: folder, labels: { "bm.role": "manager" } },
+      { id: WORKER, provider: "bm-worker/claude-opus-5", status: "running", workspaceId: WS, cwd: folder, labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER } },
     ],
-    workspaces: [{ id: WS, directory: FOLDER }],
+    workspaces: [{ id: WS, directory: folder }],
     config: {
       agentProfiles: options.profile === false ? [] : [{ id: "bm-reviewer", provider: "bm-reviewer", model: "gpt-5.6" }],
       providers: { "bm-reviewer": { extends: "codex" }, "bm-worker": { extends: "claude" } },
@@ -742,6 +747,105 @@ describe("convergence: bm_rereview asks no one while blocking findings fall (del
     ];
     expect(batchResultsOf({ batchId: "b1" }, traceReviews).map((entry) => entry.blocking)).toEqual([3, 2]);
     expect(batchResultsOf({ batchId: "b1", results: [] }, traceReviews)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A batch a continuation adopted (ADR-045 decision 10).
+// ---------------------------------------------------------------------------
+
+describe("bm_rereview on a batch a continuation adopted (ADR-045 decision 10)", () => {
+  const PREV = "req-20261003T090000Z";
+  const earlier = (minutes: number) => new Date(T0.getTime() - minutes * 60_000).toISOString();
+  /** b1 as the predecessor left it, its newest verdict `blocking`; `rereviews` re-reviews before it. */
+  const adoptedBatch = (blockings: readonly number[], tree?: string): ReviewBatch => ({
+    batchId: "b1",
+    reviewerIds: ["agent-r1"],
+    brief: "Review b1",
+    milestone: "finished",
+    calls: blockings.map((_, index) => ({ callId: `old-${index}`, kind: index === 0 ? "create" : "rereview", reviewerId: "agent-r1", at: earlier(60 - index * 10), ...(tree === undefined ? {} : { tree }) })),
+    results: blockings.map((blocking, index) => ({ at: earlier(55 - index * 10), recordId: `out-old-${index}`, verdict: "changes-required", blocking })),
+  });
+  const adopt = (home: string, batch: ReviewBatch) => expect(createRequestRegistry(home).adoptReviewBatches(WS, REQ, [batch], PREV)).toBe(1);
+
+  it("re-reviews from the batch's last completed snapshot, with the real diff since it", async () => {
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+    try {
+      const root = join(dirname(dataFolder("bm-adopted-")), "repo");
+      mkdirSync(root, { recursive: true });
+      const git = (...args: string[]) => execFileSync("git", ["-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args], { cwd: root, stdio: "pipe", encoding: "utf8" }).trim();
+      git("init", "-q", "-b", "develop");
+      git("config", "user.name", "Owner");
+      git("config", "user.email", "owner@example.com");
+      git("config", "commit.gpgsign", "false");
+      writeFileSync(join(root, "date.ts"), "export const format = 'en';\n");
+      git("add", "-A");
+      git("commit", "-q", "-m", "base");
+      const reviewed = await snapshotTree(root);
+
+      const { home, tools, fake } = setup({ tier: "Medium", folder: root });
+      adopt(home, adoptedBatch([2], reviewed));
+      writeFileSync(join(root, "date.ts"), "export const format = 'vi';\n");
+
+      const answer = await tools.call("bm_rereview", { batchId: "b1", fixed: "F1 fixed; npm test passed." }, WORKER_CALLER);
+      expect(answer.ok, answer.text).toBe(true);
+      const prompt = fake.creates[0]!.options.prompt!;
+      expect(prompt).toContain(`Re-review batch b1 of request ${REQ}`);
+      expect(prompt).toContain("Fixes — files changed since the last review:");
+      expect(prompt).toContain("date.ts");
+      expect(prompt).toContain("-export const format = 'en';");
+      expect(prompt).toContain("+export const format = 'vi';");
+
+      // The verdict and the new call land on the continuation, with the inherited ones.
+      const batch = createRequestRegistry(home).get(WS, REQ)!.reviews.batches[0]!;
+      expect(batch.adoptedFrom).toBe(PREV);
+      expect(batch.calls.map((entry) => [entry.kind, entry.adopted ?? false])).toEqual([["create", true], ["rereview", false]]);
+      expect(batch.calls[1]!.tree).toBeDefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("convergence counts the batch's earlier re-reviews, and a new batch of that id is refused", async () => {
+    const { home, tools, tick, verdict } = setup({ tier: "Large" });
+    createCoordinationStore(home).set({ key: "review.callsPerBatch", value: 6 });
+    adopt(home, adoptedBatch([5, 3, 2]));
+    expect((await tools.call("bm_create_reviewer", INPUT, WORKER_CALLER)).text).toBe("Batch b1 already has a Reviewer: use bm_rereview for its re-review, or open a new batch. Nothing was created.");
+    expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "fixed" }, WORKER_CALLER)).ok).toBe(true);
+    tick();
+    verdict("b1", 1);
+    tick();
+    // Two inherited re-reviews and this one: the rule's third, its last.
+    expect(await tools.call("bm_rereview", { batchId: "b1", fixed: "fixed again" }, WORKER_CALLER)).toEqual({ ok: false, text: `Batch b1 had its 3 re-reviews. ${CONVERGENCE_STOP_TAIL}` });
+  });
+
+  it("a blocking count that does not fall against the inherited one stops it", async () => {
+    const { home, tools, tick, verdict } = setup({ tier: "Large" });
+    adopt(home, adoptedBatch([3, 2]));
+    expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "fixed" }, WORKER_CALLER)).ok).toBe(true);
+    tick();
+    verdict("b1", 2);
+    tick();
+    expect((await tools.call("bm_rereview", { batchId: "b1", fixed: "fixed again" }, WORKER_CALLER)).text).toBe(`Batch b1 stopped converging (blocking 2 → 2). ${CONVERGENCE_STOP_TAIL}`);
+  });
+
+  it("the predecessor's calls are not charged to the continuation's cap, in the tool's answer or the Dashboard", async () => {
+    const { home, tools, fake, dashboard, record, location } = setup({ tier: "Medium" });
+    // Three inherited calls: at the default three calls per batch the cap would refuse the next one if they counted.
+    adopt(home, adoptedBatch([3, 2, 1]));
+    const count = () => requestReviewCountOf({ location, paseo: fake.paseo as never, home }, WS, REQ);
+    // No trace yet: the count from the registry's tool records.
+    expect((await count()).trace).toBeNull();
+    expect((await count()).calls).toBe(0);
+    const answer = await tools.call("bm_rereview", { batchId: "b1", fixed: "fixed" }, WORKER_CALLER);
+    expect(answer.ok, answer.text).toBe(true);
+    expect(parsed(answer)["reviewCalls"]).toBe("1 of 3");
+    // Once a trace exists, the Dashboard's number is the same one.
+    await record(MANAGER, "manager", "Fix the invoice date format.");
+    await record(WORKER, "worker", null, { parentAgentId: MANAGER });
+    expect((await count()).calls).toBe(1);
+    expect(await dashboard()).toBe(1);
   });
 });
 

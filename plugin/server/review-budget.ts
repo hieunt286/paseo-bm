@@ -45,6 +45,7 @@
  * open mission (mission runtime design §4.3, §6.1, ADR-033 decision 5): the
  * notice asked nothing of it, and the review tools hold the caps.
  */
+import { presenceOf } from "./agent-presence";
 import { dirname } from "node:path";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import type { Tier } from "../shared/contracts";
@@ -229,10 +230,11 @@ export async function checkReviewBudget(event: TurnEndedEvent, deps: BudgetDeps)
     const status = snapshot?.agent?.status ?? null;
     if (status === "running") return "deferred";
     // Lifecycle belongs to the user (ADR-005): `send()` un-archives an archived
-    // agent and starts a turn on it, so an archived or closed Manager is left
-    // alone and the notice is dropped rather than deferred forever.
-    if (snapshot?.agent?.archivedAt != null || status === "closed") {
-      log(`[paseo-bm] the Manager of ${over.requestId} is archived or closed; the review budget notice was not sent.`);
+    // agent and starts a turn on it, so an archived or gone Manager is left
+    // alone and the notice is dropped rather than deferred forever. A resting
+    // one resumes on the send (ADR-042).
+    if (snapshot?.agent !== undefined && snapshot.agent !== null && presenceOf(snapshot.agent) === "gone") {
+      log(`[paseo-bm] the Manager of ${over.requestId} is archived or gone; the review budget notice was not sent.`);
       pending.delete(key);
       claimed = null;
       return "ignored";

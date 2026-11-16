@@ -7,15 +7,22 @@ import { clearJsonFileCache } from "../plugin/server/data-files";
 import { handleDecisionsAnswer } from "../plugin/server/decision-rpc";
 import {
   applyIntegrationDecision,
+  applyLocalMergeDecision,
   integrationCoverOf,
   integrationFactLine,
   integrationWindowOf,
+  isIntegrationCard,
+  isLocalMergeCard,
+  localMergeHolds,
   openIntegrationCardIfNeeded,
+  openLocalMergeCardIfNeeded,
   revokeIntegration,
+  revokeLocalMerge,
 } from "../plugin/server/integration-grant";
 import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { createMissionStore, type Placement } from "../plugin/server/mission-store";
-import { handleMissionGet, handleMissionIntegrationAsk, handleMissionIntegrationRevoke, integrationStateOf } from "../plugin/server/missions-rpc";
+import { handleMissionGet, handleMissionIntegrationAsk, handleMissionIntegrationRevoke, integrationStateOf, localMergeStateOf } from "../plugin/server/missions-rpc";
+import { createOutbox } from "../plugin/server/outbox";
 import { placementOf } from "../plugin/server/placements";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 import { fakePaseo } from "./helpers/fake-paseo";
@@ -268,6 +275,7 @@ describe("the mission page's repo row (§4.9, mission.get)", () => {
       ci: null,
       readAt: null,
       integration: { state: "waiting", at: null, decisionId: card.id },
+      localMerge: { state: "none", at: null, decisionId: null },
       // Delivery line design §19.8: lane 1 alone, idle, and no overlap.
       lanes: [{ lane: 1, branch: BRANCH, workspaceId: PLACE, state: "ready", requests: [], freeSince: null, mergedAt: null, mergePending: null }],
       maxLanes: 7,
@@ -328,5 +336,174 @@ describe("Ask me again (§4.3, mission.integration.ask)", () => {
     const closedMission = missionIn(closing);
     createMissionStore(closing).update(closedMission, (mission) => ({ ...mission, state: "closed", closedAt: NOW.toISOString() }));
     expect(await codeOf(() => handleMissionIntegrationAsk({ missionId: closedMission, repo: REPO }, undefined, rpc(closing)))).toEqual(["E_MISSION_INVALID", "E_MISSION_INVALID: mission ABC is not open"]);
+  });
+});
+
+describe("the local-merge grant (ADR-045 decision 4)", () => {
+  const rpc = (home: string) => ({ home, now: () => NOW, log: () => {} });
+  const QUESTION = "Merge `m/ABC/fe` into your local `develop` by fast-forward whenever a request passes its checks? Nothing is pushed; push and tag stay yours.";
+  const stated = (over: Partial<NonNullable<Placement["localMerge"]>> = {}): NonNullable<Placement["localMerge"]> => ({ state: "granted", decisionId: "m:mis-0000000001:1", grantedAt: NOW.toISOString(), revokedAt: null, target: "develop", ...over });
+  function openMergeCard(home: string, missionId: string): Decision {
+    const id = openLocalMergeCardIfNeeded(home, missionId, REPO, { now: NOW, log: () => {}, requestId: "req-20261021T090000Z" });
+    if (id === null) throw new Error("no card opened");
+    return createMissionDecisionStore(home).get(id)!;
+  }
+  function answered(card: Decision, optionKey: string): Decision {
+    const done = answerDecision(card, { via: "inbox", optionKey, at: NOW.toISOString() });
+    if (!done.ok) throw new Error(done.message);
+    return done.decision;
+  }
+
+  it("is ownerOnly, release, its own code subject, a Yes carrying the grant and a Not now, the question word for word", () => {
+    const home = dataFolder();
+    const missionId = missionIn(home);
+    const card = openMergeCard(home, missionId);
+    expect(card).toMatchObject({ workspaceId: missionId, requestId: "req-20261021T090000Z", askedBy: { role: "plugin", agentId: null }, subject: "local-merge", class: "release", ownerOnly: true, status: "open", question: QUESTION });
+    expect(card.options).toEqual([
+      { key: "a", label: "Yes, for this mission and repository", recommended: false, effects: ["commit"], action: { kind: "integration.local-merge", missionId, repo: REPO } },
+      { key: "b", label: "Not now — keep the work on its branch", recommended: false, effects: ["none"] },
+    ]);
+    expect([isLocalMergeCard(card), isIntegrationCard(card)]).toEqual([true, false]);
+    expect(createMissionStore(home).journal(missionId).map((line) => line.text)).toContain(`The owner is asked on ${card.id} to allow fast-forwarding develop to what ${BRANCH} passes.`);
+  });
+
+  it("is asked once: never again while open, after Not now or with a grant; a placement not ready is not asked", () => {
+    const home = dataFolder();
+    const missionId = missionIn(home);
+    const card = openMergeCard(home, missionId);
+    const again = () => openLocalMergeCardIfNeeded(home, missionId, REPO, { now: NOW, log: () => {} });
+    expect(again()).toBeNull();
+    createMissionDecisionStore(home).transition(card.id, (current) => answerDecision(current, { via: "inbox", optionKey: "b", at: NOW.toISOString() }));
+    expect(again()).toBeNull();
+    expect(createMissionDecisionStore(home).list(missionId)).toHaveLength(1);
+    for (const placed of [placement({ localMerge: stated() }), placement({ localMerge: stated({ state: "revoked", revokedAt: NOW.toISOString() }) }), placement({ state: "creating" })]) {
+      const other = dataFolder();
+      expect(openLocalMergeCardIfNeeded(other, missionIn(other, [placed]), REPO, { now: NOW, log: () => {} })).toBeNull();
+    }
+  });
+
+  it("the owner's Yes writes the grant, the journal and the Main's word, on the mission branch's placement", async () => {
+    const home = dataFolder();
+    const lane2 = placement({ workspaceId: "wks_lane", branch: `${BRANCH}-2`, lane: 2 });
+    const missionId = missionIn(home, [placement(), lane2]);
+    createMissionStore(home).update(missionId, (mission) => ({ ...mission, workspaceId: "wks_main" }));
+    const card = openMergeCard(home, missionId);
+    await applyLocalMergeDecision(answered(card, "a"), deps(home));
+    const placements = createMissionStore(home).get(missionId)!.placements!;
+    expect(placements[0]!.localMerge).toEqual({ state: "granted", decisionId: card.id, grantedAt: NOW.toISOString(), revokedAt: null, target: "develop" });
+    expect(placements[1]!.localMerge).toBeUndefined();
+    expect(localMergeHolds(placements[0]!)).toBe(true);
+    expect(createMissionStore(home).journal(missionId, 10, "decision").at(-1)).toMatchObject({ by: "owner", text: `The owner allowed fast-forwarding develop to what ${BRANCH} passes (${card.id}).`, ref: card.id });
+    expect(createOutbox(home).list("wks_main").map((record) => record.text)).toEqual([expect.stringContaining(`The owner allowed fast-forwarding the local develop to what ${BRANCH} passes, on card ${card.id}; nothing is pushed.`)]);
+  });
+
+  it("Not now writes no grant, and stands until the owner re-asks", async () => {
+    const home = dataFolder();
+    const missionId = missionIn(home);
+    createMissionStore(home).update(missionId, (mission) => ({ ...mission, workspaceId: "wks_main" }));
+    const card = openMergeCard(home, missionId);
+    await handleDecisionsAnswer({ id: card.id, optionKey: "b" }, undefined, rpc(home));
+    expect(placementOf(home, missionId, REPO)?.localMerge).toBeUndefined();
+    expect(createOutbox(home).list("wks_main").map((record) => record.text)).toEqual([expect.stringContaining(`On local-merge card ${card.id} the owner chose not now: nothing is merged.`)]);
+    expect(openLocalMergeCardIfNeeded(home, missionId, REPO, { now: NOW, log: () => {} })).toBeNull();
+    const { decisionId } = await handleMissionIntegrationAsk({ missionId, repo: REPO, what: "local-merge" }, undefined, rpc(home));
+    expect(createMissionDecisionStore(home).get(decisionId)).toMatchObject({ subject: "local-merge", status: "open", question: QUESTION });
+    expect(createMissionStore(home).journal(missionId, 10, "decision").at(-1)).toMatchObject({ by: "owner", text: `The owner asked again on ${decisionId} to allow fast-forwarding develop to what ${BRANCH} passes.` });
+  });
+
+  it("negative: an answer that is not the owner's writes no grant", async () => {
+    const home = dataFolder();
+    const missionId = missionIn(home);
+    const card = openMergeCard(home, missionId);
+    const at = NOW.toISOString();
+    expect(answerDecision(card, { by: "policy", via: "inbox", optionKey: "a", at }).ok).toBe(false);
+    expect(answerDecision(card, { by: "main", via: "main", optionKey: "a", at }).ok).toBe(false);
+    expect(answerDecision(card, { by: "precedent", via: "inbox", optionKey: "a", at, precedentId: "p-1" }).ok).toBe(false);
+    expect(answerDecision(card, { via: "chat-manager", optionKey: "a", at }).ok).toBe(false);
+    expect(carriesPreparedChange(card)).toBe(true);
+    expect(decideRefusalOf(EMPTY_AUTONOMY_POLICY, card)).not.toBeNull();
+    expect(whyIneligible(card.subject, card)).toBe('"local-merge" is a question paseo-bm asks you itself, once per mission and repository; no precedent answers it');
+    // Whatever reaches the applier, only the owner's own answer writes.
+    await applyLocalMergeDecision({ ...answered(card, "a"), answer: { ...answered(card, "a").answer!, by: "main" } }, deps(home));
+    expect(placementOf(home, missionId, REPO)?.localMerge).toBeUndefined();
+  });
+
+  it("decisions.answer routes it on the owner's tap; a retired placement is refused, nothing written", async () => {
+    const home = dataFolder();
+    const missionId = missionIn(home);
+    const card = openMergeCard(home, missionId);
+    await handleDecisionsAnswer({ id: card.id, optionKey: "a" }, undefined, rpc(home));
+    expect(placementOf(home, missionId, REPO)?.localMerge?.state).toBe("granted");
+    expect(placementOf(home, missionId, REPO)?.integration).toBeNull();
+
+    const retired = dataFolder();
+    const retiredMission = missionIn(retired);
+    const retiredCard = openMergeCard(retired, retiredMission);
+    createMissionStore(retired).update(retiredMission, (mission) => ({ ...mission, placements: [placement({ state: "retired" })] }));
+    await expect(handleDecisionsAnswer({ id: retiredCard.id, optionKey: "a" }, undefined, rpc(retired))).rejects.toMatchObject({ code: "E_MISSION_INVALID" });
+    expect(createMissionDecisionStore(retired).get(retiredCard.id)?.status).toBe("open");
+    expect(placementOf(retired, retiredMission, REPO)?.localMerge).toBeUndefined();
+  });
+
+  it("a grant holds only while its target is the placement's, and until a Revoke ends it", () => {
+    expect(localMergeHolds(placement({ localMerge: stated() }))).toBe(true);
+    expect(localMergeHolds(placement({ target: "main", localMerge: stated() }))).toBe(false);
+    expect(localMergeHolds(placement({ localMerge: stated({ state: "revoked" }) }))).toBe(false);
+    expect(localMergeHolds(placement())).toBe(false);
+    const home = dataFolder();
+    const missionId = missionIn(home, [placement({ localMerge: stated() })]);
+    expect(revokeLocalMerge(missionId, REPO, deps(home))).toMatchObject({ ok: true });
+    expect(placementOf(home, missionId, REPO)?.localMerge).toMatchObject({ state: "revoked", revokedAt: NOW.toISOString(), grantedAt: NOW.toISOString() });
+    expect(localMergeHolds(placementOf(home, missionId, REPO)!)).toBe(false);
+    expect(createMissionStore(home).journal(missionId, 10, "decision").at(-1)).toMatchObject({ by: "owner", text: `The owner revoked fast-forwarding develop to what ${BRANCH} passes.`, ref: "m:mis-0000000001:1" });
+    expect(revokeLocalMerge(missionId, REPO, deps(home))).toEqual({ ok: false, reasons: ["the local merge into develop is not allowed; nothing was changed"] });
+  });
+
+  it("the RPCs take what: local-merge; a Revoke then an Ask grants anew; refusals are E_MISSION_INVALID", async () => {
+    const home = dataFolder();
+    const missionId = missionIn(home, [placement({ localMerge: stated() })]);
+    await expect(handleMissionIntegrationAsk({ missionId, repo: REPO, what: "local-merge" }, undefined, rpc(home))).rejects.toMatchObject({ code: "E_MISSION_INVALID" });
+    expect(await handleMissionIntegrationRevoke({ missionId, repo: REPO, what: "local-merge" }, undefined, rpc(home))).toEqual({ revokedAt: NOW.toISOString(), notified: 0 });
+    await expect(handleMissionIntegrationRevoke({ missionId, repo: REPO, what: "local-merge" }, undefined, rpc(home))).rejects.toMatchObject({ code: "E_MISSION_INVALID" });
+    const { decisionId } = await handleMissionIntegrationAsk({ missionId, repo: REPO, what: "local-merge" }, undefined, rpc(home));
+    await handleMissionIntegrationAsk({ missionId, repo: REPO, what: "local-merge" }, undefined, rpc(home)).then(
+      () => { throw new Error("a second card opened"); },
+      (error: unknown) => expect(error).toBeInstanceOf(DashboardError),
+    );
+    await handleDecisionsAnswer({ id: decisionId, optionKey: "a" }, undefined, rpc(home));
+    expect(placementOf(home, missionId, REPO)?.localMerge).toMatchObject({ state: "granted", decisionId, revokedAt: null });
+  });
+
+  it("the push card and its RPCs behave as before when what is absent", async () => {
+    const home = dataFolder();
+    const missionId = missionIn(home, [placement({ localMerge: stated() })]);
+    const push = openCard(home, missionId);
+    expect(isIntegrationCard(push)).toBe(true);
+    await handleDecisionsAnswer({ id: push.id, optionKey: "a" }, undefined, rpc(home));
+    expect(placementOf(home, missionId, REPO)?.integration?.state).toBe("granted");
+    await handleMissionIntegrationRevoke({ missionId, repo: REPO }, undefined, rpc(home));
+    expect(placementOf(home, missionId, REPO)?.integration?.state).toBe("revoked");
+    expect(placementOf(home, missionId, REPO)?.localMerge?.state).toBe("granted");
+    const { decisionId } = await handleMissionIntegrationAsk({ missionId, repo: REPO }, undefined, rpc(home));
+    expect(createMissionDecisionStore(home).get(decisionId)).toMatchObject({ subject: "integration", question: push.question });
+    // A local-merge card does not count as the push card's "asked once".
+    const fresh = dataFolder();
+    const freshMission = missionIn(fresh);
+    openMergeCard(fresh, freshMission);
+    expect(openCard(fresh, freshMission).subject).toBe("integration");
+  });
+
+  it("the row's state: allowed, revoked, waiting on the open card, not now, none before any card", () => {
+    const home = dataFolder();
+    const missionId = missionIn(home);
+    expect(localMergeStateOf(placement(), [])).toEqual({ state: "none", at: null, decisionId: null });
+    const card = openMergeCard(home, missionId);
+    expect(localMergeStateOf(placement(), [card])).toEqual({ state: "waiting", at: null, decisionId: card.id });
+    expect(localMergeStateOf(placement(), [answered(card, "b")])).toEqual({ state: "not-now", at: null, decisionId: card.id });
+    expect(localMergeStateOf(placement({ repo: "wks_other" }), [card])).toEqual({ state: "none", at: null, decisionId: null });
+    expect(localMergeStateOf(placement({ localMerge: stated() }), [])).toEqual({ state: "allowed", at: NOW.toISOString(), decisionId: "m:mis-0000000001:1" });
+    expect(localMergeStateOf(placement({ localMerge: stated({ state: "revoked", revokedAt: NOW.toISOString() }) }), [])).toEqual({ state: "revoked", at: NOW.toISOString(), decisionId: "m:mis-0000000001:1" });
+    // A grant for another target no longer holds: the row offers Ask me again.
+    expect(localMergeStateOf(placement({ target: "main", localMerge: stated() }), [])).toEqual({ state: "revoked", at: null, decisionId: "m:mis-0000000001:1" });
   });
 });

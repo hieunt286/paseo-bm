@@ -72,6 +72,8 @@ import {
   changedThresholds,
   ciCardView,
   ciToggleChange,
+  lineCardView,
+  lineToggleChange,
   mechanismCardView,
   parseCoordinationInput,
   REVIEW_KEYS,
@@ -444,10 +446,13 @@ function MechanismGroup({ mechanism, data, draft, inputs, onInput, clearInputs, 
 }
 
 /**
- * The CI card (ADR-036, delivery line design §17.1): `integration.ci`, drawn
- * as a mechanism card with no figures; its switch saves at once both ways.
+ * A card that is only a switch, drawn as a mechanism card with no figures, its
+ * switch saved at once both ways: CI (`integration.ci`; ADR-036, delivery line
+ * design §17.1) and the supervised line (`line.supervised`; ADR-045, The switch).
  */
-function CiGroup({ data, narrow, onSaved, styles, theme }: {
+function SwitchGroup({ viewOf, changeOf, data, narrow, onSaved, styles, theme }: {
+  viewOf: typeof ciCardView;
+  changeOf: typeof ciToggleChange;
   data: CoordinationSettingsOutput;
   narrow: boolean;
   onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
@@ -460,7 +465,7 @@ function CiGroup({ data, narrow, onSaved, styles, theme }: {
   const settings = data.settings;
   return (
     <MechanismCard
-      view={ciCardView(settings, busy)}
+      view={viewOf(settings, busy)}
       inputs={{}}
       dialog={null}
       busy={busy}
@@ -470,7 +475,7 @@ function CiGroup({ data, narrow, onSaved, styles, theme }: {
         run(
           async () => {
             setError(null);
-            onSaved((await save(ciToggleChange(settings))).settings);
+            onSaved((await save(changeOf(settings))).settings);
           },
           (failure) => setError(errorMessageOf(failure)),
         )
@@ -584,7 +589,8 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
           theme={theme}
         />
       ))}
-      <CiGroup data={data} narrow={narrow} onSaved={onSaved} styles={styles} theme={theme} />
+      <SwitchGroup viewOf={ciCardView} changeOf={ciToggleChange} data={data} narrow={narrow} onSaved={onSaved} styles={styles} theme={theme} />
+      <SwitchGroup viewOf={lineCardView} changeOf={lineToggleChange} data={data} narrow={narrow} onSaved={onSaved} styles={styles} theme={theme} />
       {/* The review settings alone in their row, as wide as the mechanism cards above (the wide card is `flex: 1`). */}
       <View style={{ flexDirection: narrow ? "column" : "row", alignItems: "stretch" }}>
         <ReviewGroup

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { NO_BINDER, clearBindingCache, type ToolCaller } from "../plugin/server/agent-bindings";
+import { NO_BINDER, clearBindingCache, createBindingStore, type ToolCaller } from "../plugin/server/agent-bindings";
+import { binderOf } from "../plugin/server/agent-tools";
 import { createWorkerCreationTools, missionRepoOf } from "../plugin/server/create-worker";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { createMissionAutonomyStore } from "../plugin/server/mission-autonomy-store";
@@ -31,6 +32,7 @@ import {
   type PlacementResult,
 } from "../plugin/server/placement-create";
 import { placementBlockOf, placementOf, repoKeyOf } from "../plugin/server/placements";
+import { createPeerLinkStore } from "../plugin/server/peer-links";
 import { GIT_READ_ONLY_PREFIX, type GitRunner } from "../plugin/server/repo-tool";
 import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { integrationFactsOf, runtimeFactsText } from "../plugin/server/role-instructions";
@@ -247,6 +249,110 @@ describe("the switch: placements only after the cut-over (§4.8)", () => {
     expect(placementsOf(home, mission.missionId)).toEqual([]);
     cutOver(home);
     expect(placementModeOn(home)).toBe(true);
+  });
+});
+
+describe("a repo whose root workspace is archived (ADR-043)", () => {
+  const NEW_ROOT = "wks_root_again";
+
+  /** The AIX case: a mission with its branch, its root and worktree archived, and the folder opened again as a new workspace. */
+  async function reopened() {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const made = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const tools = createWorkerCreationTools({ binder: () => NO_BINDER, paseo: () => made.fake.paseo, home: () => home, log: () => {}, placements: { git: fakeGit(world), clone: fakeClone() } });
+    const first = await tools.call("bm_create_worker", { request: "Fix the header.", context: [] }, mainCaller(mission.missionId));
+    expect(first.ok, first.text).toBe(true);
+    // Done, so the next call meets no running request (the sequential slot, ADR-045 decision 1).
+    createMissionRoster(home).setState(mission.missionId, (JSON.parse(first.text) as { requestId: string }).requestId, "finished");
+    const lifecycle = createPlacementLifecycle({ home: () => home, log: () => {}, now: () => NOW });
+    const worktree = placementsOf(home, mission.missionId)[0]!.workspaceId!;
+    made.archive(worktree);
+    lifecycle.archived(worktree);
+    made.archive(REPO);
+    made.listed.push({ id: NEW_ROOT, projectId: PROJECT, workspaceKind: "local_checkout", workspaceDirectory: root, archivingAt: null });
+    return { ...made, home, mission, tools, worktree };
+  }
+
+  it.each([
+    ["the new workspace", NEW_ROOT],
+    ["the archived key", REPO],
+  ])("staffs the repo in the mission's own branch, named by %s, and keeps the repo key", async (_name, project) => {
+    const { home, mission, tools, fake } = await reopened();
+    const answer = await tools.call("bm_create_worker", { request: "Fix the footer.", context: [], project }, mainCaller(mission.missionId));
+    expect(answer.ok, answer.text).toBe(true);
+    const newest = placementsOf(home, mission.missionId).at(-1)!;
+    expect(newest).toMatchObject({ repo: REPO, branch: "m/ABC/repo", state: "ready" });
+    expect(fake.creates.at(-1)!.workspaceId).toBe(newest.workspaceId);
+    expect(createMissionStore(home).get(mission.missionId)!.charter.repos).toEqual([REPO]);
+    expect(repoKeyOf(home, NEW_ROOT)).toBe(REPO);
+  });
+
+  it("staffs a new lane from the mission's branch: the way a Main asks for new work", async () => {
+    const { home, mission, tools } = await reopened();
+    const answer = await tools.call("bm_create_worker", { request: "Fix the footer.", context: [], project: NEW_ROOT, lane: "new" }, mainCaller(mission.missionId));
+    expect(answer.ok, answer.text).toBe(true);
+    expect(placementsOf(home, mission.missionId).filter((entry) => entry.state === "ready").every((entry) => entry.repo === REPO)).toBe(true);
+    expect(placementsOf(home, mission.missionId).at(-1)!.branch).toContain("m/ABC/repo");
+  });
+
+  it("never calls the mission's own branch someone else's, and never suggests deleting one", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const tail = (mission: Mission) => mission.missionId.slice(-4);
+    const world = gitWorld();
+    const { fake } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    world.local.add("m/ABC/repo").add(`m/ABC-${tail(mission)}/repo`);
+    const foreign = await placed(home, fake.paseo, mission.missionId, world);
+    expect(foreign).toMatchObject({ ok: false });
+    expect(JSON.stringify(foreign)).toContain("belong to other work");
+    expect(JSON.stringify(foreign)).not.toContain("delete");
+
+    const mine = { repo: "wks_elsewhere", workspaceId: null, directory: null, branch: `m/ABC-${tail(mission)}/repo`, target: "dev", base: "origin/dev", worktreeSlug: "s", state: "archived", requestKey: "k", createdAt: NOW.toISOString(), deps: { cloned: [], at: null, note: null }, integration: null } as Placement;
+    createMissionStore(home).update(mission.missionId, (current) => ({ ...current, placements: [mine] }));
+    const owned = await placed(home, fake.paseo, mission.missionId, world);
+    expect(JSON.stringify(owned)).toContain("mission ABC's branch, recorded under repo wks_elsewhere");
+    expect(JSON.stringify(owned)).toContain("keep the branch");
+  });
+
+  it("staffs a later mission whose charter names the live workspace another mission proved to be this repo", async () => {
+    const { home, mission, tools } = await reopened();
+    const adopted = await tools.call("bm_create_worker", { request: "Fix the footer.", context: [], project: NEW_ROOT }, mainCaller(mission.missionId));
+    expect(adopted.ok, adopted.text).toBe(true);
+    createMissionStore(home).update(mission.missionId, (current) => ({ ...current, state: "closed", closedAt: NOW.toISOString() }));
+
+    const later = missionIn(home, [NEW_ROOT]);
+    const answer = await tools.call("bm_create_worker", { request: "Add the settings page.", context: [], project: NEW_ROOT, lane: "new" }, mainCaller(later.missionId));
+    expect(answer.ok, answer.text).toBe(true);
+    expect(placementsOf(home, later.missionId).every((placement) => placement.repo === REPO)).toBe(true);
+    expect(createMissionStore(home).get(later.missionId)!.charter.repos).toEqual([NEW_ROOT, REPO]);
+    expect(repoKeyOf(home, NEW_ROOT)).toBe(REPO);
+  });
+
+  it("a later one-repo mission naming only the live workspace is staffed without project: its charter's two ids are one repo", async () => {
+    const { home, mission, tools } = await reopened();
+    const adopted = await tools.call("bm_create_worker", { request: "Fix the footer.", context: [], project: NEW_ROOT }, mainCaller(mission.missionId));
+    expect(adopted.ok, adopted.text).toBe(true);
+    createMissionStore(home).update(mission.missionId, (current) => ({ ...current, state: "closed", closedAt: NOW.toISOString() }));
+
+    const later = missionIn(home, [NEW_ROOT]);
+    const answer = await tools.call("bm_create_worker", { request: "Add the settings page.", context: [] }, mainCaller(later.missionId));
+    expect(answer.ok, answer.text).toBe(true);
+    expect(createMissionStore(home).get(later.missionId)!.charter.repos).toEqual([NEW_ROOT, REPO]);
+    expect(placementsOf(home, later.missionId).every((placement) => placement.repo === REPO)).toBe(true);
+  });
+
+  it("refuses with what the owner can do when no live workspace holds the branch, and never suggests deleting one", async () => {
+    const { home, mission, tools, listed } = await reopened();
+    listed.splice(listed.findIndex((entry) => entry["id"] === NEW_ROOT), 1);
+    const answer = await tools.call("bm_create_worker", { request: "Fix the footer.", context: [], project: REPO }, mainCaller(mission.missionId));
+    expect(answer.ok).toBe(false);
+    expect(answer.text).toContain("the owner opens the repo's folder in Paseo");
+    expect(answer.text).toContain("keep its mission branches");
+    expect(createMissionStore(home).get(mission.missionId)!.repoAliases).toBeUndefined();
   });
 });
 
@@ -909,7 +1015,7 @@ describe("lanes (§19.1)", () => {
     expect(refused.reasons[0]).toContain("hold the request with after, or stop one");
   });
 
-  it("bm_create_worker with lane: \"new\" runs independent work in lane 2 beside lane 1, with the lane's brief lines; refused without staffing delegated", async () => {
+  it("parallel on the owner's typed word runs in lane 2 beside lane 1, with the lane's brief lines, journalled and marked; lane: \"new\" alone is refused, and no staffing delegation is needed", async () => {
     const { home, root, worktrees } = folders();
     cutOver(home);
     const world = gitWorld();
@@ -920,14 +1026,21 @@ describe("lanes (§19.1)", () => {
     createMissionAutonomyStore(home).setLevel(mission.missionId, 1);
     const first = await tools.call("bm_create_worker", { request: "Audit the repo.", context: [] }, mainCaller(mission.missionId));
     expect(first.ok, first.text).toBe(true);
+    const { requestId: running } = JSON.parse(first.text) as { requestId: string };
     const refused = await tools.call("bm_create_worker", { request: "Fix the compile error.", context: [], lane: "new" }, mainCaller(mission.missionId));
     expect(refused.ok).toBe(false);
-    expect(refused.text).toContain("a new lane adds a live Worker to mission ABC in repo: staffing is not delegated in this mission, so ask the owner first");
+    expect(refused.text).toContain(`Request ${running} is running`);
+    expect(creations).toHaveLength(1);
 
-    createMissionAutonomyStore(home).setLevel(mission.missionId, 2);
-    const second = await tools.call("bm_create_worker", { request: "Fix the compile error.", context: [], lane: "new" }, mainCaller(mission.missionId));
+    fake.setTimeline(MAIN, [{ item: { type: "user_message", text: "Sửa lỗi compile,  làm   SONG song với audit nhé", clientMessageId: "m-1" }, timestamp: NOW.toISOString() }]);
+    const reason = 'owner said "song song" for the compile fix';
+    const second = await tools.call("bm_create_worker", { request: "Fix the compile error.", context: [], parallel: reason }, mainCaller(mission.missionId));
     expect(second.ok, second.text).toBe(true);
-    expect(JSON.parse(second.text)).toMatchObject({ lane: 2 });
+    const parallelAnswer = JSON.parse(second.text) as { lane: number; requestId: string };
+    expect(parallelAnswer).toMatchObject({ lane: 2 });
+    expect(createMissionRoster(home).get(mission.missionId, parallelAnswer.requestId)).toMatchObject({ parallel: true });
+    expect(createMissionRoster(home).get(mission.missionId, running)?.parallel).toBeUndefined();
+    expect(createMissionStore(home).journal(mission.missionId).at(-1)).toMatchObject({ kind: "worker", ref: parallelAnswer.requestId, text: `Parallel lane for ${parallelAnswer.requestId}: ${reason}` });
     expect(creations.map((creation) => (creation["source"] as { branchName?: string; refName?: string }).branchName)).toEqual(["m/ABC/repo", "m/ABC/repo-2"]);
     const lane2 = placementsOf(home, mission.missionId).find((placement) => placement.lane === 2)!;
     expect(fake.creates.at(-1)!.workspaceId).toBe(lane2.workspaceId);
@@ -935,6 +1048,49 @@ describe("lanes (§19.1)", () => {
     expect(prompt).toContain(`worktree: ${lane2.directory} on branch m/ABC/repo-2 (lane 2; the mission branch is m/ABC/repo)`);
     expect(prompt).toContain("lane: at finished, merge m/ABC/repo into m/ABC/repo-2, resolve conflicts, check what the merge touched, commit, then report finished; paseo-bm moves m/ABC/repo forward. Never push this branch.");
     expect(prompt).not.toContain("push and merge request:");
+  });
+
+  /** ADR-047 decision 2: the running request's own ask is answered beside it, in a lane of its own, so lane 1 stays the line's. */
+  it("a Worker for the running request's open ask runs in lane 2, marked parallel, with no owner's word; lane 1 stays the running request's", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake, creations } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const store = createBindingStore(home);
+    const tools = createWorkerCreationTools({ binder: () => binderOf((role) => `http://127.0.0.1:4567/mcp/${role}`, store, () => {}), paseo: () => fake.paseo, home: () => home, log: () => {}, placements: { git: laneGit(world, []), clone: fakeClone() } });
+    createMissionAutonomyStore(home).setLevel(mission.missionId, 1);
+    const first = await tools.call("bm_create_worker", { request: "Audit the repo.", context: [] }, mainCaller(mission.missionId));
+    expect(first.ok, first.text).toBe(true);
+    const { requestId: running } = JSON.parse(first.text) as { requestId: string };
+    createPeerLinkStore(home, { newId: () => "peer-00000000000d" }).createLink({ kind: "question", route: "ask-main", missionId: mission.missionId, from: { workspaceId: "wks_front", requestId: running, agentId: "wrk-front", role: "worker" }, to: { workspaceId: REPO, managerId: MAIN }, text: "Which fields does the audit need?" });
+    const answer = await tools.call("bm_create_worker", { request: "Answer the audit's question.", context: [], peerLink: "peer-00000000000d" }, mainCaller(mission.missionId));
+    expect(answer.ok, answer.text).toBe(true);
+    const made = JSON.parse(answer.text) as { lane: number; requestId: string; peerLinkNotTaken?: string };
+    expect(made).toMatchObject({ lane: 2 });
+    expect(made.peerLinkNotTaken).toBeUndefined();
+    expect(createMissionRoster(home).get(mission.missionId, made.requestId)).toMatchObject({ parallel: true });
+    expect(creations.map((creation) => (creation["source"] as { branchName?: string }).branchName)).toEqual(["m/ABC/repo", "m/ABC/repo-2"]);
+    expect(placementsOf(home, mission.missionId).find((placement) => placement.lane === 2)!.workspaceId).toBe(fake.creates.at(-1)!.workspaceId);
+    // Other new work still waits for the slot.
+    const other = await tools.call("bm_create_worker", { request: "Fix the footer.", context: [] }, mainCaller(mission.missionId));
+    expect(other.text).toContain(`Request ${running} is running`);
+  });
+
+  it("parallel still meets the mission's budget of Workers", async () => {
+    const { home, root, worktrees } = folders();
+    cutOver(home);
+    const world = gitWorld();
+    const { fake, creations } = daemon(root, worktrees, world);
+    const mission = missionIn(home);
+    const tools = createWorkerCreationTools({ binder: () => NO_BINDER, paseo: () => fake.paseo, home: () => home, log: () => {}, placements: { git: laneGit(world, []), clone: fakeClone() } });
+    createMissionAutonomyStore(home).setLevel(mission.missionId, 1);
+    createMissionStore(home).update(mission.missionId, (current) => ({ ...current, charter: { ...current.charter, budget: { requests: null, workers: 1, reviewCalls: null, days: null } } }));
+    expect((await tools.call("bm_create_worker", { request: "Audit the repo.", context: [] }, mainCaller(mission.missionId))).ok).toBe(true);
+    fake.setTimeline(MAIN, [{ item: { type: "user_message", text: "làm ngay nhé", clientMessageId: "m-1" }, timestamp: NOW.toISOString() }]);
+    const answer = await tools.call("bm_create_worker", { request: "Fix it.", context: [], parallel: 'the owner said "làm ngay"' }, mainCaller(mission.missionId));
+    expect(answer).toEqual({ ok: false, text: "mission ABC has 1 live Workers and its budget allows 1: staffing is not delegated in this mission, so ask the owner first\nNothing was created." });
+    expect(creations).toHaveLength(1);
   });
 });
 

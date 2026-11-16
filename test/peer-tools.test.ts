@@ -397,6 +397,13 @@ describe("who receives at each attempt (design §7.17.4)", () => {
     expect(await answererOf(taken, fake.paseo, home)).toBe("mgr-b2");
   });
 
+  it("answererOf: a Manager Paseo closed after its idle hour still answers its link (ADR-042)", async () => {
+    const { home, fake } = setup({ agents: [...AGENTS] });
+    const link = linkOf(home);
+    fake.setAgents([MGR_A, WRK_A, { ...MGR_B, status: "closed", persistence: { sessionId: "session-1" } }]);
+    expect(await answererOf(link, fake.paseo, home)).toBe("mgr-b");
+  });
+
   it("a continued request resolves to the head of its chain (delivery line design §2.7): the link's answerer is the continuation's Worker", async () => {
     const workerB = agent("wrk-b", B, "worker", { "bm.requestId": REQ_B, "paseo.parent-agent-id": "mgr-b" });
     const REQ_B2 = "req-20261008T113000Z";
@@ -478,6 +485,50 @@ describe("who receives at each attempt (design §7.17.4)", () => {
 // ---------------------------------------------------------------------------
 // bm_peers.
 // ---------------------------------------------------------------------------
+
+describe("a project whose root workspace is archived (ADR-043)", () => {
+  const LIVE = "wks_back_again";
+  const SECOND = "wks_back_third";
+  const ALIASED = [
+    { id: A, directory: "/repo/front" },
+    { id: B, directory: "/repo/back", archivedAt: "2026-10-01T00:00:00.000Z" },
+    { id: LIVE, directory: "/repo/back" },
+    { id: SECOND, directory: "/repo/back" },
+  ];
+
+  function aliased(agents: FakeAgent[]) {
+    const context = setup({ agents, workspaces: () => ALIASED });
+    const store = createMissionStore(context.home);
+    const made = store.create({ code: "BCK", name: "Back", goal: "Ship", repos: [B], createdBy: "owner", mainId: null });
+    if (!made.ok) throw new Error(made.reasons.join("; "));
+    store.update(made.mission.missionId, (current) => ({ ...current, repoAliases: { [LIVE]: B, [SECOND]: B } }));
+    return context;
+  }
+
+  it("bm_peers lists it once, by a live root, not by the archived key", async () => {
+    const { call } = aliased([MGR_A, WRK_A]);
+    const { projects } = parsed(await call("worker", "bm_peers", {}, WORKER_A)) as { projects: Array<{ workspaceId: string }> };
+    expect(projects.map((project) => project.workspaceId)).toEqual([LIVE]);
+  });
+
+  it("a standalone ask stores the repo key and opens the Manager in the live root", async () => {
+    const { home, call, opened } = aliased([MGR_A, WRK_A]);
+    const answer = parsed(await call("worker", "bm_ask_project", { ...ASK, project: LIVE }, WORKER_A));
+    expect(answer).toMatchObject({ managerId: "mgr-new", openedManager: true });
+    expect(opened).toEqual([LIVE]);
+    expect(links(home).get(LINK)!.to.workspaceId).toBe(B);
+  });
+
+  it("answererOf finds the project's Manager in an alias of the repo key", async () => {
+    const live = agent("mgr-live", LIVE, "manager");
+    const { home, call, fake } = aliased([MGR_A, WRK_A, live]);
+    bindAgent(createBindingStore(home), "mgr-live", { role: "manager", workspaceId: LIVE });
+    await call("worker", "bm_ask_project", { ...ASK, project: LIVE }, WORKER_A);
+    const link = links(home).get(LINK)!;
+    fake.setAgents([MGR_A, WRK_A, live]);
+    expect(await answererOf({ ...link, to: { ...link.to, managerId: null } }, fake.paseo, home)).toBe("mgr-live");
+  });
+});
 
 describe("bm_peers", () => {
   it("lists the other unarchived projects with their live Manager, and this workspace's links both ways, newest first", async () => {

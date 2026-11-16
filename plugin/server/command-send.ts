@@ -35,17 +35,17 @@
  * 3. **Once delivered:** the command is appended to the commands store
  *    (`proposals.json`, source `chat`, its secrets masked) under its id, which
  *    is what the loop guard counts; the intervention it is, if any, is logged
- *    with that id (`interventionOfCommand`); a Worker's Manager gets the
- *    `copy: yes` block through the queue. A governor command is stored with
- *    its mission, its step and who wrote it (`by`): its pool.
+ *    with that id (`interventionOfCommand`); the `copy: yes` block for a
+ *    Worker's Manager goes to the outbox as a note that starts no turn (ADR-045
+ *    decision 14). A governor command is stored with its mission, its step and
+ *    who wrote it (`by`): its pool.
  *
  * The loop guard counts every delivered command. It refuses every one but the
  * prepared command of the owner's own answer, which it counts and never
  * refuses: the owner is who its refusal sends the Orchestrator to.
  *
- * Nothing after delivery fails the send: a record or an intervention that
- * cannot be written, and a copy that cannot be delivered, are reported in the
- * result or as one log line.
+ * Nothing after delivery fails the send: a record, an intervention or a copy
+ * that cannot be written is reported in the result or as one log line.
  */
 import { randomUUID } from "node:crypto";
 import { redactText } from "./collector";
@@ -53,6 +53,7 @@ import type { BmEvent } from "./event-bus";
 import { interventionOfCommand, recordIntervention } from "./intervention-store";
 import { enqueueNotice, type ChannelQueue } from "./main-channel";
 import { noticeQueue, type NoticePaseo, type SteerResult } from "./notice-queue";
+import { createOutbox } from "./outbox";
 import { reportTurnReplaced } from "./owner-words";
 import { commandKindOf } from "./orchestrator-state";
 import { createOrchestratorStore, type OrchestratorStoreDeps } from "./orchestrator-store";
@@ -293,8 +294,8 @@ export type CommandSendResult =
       outcome: "sent" | "queued";
       /** A `steer` command sent into the running turn (§19.5): joined it, or Paseo replaced the turn with it. Absent otherwise. */
       steer?: "steered" | "replaced";
-      /** The Manager's copy: how it went, or null when there was none to send. */
-      copy: "sent" | "queued" | "failed" | null;
+      /** The Manager's copy: `sent` once stored as a note, `failed` when it could not be written, null when there was none to send. */
+      copy: "sent" | "failed" | null;
       /** Why the command could not be recorded; null when it was. It was delivered either way. */
       unrecorded: string | null;
     }
@@ -463,13 +464,15 @@ export async function sendCommand(spec: CommandSend): Promise<CommandSendResult>
       log(`[paseo-bm] could not log the Orchestrator's intervention: ${errorText(error)}`);
     }
   }
-  let copy: "sent" | "queued" | "failed" | null = null;
+  let copy: "sent" | "failed" | null = null;
   if (spec.copyTo !== null) {
-    // The copy keeps one line of command the Manager can see (ADR-016 decision 2).
+    // ADR-016 decision 2: the Manager can see it; ADR-045 decision 14: it reads it at its next delivery, for no turn of its own.
     try {
-      const copied = await enqueueNotice({ home, queue, targetId: spec.copyTo, kind, text: commandBlockOf({ ...command, copy: true }), paseo: spec.paseo });
-      copy = delivered(copied) ? copied : "failed";
-    } catch {
+      const outbox = createOutbox(home, { now: () => now, ...(spec.redactEnv === undefined ? {} : { env: spec.redactEnv }) });
+      outbox.add(workspaceId, { kind: "message", requestId: requestId ?? spec.missionId ?? spec.targetId, from: command.from, to: spec.copyTo, text: commandBlockOf({ ...command, copy: true }), noTurn: true });
+      copy = "sent";
+    } catch (error) {
+      log(`[paseo-bm] could not store the copy of command ${id} for ${spec.copyTo}: ${errorText(error)}`);
       copy = "failed";
     }
   }

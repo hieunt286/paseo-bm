@@ -15,6 +15,7 @@ import {
   type GovernorSnapshot,
 } from "../plugin/server/governor-figures";
 import { createAlertStore } from "../plugin/server/alert-store";
+import { createDecisionStore } from "../plugin/server/decision-store";
 import { createMissionRoster } from "../plugin/server/mission-roster";
 import { createOutbox } from "../plugin/server/outbox";
 import { createMissionStore, type Mission } from "../plugin/server/mission-store";
@@ -23,6 +24,7 @@ import { appendRecord } from "../plugin/server/trace-store";
 import { DEFAULT_COORDINATION_SETTINGS, GOVERNOR_BOUNDS } from "../plugin/shared/coordination";
 import { GOVERNOR_FIGURE_IDS, storedFigureIdOf } from "../plugin/shared/governor-figures";
 import type { TraceRecord } from "../plugin/shared/contracts";
+import type { Decision } from "../plugin/shared/decisions";
 import type { Waiting } from "../plugin/shared/waits";
 import { file, report, turn } from "./fixtures/orchestrator-traces";
 import { fakeLineGit } from "./helpers/line-git";
@@ -592,6 +594,41 @@ describe("readGovernorSnapshot: what the stores of a data folder give", () => {
     expect(read.alerts.map((alert) => alert.subject)).toEqual([R]);
     expect(read.review).toMatchObject({ callsPerBatch: 3 });
     expect(figureOf(governorFiguresOf(read, SETTINGS), "stalled").crossed).toBe(true);
+  });
+
+  it("counts answers that reached nobody as dropped (ADR-042 decision 5)", () => {
+    const R = "req-20261009T100000Z";
+    const created = createMissionStore(home, { newId: () => "mis-0123456789", env: {} }).create({ code: "PAY", name: "Payments", goal: "Ship", repos: ["repo-a"], createdBy: "owner" });
+    if (!created.ok) throw new Error(created.reasons.join("; "));
+    createMissionRoster(home, { env: {} }).add("mis-0123456789", { requestId: R, workspaceId: "repo-a", topic: "cards", workerId: "w1" });
+    createRequestRegistry(home, { backfill: () => [] }).register("repo-a", R, { source: "tool", managerId: "main-1", workerId: "w1" });
+    const store = createDecisionStore(home);
+    const question: Decision = {
+      id: `q:${R}:Q1`,
+      workspaceId: "repo-a",
+      requestId: R,
+      askedBy: { role: "worker", agentId: "w1" },
+      askedAt: hoursAgo(2),
+      round: 1,
+      question: "Which one?",
+      subject: null,
+      options: [
+        { key: "a", label: "This", recommended: true, effects: [] },
+        { key: "b", label: "That", recommended: false, effects: [] },
+      ],
+      status: "open",
+      settledAt: null,
+      needsConfirmation: null,
+      answer: null,
+      grant: null,
+      delivery: null,
+      supersedes: null,
+      supersededBy: null,
+    };
+    store.open(question);
+    store.transition(question.id, (current) => ({ ok: true, decision: { ...current, delivery: { to: "w1", kind: `answers:${R}`, at: hoursAgo(1), outcome: "failed" } } }), "repo-a");
+    const read = readGovernorSnapshot(home, created.mission, { now: new Date(NOW), agents: [], settings: DEFAULT_COORDINATION_SETTINGS });
+    expect(read.dropped).toEqual([{ id: question.id, outcomeAt: hoursAgo(1) }]);
   });
 
   it("reads each request's structured wait, its batches and chain, and the running agents (delivery line design §6.5)", () => {

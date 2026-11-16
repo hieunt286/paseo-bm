@@ -25,6 +25,7 @@
  *   `archivedAt` and `providerUnavailable`.
  * - The only removal a handle offers is `archive()`; the SDK has no delete.
  */
+import { presenceOf } from "./agent-presence";
 import type { AgentNode } from "../shared/contracts";
 import { rolesCreatedSentence } from "../shared/roles-created";
 import { PLUGIN_VERSION } from "../shared/version";
@@ -105,6 +106,8 @@ export interface ManagerAgentSnapshot {
   /** Provider selection (`bm-manager` or `bm-manager/<model>`); decides the role (design §16.3). */
   provider?: string;
   archivedAt?: string | null;
+  /** Its stored session (`presenceOf`). */
+  persistence?: unknown;
   providerUnavailable?: boolean;
   lastError?: string;
   /** The mode the agent is in now; `agents.list` entries carry it. */
@@ -466,7 +469,7 @@ export async function ensureManager(
 
   // Opening the Manager is one of the two moments a machine gets set up (the
   // other is opening Settings). The plugin has no install hook — `contribute()`
-  // has no Paseo handle — so this is where a paseo.cafe install gets its roles.
+  // has no Paseo handle — so this is where an install from npm gets its roles.
   const ensured = await ensureRolesFor(paseo, deps.log);
 
   const [chosen, ...others] = await findLiveManagers(paseo, workspaceId, { home: deps.home, log: deps.log });
@@ -777,17 +780,19 @@ const NO_ROLES_CREATED: EnsureRolesResult = { created: [], baseProvider: null, m
 /**
  * The live Mains of a mission (missions design §3.2), the newest first: the
  * `bm-manager` agents labelled `bm.missionId=<missionId>`, neither archived
- * nor closed, skipping one marked `bm.replacedBy`. The label filter is checked
+ * nor closed, skipping one marked `bm.replacedBy`. `currentMainId`, the
+ * mission's Main, counts while it rests (ADR-042); a closed predecessor never does. The label filter is checked
  * again here, so a host that ignores it cannot make another agent the Main.
  */
-export async function findMain(paseo: Pick<ManagerPaseo, "agents">, missionId: string): Promise<ManagerAgentSnapshot[]> {
+export async function findMain(paseo: Pick<ManagerPaseo, "agents">, missionId: string, currentMainId: string | null = null): Promise<ManagerAgentSnapshot[]> {
   const all = await listAllAgents((options) => paseo.agents.list(options), { labels: { [MISSION_ID_LABEL]: missionId }, includeArchived: false });
   return all
     .filter(
       (agent) =>
         agent.labels?.[MISSION_ID_LABEL] === missionId &&
         roleOfAgent(agent)?.role === "manager" &&
-        isLive(agent) &&
+        // ADR-042: Paseo's idle hour does not end the mission's Main; a resting predecessor stays retired.
+        (presenceOf(agent) === "live" || (presenceOf(agent) === "resting" && agent.id === currentMainId)) &&
         agent.labels?.[REPLACED_BY_LABEL] === undefined,
     )
     .sort(newestFirst);

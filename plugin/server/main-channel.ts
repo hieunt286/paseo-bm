@@ -61,14 +61,12 @@ export async function enqueueNotice(notice: AgentNotice): Promise<NoticeOutcome>
   const queue = notice.queue ?? noticeQueue;
   if (queue.enqueueBatch === undefined || !isMissionMain(notice.home, notice.targetId)) {
     const args = [notice.targetId, notice.kind, notice.text, notice.paseo] as const;
-    if (notice.isHeld !== undefined || notice.steer === true) {
-      return queue.enqueue(...args, notice.callbacks, { ...(notice.isHeld === undefined ? {} : { isHeld: notice.isHeld }), ...(notice.steer === true ? { steer: true } : {}) });
-    }
-    return notice.callbacks === undefined ? queue.enqueue(...args) : queue.enqueue(...args, notice.callbacks);
+    return queue.enqueue(...args, notice.callbacks, { wake: true, ...(notice.isHeld === undefined ? {} : { isHeld: notice.isHeld }), ...(notice.steer === true ? { steer: true } : {}) });
   }
   const item = {
     key: notice.kind,
     line: notice.text,
+    wake: true,
     ...(notice.callbacks === undefined ? {} : { callbacks: notice.callbacks }),
     ...(notice.first === true ? { first: true } : {}),
     ...(notice.isHeld === undefined ? {} : { isHeld: notice.isHeld }),
@@ -98,11 +96,11 @@ export async function enqueueUpdates(notice: UpdatesNotice): Promise<NoticeOutco
   const queue = notice.queue ?? noticeQueue;
   const { items } = notice;
   if (items.length === 0) return [];
-  if (queue.enqueueBatch !== undefined) return queue.enqueueBatch(notice.targetId, MAIN_UPDATES, items, notice.paseo);
+  if (queue.enqueueBatch !== undefined) return queue.enqueueBatch(notice.targetId, MAIN_UPDATES, items.map((item) => ({ ...item, wake: true })), notice.paseo);
   const callbacks: NoticeCallbacks = {
     onSent: (targetId, kind) => items.forEach((item) => item.callbacks?.onSent?.(targetId, kind)),
     onDropped: (targetId, kind, reason) => items.forEach((item) => item.callbacks?.onDropped?.(targetId, kind, reason)),
   };
-  const outcome = await queue.enqueue(notice.targetId, `${UPDATES_NOTICE_MARKER}:${items[0]!.key}`, updatesNoticeOf(items.map((item) => item.line)), notice.paseo, callbacks);
+  const outcome = await queue.enqueue(notice.targetId, `${UPDATES_NOTICE_MARKER}:${items[0]!.key}`, updatesNoticeOf(items.map((item) => item.line)), notice.paseo, callbacks, { wake: true });
   return items.map(() => outcome);
 }

@@ -13,7 +13,9 @@
  *
  * Fed by the `placements` map of `missions/index.json`, rebuilt with the
  * index. A workspace that is no placement is its own repo key, so with no
- * placement every reader behaves as before. Never throws.
+ * placement every reader behaves as before. A repo alias (ADR-043) is a live
+ * root read as the repo key whose root is archived: `repoKeyOf` follows it, and
+ * it stays apart from the placements, as a root is none. Never throws.
  */
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
@@ -22,7 +24,7 @@ import { currentPolicy } from "./autonomy-store";
 import { MISSIONS_DIR_NAME, MISSION_INDEX_FILE_NAME, createMissionStore, type Mission, type Placement, type PlacementIndex } from "./mission-store";
 
 /** The placements map of each data folder, kept while its index file is unchanged. */
-const memo = new Map<string, { stamp: string | null; placements: PlacementIndex }>();
+const memo = new Map<string, { stamp: string | null; placements: PlacementIndex; aliases: Record<string, string> }>();
 
 /** What tells the index file apart from its last read: a write replaces it (a new inode). */
 function stampOf(home: string): string | null {
@@ -34,32 +36,53 @@ function stampOf(home: string): string | null {
   }
 }
 
-/** Every placement workspace of `home` with its mission and repo key; none when unreadable. Memoised on the index's stamp. */
-export function placementIndexIn(home: string | null): PlacementIndex {
-  if (home === null) return {};
+/** The index of `home`, memoised on its stamp; empty when unreadable. */
+function indexIn(home: string): { placements: PlacementIndex; aliases: Record<string, string> } {
   const stamp = stampOf(home);
   const known = memo.get(home);
-  if (known !== undefined && known.stamp === stamp) return known.placements;
+  if (known !== undefined && known.stamp === stamp) return known;
   let placements: PlacementIndex = {};
+  let aliases: Record<string, string> = {};
   try {
-    placements = createMissionStore(home).placements();
+    const store = createMissionStore(home);
+    placements = store.placements();
+    aliases = store.repoAliases();
   } catch {
     // An unreadable mission store: no placement, every workspace its own repo.
   }
   // A missing or stale index was rebuilt by the read: its new stamp is the one kept.
-  memo.set(home, { stamp: stampOf(home), placements });
-  return placements;
+  const read = { stamp: stampOf(home), placements, aliases };
+  memo.set(home, read);
+  return read;
+}
+
+/** Every placement workspace of `home` with its mission and repo key; none when unreadable. Memoised on the index's stamp. */
+export function placementIndexIn(home: string | null): PlacementIndex {
+  return home === null ? {} : indexIn(home).placements;
+}
+
+/** Every repo alias of `home` (ADR-043): a live root → its repo key. */
+export function repoAliasesIn(home: string | null): Record<string, string> {
+  return home === null ? {} : indexIn(home).aliases;
+}
+
+/** The live workspace to address for `repo`, a repo key (ADR-043): the key while listed, else a live alias, else the key. */
+export function liveRootOf(home: string | null, repo: string, listed: ReadonlyArray<{ id: string; archived: boolean }> | null): string {
+  const live = (id: string) => listed?.some((entry) => entry.id === id && !entry.archived) === true;
+  if (live(repo)) return repo;
+  return Object.entries(repoAliasesIn(home)).find(([id, key]) => key === repo && live(id))?.[0] ?? repo;
 }
 
 /** The repo key of `workspaceId`: the repo of a placement, else the id itself. Synchronous. */
 export function repoKeyOf(home: string | null, workspaceId: string): string {
-  return placementIndexIn(home)[workspaceId]?.repo ?? workspaceId;
+  return placementIndexIn(home)[workspaceId]?.repo ?? repoAliasesIn(home)[workspaceId] ?? workspaceId;
 }
 
 /** `repoKeyOf` bound to one data folder, for the pure readers that take a key function. */
 export function repoKeysIn(home: string | null): (workspaceId: string) => string {
   const placements = placementIndexIn(home);
-  return (workspaceId) => placements[workspaceId]?.repo ?? workspaceId;
+  const aliases = repoAliasesIn(home);
+  return (workspaceId) => placements[workspaceId]?.repo ?? aliases[workspaceId] ?? workspaceId;
 }
 
 /** The mission whose placement `workspaceId` is, and its repo; null for any other workspace. */
@@ -114,8 +137,12 @@ export function placementBlockOf(home: string | null, workspaceId: string): stri
 
 /** Whether `workspaceId` (a repo, or a placement of one) is in the mission's charter. */
 export function inCharter(home: string | null, mission: Pick<Mission, "charter">, workspaceId: string): boolean {
-  return mission.charter.repos.includes(repoKeyOf(home, workspaceId));
+  const key = repoKeyOf(home, workspaceId);
+  return mission.charter.repos.some((repo) => repoKeyOf(home, repo) === key);
 }
+
+/** The charter's repos by key (ADR-047): a live id and its key are one repo. */
+export const charterKeysOf = (home: string | null, mission: Pick<Mission, "charter">): string[] => [...new Set(mission.charter.repos.map((repo) => repoKeyOf(home, repo)))];
 
 /**
  * `policy` with each placement read as its repo: a read-only alias of the
@@ -134,6 +161,25 @@ export function policyWithPlacements(policy: AutonomyPolicy, placements: Placeme
 }
 
 /**
+ * `policy` with each repo alias (ADR-043) reading exactly as its repo: what the
+ * repo has, and nothing the alias's id held of its own, so a reopened workspace
+ * is never allowed more than its repo. Pure.
+ */
+export function policyWithAliases(policy: AutonomyPolicy, aliases: Readonly<Record<string, string>>): AutonomyPolicy {
+  const entries = Object.entries(aliases);
+  if (entries.length === 0) return policy;
+  const read = <T>(of: Record<string, T>): Record<string, T> => {
+    const out = { ...of };
+    for (const [alias, repo] of entries) {
+      if (of[repo] === undefined) delete out[alias];
+      else out[alias] = of[repo]!;
+    }
+    return out;
+  };
+  return { projects: read(policy.projects), challenger: read(policy.challenger), ...(policy.boundary === undefined ? {} : { boundary: read(policy.boundary) }) };
+}
+
+/**
  * The owner's policy as the enforcement readers apply it (§3.1): the stored
  * policy (`currentPolicy`) with each placement aliased to its repo. Settings
  * keeps `currentPolicy`, so a placement never shows as a project. Never throws.
@@ -141,5 +187,6 @@ export function policyWithPlacements(policy: AutonomyPolicy, placements: Placeme
 export function effectivePolicy(home: string, onUnreadable?: (reason: string) => void): AutonomyPolicy {
   const policy = currentPolicy(home, onUnreadable);
   const placements = placementIndexIn(home);
-  return Object.keys(placements).length === 0 ? policy : policyWithPlacements(policy, placements);
+  const placed = Object.keys(placements).length === 0 ? policy : policyWithPlacements(policy, placements);
+  return policyWithAliases(placed, repoAliasesIn(home));
 }

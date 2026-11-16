@@ -13,11 +13,12 @@
  *   (`mission-tools.ts`): the card's checks (`missionChangeRefusalsOf`),
  *   `applyMissionChange`, a `charter` journal line by `owner`, the Main told
  *   (`tellMain`), retitled and relabelled (`syncMainAfterChange`).
- * - `mission.integration.revoke { missionId, repo }` → the owner's revoke of
- *   the mission's integration grant for a repo (delivery line design §4.3,
- *   `integration-grant.ts`).
- * - `mission.integration.ask { missionId, repo }` → the owner's "Ask me
- *   again": a fresh integration card for the repo (§4.3).
+ * - `mission.integration.revoke { missionId, repo, what? }` → the owner's
+ *   revoke of the mission's integration grant for a repo (delivery line design
+ *   §4.3, `integration-grant.ts`), or of its local merge with `what:
+ *   "local-merge"` (ADR-045 decision 4).
+ * - `mission.integration.ask { missionId, repo, what? }` → the owner's "Ask me
+ *   again": a fresh card for the repo (§4.3), `what` as above.
  * - `memory.list { workspaceId }` → one repository's active project memory,
  *   newest first, at most `MEMORY_LIST_LIMIT`.
  *
@@ -37,6 +38,7 @@
  * mission, is `E_MISSION_INVALID` with its reasons; any other failure is a
  * coded error, never a bare one.
  */
+import { createAlertStore } from "./alert-store";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
@@ -66,7 +68,7 @@ import { UNSETTLED_STATUSES, type Decision } from "../shared/decisions";
 import { isEmptyMissionChange, missionChangeLinesOf, type MissionChange } from "../shared/mission-change";
 import { timeOrZero } from "../shared/time";
 import { readCoordinationSettings } from "./coordination-rpc";
-import { askIntegrationAgain, isIntegrationCard, revokeIntegration } from "./integration-grant";
+import { askIntegrationAgain, askLocalMergeAgain, isIntegrationCard, isLocalMergeCard, localMergeHolds, revokeIntegration, revokeLocalMerge } from "./integration-grant";
 import { TRACES_DIR_NAME } from "./data-home";
 import { createDecisionStore } from "./decision-store";
 import { GOVERNOR_FAMILIES, governorFiguresOf, liveWorkersOf, readGovernorSnapshot, type GovernorFigure, type ListedAgent } from "./governor-figures";
@@ -82,7 +84,7 @@ import { MISSION_CODE_PATTERN, createMissionStore, journalQuietly, type Mission,
 import { missionStateOf } from "./mission-state";
 import type { MissionState } from "../shared/mission-state";
 import { MAX_LANES, openArchiveCards, retitlePlacements } from "./placement-create";
-import { laneViewsOf, overlapsOf, waitingOf } from "./mission-page-lanes";
+import { laneViewsOf, lineOf, overlapsOf, waitingOf } from "./mission-page-lanes";
 import { applyMissionChange, missionChangeRefusalsOf, syncMainAfterChange, tellMain } from "./mission-tools";
 import { missionInvalid } from "./missions-home";
 import { workspaceLabelOf } from "./orchestrator-state";
@@ -293,6 +295,13 @@ function rowsOf(context: ReadContext, view: MissionView): MissionRow[] {
   } catch {
     // An unreadable decision store contributes no fallback state.
   }
+  // ADR-042: an open delivery-dropped alert is a stop nobody can see from the Worker's report.
+  let undelivered = new Set<string>();
+  try {
+    undelivered = new Set(createAlertStore(context.home).list({ open: true, kinds: ["delivery-dropped"] }).flatMap((alert) => (alert.workspaceId === null ? [] : [requestKey(alert.workspaceId, alert.subject)])));
+  } catch {
+    // An unreadable alert store contributes no delivery state.
+  }
   let links: ReturnType<ReturnType<typeof createPeerLinkStore>["list"]> = [];
   try {
     links = createPeerLinkStore(context.home).list().filter(isLiveLink);
@@ -305,7 +314,7 @@ function rowsOf(context: ReadContext, view: MissionView): MissionRow[] {
     let phase: MissionRow["phase"] = entry.state === "active" ? "working" : entry.state;
     if (entry.state === "active") {
       const report = workerId === null ? null : newestReportRecordOf(context.home, entry.workspaceId, workerId);
-      if (ownerQuestions.length > 0 || fallbackRequests.has(requestKey(entry.workspaceId, entry.requestId)) || (report !== null && reportPhaseOf(report.text) === "blocked")) phase = "blocked";
+      if (ownerQuestions.length > 0 || undelivered.has(requestKey(entry.workspaceId, entry.requestId)) || fallbackRequests.has(requestKey(entry.workspaceId, entry.requestId)) || (report !== null && reportPhaseOf(report.text) === "blocked")) phase = "blocked";
     }
     const partners = new Map<string, number>();
     for (const link of links) {
@@ -396,6 +405,8 @@ export async function handleMissionGet(input: { missionId: string }, paseo: unkn
       mainHistory: mission.mainHistory.map((entry) => ({ agentId: entry.agentId, from: entry.from, to: entry.to, reason: entry.reason })),
       // Delivery line design §19.8: held requests and tells to busy Workers.
       waiting: waitingOf(home, mission, view.roster, (workspaceId) => repoOf(context, workspaceId).name, context.now),
+      // ADR-045 decision 5: the step the line is at.
+      line: lineOf(home, mission.missionId, flight.inFlight?.requests ?? []),
     };
   });
 }
@@ -421,6 +432,22 @@ export function integrationStateOf(placement: Pick<Placement, "repo" | "integrat
   if (grant?.state === "granted") return { state: "allowed", at: grant.grantedAt, decisionId: grant.decisionId };
   if (grant?.state === "revoked") return { state: "revoked", at: grant.revokedAt, decisionId: grant.decisionId };
   const card = cards.filter((decision) => isIntegrationCard(decision) && decision.options.some((option) => option.action?.kind === "integration.grant" && option.action.repo === placement.repo)).at(-1);
+  if (card === undefined) return { state: "none", at: null, decisionId: null };
+  if (UNSETTLED_STATUSES.includes(card.status)) return { state: "waiting", at: null, decisionId: card.id };
+  const answered = card.status === "answered" && card.answer !== null && card.answer.optionKey !== "a";
+  return { state: answered ? "not-now" : "none", at: null, decisionId: card.id };
+}
+
+/**
+ * The local fast-forward of a placement (ADR-045 decision 4), read as
+ * `integrationStateOf` reads push: allowed while the grant holds, revoked once
+ * revoked or no longer naming the placement's target, else from its card. Pure.
+ */
+export function localMergeStateOf(placement: Pick<Placement, "repo" | "target" | "localMerge">, cards: readonly Decision[]): MissionPlacement["integration"] {
+  const grant = placement.localMerge;
+  if (grant !== undefined && localMergeHolds(placement)) return { state: "allowed", at: grant.grantedAt, decisionId: grant.decisionId };
+  if (grant !== undefined) return { state: "revoked", at: grant.revokedAt, decisionId: grant.decisionId };
+  const card = cards.filter((decision) => isLocalMergeCard(decision) && decision.options.some((option) => option.action?.kind === "integration.local-merge" && option.action.repo === placement.repo)).at(-1);
   if (card === undefined) return { state: "none", at: null, decisionId: null };
   if (UNSETTLED_STATUSES.includes(card.status)) return { state: "waiting", at: null, decisionId: card.id };
   const answered = card.status === "answered" && card.answer !== null && card.answer.optionKey !== "a";
@@ -460,7 +487,7 @@ function withPlacements(
     const overlaps = overlapsOf(mission, repo.workspaceId, work.roster);
     return {
       ...repo,
-      placement: { branch, target, state: lineState, dirty, ahead, behind, lastCommitAt, pushed, mr, ci, readAt, integration: integrationStateOf(placement, cards), lanes, maxLanes: MAX_LANES, overlaps },
+      placement: { branch, target, state: lineState, dirty, ahead, behind, lastCommitAt, pushed, mr, ci, readAt, integration: integrationStateOf(placement, cards), localMerge: localMergeStateOf(placement, cards), lanes, maxLanes: MAX_LANES, overlaps },
     };
   });
 }
@@ -562,6 +589,12 @@ export async function handleMissionIntegrationRevoke(input: MissionIntegrationRe
   const home = requireDataHome(deps, "revoke the integration grant");
   const mission = coded(READ_FAILED, "read the mission", () => createMissionStore(home).get(input.missionId));
   if (mission === null) throw missionInvalid([`unknown mission ${input.missionId}`]);
+  // ADR-045 decision 4: the local fast-forward has no Worker to tell.
+  if (input.what === "local-merge") {
+    const ended = revokeLocalMerge(mission.missionId, input.repo, { home, now: deps.now?.() ?? new Date(), log: logOf(deps) });
+    if (!ended.ok) throw missionInvalid(ended.reasons);
+    return { revokedAt: ended.placement.localMerge?.revokedAt ?? "", notified: 0 };
+  }
   const revoked = await revokeIntegration(mission.missionId, input.repo, { home, now: deps.now?.() ?? new Date(), log: logOf(deps), paseo });
   if (!revoked.ok) throw missionInvalid(revoked.reasons);
   return { revokedAt: revoked.placement.integration?.revokedAt ?? "", notified: revoked.notified };
@@ -574,7 +607,8 @@ export async function handleMissionIntegrationRevoke(input: MissionIntegrationRe
  */
 export async function handleMissionIntegrationAsk(input: MissionIntegrationAskInput, _paseo: unknown, deps: MissionsRpcDeps = {}): Promise<MissionIntegrationAskOutput> {
   const home = requireDataHome(deps, "ask about the integration again");
-  const asked = askIntegrationAgain(home, input.missionId, input.repo, { now: deps.now?.() ?? new Date(), log: logOf(deps) });
+  const ask = input.what === "local-merge" ? askLocalMergeAgain : askIntegrationAgain;
+  const asked = ask(home, input.missionId, input.repo, { now: deps.now?.() ?? new Date(), log: logOf(deps) });
   if (!asked.ok) throw missionInvalid(asked.reasons);
   return { decisionId: asked.decisionId };
 }

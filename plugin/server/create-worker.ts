@@ -43,21 +43,23 @@
  * reused, even when Paseo then refuses the Worker. Nothing here throws into
  * the endpoint.
  */
+import { staleReposOf, withLiveRoots } from "./repo-aliases";
 import { resolve, sep } from "node:path";
 import { NO_BINDER, createBound, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { aliasBases } from "./alias-bases";
 import { TOOL_PROVIDERS } from "./agent-tools";
 import type { ServerToolAnswer, ServerTools } from "./decision-tools";
 import { AGENT_TOOLS_OFF_TOOL_MESSAGE, agentToolsOff } from "./manager";
-import { directoryIn, listedWorkspaces, titleIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
+import { bmAgentsOf, directoryIn, listedWorkspaces, titleIn, type DashboardPaseo, type ListedWorkspace } from "./paseo-directory";
 import { createPeerLinkStore, routeOf, type PeerLink } from "./peer-links";
-import { inCharter, laneOf, placementBlockOf, repoKeyOf } from "./placements";
+import { charterKeysOf, inCharter, laneOf, placementBlockOf, repoKeyOf } from "./placements";
 import { ROOT_WAIT_BRIEF_LINE, ensureLane, ensurePlacement, placementBriefLines, placementModeOn, type PlacementDeps } from "./placement-create";
 import { peerBriefOf } from "./peer-tools";
 import { createMemoryStore, type MemoryEntry } from "./memory-store";
 import { createMissionAutonomyStore } from "./mission-autonomy-store";
-import { holdRequest } from "./held-requests";
-import { createMissionRoster, runningRequestsOf } from "./mission-roster";
+import { HOLD_ID_PATTERN, afterStateOf, heldRequestsOf, holdRequest, type HeldCaller } from "./held-requests";
+import { readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
+import { createMissionRoster, runningRequestsOf, type RosterEntry } from "./mission-roster";
 import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
 import { missionOfMain } from "./mission-tools";
 import { isMissionsHome } from "./missions-home";
@@ -67,10 +69,12 @@ import { creationProjectOf, modeFactsOf } from "./role-instructions";
 import { profileOf } from "./role-mode";
 import { actingTools, boundAs, fixThese, refused, withoutNulls } from "./tool-kit";
 import { boundToolFacesFor, schemaIssues } from "../shared/bm-tools";
+import { originOf } from "../shared/message-origin";
 import { briefLineOf } from "../shared/notices";
 import { shorten } from "../shared/text";
 import { PLUGIN_VERSION } from "../shared/version";
 import { redactText } from "./collector";
+import { lineSupervisedOf } from "./coordination-store";
 
 /** The profile and alias a plugin-created Worker is made from. */
 export const WORKER_PROFILE_ID = "bm-worker";
@@ -114,10 +118,14 @@ export interface CreateWorkerInput {
   project?: string;
   /** A Main's: the request's place in the mission's plan. */
   planStep?: string;
-  /** A Main's: `"new"` runs it in a free or new lane of the repo (delivery line design §19.1). */
+  /** A Main's: `"new"` runs it in a free or new lane of the repo (delivery line design §19.1); replaced by `parallel`. */
   lane?: "new";
-  /** A Main's: hold it until these requests of the mission finish (§19.6). */
+  /** A Main's: hold it until these requests or held entries of the mission finish and pass (§19.6; mission line plan §5.8). */
   after?: string[];
+  /** A Main's: new work on no request's result, held to run next (mission line plan §5.8). */
+  next?: boolean;
+  /** A Main's: why it runs in a new lane now, quoting the owner's explicit word (mission line plan §5.8). */
+  parallel?: string;
 }
 
 /** The memory a Worker's brief carries, in characters (delivery line design §18.2, ADR-037). */
@@ -439,19 +447,27 @@ export function missionRepoOf(
   mission: Mission,
   project: string | undefined,
   listed: readonly ListedWorkspace[] | null,
+  options: { continuing?: boolean } = {},
 ): { workspaceId: string; directory: string } | string[] {
   const { code, charter } = mission;
   if (mission.state !== "open") return [`mission ${code} is closed`];
   const repos = charter.repos;
   if (repos.length === 0) return [`mission ${code} has no repo yet: add one with bm_mission_update repos`];
   const names = repos.map((workspaceId) => `${workspaceId} (${titleIn(listed, workspaceId)})`).join(", ");
-  if (project === undefined && repos.length > 1) return [`input.project: mission ${code} works in ${repos.length} repos — ${names}; name the one the Worker works in`];
+  const keys = charterKeysOf(home, mission).length;
+  if (project === undefined && keys > 1) return [`input.project: mission ${code} works in ${keys} repos — ${names}; name the one the Worker works in`];
   // Delivery line design §3.1: a placement of a charter repo is in the charter; a repo named by its key is that repo.
   const workspaceId = project ?? repos[0]!;
   if (!inCharter(home, mission, workspaceId)) return [`project ${workspaceId} is outside mission ${code}'s scope (${names}); add it with bm_mission_update repos first`];
   if (listed === null) return ["paseo-bm could not read Paseo's workspaces; try again in a moment"];
   const entry = listed.find((candidate) => candidate.id === workspaceId);
-  if (entry === undefined || entry.archived) return [`project ${workspaceId} is archived or no longer listed in Paseo`];
+  if (entry === undefined || entry.archived) {
+    // ADR-043: a request that ran in the archived root cannot go on there; while the repo has a live root, a new Worker can.
+    const alive = Object.entries(mission.repoAliases ?? {}).some(([id, repo]) => repo === workspaceId && listed.some((candidate) => candidate.id === id && !candidate.archived));
+    if (options.continuing === true && alive) return [`repo ${workspaceId} now answers as another workspace and this request ran in its archived root: give the work a new Worker`];
+    if (staleReposOf(mission, listed).includes(workspaceId)) return [`repo ${workspaceId} is archived and no live workspace is proved to be it: the owner opens the repo's folder in Paseo, then ask again; keep its mission branches`];
+    return [`project ${workspaceId} is archived or no longer listed in Paseo`];
+  }
   if (isMissionsHome(workspaceId, home) || (entry.directory !== null && inDataFolder(home, entry.directory))) return [`project ${workspaceId} is a paseo-bm home, not a repo`];
   if (entry.directory === null) return [`paseo-bm could not read the folder of project ${workspaceId} from Paseo; try again in a moment`];
   // Delivery line design §3.6: a retired, archived or failed placement takes no new agent.
@@ -473,17 +489,20 @@ export async function staffingReasons(
   mission: Mission,
   workspaceId: string,
   listed: readonly ListedWorkspace[] | null,
-  options: { lane?: "new" } = {},
+  options: { lane?: "new"; parallel?: boolean; released?: boolean } = {},
 ): Promise<string[]> {
   if (createMissionAutonomyStore(home).isDelegated(mission.missionId, "staffing")) return [];
   const running = await runningRequestsOf(home, paseo, mission.missionId);
   const reasons: string[] = [];
   // Delivery line design §3.7: one live Worker per placement, counted per repo as before; §19.1: a new lane adds one.
   const repo = repoKeyOf(home, workspaceId);
-  const here = running.find((entry) => repoKeyOf(home, entry.workspaceId) === repo);
+  const here = running.find((entry) => repoKeyOf(home, entry.workspaceId) === repo && entry.parallel !== true);
   const ask = "staffing is not delegated in this mission, so ask the owner first";
-  if (options.lane === "new") reasons.push(`a new lane adds a live Worker to mission ${mission.code} in ${titleIn(listed, workspaceId)}: ${ask}`);
-  else if (here !== undefined) reasons.push(`mission ${mission.code} already has a live Worker in ${titleIn(listed, workspaceId)} (request ${here.requestId}): give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or ${ask}`);
+  // ADR-045 decisions 1 and 2: the owner's explicit word, or their release of a stopped entry, is the yes; the budget below still holds.
+  if (options.parallel === true || options.released === true) {
+    // No line.
+  } else if (options.lane === "new") reasons.push(`a new lane adds a live Worker to mission ${mission.code} in ${titleIn(listed, workspaceId)}: ${ask}`);
+  else if (here !== undefined) reasons.push(`mission ${mission.code} already has a live Worker in ${titleIn(listed, workspaceId)} (request ${here.requestId}): ${lineSupervisedOf(home) ? `words about its work go to it with bm_tell_worker; ${slotChoicesOf(here.requestId)}; or` : 'give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or'} ${ask}`);
   const cap = mission.charter.budget?.workers ?? null;
   if (cap !== null && running.length >= cap) reasons.push(`mission ${mission.code} has ${running.length} live Workers and its budget allows ${cap}: ${ask}`);
   return reasons;
@@ -531,6 +550,8 @@ export interface RequestWorkerSpec {
   peer?: readonly string[];
   /** Delivery line design §2.4: the request a continuation continues, and its brief block (§2.5). */
   continuation?: { of: Pick<RegisteredRequest, "requestId" | "chainRootId">; lines: readonly string[] };
+  /** ADR-045 decision 1: it runs beside the sequential slot, marked so on the roster. */
+  parallel?: true;
 }
 
 /**
@@ -592,7 +613,7 @@ export async function createRequestWorker(
     // The roster is the mission's membership (§2.3); the journal says what happened.
     const topic = workerTitleOf(request);
     try {
-      if (createMissionRoster(home).add(mission.missionId, { requestId, workspaceId, topic, workerId, ...(chain.continuationOf === undefined ? {} : { continuationOf: chain.continuationOf }) }) === null) {
+      if (createMissionRoster(home).add(mission.missionId, { requestId, workspaceId, topic, workerId, ...(chain.continuationOf === undefined ? {} : { continuationOf: chain.continuationOf }), ...(spec.parallel === undefined ? {} : { parallel: true }) }) === null) {
         log(`[paseo-bm] request ${requestId} is held by another mission's roster`);
       }
     } catch (error) {
@@ -607,6 +628,60 @@ export async function createRequestWorker(
 // ---------------------------------------------------------------------------
 // bm_create_worker.
 // ---------------------------------------------------------------------------
+
+/**
+ * True when open link `linkId` of `missionId` was asked by `running`'s chain
+ * (ADR-047 decision 2): a Worker made for it answers the running step, so it
+ * takes no slot. Never throws.
+ */
+export function asksOfRunning(home: string, linkId: string | undefined, missionId: string, running: Pick<RosterEntry, "workspaceId" | "requestId">): boolean {
+  try {
+    const link = linkId === undefined ? null : createPeerLinkStore(home).get(linkId);
+    const asker = link?.from.requestId ?? null;
+    if (link?.state !== "open" || link.missionId !== missionId || asker === null) return false;
+    const registry = createRequestRegistry(home);
+    const root = (workspaceId: string, requestId: string) => registry.get(workspaceId, requestId)?.chainRootId ?? requestId;
+    return root(link.from.workspaceId, asker) === root(running.workspaceId, running.requestId);
+  } catch {
+    return false;
+  }
+}
+
+/** What new work takes while request `id` holds the sequential slot (ADR-045 decision 1). Pure. */
+export const slotChoicesOf = (id: string): string =>
+  `next: true for new work, held to run next; after: ["${id}"] when it needs that request's result; parallel only with the owner's explicit word quoted`;
+
+/** The refusal of new work while `running` holds the sequential slot (ADR-045 decision 1). Pure. */
+export function slotRefusalOf(running: Pick<RosterEntry, "requestId">, missionCode: string): string {
+  return `Request ${running.requestId} is running and mission ${missionCode} runs one request at a time: ${slotChoicesOf(running.requestId)}. Nothing was created.`;
+}
+
+const comparable = (text: string): string => text.normalize("NFC").toLowerCase().replace(/\s+/g, " ").trim();
+
+/**
+ * Why `reason` cannot be a `parallel` (mission line plan §5.8), or null: a
+ * double-quoted span of it must appear, case and spacing aside, in a message
+ * the owner typed on the Main's newest timeline page: the words of the turn in
+ * progress are not in the trace yet. An unreadable page refuses. Never throws.
+ */
+async function parallelRefusalOf(paseo: unknown, mainId: string, reason: string): Promise<string | null> {
+  const quoted = [...reason.matchAll(/"([^"]+)"/g)].map((match) => comparable(match[1]!)).filter((span) => span !== "");
+  if (quoted.length === 0) return "parallel must quote the owner's explicit word in double quotes.";
+  const typed: string[] = [];
+  let read = 0;
+  try {
+    read = await readTimelinePages(paseo as LiveTimelinePaseo, mainId, { pages: 1, limit: 50 }, (entries) => {
+      for (const { item } of entries) {
+        const message = item as { type?: unknown; text?: unknown; clientMessageId?: unknown } | null | undefined;
+        if (message?.type === "user_message" && typeof message.text === "string" && originOf({ text: message.text, clientMessageId: message.clientMessageId }) === "owner") typed.push(comparable(message.text));
+      }
+    });
+  } catch {
+    read = 0;
+  }
+  if (read === 0) return "parallel could not be checked, because your chat could not be read: use next or after, or try again.";
+  return typed.some((text) => quoted.some((span) => text.includes(span))) ? null : "parallel quotes words the owner did not type: only the owner's explicit word, as they typed it, opens a parallel lane; otherwise use next or after.";
+}
 
 export interface WorkerCreationToolDeps {
   /** The binder of the endpoint (read when a call comes); none (unbound Workers) when absent. */
@@ -639,34 +714,62 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     const input = given !== null && typeof given === "object" && !Array.isArray(given) ? Object.fromEntries(Object.entries(given).filter(([key]) => key !== "size")) : given;
     const issues = schemaIssues(face.inputSchema, input);
     if (issues.length > 0) return fixThese(CREATE_WORKER_TOOL, issues);
-    const { request, context, peerLink, project, planStep, lane, after } = input as unknown as CreateWorkerInput;
+    const { request, context, peerLink, project, planStep, lane, after, next, parallel } = input as unknown as CreateWorkerInput;
+    const fromHeld = (toolCaller as Partial<HeldCaller>).fromHeld === true;
+    const released = (toolCaller as Partial<HeldCaller>).released === true;
     const home = deps.home();
     // A Main works in its mission's repos; a Manager of no mission in its own folder. A replaced Main works for none.
     const mission = missionOfMain(home, caller);
     if (mission === null && (caller.missionId ?? null) !== null) return refused(REPLACED_MAIN_MESSAGE);
-    if (mission === null && (project !== undefined || planStep !== undefined || lane !== undefined || after !== undefined)) return refused("project, planStep, lane and after are for the Main of a mission, and you are none: leave them out. Nothing was created.");
+    if (mission === null && (project !== undefined || planStep !== undefined || lane !== undefined || after !== undefined || next !== undefined || parallel !== undefined)) return refused("project, planStep, lane, after, next and parallel are for the Main of a mission, and you are none: leave them out. Nothing was created.");
     if (mission === null && isMissionsHome(caller.workspaceId, home)) return refused("You have no mission yet: record it with bm_mission_start before you create a Worker. Nothing was created.");
+    if (next === true && (after !== undefined || parallel !== undefined)) return refused("next is for new work on no request's result, so it does not go with after or parallel: give one of them. Nothing was created.");
+    if (mission !== null && parallel !== undefined && !fromHeld) {
+      const refusal = await parallelRefusalOf(deps.paseo(), managerId, parallel);
+      if (refusal !== null) return refused(`${refusal} Nothing was created.`);
+    }
+    /** Holds the work in the mission's queue, without `after` and `next` in its stored input. */
+    const holdWork = (holding: Mission, ids: readonly string[], until: string, when: string, extra: { next?: true } = {}, lead = ""): ServerToolAnswer => {
+      const rest = Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([key]) => key !== "after" && key !== "next"));
+      const held = holdRequest(home, holding.missionId, { after: [...ids], ...extra, input: rest, topic: oneLine(request).slice(0, 120), by: managerId }, new Date());
+      if (!held.ok) return refused(`${held.reason}. Nothing was held.`);
+      journalQuietly(createMissionStore(home), holding.missionId, { kind: "worker", by: managerId, text: `Held ${held.entry.holdId} until ${until}: ${held.entry.topic}`, ref: held.entry.holdId }, log);
+      return { ok: true, text: JSON.stringify({ held: held.entry.holdId, after: ids, note: `${lead}paseo-bm creates its Worker when ${when}, and tells you; bm_hold_cancel cancels it` }) };
+    };
     // Delivery line design §19.6: work that waits for requests of the mission is held by paseo-bm, not created now.
+    // Mission line plan §5.8: each id is read as the pass reads it, through its chain's head and the finish gate.
     if (mission !== null && after !== undefined && after.length > 0) {
       const roster = createMissionRoster(home).list(mission.missionId);
-      const unknown = after.filter((requestId) => !roster.some((entry) => entry.requestId === requestId));
+      const unknown = after.filter((id) => !HOLD_ID_PATTERN.test(id) && !roster.some((entry) => entry.requestId === id));
       if (unknown.length > 0) return refused(`${unknown.join(", ")} ${unknown.length === 1 ? "is not a request" : "are not requests"} of mission ${mission.code} (bm_mission lists them). Nothing was created.`);
-      const stopped = after.filter((requestId) => roster.find((entry) => entry.requestId === requestId)?.state === "stopped");
+      const holds = heldRequestsOf(home, mission.missionId);
+      const gone = after.filter((id) => HOLD_ID_PATTERN.test(id) && (holds.find((entry) => entry.holdId === id)?.state ?? "cancelled") === "cancelled");
+      if (gone.length > 0) return refused(`${gone.join(", ")} ${gone.length === 1 ? "is" : "are"} unknown or cancelled in mission ${mission.code}: name what still stands (bm_mission lists it). Nothing was created.`);
+      const states = after.map((id) => afterStateOf(home, mission.missionId, id));
+      const stopped = [...new Set(states.flatMap((state) => (state.kind === "stopped" ? [state.requestId] : [])))];
       if (stopped.length > 0) return refused(`${stopped.join(", ")} stopped, so work after ${stopped.length === 1 ? "it" : "them"} would never start: give it without after, or ask the owner. Nothing was created.`);
-      const waiting = after.filter((requestId) => roster.find((entry) => entry.requestId === requestId)?.state !== "finished");
-      if (waiting.length > 0) {
-        const rest = Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([key]) => key !== "after"));
-        const held = holdRequest(home, mission.missionId, { after: waiting, input: rest, topic: oneLine(request).slice(0, 120), by: caller.agentId }, new Date());
-        if (!held.ok) return refused(`${held.reason}. Nothing was held.`);
-        journalQuietly(createMissionStore(home), mission.missionId, { kind: "worker", by: caller.agentId, text: `Held ${held.entry.holdId} until ${waiting.join(", ")} finish: ${held.entry.topic}`, ref: held.entry.holdId }, log);
-        return {
-          ok: true,
-          text: JSON.stringify({ held: held.entry.holdId, after: waiting, note: `paseo-bm creates its Worker when ${waiting.join(" and ")} finish${waiting.length === 1 ? "es" : ""}, within about a minute, and tells you; bm_hold_cancel cancels it` }),
-        };
+      if (states.some((state) => state.kind !== "passed")) {
+        return holdWork(mission, after, `${after.join(", ")} finish`, `${after.join(" and ")} finish${after.length === 1 ? "es" : ""}${lineSupervisedOf(home) ? ` and pass${after.length === 1 ? "es" : ""} the finish gate` : ""}, within about a minute`);
       }
     }
     const paseo = deps.paseo();
     if (paseo === null || paseo === undefined) return refused(NO_PASEO_MESSAGE);
+    // ADR-045 decision 1: at most one sequential request at a time, across the mission's repos; the tool enforces it, unless the owner's switch is off.
+    /** ADR-047 decision 2: it answers the running step's own ask, beside the slot. */
+    let beside = false;
+    if (mission !== null && !fromHeld && parallel === undefined && lineSupervisedOf(home)) {
+      // A Main is always listed, so an empty list is one that could not be read: the slot is then held, not free.
+      const agents = await bmAgentsOf(paseo as DashboardPaseo, { home });
+      if (agents.length === 0) return refused(NO_PASEO_MESSAGE);
+      const runs = (await runningRequestsOf(home, paseo, mission.missionId, agents)).filter((entry) => entry.parallel !== true);
+      const running = runs[0];
+      beside = runs.some((entry) => asksOfRunning(home, peerLink, mission.missionId, entry));
+      if (running !== undefined && !beside) {
+        if (next === true) return holdWork(mission, [], `the slot is free (${running.requestId} runs)`, "the running request is done, ahead of the remaining steps", { next: true });
+        if (after === undefined) return refused(slotRefusalOf(running, mission.code));
+        return holdWork(mission, after, `the slot is free (${running.requestId} runs)`, "the running request is done", {}, `${after.join(" and ")} passed; `);
+      }
+    }
     // A Worker gets Paseo's tools only when it is created: one made now could not create a Reviewer.
     if (await agentToolsOff(paseo)) return refused(AGENT_TOOLS_OFF_TOOL_MESSAGE);
     const profile = await workerProfileOf(paseo, log);
@@ -684,19 +787,22 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
       if (cwd === null) return refused(`paseo-bm could not read your folder from Paseo; try again in a moment. Nothing was created.`);
     } else {
       // The repo's folder as Paseo lists it, and the mission's rules for staffing it.
-      const listed = await listedWorkspaces(paseo as DashboardPaseo);
+      const seen = await listedWorkspaces(paseo as DashboardPaseo);
       // Delivery line design §3.3: from the cut-over, the Worker works in the mission's placement of the repo.
       const placed = placementModeOn(home);
+      const listed = seen === null || !placed ? seen : await withLiveRoots(home, mission, seen, { ...deps.placements, log });
       const repo = missionRepoOf(home, mission, placed && project !== undefined ? repoKeyOf(home, project) : project, listed);
-      if (lane === "new" && !placed) return refused("lanes need the mission's worktrees, which start after this repo's cut-over: leave lane out. Nothing was created.");
-      const reasons = Array.isArray(repo) ? repo : await staffingReasons(home, paseo as DashboardPaseo, mission, repo.workspaceId, listed, lane === undefined ? {} : { lane });
+      // ADR-047 decision 2: a peer answer runs in a lane of its own, as a parallel lane does.
+      const newLane = lane === "new" || parallel !== undefined || (beside && placed);
+      if (newLane && !placed) return refused("lanes need the mission's worktrees, which start after this repo's cut-over: leave lane and parallel out. Nothing was created.");
+      const reasons = Array.isArray(repo) ? repo : await staffingReasons(home, paseo as DashboardPaseo, mission, repo.workspaceId, listed, { ...(lane === undefined ? {} : { lane }), ...(parallel === undefined && !beside ? {} : { parallel: true }), ...(released ? { released: true } : {}) });
       if (reasons.length > 0 || Array.isArray(repo)) return refused([...reasons, "Nothing was created."].join("\n"));
       ({ workspaceId, directory: cwd } = repo);
       const repoKey = repoKeyOf(home, workspaceId);
       let placementLines: string[] = [];
       if (placed) {
         // Delivery line design §19.1: independent work in a free or new lane; otherwise lane 1, the mission branch.
-        const placement = lane === "new" ? await ensureLane(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log }) : await ensurePlacement(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log });
+        const placement = newLane ? await ensureLane(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log }) : await ensurePlacement(home, paseo, mission, repoKey, listed ?? [], { ...deps.placements, log });
         if (placement.ok) {
           workspaceId = placement.placement.workspaceId!;
           cwd = placement.placement.directory!;
@@ -727,11 +833,12 @@ export function createWorkerCreationTools(deps: WorkerCreationToolDeps): ServerT
     const made = await createRequestWorker(
       home,
       paseo,
-      { tool: CREATE_WORKER_TOOL, workspaceId, managerId, cwd, request, context, model: profile.model, mission, ...(missionLines === undefined ? {} : { missionLines }), ...(peer === undefined ? {} : { peer }) },
+      { tool: CREATE_WORKER_TOOL, workspaceId, managerId, cwd, request, context, model: profile.model, mission, ...(missionLines === undefined ? {} : { missionLines }), ...(peer === undefined ? {} : { peer }), ...(parallel === undefined && !beside ? {} : { parallel: true as const }) },
       { binder: deps.binder?.(), log },
     );
     if ("ok" in made) return made;
     const { workerId, requestId } = made;
+    if (mission !== null && parallel !== undefined) journalQuietly(createMissionStore(home), mission.missionId, { kind: "worker", by: managerId, text: `Parallel lane for ${requestId}: ${parallel}`, ref: requestId }, log);
     const where = { ...(notYet === null ? {} : { worktree: notYet }), ...(laneNumber === 1 ? {} : { lane: laneNumber }) };
     if (peerLink === undefined) return { ok: true, text: JSON.stringify({ workerId, requestId, ...where }) };
     const taken = takeLinkQuietly(home, peerLink, { workspaceId, requestId, workerId, managerId }, log);

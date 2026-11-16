@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { clearBindingCache, createBindingStore, type BindingStore, type ToolCaller } from "../plugin/server/agent-bindings";
 import { binderOf } from "../plugin/server/agent-tools";
@@ -206,6 +206,73 @@ describe("bm_tell_worker on a finished bound request opens its continuation (del
   });
 });
 
+describe("a continuation inherits the review batches that did not pass (ADR-045 decision 10)", () => {
+  const at = (minutes: number) => new Date(Date.parse("2026-10-03T10:00:00.000Z") + minutes * 60_000).toISOString();
+  const call = (callId: string, minutes: number, kind: "create" | "rereview" = "create", reviewerId = "agent-r1") => ({ callId, kind, reviewerId, at: at(minutes) });
+  const result = (minutes: number, verdict: string, blocking: number | null, recordId = `out-${minutes}`) => ({ at: at(minutes), recordId, verdict, blocking });
+
+  /** One batch of the predecessor, as its tools left it: its calls, then its results. */
+  function batch(home: string, batchId: string, calls: ReturnType<typeof call>[], results: ReturnType<typeof result>[]) {
+    const registry = createRequestRegistry(home);
+    for (const [index, entry] of calls.entries()) registry.addReviewCall(WS, REQ, batchId, { ...entry, callId: `${batchId}-${entry.callId}` }, index === 0 ? `Review ${batchId}` : undefined, "finished");
+    registry.noteReviewer(WS, REQ, batchId, "agent-r1");
+    for (const entry of results) registry.addReviewResult(WS, REQ, batchId, entry);
+  }
+
+  it("copies a batch that asked for changes, with its results, calls and brief, and names it in the brief; the predecessor keeps its own", async () => {
+    const { home, fake, tell } = setup();
+    registerRequest(home);
+    batch(home, "b1", [call("c1", 1), call("c2", 3, "rereview")], [result(2, "changes-required", 3), result(4, "changes-required", 2)]);
+    batch(home, "b2", [call("c3", 5)], [result(6, "pass", 0)]);
+    const before = structuredClone(createRequestRegistry(home).get(WS, REQ)!.reviews.batches);
+
+    const next = parsed(await tell({ requestId: REQ, text: "Fix the findings." }))["requestId"] as string;
+
+    const registry = createRequestRegistry(home);
+    expect(registry.get(WS, REQ)!.reviews.batches).toEqual(before);
+    expect(registry.get(WS, next)!.reviews.batches).toEqual([
+      { ...before[0]!, adoptedFrom: REQ, calls: before[0]!.calls.map((entry) => ({ ...entry, adopted: true })) },
+    ]);
+    expect(fake.creates[0]!.options.prompt!.split("\n")).toContain("open review batches: b1 (changes-required, 2 blocking): use bm_rereview");
+  });
+
+  it("names every open batch, and a blocking count it cannot know is left out", async () => {
+    const { home, fake, tell } = setup();
+    registerRequest(home);
+    batch(home, "b1", [call("c1", 1)], [result(2, "changes-required", 3)]);
+    batch(home, "b3", [call("c3", 5)], [result(6, "needs-owner", null)]);
+    await tell({ requestId: REQ, text: "Go on." });
+    expect(fake.creates[0]!.options.prompt!.split("\n")).toContain("open review batches: b1 (changes-required, 3 blocking), b3 (needs-owner): use bm_rereview");
+  });
+
+  it("copies neither a passed batch, nor one with no verdict, nor one whose newest call has no result yet; a batch from an older build stays behind", async () => {
+    const { home, fake, tell } = setup();
+    registerRequest(home);
+    batch(home, "passed", [call("c1", 1)], [result(2, "changes-required", 1), result(4, "pass", 0)]);
+    batch(home, "none", [call("c2", 5)], []);
+    batch(home, "lost", [call("c3", 7)], [result(8, "no-verdict", null)]);
+    batch(home, "running", [call("c4", 9), call("c5", 11, "rereview")], [result(10, "changes-required", 2)]);
+    const file = join(home, "requests", `${WS}.json`);
+    const body = JSON.parse(readFileSync(file, "utf8")) as { requests: Array<{ reviews: { batches: Array<Record<string, unknown>> } }> };
+    body.requests[0]!.reviews.batches.push({ batchId: "older", reviewerIds: ["agent-r1"], brief: "Review older", calls: [call("c6", 12)] });
+    writeFileSync(file, JSON.stringify(body));
+    clearRequestRegistryCache();
+
+    const next = parsed(await tell({ requestId: REQ, text: "Go on." }))["requestId"] as string;
+    expect(createRequestRegistry(home).get(WS, next)!.reviews.batches).toEqual([]);
+    expect(fake.creates[0]!.options.prompt).not.toContain("open review batches");
+  });
+
+  it("a batch whose last attempt ended without a verdict goes on, named by its last real verdict", async () => {
+    const { home, fake, tell } = setup();
+    registerRequest(home);
+    batch(home, "b1", [call("c1", 1), call("c2", 3, "rereview")], [result(2, "changes-required", 3), result(4, "no-verdict", null)]);
+    const next = parsed(await tell({ requestId: REQ, text: "Go on." }))["requestId"] as string;
+    expect(createRequestRegistry(home).get(WS, next)!.reviews.batches.map((entry) => entry.batchId)).toEqual(["b1"]);
+    expect(fake.creates[0]!.options.prompt!.split("\n")).toContain("open review batches: b1 (changes-required, 3 blocking): use bm_rereview");
+  });
+});
+
 describe("a Main's continuation (delivery line design §2.4 item 4, missions design §4)", () => {
   const MAIN = "agent-main";
   const BACK = "wks_back";
@@ -249,7 +316,7 @@ describe("a Main's continuation (delivery line design §2.4 item 4, missions des
     const answer = await tell({ requestId: REQ, text: "More." }, caller);
     expect(answer.ok).toBe(false);
     expect(answer.text).toBe(
-      `mission SHOP already has a live Worker in repo (request ${OTHER}): give it the work with bm_tell_worker, run independent work in a new lane (lane: "new"), or staffing is not delegated in this mission, so ask the owner first\nNothing was created.`,
+      `mission SHOP already has a live Worker in repo (request ${OTHER}): words about its work go to it with bm_tell_worker; next: true for new work, held to run next; after: ["${OTHER}"] when it needs that request's result; parallel only with the owner's explicit word quoted; or staffing is not delegated in this mission, so ask the owner first\nNothing was created.`,
     );
     expect(fake.creates).toEqual([]);
     expect(createRequestRegistry(home).list(BACK).map((request) => request.requestId)).toEqual([REQ, OTHER]);

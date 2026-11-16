@@ -141,6 +141,8 @@ function coordinationChangeText(change: StoredCoordinationChange): string {
       return `runs a compaction or handoff without waiting for a safe point at ${change.value}× its threshold ${exact}`;
     case "integration.ci":
       return `turns CI ${change.value} ${exact}`;
+    case "line.supervised":
+      return `turns the supervised line ${change.value ? "on" : "off"} ${exact}`;
     case "main.compact":
       return `turns a Main's in-place compaction ${change.value ? "on" : "off"} ${exact}`;
     case "main.contextShare":

@@ -228,7 +228,7 @@ async function reviewCall(reviewerId: string, minute: number): Promise<void> {
  * The shared fake SDK: the Manager, today's Worker and Reviewers, and
  * yesterday's. `reachable: false` is a host without per-agent access.
  */
-function daemonWith(options: { managerStatus?: string; managerArchivedAt?: string; reachable?: boolean } = {}) {
+function daemonWith(options: { managerStatus?: string; managerArchivedAt?: string; managerSession?: string; reachable?: boolean } = {}) {
   return fakePaseo<BudgetPaseo>({
     agents: [
       {
@@ -238,6 +238,7 @@ function daemonWith(options: { managerStatus?: string; managerArchivedAt?: strin
         provider: "bm-manager",
         labels: { "bm.role": "manager" },
         ...(options.managerArchivedAt === undefined ? {} : { archivedAt: options.managerArchivedAt }),
+        ...(options.managerSession === undefined ? {} : { persistence: { sessionId: options.managerSession } }),
       },
       { id: "agent-worker-old", workspaceId: WS, status: "closed", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": OLD_REQ, "paseo.parent-agent-id": MANAGER } },
       { id: WORKER, workspaceId: WS, status: "running", provider: "bm-worker", labels: { "bm.role": "worker", "bm.requestId": REQ, "paseo.parent-agent-id": MANAGER } },
@@ -471,6 +472,24 @@ describe("checkReviewBudget", () => {
     expect(await checkReviewBudget(ended(MANAGER, "bm-manager"), { location, paseo, told, pending, log })).toBe("within");
     expect(sends).toEqual([]);
     expect(String(log.mock.calls[0]?.[0])).toContain("archived");
+  });
+
+  it("resumes a Manager Paseo closed after its idle hour (ADR-042)", async () => {
+    await seedRequest();
+    await reviewCall("agent-rev-1", 5);
+    await reviewCall("agent-rev-1", 7);
+    const { paseo, sends } = daemonWith({ managerStatus: "closed", managerSession: "session-1" });
+    expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold(() => {}), pending: new Map<string, BudgetOverrun>() })).toBe("sent");
+    expect(sends).toHaveLength(1);
+  });
+
+  it("leaves alone a closed Manager with no session to resume", async () => {
+    await seedRequest();
+    await reviewCall("agent-rev-1", 5);
+    await reviewCall("agent-rev-1", 7);
+    const { paseo, sends } = daemonWith({ managerStatus: "closed" });
+    expect(await checkReviewBudget(ended("agent-rev-1", "bm-reviewer"), { location, paseo, told: createBudgetTold(() => {}), pending: new Map<string, BudgetOverrun>(), log: vi.fn() })).toBe("ignored");
+    expect(sends).toEqual([]);
   });
 
   it("logs and retries later when the notice cannot be sent, without throwing", async () => {

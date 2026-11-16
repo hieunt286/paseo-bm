@@ -11,7 +11,7 @@
  *   reported sha is an ancestor of `HEAD`, the worktree is on the mission
  *   branch and its tree is clean apart from ignored files (§4.6).
  * - `verifiedOf` (pure): with `integration.ci` off (the default, ADR-036,
- *   §17.1), a check the plugin detected (`shared/evidence.ts`), CI never
+ *   §17.1), a check the plugin detected or reused (`shared/evidence.ts`), CI never
  *   read; on, the merge request's checks passed on a pushed head that
  *   contains the sha, before a merge request a detected check, and a failure
  *   is CI red.
@@ -23,7 +23,7 @@
 import { GIT_READ_ONLY_PREFIX, runGit, type GitRunner } from "./repo-tool";
 import type { Placement } from "./mission-store";
 import { placementOfWorkspace } from "./placements";
-import { verificationOf, type ChecksVerdict, type VerificationInput } from "../shared/evidence";
+import { checksVerified, verificationOf, type ChecksVerdict, type VerificationInput, type VerificationRecord } from "../shared/evidence";
 import { evidenceFromItem } from "./collector";
 import type { ParsedReport, ReportCiState } from "../shared/contracts";
 import type { IntegrationCi } from "../shared/coordination";
@@ -202,9 +202,9 @@ function ciOf(input: VerifiedInput): ReportCiState | null {
   return input.integration?.ci ?? null;
 }
 
-/** §4.6, §17.1: verified, CI red, pending or unverified, from what the report and the descriptor say; with CI off, verified or unverified by the detected checks. Pure. */
+/** §4.6, §17.1: verified, CI red, pending or unverified, from what the report and the descriptor say; with CI off, verified or unverified by the detected or reused checks. Pure. */
 export function verifiedOf(input: VerifiedInput): Verified {
-  if (input.ci === "off") return input.committed && input.checks === "detected" ? "verified" : "unverified";
+  if (input.ci === "off") return input.committed && checksVerified(input.checks) ? "verified" : "unverified";
   const ci = ciOf(input);
   if (ci === "failure") return "ci-red";
   if (!input.committed) return "unverified";
@@ -244,6 +244,20 @@ export function finishedLineFactsOf(text: string): { committed: boolean; verifie
 export type TimelineEntries = ReadonlyArray<{ item?: unknown; timestamp?: unknown }>;
 
 /**
+ * The newest pages of a Worker's live timeline as one record for
+ * `verificationOf`: the turn that reports is not recorded yet (ADR-036 §17.1;
+ * ADR-045 decision 2). `pages` newest first, as read. Pure.
+ */
+export function liveRecordOf(pages: readonly TimelineEntries[], agentId: string): VerificationRecord {
+  const evidence = [...pages].reverse().flat().flatMap((entry) => {
+    const at = typeof entry.timestamp === "string" ? entry.timestamp : null;
+    if (at === null || entry.item === null || typeof entry.item !== "object") return [];
+    return evidenceFromItem(entry.item as Parameters<typeof evidenceFromItem>[0], agentId, at);
+  });
+  return { agentId, endedAt: evidence.at(-1)?.at ?? "", evidence };
+}
+
+/**
  * ADR-036 (§17.1): a request's checks as paseo-bm detects them in its
  * Worker's own turns (`shared/evidence.ts`), from the newest pages of the
  * Worker's live timeline: the turn that reports is not recorded yet. The tail
@@ -251,10 +265,5 @@ export type TimelineEntries = ReadonlyArray<{ item?: unknown; timestamp?: unknow
  * the tail moves nothing. `pages` newest first, as read. Pure.
  */
 export function liveChecksOf(pages: readonly TimelineEntries[], agentId: string, report: VerificationInput["report"], workspaceDirectory: string | null): ChecksVerdict {
-  const evidence = [...pages].reverse().flat().flatMap((entry) => {
-    const at = typeof entry.timestamp === "string" ? entry.timestamp : null;
-    if (at === null || entry.item === null || typeof entry.item !== "object") return [];
-    return evidenceFromItem(entry.item as Parameters<typeof evidenceFromItem>[0], agentId, at);
-  });
-  return verificationOf({ report, records: [{ agentId, endedAt: evidence.at(-1)?.at ?? "", evidence }], workspaceDirectory }).checks;
+  return verificationOf({ report, records: [liveRecordOf(pages, agentId)], workspaceDirectory }).checks;
 }

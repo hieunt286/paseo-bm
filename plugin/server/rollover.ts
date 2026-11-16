@@ -15,7 +15,10 @@
  * - **Now**: `rollover.ceilingFactor` × one figure queues `BM-ROLLOVER now`,
  *   once, at once (`rollover-now` is on the wake gate's always-at-once list),
  *   ahead of what is queued for the Worker (`first`, the maintenance
- *   ceiling's order, §6.6).
+ *   ceiling's order, §6.6). It never waits for a review: `finished` with
+ *   `remaining` is then accepted, and the batch goes onto the continuation
+ *   (ADR-046). It is the current Worker's: a Worker whose handoff is under
+ *   way is not asked, and a later Worker of the request is asked again.
  *
  * The request's registry entry keeps the newest notice (`rolloverAsked`).
  * `bm_report` reads it: a `finished` with `remaining` then opens the size
@@ -30,6 +33,7 @@ import { requestTokensReadOf } from "../shared/handoff";
 import { ROLLOVER_NOTICE_MARKER } from "../shared/notices";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME } from "./data-home";
+import { createHandoffStore, isPendingHandoffState } from "./handoff-store";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
 import { createRequestRegistry, isBoundRequest } from "./request-registry";
 import { errorText } from "./rpc-kit";
@@ -98,6 +102,15 @@ export function rolloverNoticeOf(level: RolloverLevel, requestId: string, figure
   ].join("\n");
 }
 
+/** The Worker's handoff has asked for its note or gone further: its successor is the one to hear `now` (ADR-046). Never throws. */
+function handoffUnderWay(home: string, requestId: string, workerId: string): boolean {
+  try {
+    return createHandoffStore(home).list().some((entry) => entry.workerId === workerId && entry.requestId === requestId && entry.state !== "waiting" && isPendingHandoffState(entry.state));
+  } catch {
+    return false;
+  }
+}
+
 export interface RolloverDeps {
   queue?: Pick<NoticeQueue, "enqueue">;
   now?: () => Date;
@@ -116,14 +129,16 @@ export async function rolloverTurnRecorded(home: string, record: TraceRecord | n
   try {
     const registry = createRequestRegistry(home, { log });
     const request = registry.get(workspaceId, requestId);
-    if (!isBoundRequest(request) || request.finishedAt !== null || request.workerIds.at(-1) !== agentId || request.rolloverAsked?.level === "now") return null;
+    if (!isBoundRequest(request) || request.finishedAt !== null || request.workerIds.at(-1) !== agentId || (request.rolloverAsked?.level === "now" && (request.rolloverAsked.workerId ?? agentId) === agentId)) return null;
     const records = readRecords({ tracesDir: join(home, TRACES_DIR_NAME) }, workspaceId).records;
     const crossing = rolloverCrossingOf(rolloverFiguresOf(records, requestId, record), readCoordinationSettings({ home, log }));
-    if (crossing === null || crossing.level === request.rolloverAsked?.level) return null;
+    // A `now` that reached an earlier Worker is asked again: that Worker was replaced before it could finish.
+    if (crossing === null || (crossing.level === "soft" && request.rolloverAsked !== undefined) || (crossing.level === "now" && handoffUnderWay(home, requestId, agentId))) return null;
+    const now = deps.now?.() ?? new Date();
     const hint = { workspaceId, requestId };
     if (crossing.level === "soft" ? gatedWaitOf(home, agentId, hint) !== null : wakeGate(home, agentId, "rollover-now", [], hint).action === "hold") return null;
     const text = rolloverNoticeOf(crossing.level, requestId, crossing.figure);
-    const asked = { level: crossing.level, figure: crossing.figure, at: (deps.now?.() ?? new Date()).toISOString() };
+    const asked = { level: crossing.level, figure: crossing.figure, at: now.toISOString(), ...(crossing.level === "now" ? { workerId: agentId } : {}) };
     let heldNow = false;
     // §6.4: a soft notice the gate holds at its send (the Worker reported `blocked` meanwhile) is forgotten, to be asked again.
     const onHeld = (): void => {

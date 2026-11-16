@@ -731,7 +731,7 @@ export async function runScenario(options: ScenarioOptions): Promise<ScenarioRes
       if (waitingUnmet(agent.workspaceId, requestId) && !agent.finishNow && !nudged) return;
       waits.delete(keyOf(agent.workspaceId, requestId));
       if (!agent.received) {
-        agent.received = (await report(agent, { phase: "received" })).ok;
+        agent.received = (await report(agent, { phase: "received", goal: "The part of the mission this Worker was given.", acceptance: ["Its beads are closed with evidence"] })).ok;
         agent.continues = true;
         return;
       }

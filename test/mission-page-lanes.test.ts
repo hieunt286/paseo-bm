@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { missionGetRpc } from "../plugin/shared/contracts";
 import { clearJsonFileCache } from "../plugin/server/data-files";
-import { holdRequest } from "../plugin/server/held-requests";
-import { MISSION_WAITING_SHOWN, STEERED_SHOWN_MS, overlapsOf } from "../plugin/server/mission-page-lanes";
+import { createAlertStore } from "../plugin/server/alert-store";
+import { applyLine, heldRequestsOf, holdRequest, proposeLine, startHeldRequests } from "../plugin/server/held-requests";
+import { MISSION_WAITING_SHOWN, STEERED_SHOWN_MS, lineOf, overlapsOf } from "../plugin/server/mission-page-lanes";
 import { clearRequestIndexCache, createMissionRoster } from "../plugin/server/mission-roster";
 import { createMissionStore, type Placement } from "../plugin/server/mission-store";
 import { handleMissionGet } from "../plugin/server/missions-rpc";
 import { createOutbox } from "../plugin/server/outbox";
 import { MAX_LANES } from "../plugin/server/placement-create";
+import { clearRequestRegistryCache, createRequestRegistry } from "../plugin/server/request-registry";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 
 /**
@@ -28,6 +30,7 @@ const REQ_C = "req-20261025T030000Z";
 afterEach(() => {
   clearJsonFileCache();
   clearRequestIndexCache();
+  clearRequestRegistryCache();
   removeDataFolders();
 });
 
@@ -131,6 +134,16 @@ describe("mission.get's Waiting part (§19.8)", () => {
     ]);
   });
 
+  it("shows the topic of a held entry another one waits for", async () => {
+    const { home, missionId } = world();
+    const first = holdRequest(home, missionId, { after: [REQ_B], input: { request: "Step two" }, topic: "Step two of the line", by: "main-1" }, new Date(at(31)));
+    if (!first.ok) throw new Error(first.reason);
+    const second = holdRequest(home, missionId, { after: [first.entry.holdId, REQ_B], input: { request: "Step three" }, topic: "Step three of the line", by: "main-1" }, new Date(at(30)));
+    if (!second.ok) throw new Error(second.reason);
+    const line = (await read(home, missionId)).waiting!.find((entry) => entry.id === second.entry.holdId)!;
+    expect(line).toMatchObject({ kind: "held", after: [{ requestId: first.entry.holdId, topic: "Step two of the line" }, { requestId: REQ_B, topic: "Keep only the bypass-authz flag" }] });
+  });
+
   it("keeps the newest few, and says replaced when Paseo replaced the turn", async () => {
     const { home, missionId } = world();
     for (let n = 0; n < MISSION_WAITING_SHOWN + 3; n += 1) {
@@ -142,5 +155,113 @@ describe("mission.get's Waiting part (§19.8)", () => {
     expect(waiting).toHaveLength(MISSION_WAITING_SHOWN);
     expect(waiting.map((line) => (line.kind === "tell" ? line.text : line.topic))).toEqual([...Array.from({ length: MISSION_WAITING_SHOWN - 1 }, (_, index) => `tell ${index + 4}`), "now"]);
     expect(waiting.at(-1)).toMatchObject({ kind: "tell", state: "replaced", owner: true });
+  });
+});
+
+describe("mission.get's line (ADR-045 decision 5)", () => {
+  const QUIET = { enqueue: async () => "sent" as const, enqueueBatch: async (_target: string, _batch: unknown, items: unknown[]) => items.map(() => "sent" as const) } as never;
+
+  /** A mission with an approved line of `titles`; `start` is one pass of the plugin, whose Worker creation lands on the roster. */
+  function lineWorld(titles: string[], approve = true) {
+    const home = dataFolder();
+    const made = createMissionStore(home, { now: () => NOW }).create({ code: "LIN", name: "Line", goal: "Ship it.", repos: [REPO], createdBy: "owner", mainId: "main-1" });
+    if (!made.ok) throw new Error(made.reasons.join("\n"));
+    const missionId = made.mission.missionId;
+    const registry = createRequestRegistry(home, { log: () => {} });
+    const roster = createMissionRoster(home, { now: () => NOW });
+    const proposed = proposeLine(home, missionId, { lineId: "line-1", by: "main-1", steps: titles.map((title) => ({ title, request: title, acceptance: ["Done"] })) }, NOW);
+    if (!proposed.ok) throw new Error(proposed.reason);
+    if (approve) applyLine(home, missionId, "line-1");
+    const started: string[] = [];
+    const create = async () => {
+      const { requestId } = registry.generate(REPO, { managerId: "main-1", missionId });
+      roster.add(missionId, { requestId, workspaceId: REPO, topic: "The work", workerId: `w-${requestId}` });
+      started.push(requestId);
+      return { ok: true, text: JSON.stringify({ requestId, workerId: `w-${requestId}` }) };
+    };
+    const pass = (paseo?: unknown) => startHeldRequests(home, { create, queue: QUIET, log: () => {}, ...(paseo === undefined ? {} : { paseo: paseo as never }) });
+    const finish = (requestId: string, gate: { passed: boolean; reasons?: string[] }) => {
+      registry.noteFinishGate(REPO, requestId, { passed: gate.passed, reasons: gate.reasons ?? [], at: at(1), commit: null });
+      roster.setState(missionId, requestId, "finished");
+    };
+    return { home, missionId, entries: proposed.entries, started, pass, finish, registry, roster };
+  }
+
+  const lineOfPage = async (home: string, missionId: string) => (await read(home, missionId)).line;
+
+  it("is null with no line, and while a line is only proposed", async () => {
+    const { home, missionId } = world();
+    expect(await lineOfPage(home, missionId)).toBeNull();
+    const proposed = lineWorld(["One", "Two"], false);
+    expect(await lineOfPage(proposed.home, proposed.missionId)).toBeNull();
+  });
+
+  it("reads the step that runs, on the newest request of its chain, and blocked while its request waits for someone", async () => {
+    const { home, missionId, pass, finish, started, registry, roster } = lineWorld(["One", "Two", "Three", "Four"]);
+    await pass();
+    expect(await lineOfPage(home, missionId)).toEqual({ n: 1, of: 4, title: "One", state: "running", requestId: started[0], why: null });
+    finish(started[0]!, { passed: true });
+    // Passed and not yet started: the next step waits for its turn.
+    expect(await lineOfPage(home, missionId)).toMatchObject({ n: 2, state: "blocked", requestId: null, why: "starts when the request running now ends" });
+    await pass();
+    expect(await lineOfPage(home, missionId)).toEqual({ n: 2, of: 4, title: "Two", state: "running", requestId: started[1], why: null });
+
+    const { requestId: next } = registry.generate(REPO, { managerId: "main-1", missionId, continuationOf: started[1]! });
+    roster.add(missionId, { requestId: next, workspaceId: REPO, topic: "The rest", workerId: "w-next", continuationOf: started[1]! });
+    registry.noteContinuedBy(REPO, started[1]!, next, { reason: "size", figure: "180k", at: at(1) });
+    roster.setState(missionId, started[1]!, "finished");
+    expect(await lineOfPage(home, missionId)).toMatchObject({ n: 2, state: "running", requestId: next });
+
+    const waitingFor = (state: string, waitingOn: string | null = null) => lineOf(home, missionId, [{ requestId: next, state, waitingOn } as never]);
+    expect(waitingFor("waiting-owner")).toMatchObject({ state: "blocked", why: "waiting for you" });
+    expect(waitingFor("waiting-main")).toMatchObject({ state: "blocked", why: "waiting for the Main" });
+    expect(waitingFor("waiting-other", "the login API")).toMatchObject({ state: "blocked", why: "waiting for the login API" });
+    expect(waitingFor("undelivered")).toMatchObject({ state: "blocked", why: "a delivery failed" });
+  });
+
+  it("reads a stalled step as stopped with its reason, and a stop stays on the started step, off the Waiting list", async () => {
+    const { home, missionId, entries, pass, started } = lineWorld(["One", "Two"]);
+    await pass();
+    createAlertStore(home, { now: () => new Date(at(30)) }).raise({ workspaceId: REPO, kind: "request-stalled", subject: started[0]! });
+    const reason = `${started[0]} has stalled since ${at(30)}`;
+    // Before any pass the alert is enough; a pass then stores it as the step's stopNote.
+    expect(await lineOfPage(home, missionId)).toEqual({ n: 1, of: 2, title: "One", state: "stopped", requestId: started[0], why: reason });
+    await pass();
+    const step = heldRequestsOf(home, missionId).find((entry) => entry.holdId === entries[0]!.holdId)!;
+    expect(step).toMatchObject({ state: "started", stopNote: reason });
+    expect(await lineOfPage(home, missionId)).toEqual({ n: 1, of: 2, title: "One", state: "stopped", requestId: started[0], why: reason });
+    expect((await read(home, missionId)).waiting!.map((line) => line.id)).toEqual([entries[1]!.holdId]);
+  });
+
+  it("reads a step with no live Worker as stopped with its reason, from its stopNote", async () => {
+    const { home, missionId, entries, pass, started } = lineWorld(["One", "Two"]);
+    await pass();
+    await pass({ agents: { list: async () => ({ entries: [{ id: "main-1", provider: "bm-manager", status: "running", labels: { "bm.role": "manager" } }], pageInfo: { hasMore: false } }) } });
+    expect(heldRequestsOf(home, missionId).find((entry) => entry.holdId === entries[0]!.holdId)).toMatchObject({ state: "started", stopNote: `${started[0]} has no live Worker` });
+    expect(await lineOfPage(home, missionId)).toEqual({ n: 1, of: 2, title: "One", state: "stopped", requestId: started[0], why: `${started[0]} has no live Worker` });
+  });
+
+  it("reads a failed gate at the step that failed it, and gives the step waiting on it its place and the reason", async () => {
+    const { home, missionId, entries, pass, finish, started } = lineWorld(["One", "Two"]);
+    await pass();
+    finish(started[0]!, { passed: false, reasons: ["review batch b1 has not passed"] });
+    await pass();
+    const reason = `${started[0]} did not pass its finish gate: review batch b1 has not passed`;
+    expect(await lineOfPage(home, missionId)).toEqual({ n: 1, of: 2, title: "One", state: "stopped", requestId: started[0], why: reason });
+    expect((await read(home, missionId)).waiting!.find((line) => line.id === entries[1]!.holdId)).toMatchObject({ kind: "held", state: "waiting-stopped", step: { n: 2, of: 2, title: "Two" }, why: reason });
+  });
+
+  it("is done when every step passed, and never done on a last step whose gate failed", async () => {
+    const passing = lineWorld(["One", "Two"]);
+    await passing.pass();
+    passing.finish(passing.started[0]!, { passed: true });
+    await passing.pass();
+    passing.finish(passing.started[1]!, { passed: true });
+    expect(await lineOfPage(passing.home, passing.missionId)).toEqual({ n: 2, of: 2, title: "Two", state: "done", requestId: passing.started[1], why: null });
+
+    const failing = lineWorld(["Only"]);
+    await failing.pass();
+    failing.finish(failing.started[0]!, { passed: false, reasons: ["the changed files are not committed"] });
+    expect(await lineOfPage(failing.home, failing.missionId)).toMatchObject({ state: "stopped", why: `${failing.started[0]} did not pass its finish gate: the changed files are not committed` });
   });
 });

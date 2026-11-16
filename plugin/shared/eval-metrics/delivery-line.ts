@@ -65,7 +65,7 @@ import { WAITING_FOR_PREFIX, WAITING_ON_OWNER_PREFIX, WAITING_ON_PROJECT_PREFIX 
 import type { ParsedReport, TraceRecord } from "../contracts";
 import { coordinationSettingsOf, DEFAULT_COORDINATION_SETTINGS } from "../coordination";
 import type { Decision } from "../decisions";
-import { requestFinishOf } from "../evidence";
+import { checksVerified, requestFinishOf } from "../evidence";
 import { MAINTENANCE_WAIT_MS } from "../interventions";
 import { isPluginNotice, isPluginPrompt, noticeMarkerOf, parseDelivery, updatesItemsOf } from "../notices";
 import { timeOrNull } from "../time";
@@ -606,9 +606,9 @@ export function m38Of(scope: EvalScope, input: Pick<EvalInput, "missionRequests"
     }
     if (line?.verified === true || integration?.ci === "success") {
       verified += 1;
-      if (integration?.ci === "success" || finish.checks !== "detected") verifiedBy.ci += 1;
+      if (integration?.ci === "success" || !checksVerified(finish.checks)) verifiedBy.ci += 1;
       else verifiedBy.check += 1;
-    } else if (finish.checks === "detected") {
+    } else if (checksVerified(finish.checks)) {
       verified += 1;
       verifiedBy.check += 1;
     }

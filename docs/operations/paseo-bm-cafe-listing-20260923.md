@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | ID | `cafe-listing-20260923` |
-| Status | **Active** — paseo-bm is listed. The entry declares `path: "plugin-package"` and `package: "paseo-bm-plugin"`, as set by [PR #315](https://github.com/paseo-cafe/paseo-cafe/pull/315) (0.5 caveats and the bundled path, [ADR-026](../adr/ADR-026-published-plugin-is-bundled.md)), merged 2026-10-01. Earlier PRs: [#215](https://github.com/paseo-cafe/paseo-cafe/pull/215) (first listing), [#284](https://github.com/paseo-cafe/paseo-cafe/pull/284) (0.4 caveats) |
+| Status | Not maintained since 2026-11-16: paseo-bm no longer depends on paseo.cafe ([ADR-048](../adr/ADR-048-no-dependency-on-paseo-cafe-and-no-bundle-size-limit.md)). Kept as the record of the listing. |
 | Owner | hieu.nt10 |
 | Created | 2026-09-23 |
 | Request | `req-20260923T063441Z`: "Now I want to register my plugin on this site : https://paseo.cafe/submit , what do I need to do and what can you help me do" |

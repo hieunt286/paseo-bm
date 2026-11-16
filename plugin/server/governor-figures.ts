@@ -68,7 +68,7 @@ import { metAtOf, type Mission } from "./mission-store";
 import { mainPlacesOf } from "./missions-home";
 import { createOutbox, newestReportRecordOf, reportPhaseOf } from "./outbox";
 import { createPeerLinkStore, isLiveLink } from "./peer-links";
-import { createRequestRegistry } from "./request-registry";
+import { createRequestRegistry, ownCallsOf } from "./request-registry";
 import { CONVERGENCE_STOP_TAIL, batchResultsOf, convergenceRefusalOf, grantedCallsOf, milestoneBatchesOf } from "./review-tools";
 import type { RegisteredRequest } from "./request-registry";
 import { ownReviewsOf } from "../shared/bm-report";
@@ -551,7 +551,7 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
       workerIds: [...new Set([...entry.workerIds, ...(registered?.workerIds ?? [])])],
       finishedAt: registered?.finishedAt ?? null,
       tier: registered?.tier ?? null,
-      reviewCalls: registered === null ? 0 : registered.reviews.batches.reduce((sum, batch) => sum + batch.calls.length, 0),
+      reviewCalls: registered === null ? 0 : registered.reviews.batches.reduce((sum, batch) => sum + ownCallsOf(batch).length, 0),
       reviewGranted: registered === null ? 0 : grantedCallsOf(registered),
       reviewMilestones: registered === null ? 0 : milestoneBatchesOf(registered),
       lastPhase: report === null ? null : (reportPhaseOf(report.text) ?? null),
@@ -610,6 +610,8 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
       .filter((record) => record.state === "dropped" && (requestIds.has(record.requestId) || missionOfDecisionId(record.requestId) === mission.missionId))
       .map((record) => ({ id: record.id, outcomeAt: record.outcomeAt })),
   );
+  // ADR-042 decision 5: answers that reached nobody count as a dropped record does.
+  const failedAnswers = decisions.flatMap((decision) => ("delivery" in decision && decision.delivery?.outcome === "failed" ? [{ id: decision.id, outcomeAt: decision.delivery.at }] : []));
 
   const repoOf = new Map(requests.map((request) => [request.requestId, request.workspaceId]));
   const alerts = quietly("the alerts", () => createAlertStore(home).list({ open: true, kinds: ["request-stalled", "peer-unanswered"] }), []).filter(
@@ -635,7 +637,7 @@ export function readGovernorSnapshot(home: string, mission: Mission, deps: Gover
     mainTurnEnds: [...mainTurns.values()],
     driftTurnEnds: [...driftTurns.values()],
     decisions,
-    dropped,
+    dropped: [...dropped, ...failedAnswers],
     alerts,
     links,
     review: deps.settings.review,

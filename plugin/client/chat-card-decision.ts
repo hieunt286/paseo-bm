@@ -33,6 +33,7 @@ import {
   type Decision,
   type Effect,
 } from "../shared/decisions";
+import { missionLineDetailsOf } from "../shared/mission-change";
 import { MAX_BODY_LINES, type ChatCard, type ChatRole, type DecisionSeed } from "./chat-card-parse";
 import { actorName, party } from "./chat-card-parties";
 import type { CardFrameView } from "./chat-card-frame";
@@ -314,6 +315,8 @@ function decisionDetails(card: ChatCard, seed: DecisionSeed, decision: Decision 
     const effects = realEffects(option.effects);
     lines.push(`${option.key}: ${option.label}${option.recommended ? " (recommended)" : ""} — effects: ${effects.length === 0 ? "none" : effectWords(effects)}`);
   }
+  // ADR-045 decision 1: a step list's acceptance criteria, where the owner answers.
+  lines.push(...missionLineDetailsOf(decision.options));
   lines.push(`Status: ${decision.status}${decision.settledAt === null ? "" : ` at ${decision.settledAt}`}`);
   const proposal = proposalOf(decision);
   if (proposal !== null) lines.push(`${SUGGESTS_MARKS[proposal.by]}: ${proposal.optionKey} at ${proposal.at}`);

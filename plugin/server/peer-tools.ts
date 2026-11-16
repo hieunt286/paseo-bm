@@ -34,6 +34,7 @@
  * carried text is masked with `redactText` (the outbox and the link store
  * mask what they keep). Nothing here throws into the endpoint.
  */
+import { isReachable } from "./agent-presence";
 import { createBindingStore, liveBindingOf, withoutTokenPaths, type AgentBinder, type ToolCaller } from "./agent-bindings";
 import { createAlertStore } from "./alert-store";
 import { soleWorkerOfRequest } from "./decision-delivery";
@@ -45,7 +46,7 @@ import type { NoticeQueue } from "./notice-queue";
 import { createOutbox, storeAndDeliver, usePeerTargets, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import { unboundManagerAlertOf } from "./outdated-agents";
 import { bmAgentsOf, listedWorkspaces, titleIn, type DashboardPaseo } from "./paseo-directory";
-import { repoKeyOf, repoKeysIn } from "./placements";
+import { liveRootOf, repoAliasesIn, repoKeyOf, repoKeysIn } from "./placements";
 import { isPluginHomeIn } from "./plugin-homes";
 import {
   PEER_RULES,
@@ -193,16 +194,22 @@ export { titleIn };
 // Who receives (§7.17.4).
 // ---------------------------------------------------------------------------
 
-/** The live paseo-bm agents: not archived, not closed, not replaced (a label or a fallback switch). */
+/** The paseo-bm agents a message can reach: live or resting (ADR-042), not replaced (a label or a fallback switch). */
 async function liveAgentsOf(paseo: unknown, home: string): Promise<Awaited<ReturnType<typeof bmAgentsOf>>> {
   const replaced = replacementsOf(readIncidents(home, () => {}).incidents);
   return (await bmAgentsOf(paseo as DashboardPaseo, { home })).filter(
-    ({ facts }) => !facts.archived && facts.status !== "closed" && (facts.replacedBy ?? null) === null && !replaced.has(facts.id),
+    ({ facts }) => isReachable(facts) && (facts.replacedBy ?? null) === null && !replaced.has(facts.id),
   );
 }
 
-const newestManagerOf = async (paseo: unknown, workspaceId: string, home: string): Promise<string | null> =>
-  (await findLiveManagers(paseo as ManagerPaseo, workspaceId, { home }))[0]?.id ?? null;
+/** The project's newest live Manager: of the repo key's workspace, else of an alias of it (ADR-043). */
+const newestManagerOf = async (paseo: unknown, workspaceId: string, home: string): Promise<string | null> => {
+  for (const place of [workspaceId, ...Object.entries(repoAliasesIn(home)).flatMap(([id, repo]) => (repo === workspaceId ? [id] : []))]) {
+    const found = (await findLiveManagers(paseo as ManagerPaseo, place, { home }))[0]?.id;
+    if (found !== undefined) return found;
+  }
+  return null;
+};
 
 /** Every agent that is or was a mission's Main (its Main history) → that mission's id, the first mission in the index winning. Never throws. */
 function missionIdsByMain(home: string): Map<string, string> {
@@ -494,9 +501,11 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
       const known = managers.get(workspaceId);
       if (known === undefined || (facts.createdAt ?? "") > (known.createdAt ?? "")) managers.set(workspaceId, facts);
     }
+    // ADR-043: one project per repo, by its live root: its key while listed, else an alias of it.
+    const roots = new Set((listed ?? []).map((entry) => liveRootOf(home, keyOf(entry.id), listed)));
     const projects = (listed ?? [])
       // The plugin's own homes are not projects (missions design §3.1).
-      .filter((entry) => entry.id !== "" && !entry.archived && keyOf(entry.id) === entry.id && entry.id !== keyOf(mine) && !isPluginHomeIn(entry.id, listed, home))
+      .filter((entry) => entry.id !== "" && !entry.archived && roots.has(entry.id) && keyOf(entry.id) !== keyOf(mine) && !isPluginHomeIn(entry.id, listed, home))
       .map((entry) => {
         const manager = managers.get(entry.id);
         return { workspaceId: entry.id, title: titleIn(listed, entry.id), directory: entry.directory, manager: manager === undefined ? null : { id: manager.id, status: manager.status } };
@@ -617,10 +626,12 @@ export function createPeerTools(deps: PeerToolDeps): PeerTools {
     // The bounds first (§7.17.6): nothing is opened for an ask the chain refuses.
     const bounds = chainFor(links.list(), from, target.workspaceId, route, repoKeysIn(home));
     if (!bounds.ok) return why(bounds.reasons);
-    const title = titleIn(listed, target.workspaceId);
+    // ADR-043: the link stores the repo key; Paseo is addressed at the repo's live root.
+    const root = liveRootOf(home, target.workspaceId, listed);
+    const title = titleIn(listed, root);
     let manager: { id: string; opened: boolean };
     if (mission === null) {
-      const found = await managerOf(paseo, home, target.workspaceId, title);
+      const found = await managerOf(paseo, home, root, title);
       if ("ok" in found) return found;
       manager = found;
     } else {

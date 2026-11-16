@@ -8,10 +8,12 @@ import { clearDecisionStoreCache, createDecisionStore } from "../plugin/server/d
 import { createGovernorStore } from "../plugin/server/governor-store";
 import { createMissionDecisionStore } from "../plugin/server/mission-decisions";
 import { clearRequestIndexCache, createMissionRoster, noteFollowUp, noteRosterReport } from "../plugin/server/mission-roster";
+import { createAlertStore } from "../plugin/server/alert-store";
 import { missionStateOf, waitingOnOf } from "../plugin/server/mission-state";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { createOutbox } from "../plugin/server/outbox";
 import { createPeerLinkStore } from "../plugin/server/peer-links";
+import { createRequestRegistry } from "../plugin/server/request-registry";
 import { clearTraceStoreCache, appendRecord } from "../plugin/server/trace-store";
 import { makeDecision } from "./helpers/decisions";
 import { fakeLineGit } from "./helpers/line-git";
@@ -93,6 +95,14 @@ describe("requestStateOf (design §2.1)", () => {
     expect(requestStateOf({ rosterState: "active", lastReport: { phase: "blocked", at: at(0) }, followUpAt: null, openDeciders: [], waitingOn: "req-x" })).toBe("waiting-other");
     expect(requestStateOf({ rosterState: "active", lastReport: { phase: "received", at: at(0) }, followUpAt: null, openDeciders: [], waitingOn: null })).toBe("working");
     expect(requestStateOf({ rosterState: "stopped", lastReport: null, followUpAt: null, openDeciders: [], waitingOn: null })).toBe("stopped");
+    // ADR-045 decision 14: an owner's open question ranks above a failed delivery; the owner is who holds the request.
+    expect(requestStateOf({ rosterState: "active", lastReport: { phase: "blocked", at: at(0) }, followUpAt: null, openDeciders: ["owner"], waitingOn: null, undelivered: true })).toBe("waiting-owner");
+    // ADR-042: otherwise a failed delivery shows ahead of every other wait, never over a request that ended.
+    expect(requestStateOf({ rosterState: "active", lastReport: { phase: "blocked", at: at(0) }, followUpAt: null, openDeciders: ["main"], waitingOn: "req-x", undelivered: true })).toBe("undelivered");
+    expect(requestStateOf({ rosterState: "active", lastReport: { phase: "received", at: at(0) }, followUpAt: null, openDeciders: [], waitingOn: null, undelivered: true })).toBe("undelivered");
+    expect(requestStateOf({ rosterState: "active", lastReport: { phase: "blocked", at: at(0) }, followUpAt: null, openDeciders: [], waitingOn: "req-x", undelivered: true })).toBe("undelivered");
+    expect(requestStateOf({ rosterState: "finished", lastReport: { phase: "finished", at: at(0) }, followUpAt: null, openDeciders: [], waitingOn: null, undelivered: true })).toBe("finished");
+    expect(requestStateOf({ rosterState: "stopped", lastReport: { phase: "stopped", at: at(0) }, followUpAt: null, openDeciders: ["owner"], waitingOn: null, undelivered: true })).toBe("stopped");
   });
 
   it("a bound finished or stopped request is final: a later follow-up never reads it working (delivery line design §2.3)", () => {
@@ -151,6 +161,16 @@ describe("missionStateOf (design §2.1)", () => {
     expect(text).toContain(`Waiting on the owner:\n- m:${MISSION}:1 (your question): Commit .env.serve.local?`);
     expect(text).toContain("The owner said lately:");
     expect(text.endsWith("Read the whole mission with bm_mission.")).toBe(true);
+  });
+
+  it("reads a request undelivered while its delivery-dropped alert is open (ADR-042)", () => {
+    roster().add(MISSION, { requestId: REQ_A, workspaceId: BACK, topic: "Push and add routes", workerId: "w-back" });
+    report(BACK, REQ_A, "w-back", "blocked", ["blockers: waiting on the owner: Q1."]);
+    createAlertStore(home).raise({ workspaceId: BACK, kind: "delivery-dropped", subject: REQ_A, detail: "the answers did not arrive" });
+    expect(state().requests.map((request) => request.state)).toEqual(["undelivered"]);
+    expect(renderMissionState(state())).toContain("delivery failed");
+    createAlertStore(home).clearWhere((open) => open.subject === REQ_A);
+    expect(state().requests.map((request) => request.state)).not.toContain("undelivered");
   });
 
   it("keeps the rendering within its bound by dropping the oldest lines of the last sections first", () => {
@@ -256,6 +276,23 @@ describe("missionStateOf (design §2.1)", () => {
     expect(finishedLineFactsOf("BM-REPORT\nphase: finished")).toBeNull();
     // A mission with no placement has no Lines section.
     expect(renderMissionState(state())).not.toContain("Lines:");
+  });
+
+  it("shows could not run on the request whose finished could not be run for real, only on that one (ADR-045 decision 6)", () => {
+    roster().add(MISSION, { requestId: REQ_A, workspaceId: BACK, topic: "Add routes", workerId: "w-back" });
+    roster().add(MISSION, { requestId: REQ_B, workspaceId: FRONT, topic: "G14 tools", workerId: "w-front" });
+    roster().add(MISSION, { requestId: REQ_C, workspaceId: FRONT, topic: "Docs", workerId: "w-docs" });
+    const registry = createRequestRegistry(home);
+    registry.register(BACK, REQ_A, { source: "tool", managerId: MAIN });
+    registry.register(FRONT, REQ_B, { source: "tool", managerId: MAIN });
+    registry.noteProof(BACK, REQ_A, { kind: "could-not-run", what: "it needs a login", at: NOW.toISOString() });
+    registry.noteProof(FRONT, REQ_B, { kind: "ran", what: "opened the page", at: NOW.toISOString() });
+    const found = state();
+    expect(found.requests.find((request) => request.requestId === REQ_A)).toMatchObject({ couldNotRun: true });
+    for (const other of [REQ_B, REQ_C]) expect(found.requests.find((request) => request.requestId === other)).not.toHaveProperty("couldNotRun");
+    const text = renderMissionState(found);
+    expect(text).toMatch(new RegExp(`- ${REQ_A} in \\S+: working, could not run; Worker w-back`));
+    expect(text.split("\n").filter((line) => line.includes("could not run"))).toHaveLength(1);
   });
 
   it("returns null for an unknown mission", () => {

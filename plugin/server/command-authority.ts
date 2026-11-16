@@ -17,7 +17,8 @@
  *   concerns on the ladder (`governor-store.ts`): a nudge takes a family at
  *   step 1 to 2 (its window counts from now), a re-plan one at step 3 to 4
  *   (escalate or stop); any other step on a family at step 1 or 2 restarts
- *   its window, both its minutes and its Main turns.
+ *   its window, both its minutes and its Main turns. A nudge whose named
+ *   figures are all of `QUIET_FAMILIES` is refused (ADR-045 decision 9).
  * - `bm_direct_worker` (§6B.4, ADR-016; narrowed by missions design §9.1)
  *   only stops a paseo-bm Worker at once (`intent: stop`, `interrupt: true`,
  *   no effect), and only while a danger signal of that Worker is open or a
@@ -27,7 +28,7 @@
  *   `reversible-technical` for the project (`policy:reversible-technical`,
  *   autonomy design §B.9), or the owner's own latest inbound message in the
  *   Orchestrator's chat (`isOwnerWord`). Its Main (else its Manager) gets
- *   the same block with `copy: yes` through the queue. Never a Reviewer.
+ *   the same block with `copy: yes` as a note (ADR-045 decision 14). Never a Reviewer.
  * - A stop never carries the answer to a question the decision store holds
  *   (change-004, ADR-017): a `BM-ANSWERS` block naming a stored `Qn` of that
  *   request is refused (`refuseStoredAnswers`).
@@ -54,7 +55,7 @@ import { readCoordinationSettings } from "./coordination-rpc";
 import { answerBlockOf } from "./decision-materialiser";
 import { createDecisionStore } from "./decision-store";
 import { deliveryEffect, nothingWas } from "./effects";
-import { GOVERNOR_FAMILIES, GOVERNOR_FIGURES, familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
+import { GOVERNOR_FAMILIES, GOVERNOR_FIGURES, QUIET_FAMILIES, familyFiguresOf, figureText, type GovernorFamily, type GovernorFigure, type GovernorFigureId } from "../shared/governor-figures";
 import { governorFiguresOf, readGovernorSnapshot } from "./governor-figures";
 import { createGovernorStore, type FamilyState, type MissionLadder } from "./governor-store";
 import { interventionOfGovern, recordIntervention } from "./intervention-store";
@@ -470,6 +471,10 @@ export async function governSend(input: GovernInput, context: ToolContext, deps:
   const unknown = (input.figures ?? []).filter((id) => !known.includes(id));
   if (unknown.length > 0) return fixThese("bm_govern", unknown.map((id) => `input.figures: ${id} is not a figure; the figures are ${known.join(", ")}`));
   const named = [...new Set(input.figures ?? [])] as GovernorFigureId[];
+  // ADR-045 decision 9: the mess and drift figures are shown, not nudged for.
+  if (input.step === "nudge" && named.length > 0 && named.every((id) => QUIET_FAMILIES.includes(GOVERNOR_FIGURES[id]))) {
+    refuse(`a nudge for ${QUIET_FAMILIES.join(" or ")} figures alone is not sent: they stay computed and shown; cite a stuck, overengineering or budget figure, or keep a note with bm_note; ${nothingWas("sent")}`);
+  }
   let snapshot: ReturnType<typeof readGovernorSnapshot> | null = null;
   let all: GovernorFigure[] = [];
   let windowMs = 0;
@@ -594,8 +599,8 @@ function stopFamiliesOf(home: string, missionId: string | null): string[] {
  * request's mission stands at the governor's stop step (`stopFamiliesOf`).
  * Its authority is `stopAuthorityOf`'s; the pipeline checks the block, the
  * backstop and the loop guard. Once the Worker has it, its Main (else its
- * Manager, `copyRecipientOf`) gets the same block with `copy: yes` through
- * the queue. Recorded `sent` with `to: "worker"`, `workerId`, and the agent
+ * Manager, `copyRecipientOf`) gets the same block with `copy: yes` as a
+ * note. Recorded `sent` with `to: "worker"`, `workerId`, and the agent
  * that got the copy as `managerId`. Every refusal comes before anything is
  * sent.
  */
@@ -666,7 +671,7 @@ export async function bmDirectWorker(input: DirectInput, context: ToolContext, d
     manager === null
       ? "The Worker has no paseo-bm Main or Manager, so no copy was sent."
       : sent.copy !== "failed"
-        ? `Its Main ${manager.id} gets a copy${sent.copy === "queued" ? " when its current turn ends" : ""}.`
+        ? `Its Main ${manager.id} gets a copy.`
         : `The copy to its Main ${manager.id} could not be delivered; tell the owner.`,
   ].join(" ");
   if (sent.unrecorded !== null) return { ok: true, text: unrecordedText(said, sent.unrecorded) };

@@ -208,7 +208,7 @@ export function createOrchestratorDecisionDelivery(deps: OrchestratorDeliveryDep
       log(`[paseo-bm] decision ${decision.id} is answered, but no Beads Orchestrator is open to receive it; it reads it with bm_decisions.`);
       return { to: decision.askedBy.agentId ?? "orchestrator", kind, at, outcome: "failed" };
     }
-    const outcome = await (deps.queue ?? noticeQueue).enqueue(orchestratorId, kind, answerNoticeOf(decision, failure, change), paseo);
+    const outcome = await (deps.queue ?? noticeQueue).enqueue(orchestratorId, kind, answerNoticeOf(decision, failure, change), paseo, undefined, { wake: true });
     return { to: orchestratorId, kind, at, outcome: delivered(outcome) ? outcome : "failed" };
   };
 

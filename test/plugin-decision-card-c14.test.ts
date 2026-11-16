@@ -328,6 +328,35 @@ describe("decided for you by the Orchestrator (change-014, ADR-025)", () => {
 });
 
 describe("a mission's card (missions design §4.1)", () => {
+  const LINE = {
+    lineId: "line-1",
+    steps: [
+      { title: "Build the API", acceptance: ["GET /orders answers 200", "It is documented"] },
+      { title: "Wire the screens", acceptance: ["The page lists them"] },
+    ],
+  };
+  const lineCard = () =>
+    makeDecision({
+      id: "m:mis-0123456789:2",
+      workspaceId: "mis-0123456789",
+      requestId: null,
+      askedBy: { role: "plugin", agentId: "main-aix-0001" },
+      options: [
+        { key: "apply", label: "Apply the change", recommended: false, effects: [], action: { kind: "mission-change", missionId: "mis-0123456789", change: { line: LINE } } },
+        { key: "keep", label: "Keep as is", recommended: false, effects: [] },
+      ],
+    });
+
+  it("lists each step's acceptance criteria in the details on a tap, where the owner answers", () => {
+    const { details } = view(lineCard());
+    for (const line of ["Step 1: Build the API", "- GET /orders answers 200", "- It is documented", "Step 2: Wire the screens", "- The page lists them"]) expect(details).toContain(line);
+    expect(details.indexOf("Step 1: Build the API")).toBeLessThan(details.indexOf("Step 2: Wire the screens"));
+  });
+
+  it("a card without a step list adds no such line", () => {
+    expect(view(makeDecision({ id: "m:mis-0123456789:3", workspaceId: "mis-0123456789", requestId: null })).details.some((line) => line.startsWith("Step "))).toBe(false);
+  });
+
   it("names the Main as its asker, not the plugin that stored it; another plugin card stays the plugin's", () => {
     const card = makeDecision({ id: "m:mis-0123456789:1", workspaceId: "mis-0123456789", requestId: null, askedBy: { role: "plugin", agentId: "main-aix-0001" } });
     expect(view(card).frame.actor).toEqual({ mark: "request", name: "Main" });

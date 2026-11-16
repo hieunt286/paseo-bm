@@ -128,3 +128,12 @@ export function integrationCiOf(home: string): IntegrationCi {
     return DEFAULT_COORDINATION_SETTINGS.integration.ci;
   }
 }
+
+/** The owner's `line.supervised` (ADR-045, The switch): its default, on, when the settings cannot be read. Never throws. */
+export function lineSupervisedOf(home: string): boolean {
+  try {
+    return createCoordinationStore(home).read().line.supervised;
+  } catch {
+    return DEFAULT_COORDINATION_SETTINGS.line.supervised;
+  }
+}

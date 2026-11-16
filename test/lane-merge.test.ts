@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { clearJsonFileCache } from "../plugin/server/data-files";
-import { MERGE_RETRY_MS, laneMergeIssueOf, laneMergeLineOf, mergeLane, overwrittenFilesOf, retryPendingMerges } from "../plugin/server/lane-merge";
+import { MERGE_RETRY_MS, fastForwardLocalTarget, laneMergeIssueOf, laneMergeLineOf, localMergeRefusalOf, mergeGit, mergeLane, overwrittenFilesOf, retryPendingMerges, worktreeOfBranch } from "../plugin/server/lane-merge";
+import type { GitRunner } from "../plugin/server/repo-tool";
 import { createMissionStore, type Placement } from "../plugin/server/mission-store";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 
@@ -140,8 +141,156 @@ describe("merging a lane (§19.2)", () => {
     expect(git(lane1Dir, "show", "HEAD:a.txt")).toBe("lane");
   });
 
+  it("reads the worktree a branch is checked out in", () => {
+    const porcelain = "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\nworktree /l\nHEAD bbb\nbranch refs/heads/m/ABC/repo\n\nworktree /d\nHEAD ccc\ndetached\n";
+    expect([worktreeOfBranch(porcelain, "main"), worktreeOfBranch(porcelain, "m/ABC/repo"), worktreeOfBranch(porcelain, "dev"), worktreeOfBranch(porcelain, "repo")]).toEqual(["/r", "/l", null, null]);
+  });
+
   it("reads the files git says would be overwritten", () => {
     expect(overwrittenFilesOf("error: Your local changes to the following files would be overwritten by merge:\n\tsrc/a.ts\n\tsrc/b.ts\nPlease commit your changes")).toEqual(["src/a.ts", "src/b.ts"]);
     expect(overwrittenFilesOf("fatal: Not possible to fast-forward, aborting.")).toEqual([]);
   });
+});
+
+describe("the local merge (ADR-045 decision 4, plan §5.3)", () => {
+  const rootOf = (lane1Dir: string) => join(dirname(lane1Dir), "repo");
+  /** A commit on the mission branch; its sha. */
+  function workOn(lane1Dir: string): string {
+    commitIn(lane1Dir, "b.txt", "b\n", "mission work");
+    return git(lane1Dir, "rev-parse", "HEAD");
+  }
+  function recording(): { git: GitRunner; calls: string[][] } {
+    const calls: string[][] = [];
+    return { calls, git: (args, options) => (calls.push([...args]), mergeGit(args, options)) };
+  }
+  const WRITES = ["merge", "update-ref", "push", "tag", "reset", "branch", "rebase", "fetch"];
+  const writesOf = (calls: readonly string[][]) => calls.filter((args) => WRITES.includes(args[0]!)).map((args) => args[0]);
+  const stated = { state: "granted" as const, decisionId: "m:x:1", grantedAt: NOW.toISOString(), revokedAt: null, target: "main" };
+  function granted(home: string, missionId: string, over: Record<string, unknown> = stated): void {
+    createMissionStore(home).update(missionId, (mission) => ({ ...mission, placements: mission.placements!.map((placement) => (placement.requestKey === "key-1" ? ({ ...placement, localMerge: over } as Placement) : placement)) }));
+  }
+  const journalOf = (home: string, missionId: string) => createMissionStore(home).journal(missionId, 20).map((line) => line.text);
+
+  it("the target checked out in a worktree moves by fast-forward, its files with it", async () => {
+    const { lane1Dir } = world();
+    const root = rootOf(lane1Dir);
+    const sha = workOn(lane1Dir);
+    const spy = recording();
+    expect(await fastForwardLocalTarget("main", sha, lane1Dir, { git: spy.git })).toEqual({ merged: true });
+    expect(git(root, "rev-parse", "main")).toBe(sha);
+    expect(git(root, "show", "HEAD:b.txt")).toBe("b");
+    expect(git(root, "status", "--porcelain")).toBe("");
+    expect(writesOf(spy.calls)).toEqual(["merge"]);
+    expect(spy.calls.find((args) => args[0] === "merge")).toEqual(["merge", "--ff-only", sha]);
+  });
+
+  it("a target not checked out moves by the guarded update-ref", async () => {
+    const { lane1Dir } = world();
+    const root = rootOf(lane1Dir);
+    git(root, "checkout", "-q", "-b", "elsewhere");
+    const old = git(root, "rev-parse", "main");
+    const sha = workOn(lane1Dir);
+    const spy = recording();
+    expect(await fastForwardLocalTarget("main", sha, lane1Dir, { git: spy.git })).toEqual({ merged: true });
+    expect(git(root, "rev-parse", "main")).toBe(sha);
+    expect(git(root, "rev-parse", "elsewhere")).toBe(old);
+    expect(writesOf(spy.calls)).toEqual(["update-ref"]);
+    expect(spy.calls.find((args) => args[0] === "update-ref")).toEqual(["update-ref", "refs/heads/main", sha, old]);
+  });
+
+  it("a diverged target stays, checked out or not, with a named reason", async () => {
+    for (const checkedOut of [true, false]) {
+      const { lane1Dir } = world();
+      const root = rootOf(lane1Dir);
+      const sha = workOn(lane1Dir);
+      commitIn(root, "c.txt", "c\n", "owner's own commit");
+      if (!checkedOut) git(root, "checkout", "-q", "-b", "elsewhere");
+      const before = git(root, "rev-parse", "main");
+      const spy = recording();
+      expect(await fastForwardLocalTarget("main", sha, lane1Dir, { git: spy.git })).toEqual({ merged: false, reason: `main and ${sha} have diverged, so it is not a fast-forward` });
+      expect(git(root, "rev-parse", "main")).toBe(before);
+      expect(writesOf(spy.calls)).toEqual([]);
+    }
+  });
+
+  it("a dirty file the merge would overwrite leaves the target and the file as they were", async () => {
+    const { lane1Dir } = world();
+    const root = rootOf(lane1Dir);
+    commitIn(lane1Dir, "a.txt", "mission\n", "mission edits a");
+    const sha = git(lane1Dir, "rev-parse", "HEAD");
+    writeFileSync(join(root, "a.txt"), "half done\n");
+    const before = git(root, "rev-parse", "main");
+    expect(await fastForwardLocalTarget("main", sha, lane1Dir)).toEqual({ merged: false, reason: "uncommitted changes in main's worktree would be overwritten: a.txt" });
+    expect(git(root, "rev-parse", "main")).toBe(before);
+    expect(git(root, "status", "--porcelain")).toBe("M a.txt");
+  });
+
+  it("a target that already holds the commit needs no write; a commit or target it cannot read is refused", async () => {
+    const { lane1Dir } = world();
+    const root = rootOf(lane1Dir);
+    const base = git(root, "rev-parse", "main");
+    const spy = recording();
+    expect(await fastForwardLocalTarget("main", base, lane1Dir, { git: spy.git })).toEqual({ merged: true });
+    expect(writesOf(spy.calls)).toEqual([]);
+    const unknownSha = await fastForwardLocalTarget("main", "abcdef1", lane1Dir);
+    expect(unknownSha.merged === false && unknownSha.reason).toContain("git could not read main and abcdef1");
+    const noTarget = await fastForwardLocalTarget("dev", base, lane1Dir);
+    expect(noTarget.merged === false && noTarget.reason).toContain("git could not read dev");
+    const broken: GitRunner = async () => {
+      throw Object.assign(new Error("boom"), { stderr: "fatal: not a git repository" });
+    };
+    expect(await fastForwardLocalTarget("main", base, lane1Dir, { git: broken })).toEqual({ merged: false, reason: `git could not read main and ${base}: fatal: not a git repository` });
+    expect(git(root, "rev-parse", "main")).toBe(base);
+  });
+
+  it("without the grant, or with one for another target, git is not touched", async () => {
+    const { home, missionId, lane1, lane1Dir } = world();
+    const sha = workOn(lane1Dir);
+    const before = git(rootOf(lane1Dir), "rev-parse", "main");
+    const spy = recording();
+    expect(await localMergeRefusalOf(home, lane1, sha, false, { log, now: () => NOW, git: spy.git })).toBeNull();
+    granted(home, missionId, { ...stated, target: "develop" });
+    expect(await localMergeRefusalOf(home, lane1, sha, false, { log, now: () => NOW, git: spy.git })).toBeNull();
+    granted(home, missionId, { ...stated, state: "revoked", revokedAt: NOW.toISOString() });
+    expect(await localMergeRefusalOf(home, lane1, sha, false, { log, now: () => NOW, git: spy.git })).toBeNull();
+    expect(spy.calls).toEqual([]);
+    expect(git(rootOf(lane1Dir), "rev-parse", "main")).toBe(before);
+  });
+
+  it("under the grant: moves and journals; a refusal changes nothing and names why", async () => {
+    const { home, missionId, lane1, lane1Dir } = world();
+    granted(home, missionId);
+    const sha = workOn(lane1Dir);
+    expect(await localMergeRefusalOf(home, lane1, sha, false, { log, now: () => NOW })).toBeNull();
+    expect(git(rootOf(lane1Dir), "rev-parse", "main")).toBe(sha);
+    expect(journalOf(home, missionId)).toContain(`main moved forward to ${sha} by fast-forward.`);
+
+    commitIn(rootOf(lane1Dir), "c.txt", "c\n", "owner's own commit");
+    const next = workOn2(lane1Dir);
+    const before = git(rootOf(lane1Dir), "rev-parse", "main");
+    expect(await localMergeRefusalOf(home, lane1, next, false, { log, now: () => NOW })).toBe(`the local merge into main was refused: main and ${next} have diverged, so it is not a fast-forward`);
+    expect(git(rootOf(lane1Dir), "rev-parse", "main")).toBe(before);
+    expect(journalOf(home, missionId)).toContain(`The local merge of ${next} into main changed nothing: main and ${next} have diverged, so it is not a fast-forward.`);
+  });
+
+  it("a lane n >= 2 merges only once mergeLane merged it, under the grant on lane 1", async () => {
+    const { home, missionId, lane2, lane1Dir, lane2Dir } = world();
+    granted(home, missionId);
+    commitIn(lane2Dir, "b.txt", "b\n", "lane work");
+    const sha = git(lane2Dir, "rev-parse", "HEAD");
+    const before = git(rootOf(lane1Dir), "rev-parse", "main");
+    const spy = recording();
+    expect(await localMergeRefusalOf(home, lane2, sha, false, { log, now: () => NOW, git: spy.git })).toBe("the local merge into main was refused: lane 2 is not merged into m/ABC/repo yet");
+    expect(spy.calls).toEqual([]);
+    expect(git(rootOf(lane1Dir), "rev-parse", "main")).toBe(before);
+    expect((await mergeLane(home, missionId, lane2, { log, now: () => NOW })).merged).toBe(true);
+    expect(await localMergeRefusalOf(home, lane2, sha, true, { log, now: () => NOW })).toBeNull();
+    expect(git(rootOf(lane1Dir), "rev-parse", "main")).toBe(sha);
+  });
+
+  /** A second commit on the mission branch; its sha. */
+  function workOn2(lane1Dir: string): string {
+    commitIn(lane1Dir, "d.txt", "d\n", "more mission work");
+    return git(lane1Dir, "rev-parse", "HEAD");
+  }
 });

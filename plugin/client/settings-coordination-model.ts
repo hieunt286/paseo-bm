@@ -139,7 +139,7 @@ export function tokenCountText(tokens: number): string {
   return String(tokens);
 }
 
-/** A threshold's value in words: "5.7M tokens read", "context 250k", "50% of the window", "2×", "15 beads", "at most 2". */
+/** A threshold's value in words: "5.7M tokens read", "context 180k", "50% of the window", "2×", "15 beads", "at most 2". */
 export function thresholdValueText(key: ThresholdKey, value: number): string {
   if (CONTEXT_TOKEN_KEYS.has(key)) return `context ${tokenCountText(value)}`;
   if (TOKEN_KEYS.has(key)) return `${tokenCountText(value)} tokens read`;
@@ -316,8 +316,8 @@ export interface ThresholdRowView {
 }
 
 export interface MechanismCardView {
-  /** The card; `integration` is the CI card (`ciCardView`), drawn with the same controls. */
-  mechanism: CoordinationCard | "integration";
+  /** The card; `integration` is the CI card (`ciCardView`) and `line` the supervised line's (`lineCardView`), drawn with the same controls. */
+  mechanism: CoordinationCard | "integration" | "line";
   title: string;
   /** "helped 6 of 10", "helped —"; null for rollover, which A-12 does not judge. */
   helped: string | null;
@@ -577,28 +577,42 @@ export const CI_CARD_WORDS = {
   meaning: "Read a merge request's pipeline as evidence and show it. Off: verified is a check paseo-bm saw pass, and no agent waits on a pipeline.",
 } as const;
 
-/**
- * The CI card (`integration.ci`), drawn with a mechanism card's controls: its
- * switch, saved at once both ways (it lets nothing act without the owner),
- * On or Off, and no figures.
- */
-export function ciCardView(settings: CoordinationSettings, saving: boolean): MechanismCardView {
-  const on = settings.integration.ci === "on";
+/** A card that is only a switch, drawn with a mechanism card's controls: saved at once both ways (it lets nothing act without the owner), On or Off, no figures. */
+function switchCardView(card: { mechanism: "integration" | "line"; title: string; meaning: string; spoken: string; setting: string }, on: boolean, saving: boolean): MechanismCardView {
   return {
-    mechanism: "integration",
-    title: CI_CARD_WORDS.title,
+    mechanism: card.mechanism,
+    title: card.title,
     helped: null,
-    meaning: CI_CARD_WORDS.meaning,
+    meaning: card.meaning,
     note: null,
     status: on ? { text: "On", tone: "success" } : { text: "Off", tone: "muted" },
-    toggle: { turnsOn: !on, enabled: !saving, label: on ? "Turn off" : "Turn on", accessibilityLabel: `Turn CI ${on ? "off" : "on"} now` },
+    toggle: { turnsOn: !on, enabled: !saving, label: on ? "Turn off" : "Turn on", accessibilityLabel: `Turn ${card.spoken} ${on ? "off" : "on"} now` },
     rows: [],
-    save: { enabled: false, label: "Save", accessibilityLabel: "Save the CI setting" },
+    save: { enabled: false, label: "Save", accessibilityLabel: `Save the ${card.setting} setting` },
     reset: null,
   };
 }
 
+/** The CI card (`integration.ci`). */
+export const ciCardView = (settings: CoordinationSettings, saving: boolean): MechanismCardView => switchCardView({ mechanism: "integration", ...CI_CARD_WORDS, spoken: "CI", setting: "CI" }, settings.integration.ci === "on", saving);
+
 /** What the CI card's switch saves: `integration.ci` the other way. */
 export function ciToggleChange(settings: CoordinationSettings): CoordinationChange {
   return { key: "integration.ci", value: settings.integration.ci === "on" ? "off" : "on" };
+}
+
+// ── The supervised line's card (ADR-045, The switch) ────────────────────────
+
+/** The line card's words. */
+export const LINE_CARD_WORDS = {
+  title: "Supervised line",
+  meaning: "One request at a time per mission, and held work starts on a passed finish gate. Off: on finished alone.",
+} as const;
+
+/** The supervised line's card (`line.supervised`). */
+export const lineCardView = (settings: CoordinationSettings, saving: boolean): MechanismCardView => switchCardView({ mechanism: "line", ...LINE_CARD_WORDS, spoken: "the supervised line", setting: "supervised line" }, settings.line.supervised, saving);
+
+/** What the line card's switch saves: `line.supervised` the other way. */
+export function lineToggleChange(settings: CoordinationSettings): CoordinationChange {
+  return { key: "line.supervised", value: !settings.line.supervised };
 }

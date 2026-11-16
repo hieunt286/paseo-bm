@@ -30,6 +30,7 @@ import {
   renameInputOf,
   repositoriesOf,
   revokeIntegrationDialog,
+  revokeLocalMergeDialog,
   toggleRepo,
   waitingRowOf,
   type MissionDraft,
@@ -1058,6 +1059,51 @@ describe("the mission page's Repositories card (delivery line design §4.9; mock
     }
   });
 
+  it("the local merge (ADR-045 decision 4): the row's state in the same shape; none before any card or from an older server", () => {
+    const rowOf = (over: Partial<Placement>) => repositoriesOf({ code: "INO", repos: [{ ...UI, placement: line(over) }] }, LATER)!.rows[0]!;
+    expect(rowOf({}).localMerge).toBeNull();
+    expect(rowOf({ localMerge: { state: "none", at: null, decisionId: null } }).localMerge).toBeNull();
+    expect(rowOf({ localMerge: { state: "allowed", at: T(10, 42), decisionId: "m:x:2" } }).localMerge).toEqual({ text: "local merge allowed since 10:42", short: "local merge allowed", tone: "plain", phone: "Local merge allowed", action: "revoke", decisionId: "m:x:2" });
+    expect(rowOf({ localMerge: { state: "waiting", at: null, decisionId: "m:x:2" } }).localMerge).toMatchObject({ short: "local merge: waiting for you", tone: "warning", phone: "Local merge: waiting for you", action: "answer" });
+    expect(rowOf({ localMerge: { state: "not-now", at: null, decisionId: "m:x:2" } }).localMerge).toMatchObject({ short: "local merge: not now", phone: "Local merge: not now", action: "ask" });
+    expect(rowOf({ localMerge: { state: "revoked", at: T(12, 10), decisionId: "m:x:2" } }).localMerge).toMatchObject({ short: "local merge: revoked 12:10", phone: "Local merge: revoked", action: "ask" });
+  });
+
+  it("the local merge has the row's own controls, wide and on a phone; none on a closed mission", () => {
+    const page = (localMerge: Placement["localMerge"], over: Partial<MissionSummary> = {}) => missionPageOf({ ...PLACED, summary: { ...INO, ...over, repos: [{ ...UI, placement: line({ localMerge }) }] } }, LATER);
+    const NAME = "xspace-ai-assistant";
+    const drawn = (localMerge: Placement["localMerge"], compact: boolean, ui = PAGE_UI_IDLE) => {
+      const on = actions();
+      return { on, nodes: renderTree(MissionPageBody({ page: page(localMerge), ui, addable: [], compact, on, styles, theme })) };
+    };
+    for (const compact of [false, true]) {
+      const ask = drawn({ state: "not-now", at: null, decisionId: "m:x:2" }, compact);
+      (byLabel(ask.nodes, `Ask me again about the local merge for ${NAME}`)!.props["onPress"] as () => void)();
+      expect(ask.on.askAgain).toHaveBeenCalledWith("ws-ui", "local-merge");
+      const revoke = drawn({ state: "allowed", at: T(10, 42), decisionId: "m:x:2" }, compact);
+      (byLabel(revoke.nodes, `Revoke the local merge for ${NAME}`)!.props["onPress"] as () => void)();
+      expect(revoke.on.ui).toHaveBeenCalledWith({ confirm: { kind: "revoke", repo: "ws-ui", what: "local-merge" }, menu: false, rename: null });
+      expect(byLabel(drawn({ state: "waiting", at: null, decisionId: "m:x:2" }, compact).nodes, `Answer the local merge for ${NAME} in the Inbox`)).toBeDefined();
+      const confirming = drawn({ state: "allowed", at: T(10, 42), decisionId: "m:x:2" }, compact, { ...PAGE_UI_IDLE, confirm: { kind: "revoke", repo: "ws-ui", what: "local-merge" } });
+      expect(texts(confirming.nodes)).toContain(`Revoke the local merge for ${NAME}?`);
+    }
+    const closed = renderTree(MissionPageBody({ page: page({ state: "not-now", at: null, decisionId: "m:x:2" }, { state: "closed", closedAt: T(12, 0) }), ui: PAGE_UI_IDLE, addable: [], compact: false, on: actions(), styles, theme }));
+    expect(byLabel(closed, `Ask me again about the local merge for ${NAME}`)).toBeUndefined();
+    expect(texts(closed)).toContain("local merge: not now");
+  });
+
+  it("asks before revoking the local merge, in place", () => {
+    expect(revokeLocalMergeDialog("INO", { name: "xspace-ai-assistant", branch: "m/INO/xspace-ai-assistant", target: "develop" })).toEqual({
+      title: "Revoke the local merge for xspace-ai-assistant?",
+      body: "INO's finished requests stop moving your local develop forward; m/INO/xspace-ai-assistant goes on as it is. What was merged stays.",
+      bodyTone: "plain",
+      confirmLabel: "Revoke",
+      confirmKind: "danger",
+      cancelLabel: "Cancel",
+      defaultAction: "cancel",
+    });
+  });
+
   it("asks before a revoke, in place", () => {
     expect(revokeIntegrationDialog("INO", { name: "xspace-ai-assistant", branch: "m/INO/xspace-ai-assistant", target: "develop" })).toEqual({
       title: "Revoke push and merge request for xspace-ai-assistant?",
@@ -1228,6 +1274,45 @@ describe("the mission page's lanes and Waiting part (delivery line design §19.8
     const older: MissionGetOutput = { ...LANES_PAGE, summary: AIX };
     delete older.waiting;
     expect(missionPageOf(older, READ).inFlight).toMatchObject({ repoHeader: "Repository", waiting: null });
+  });
+
+  describe("the mission's line (ADR-045 decision 5)", () => {
+    const HEAD = "req-20261025T021049Z";
+    const onPage = (line: MissionGetOutput["line"]) => missionPageOf({ ...LANES_PAGE, line }, READ).inFlight!.line;
+
+    it("reads Step n of m, its title and its repo while it runs", () => {
+      expect(onPage({ n: 2, of: 4, title: "Wire the screens", state: "running", requestId: HEAD, why: null })).toEqual({ text: "Step 2 of 4 · Wire the screens · ai-assistant · 1", state: { text: "running", tone: "info" } });
+    });
+
+    it("reads the reason of a stop, and a started step that stopped still reads as started", () => {
+      const reason = "req-20261025T040712Z has no live Worker";
+      expect(onPage({ n: 2, of: 4, title: "Wire", state: "stopped", requestId: HEAD, why: reason })!.state).toEqual({ text: "started, stopped: req-…040712Z has no live Worker", tone: "warning" });
+      expect(onPage({ n: 3, of: 4, title: "Wire", state: "stopped", requestId: null, why: reason })).toEqual({ text: "Step 3 of 4 · Wire", state: { text: "stopped: req-…040712Z has no live Worker", tone: "warning" } });
+      expect(onPage({ n: 2, of: 4, title: "Wire", state: "blocked", requestId: HEAD, why: "waiting for you" })!.state).toEqual({ text: "blocked: waiting for you", tone: "warning" });
+      expect(onPage({ n: 4, of: 4, title: "Wire", state: "done", requestId: HEAD, why: null })!.state).toEqual({ text: "done", tone: "success" });
+    });
+
+    it("shows nothing new with no line, or from an older server", () => {
+      expect(onPage(null)).toBeNull();
+      expect(onPage(undefined)).toBeNull();
+      expect(view.inFlight!.line).toBeNull();
+      expect(texts(draw(false)).some((text) => text.startsWith("Step "))).toBe(false);
+    });
+
+    it("draws one row in In flight, wide and on a phone", () => {
+      const page = missionPageOf({ ...LANES_PAGE, line: { n: 2, of: 4, title: "Wire the screens", state: "stopped", requestId: HEAD, why: "req-20261025T040712Z has no live Worker" } }, READ);
+      for (const compact of [false, true]) {
+        const shown = texts(renderTree(MissionPageBody({ page, ui: PAGE_UI_IDLE, addable: [], compact, on: actions(), styles, theme })));
+        expect(shown, String(compact)).toContain("Step 2 of 4 · Wire the screens · ai-assistant · 1");
+        expect(shown, String(compact)).toContain("started, stopped: req-…040712Z has no live Worker");
+      }
+    });
+
+    it("prefixes a held step in Waiting with its place, and shows the stored reason of a stop", () => {
+      const held = { kind: "held" as const, id: "h", topic: "Wire", after: [], since: T(4, 0), repo: "be", newLane: false };
+      expect(waitingRowOf({ ...held, state: "held", step: { n: 3, of: 4, title: "Wire" } }, READ)).toMatchObject({ what: "Step 3 of 4 · Wire", status: null, phone: { lead: "Step 3 of 4 · Wire", status: null } });
+      expect(waitingRowOf({ ...held, state: "waiting-stopped", why: "req-20261025T040712Z did not pass its finish gate: no" }, READ)).toMatchObject({ what: "Wire", status: { text: "req-…040712Z did not pass its finish gate: no", tone: "warning" } });
+    });
   });
 
   it("draws artboard Q: Repositories with lanes and the overlap line, In flight with the lane column and the Waiting part", () => {

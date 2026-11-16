@@ -407,7 +407,7 @@ describe("a decision opening in a class delegated to the Orchestrator (bm_decide
 
 describe("a finished-unverified request: a delegate cannot act on it as done (design §C.6, change-008 C4)", () => {
   const traces = () => ({ tracesDir: join(home, "traces") });
-  const UNVERIFIED = `request ${REQUEST} finished unverified: its code changed and not every check its report names was seen to pass after the last edit, so a commit or release on it is the owner's to decide`;
+  const UNVERIFIED = `request ${REQUEST} finished unverified: its code changed and not every check its report names was seen to pass after the last edit or reused from an earlier pass, so a commit or release on it is the owner's to decide`;
 
   /**
    * The request's Worker edited a file, then its Manager got a `finished`

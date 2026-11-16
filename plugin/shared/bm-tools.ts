@@ -353,21 +353,28 @@ interface ReportInput {
   remaining?: string[];
   /** The mission branch's commit of the work (delivery line design §4.4), as the Worker read it with git and glab. */
   integration?: { branch: string; commit: string; pushed: boolean; mr?: string; ci?: ReportCiState };
+  /** A bound Worker's `finished` of a step (ADR-045 decision 3): what the next step's Worker needs; it goes in that brief, never in the block. */
+  forNextStep?: { summary: string; contract?: string; remaining?: string };
+  /** A bound Worker's `received` (ADR-045 decision 7): the goal it understood and how it will be judged. */
+  goal?: string;
+  acceptance?: string[];
+  /** A bound Worker's `finished` (ADR-045 decision 6): what was run for real and what it showed, or why it could not be run. */
+  runtimeProof?: { kind: "ran" | "could-not-run"; what: string; showed?: string };
 }
 
 /** Empty is `[]` or left out; a model used to the text template writes `none`, which is not JSON (live run, 2026-09-24). */
-const EMPTY = "Leave it out or [] when there are none; never the word none.";
+const EMPTY = "Omit or [] when none; never the word none.";
 const BEAD_IDS: JsonSchema = {
   type: "array",
   items: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9][A-Za-z0-9.-]*$", description: "A full bead id, as br prints it." },
-  description: `Full bead ids. ${EMPTY}`,
+  description: EMPTY,
 };
 
 /** A decision's class as its asker proposes it (autonomy design §B.1): `bm_report`'s questions and `bm_ask_owner`. */
 const CLASS_FIELD: JsonSchema = {
   type: "string",
   enum: DECISION_CLASSES,
-  description: `What is decided, riskiest first: ${DECISION_CLASSES.join(", ")}. The riskier one when unsure. The plugin keeps the riskier of yours and what the options' effects imply (push, publish or deploy is release; real-data or migration, data; dependency-install, dependency; network or outside-workspace, environment).`,
+  description: `What is decided, riskiest first: ${DECISION_CLASSES.join(", ")}. The riskier one when unsure.`,
 };
 
 /**
@@ -434,38 +441,38 @@ const REPORT_SCHEMA: JsonSchema = {
     buildAndTests: {
       ...TEXT,
       description:
-        "Each check exactly as you ran it, in backticks, with pass/fail — `npm test` pass; `npm run lint` pass — or \"not run\". Backticks only around commands. The plugin confirms a check only from a run after your last edit, without pipes or redirections. Identify reused unaffected results and their source; older evidence may remain self-reported. Never rerun a suite solely to obtain a detected label.",
+        "Each check exactly as you ran it, in backticks, with pass/fail — `npm test` pass; `npm run lint` pass — or \"not run\". Backticks only around commands. The plugin confirms a check only from a run after your last edit, without pipes or redirections. Name a reused result and its source; never rerun a suite only to obtain a detected label.",
     },
     skillsUsed: {
       type: "array",
       items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]*$", description: "A skill name, such as feature-workflow; no notes." },
-      description: `Skills you loaded for this request so far, not the ones you plan to. ${EMPTY}`,
+      description: `Skills you loaded for this request, not the ones you plan to. ${EMPTY}`,
     },
     decided: {
       type: "array",
-      description: `Choices you made on your own that the user may want to overturn. ${EMPTY}`,
+      description: `Choices you made that the owner may want to overturn. ${EMPTY}`,
       items: { type: "object", additionalProperties: false, required: ["choice", "why"], properties: { choice: TEXT, why: TEXT } },
     },
     blockers: { ...TEXT, description: "Only what waits for the user; omit when nothing does. When blocked, the tool writes the questions line itself." },
-    suggestions: { type: "array", items: TEXT, description: `What you noticed but did not do: extra tests, refactors, docs, cleanups, related bugs, other beads. ${EMPTY}` },
+    suggestions: { type: "array", items: TEXT, description: `What you noticed but did not do. ${EMPTY}` },
     integration: {
       type: "object",
       additionalProperties: false,
       required: ["branch", "commit", "pushed"],
-      description: "When your worktree is on a mission branch (your ## Runtime facts \"Integration:\" line): the commit of your work on it. Required on finished when you changed files there.",
+      description: "On a mission branch (your ## Runtime facts \"Integration:\" line): the commit of your work. Required on finished when you changed files there.",
       properties: {
-        branch: { type: "string", pattern: "^[^\\s]+$", maxLength: 200, description: "The branch you committed on, as git branch --show-current prints it." },
-        commit: { type: "string", pattern: "^[0-9a-fA-F]{7,40}$", description: "The commit's sha, as git rev-parse HEAD prints it (7 to 40 hex digits)." },
-        pushed: { type: "boolean", description: "True when that commit is pushed to origin." },
+        branch: { type: "string", pattern: "^[^\\s]+$", maxLength: 200, description: "The branch you committed on." },
+        commit: { type: "string", pattern: "^[0-9a-fA-F]{7,40}$", description: "The commit's sha (7 to 40 hex digits)." },
+        pushed: { type: "boolean", description: "True when pushed to origin." },
         mr: { type: "string", pattern: "^https?://[^\\s]+$", maxLength: 500, description: "The merge request's URL, once one exists." },
-        ci: { type: "string", enum: REPORT_CI_STATES, description: "Ignored while paseo-bm does not use CI (the default): never read, wait for or poll a pipeline to fill it. When the owner turns CI on, the merge request's pipeline state; none when there is no pipeline." },
+        ci: { type: "string", enum: REPORT_CI_STATES, description: "Ignored while paseo-bm does not use CI (the default): never read, wait for or poll a pipeline to fill it. When the owner turns CI on: the merge request's pipeline state." },
       },
     },
     handoffNote: {
       type: "string",
       minLength: 1,
       maxLength: MAX_HANDOFF_NOTE_CHARS,
-      description: `Only when a BM-HANDOFF message asks for it: for the Worker who takes the request over, what you tried and what is next, at most ${MAX_HANDOFF_NOTE_CHARS.toLocaleString("en-US")} characters.`,
+      description: `Only when a BM-HANDOFF message asks for it: for the Worker who takes the request over, what you tried and what is next.`,
     },
     questions: {
       type: "array",
@@ -485,7 +492,7 @@ const REPORT_SCHEMA: JsonSchema = {
             maxLength: MAX_SUBJECT_CHARS,
             description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most ${MAX_SUBJECT_CHARS} characters. Keep it when you ask the same thing again.`,
           },
-          supersedes: { ...QUESTION_ID, description: "The earlier question of this request that this one asks again, such as Q2; leave it out for a new question." },
+          supersedes: { ...QUESTION_ID, description: "The earlier question this one asks again, such as Q2." },
           class: CLASS_FIELD,
           options: {
             type: "array",
@@ -609,6 +616,9 @@ function buildReport(input: ReportInput, titleOf: (linkId: string) => string = (
     `blockers: ${blockersText(input, titleOf)}`,
     ...(input.handoffNote === undefined || line(input.handoffNote) === "" ? [] : [`handoffNote: ${line(input.handoffNote)}`]),
     ...((input.remaining ?? []).length === 0 ? [] : [`remaining: ${list(input.remaining!.map(item), "; ")}`]),
+    ...(input.goal === undefined ? [] : [`goal: ${line(input.goal)}`]),
+    ...((input.acceptance ?? []).length === 0 ? [] : [`acceptance: ${list(input.acceptance!.map(item), "; ")}`]),
+    ...(input.runtimeProof === undefined ? [] : [runtimeProofLine(input.runtimeProof)]),
     ...integrationLines(input.integration),
   ];
   if (input.phase !== "blocked" || input.questions === undefined) return lines.join("\n");
@@ -626,6 +636,11 @@ function buildReport(input: ReportInput, titleOf: (linkId: string) => string = (
     });
   }
   return `${lines.join("\n")}\n\n${asked.join("\n")}`;
+}
+
+/** The report's one line of runtime proof (ADR-045 decision 6). `shared/bm-report.ts` reads it back. */
+function runtimeProofLine(proof: NonNullable<ReportInput["runtimeProof"]>): string {
+  return `runtimeProof: ${proof.kind === "ran" ? "ran" : "could not run"} — ${line(proof.what)}${proof.showed === undefined ? "" : `; showed: ${line(proof.showed)}`}`;
 }
 
 /** The report's git lines (delivery line design §4.4): `branch:`, `commit:`, `pushed:`, then `mr:` and `ci:` when known. */
@@ -1237,7 +1252,7 @@ export const CREATE_WORKER_LIMITS = { request: 20_000, contextItems: 20, fact: 5
 // ---------------------------------------------------------------------------
 
 /** The bounds of the bound delivering tools (design §16.6). */
-export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, waitingOnPeers: 10, waitingOnRequests: 10, waitingOnBatches: 5, forPeer: 4_000, questions: 5, tellText: 8_000, tellSource: 300, remaining: 30 } as const;
+export const DELIVERING_LIMITS = { waitingFor: 500, waitingOn: 10, waitingOnPeers: 10, waitingOnRequests: 10, waitingOnBatches: 5, forPeer: 4_000, questions: 5, tellText: 8_000, tellSource: 300, remaining: 30, forNextStep: 2_000, runtimeProof: 500, goal: 1_000, acceptance: 12, acceptanceItem: 300 } as const;
 /** A peer link id: `peer-` + 12 hex digits. */
 export const PEER_LINK_ID_SOURCE = "^peer-[0-9a-f]{12}$";
 /** An open peer link a Manager gives the request (design §7.17.3). */
@@ -1289,7 +1304,7 @@ const MESSAGE_ACT: JsonSchema = {
   type: "string",
   enum: MESSAGE_ACTS,
   description:
-    "What the message does: ask, answer, agree (to a contract in refs.contracts), ack (needs no answer; wakes no one), close (closes the link; wakes no one), supersede (replaces the record in refs.records).",
+    "ask, answer, agree (to a contract in refs.contracts), ack (needs no answer; wakes no one), close (closes the link; wakes no one), supersede (replaces the record in refs.records).",
 };
 
 /** Every id `refs` names, in order: contracts, records, decisions. Pure. */
@@ -1305,7 +1320,7 @@ export function actHeaderOf(act: MessageAct | null, refs: MessageRefs | undefine
 }
 
 /** What a bound tool's description ends with: it delivers, so there is nothing to send. */
-const DELIVERED = "Arguments are JSON: leave out a field you have nothing for. On error, fix the listed fields and call again; nothing was stored or sent.";
+const DELIVERED = "Arguments are JSON: leave out a field you have nothing for. A refusal stored and sent nothing.";
 
 /** `bm_report`'s fields without `questions`: a bound Worker asks with `bm_questions`. */
 const BOUND_REPORT_PROPERTIES: Record<string, JsonSchema> = Object.fromEntries(Object.entries(REPORT_SCHEMA.properties!).filter(([key]) => key !== "questions"));
@@ -1317,12 +1332,12 @@ const BOUND_REPORT_SCHEMA: JsonSchema = {
   properties: {
     ...BOUND_REPORT_PROPERTIES,
     requestId: { ...REQUEST_ID, description: "Your request's id, as your first prompt gave it." },
-    blockers: { ...TEXT, description: "Anything else that holds the work up; omit when nothing does. When blocked, the tool writes what you wait on itself." },
+    blockers: { ...TEXT, description: "Anything else that holds the work up; omit when nothing does." },
     waitingOn: {
       type: "array",
       minItems: 1,
       maxItems: DELIVERING_LIMITS.waitingOn,
-      items: { type: "string", pattern: QUESTION_DECISION_ID_SOURCE, description: "A decisionId bm_questions gave you." },
+      items: { type: "string", pattern: QUESTION_DECISION_ID_SOURCE },
       description: "Only when blocked: the open questions of your request you wait on, by the decisionId bm_questions returned. The only way to wait on the owner.",
     },
     waitingFor: {
@@ -1336,39 +1351,74 @@ const BOUND_REPORT_SCHEMA: JsonSchema = {
       minItems: 1,
       maxItems: DELIVERING_LIMITS.waitingOnPeers,
       items: { type: "string", pattern: PEER_LINK_ID_SOURCE },
-      description: "Only when blocked, and only when nothing else can go on: the live links your request asked with bm_ask_project that you wait on.",
+      description: "Only when blocked and nothing else can go on: the live links you asked that you wait on.",
     },
     waitingOnRequests: {
       type: "array",
       minItems: 1,
       maxItems: DELIVERING_LIMITS.waitingOnRequests,
-      items: { ...REQUEST_ID, description: "Another request's id, req-YYYYMMDDTHHMMSSZ." },
-      description: "Only when blocked: the other requests you wait on, by id. Each counts as done when it, or the request that continues it, reports finished or stopped.",
+      items: REQUEST_ID,
+      description: "Only when blocked: the other requests you wait on, by id.",
     },
     waitingOnBatches: {
       type: "array",
       minItems: 1,
       maxItems: DELIVERING_LIMITS.waitingOnBatches,
-      items: { ...BATCH_ID, description: "A batch of your request whose verdict has not come yet." },
+      items: BATCH_ID,
       description: "Only when blocked: your batches whose verdict you wait on.",
     },
     wakeOn: {
       type: "string",
       enum: ["all", "any"],
-      description: "Only when blocked: all (the default) when you go on once everything you wait on is settled; any when the first is enough.",
+      description: "Only when blocked: all (the default), or any when the first is enough.",
     },
     forPeer: {
       type: "string",
       minLength: 1,
       maxLength: DELIVERING_LIMITS.forPeer,
-      description: "Required on finished when your first prompt has a peer: line: what that project needs to know. paseo-bm delivers it to the project.",
+      description: "Required on finished when your first prompt has a peer: line: what that project needs to know.",
     },
     remaining: {
       type: "array",
       minItems: 1,
       maxItems: DELIVERING_LIMITS.remaining,
       items: TEXT,
-      description: "Only on finished after a BM-ROLLOVER message: the work left, one item each (beads ready, open review findings, the work in progress). paseo-bm opens the continuation that takes it.",
+      description: "Only on finished after a BM-ROLLOVER message: the work left, one item each (beads ready, open review findings, the work in progress).",
+    },
+    forNextStep: {
+      type: "object",
+      additionalProperties: false,
+      required: ["summary"],
+      description: "Only on finished; required when your brief's plan: line says Step n of m with n below m, except after a BM-ROLLOVER: what the next step's Worker needs.",
+      properties: {
+        summary: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.forNextStep, description: "What this step did and where, in a few lines." },
+        contract: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.forNextStep, description: "What the next step builds on: an interface, a format, a rule." },
+        remaining: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.forNextStep, description: "What this step left for the next." },
+      },
+    },
+    goal: {
+      type: "string",
+      minLength: 1,
+      maxLength: DELIVERING_LIMITS.goal,
+      description: "Required on a Medium or Large received outside a step, with acceptance: the goal as you understood it, in the owner's terms.",
+    },
+    acceptance: {
+      type: "array",
+      minItems: 1,
+      maxItems: DELIVERING_LIMITS.acceptance,
+      items: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.acceptanceItem },
+      description: "With goal: how the owner will know it is done, one item each.",
+    },
+    runtimeProof: {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "what"],
+      description: "Only on finished, and required on a Medium or Large one that changed code, except after a BM-ROLLOVER: what you ran for real, as a user would, of what needs no login.",
+      properties: {
+        kind: { type: "string", enum: ["ran", "could-not-run"], description: "ran, or could-not-run (accepted and flagged)." },
+        what: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.runtimeProof, description: "What you ran, or why it could not run." },
+        showed: { type: "string", minLength: 1, maxLength: DELIVERING_LIMITS.runtimeProof, description: "What it showed." },
+      },
     },
   },
 };
@@ -1390,6 +1440,11 @@ function boundReportRules(input: ReportInput): string[] {
     if (input.phase !== "blocked" && input[field] !== undefined) out.push(`input.${field}: only a blocked report waits; leave it out`);
   }
   if (input.phase !== "finished" && input.remaining !== undefined) out.push("input.remaining: only a finished report lists what remains; leave it out");
+  if (input.phase !== "finished" && input.forNextStep !== undefined) out.push("input.forNextStep: only a finished report says what the next step needs; leave it out");
+  if (input.phase !== "finished" && input.runtimeProof !== undefined) out.push("input.runtimeProof: only a finished report carries a runtime proof; leave it out");
+  for (const field of ["goal", "acceptance"] as const) {
+    if (input.phase !== "received" && input[field] !== undefined) out.push(`input.${field}: only a received report restates the goal; leave it out`);
+  }
   (input.waitingOn ?? []).forEach((id, index) => {
     if (!id.startsWith(`q:${input.requestId}:`)) out.push(`input.waitingOn[${index}]: ${id} is not a question of ${input.requestId}`);
   });
@@ -1409,7 +1464,7 @@ export function boundReportTool(titleOf?: (linkId: string) => string): AgentTool
     name: "bm_report",
     role: "worker",
     description:
-      "Report to your Manager: paseo-bm builds your BM-REPORT, stores it and delivers it to the Manager that created you, at its next idle moment. phase: received first, beads-done, blocked (with waitingOn, waitingOnRequests, waitingOnBatches, waitingFor or waitingOnPeers), finished when the request is done, stopped when your run was stopped. Ask the owner with bm_questions, never here. Returns JSON { recordId, delivery } — delivery sent, queued (the Manager is busy; it arrives at its next idle moment) or dropped.",
+      "Report to your Manager: paseo-bm builds your BM-REPORT and delivers it at the Manager's next idle moment. phase: received first, beads-done, blocked (naming what you wait on), finished when the request is done, stopped when your run was stopped. Ask the owner with bm_questions, never here. Returns JSON { recordId, delivery }: sent, queued or dropped.",
     inputSchema: BOUND_REPORT_SCHEMA,
     rules: boundReportRules,
     build: (input) => buildReport(input, titleOf),
@@ -1475,7 +1530,7 @@ export interface QuestionsInput {
 export const QUESTIONS_FACE: ToolFace = {
   name: "bm_questions",
   role: "worker",
-  description: `Ask the owner: paseo-bm opens each question as a decision the owner answers in paseo-bm, numbers it after your request's last Qn, and delivers the answer to you when it comes. A question an owner precedent answers at once comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
+  description: `Ask the owner: paseo-bm opens each question as a decision and delivers the answer when it comes. A question an owner precedent answers comes back answered: carry on with that answer. Then report blocked with waitingOn naming the open ones, unless you can carry on with what does not depend on them. Exactly one recommended option per question. Returns JSON [{ qn, decisionId, state, answer? }]. ${DELIVERED}`,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1494,13 +1549,13 @@ export const QUESTIONS_FACE: ToolFace = {
             subject: {
               type: "string",
               pattern: SUBJECT_PATTERN.source,
-              description: `A short slug naming what is decided, such as push-backends: lowercase letters, digits and -, at most 60 characters. Keep it when you ask the same thing again. Never "${REVIEW_CAP_SUBJECT}" or "${LEGACY_REVIEW_BUDGET_SUBJECT}": past your request's review cap paseo-bm asks the owner itself.`,
+              description: `A short slug naming what is decided, such as push-backends; the same when you ask it again. Never "${REVIEW_CAP_SUBJECT}" or "${LEGACY_REVIEW_BUDGET_SUBJECT}": past your request's review cap paseo-bm asks the owner itself.`,
             },
             class: CLASS_FIELD,
-            supersedes: { ...QUESTION_ID, description: "The earlier question of this request that this one asks again, such as Q2; leave it out for a new question." },
+            supersedes: { ...QUESTION_ID, description: "The earlier question this one asks again, such as Q2." },
             ownerOnly: {
               type: "boolean",
-              description: "True when only the owner knows the answer: a login, an account or user id, a port of the owner's machine, a personal choice. Then only the owner answers it.",
+              description: "True when only the owner knows the answer: a login, an account or user id, a port of the owner's machine, a personal choice.",
             },
             options: {
               type: "array",
@@ -1518,7 +1573,7 @@ export const QUESTIONS_FACE: ToolFace = {
                     minItems: 1,
                     maxItems: EFFECTS.length,
                     items: { type: "string", enum: EFFECTS },
-                    description: 'What choosing it lets you do beyond the workspace or the undoable, such as push or migration; ["none"] when nothing of the kind.',
+                    description: 'What choosing it lets you do beyond the workspace or the undoable; ["none"] when nothing of the kind.',
                   },
                   recommended: { type: "boolean", description: "True on exactly one option." },
                 },
@@ -1557,7 +1612,7 @@ export const TELL_WORKER_FACE: ToolFace = {
   name: "bm_tell_worker",
   role: "manager",
   description:
-    "Give a request's Worker words about ITS OWN work — the owner's correction, a stop, an answer or a fact it needs — never new work: while the request is at work, about is required, and about: \"new\" is refused (new work gets its own Worker with bm_create_worker, lane: \"new\" or after). paseo-bm delivers to that request's one live Worker at its next idle moment (delivery \"sent\" or \"queued\" with turnMinutes, how long its turn has run). While the Worker waits on items by id, a tell is held and goes with them (delivery \"held\", with a note naming them). now: true with about: \"current\" marks the owner's own words that correct or stop this work: delivered at once, and into a running Claude or Codex Worker's turn (delivery \"steered\"); turnReplaced: true when Paseo restarted that turn with them instead. A finished or stopped request goes on as its continuation: a new request and Worker, briefed by paseo-bm, returning { requestId, continuationOf, workerId, delivery, opened }. Only a request of yours. Returns JSON { workerId, delivery, turnMinutes?, turnReplaced?, note? }.",
+    "Give a request's Worker words about ITS OWN work — the owner's correction, a stop, an answer or a fact it needs — never new work: while the request is at work, about is required, and about: \"new\" is refused (new work gets its own Worker with bm_create_worker: next, or after when it needs this request's result). paseo-bm delivers to that request's one live Worker at its next idle moment (delivery \"sent\" or \"queued\" with turnMinutes, how long its turn has run). While the Worker waits on items by id, a tell is held and goes with them (delivery \"held\", with a note naming them). now: true with about: \"current\" marks the owner's own words that correct or stop this work: delivered at once, and into a running Claude or Codex Worker's turn (delivery \"steered\"); turnReplaced: true when Paseo restarted that turn with them instead. A finished or stopped request goes on as its continuation: a new request and Worker, briefed by paseo-bm, returning { requestId, continuationOf, workerId, delivery, opened }. Only a request of yours. Returns JSON { workerId, delivery, turnMinutes?, turnReplaced?, note? }.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1614,7 +1669,7 @@ export const CREATE_REVIEWER_FACE: ToolFace = {
   name: "bm_create_reviewer",
   role: "worker",
   description:
-    "Create the Reviewer of one new milestone batch of your request (plan, wave or finished): paseo-bm checks your request's review cap, creates the Reviewer in your folder with its labels, mode and tools, and gives it its first prompt — the milestone, the stages, the scope and the checks you ran. Its verdict reaches you as a delivery; you do not wait on it. Send your received report first. Refused, creating nothing, when the batch already has a Reviewer (use bm_rereview), when a plan batch is asked below Large or after a plan batch passed, when the milestone contradicts the stages, or when the request's review cap is reached (paseo-bm asks the owner once and names the question). Returns JSON { reviewerId, batchId, reviewCalls }. " +
+    "Create the Reviewer of one new milestone batch of your request (plan, wave or finished). Its verdict reaches you as a delivery; you do not wait on it. Send your received report first. Refused, creating nothing, when the batch already has a Reviewer (use bm_rereview), a plan batch is asked below Large or after one passed, the milestone contradicts the stages, or the review cap is reached (paseo-bm asks the owner once and names the question). Returns JSON { reviewerId, batchId, reviewCalls }. " +
     DELIVERED,
   inputSchema: {
     type: "object",
@@ -1627,9 +1682,9 @@ export const CREATE_REVIEWER_FACE: ToolFace = {
         minItems: 1,
         maxItems: REVIEW_TOOL_LIMITS.stages,
         items: { type: "string", enum: REVIEW_STAGES },
-        description: "What the Reviewer reviews in this batch: implementation, plan, beads, documents (one to three).",
+        description: "What the Reviewer reviews in this batch (one to three).",
       },
-      scope: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.scope, description: "First implementation review: its full requested scope. Later batches: only new changed paths/hunks and affected behaviour; paseo-bm supplies the delta since the last completed implementation review and retains open blocking findings." },
+      scope: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.scope, description: "First implementation review: its full requested scope. Later batches: only new changed paths/hunks and affected behaviour; paseo-bm supplies the delta and retains open blocking findings." },
       checks: {
         type: "string",
         minLength: 1,
@@ -1639,9 +1694,9 @@ export const CREATE_REVIEWER_FACE: ToolFace = {
       milestone: {
         type: "string",
         enum: REVIEW_MILESTONES,
-        description: "plan (Large only, once: the plan, its documents and the bead graph), wave (the diff since the previous implementation batch, after a planned wave) or finished (before finished). When left out: plan if the stages include plan or beads, else finished.",
+        description: "plan (Large only, once: the plan, its documents and the bead graph), wave (after a planned wave) or finished (before finished). When left out: plan if the stages include plan or beads, else finished.",
       },
-      since: { ...COMMIT, description: "The request's base for the first implementation review. Later batches use paseo-bm's last completed review snapshot, not this original base." },
+      since: { ...COMMIT, description: "The request's base for the first implementation review." },
     },
   },
 };
@@ -1661,7 +1716,7 @@ export const REREVIEW_FACE: ToolFace = {
   name: "bm_rereview",
   role: "worker",
   description:
-    "Ask for a batch's re-review: a fresh Reviewer checks the diff of your fixes against the previous blocking findings, within your request's review cap. paseo-bm records your tree at every review call and gives the new Reviewer the files changed since the batch's last completed review and their diff; the earlier Reviewer is left idle. Allowed while the batch's latest verdict is changes-required, up to the owner's re-reviews per batch (3 by default), and from the second re-review on only while its blocking findings fall; otherwise refused, creating nothing and asking no one. Returns JSON { reviewerId, reviewCalls }. " +
+    "Ask for a batch's re-review: a fresh Reviewer checks the diff of your fixes against the previous blocking findings, within your request's review cap. Allowed while the batch's latest verdict is changes-required, up to the owner's re-reviews per batch, and from the second re-review on only while its blocking findings fall; otherwise refused, creating nothing and asking no one. Returns JSON { reviewerId, reviewCalls }. " +
     DELIVERED,
   inputSchema: {
     type: "object",
@@ -1669,8 +1724,8 @@ export const REREVIEW_FACE: ToolFace = {
     required: ["batchId", "fixed"],
     properties: {
       batchId: { ...BATCH_ID, description: "The batch bm_create_reviewer opened." },
-      fixed: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.fixed, description: "How each blocking finding was fixed, the changed paths/hunks, and affected check results (reuse unaffected passing evidence). This account bounds review when snapshots are unavailable." },
-      since: { ...COMMIT, description: "Legacy context only; not needed. paseo-bm uses completed-review snapshots, or the changed paths/hunks in fixed. Never a whole-request diff fallback." },
+      fixed: { type: "string", minLength: 1, maxLength: REVIEW_TOOL_LIMITS.fixed, description: "How each blocking finding was fixed, the changed paths/hunks, and affected check results (reuse unaffected passing evidence)." },
+      since: { ...COMMIT, description: "Not needed: paseo-bm finds the diff." },
     },
   },
 };
@@ -1705,7 +1760,7 @@ const PROJECT: JsonSchema = {
 const ASK_PROJECT_FACE: ToolFace = {
   name: "bm_ask_project",
   role: "worker",
-  description: `Ask another project for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that project's Manager (opening one when it has none) — or, for a Worker of a mission, to its own Main, who links it with the Worker on that work or gives it one there. Never message another project's agents yourself. Its reply reaches you as a BM-DELIVERY peer-reply; talk on the link with bm_peer_reply. Returns JSON { linkId, project, managerId, delivery, openedManager }. ${DELIVERED}`,
+  description: `Ask another project for work or an answer: paseo-bm stores the ask as a peer link and delivers it to that project's Manager, or in a mission to your Main. Never message another project's agents yourself. Its reply reaches you as a BM-DELIVERY peer-reply; talk on the link with bm_peer_reply. Returns JSON { linkId, project, managerId, delivery, openedManager }. ${DELIVERED}`,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -1730,20 +1785,20 @@ function peerFaces(role: "manager" | "worker"): ToolFace[] {
       name: "bm_peers",
       role,
       description:
-        "Read the other projects you can ask (Paseo workspaces, each with its live Manager) and this project's peer links both ways, newest first: who asked whom, the requests, the state and the newest message; a Main also reads the other open missions and its mission's links of every kind. project narrows the links to one project. Read-only. Returns JSON { projects, links } (a Main: and missions).",
+        "Read the other projects you can ask (Paseo workspaces, each with its live Manager) and this project's peer links both ways, newest first; a Main also reads the other open missions and its mission's links of every kind. project narrows the links. Read-only. Returns JSON { projects, links } (a Main: and missions).",
       inputSchema: { type: "object", additionalProperties: false, properties: { project: PROJECT } },
     },
     ...(role === "worker" ? [ASK_PROJECT_FACE] : []),
     {
       name: "bm_peer_reply",
       role,
-      description: `Write on a peer link you are a party to: paseo-bm delivers the text to the agent on the link's other side at its next idle moment. act says what it does (default: answer from the answering side, ask from the asking side); ack and close start no turn: the other side reads them in its BM-STATE and at the head of its next delivery (delivery "no-turn"). close (or close: true) closes the link after this message (decline an ask, or withdraw yours). refs names what you mean by id. Returns JSON { recordId, to, delivery, state, note? }. ${DELIVERED}`,
+      description: `Write on a peer link you are a party to: paseo-bm delivers the text to the link's other side at its next idle moment. act says what it does (default: answer from the answering side, ask from the asking side); ack and close start no turn (delivery "no-turn"): the other side reads them at the head of its next delivery. close (or close: true) closes the link after this message. Returns JSON { recordId, to, delivery, state, note? }. ${DELIVERED}`,
       inputSchema: {
         type: "object",
         additionalProperties: false,
         required: ["linkId", "text"],
         properties: {
-          linkId: { ...PEER_LINK, description: "The link, peer-…, as bm_ask_project or the delivery gave it." },
+          linkId: { ...PEER_LINK, description: "The link, peer-…." },
           text: { type: "string", minLength: 1, maxLength: PEER_TOOL_LIMITS.text, description: "The message, in full sentences a newcomer to the work understands." },
           act: MESSAGE_ACT,
           refs: MESSAGE_REFS,
@@ -1768,7 +1823,8 @@ export const MISSION_TOOL_LIMITS = {
   criterion: 500,
   evidence: 500,
   criteria: 20,
-  plan: 20_000,
+  planSteps: 30,
+  planStep: 200,
   contractTitle: 200,
   contractText: 4_000,
   contractSource: 300,
@@ -1784,7 +1840,14 @@ const MISSION_REPOS: JsonSchema = { type: "array", minItems: 1, maxItems: MISSIO
 const BUDGET_VALUE: JsonSchema = { type: "integer", minimum: 0 };
 
 
-/** `bm_mission`, `bm_mission_start`, `bm_mission_update`, `bm_answer_worker` and `bm_hold_cancel`: a bound Manager lists them; only a Main can use them. */
+/**
+ * The bounds of `bm_mission_update.steps` (ADR-045 decision 1). A step's
+ * request leaves room in `CREATE_WORKER_LIMITS.request` for its criteria, its
+ * context for the four facts the next step is given at its start.
+ */
+export const LINE_STEP_LIMITS = { min: 2, max: 12, title: 70, request: 18_000, acceptance: 6, criterion: 200, context: 16 } as const;
+
+/** `bm_mission`, `bm_mission_start`, `bm_mission_update`, `bm_answer_worker`, `bm_hold_cancel` and `bm_hold_release`: a bound Manager lists them; only a Main can use them. */
 export const MISSION_TOOL_FACES: readonly ToolFace[] = [
   {
     name: "bm_mission",
@@ -1819,7 +1882,7 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
   {
     name: "bm_mission_update",
     role: "manager",
-    description: `Change your mission. Written at once: plan (the whole text), contracts (add one, or a new version of one by id), a new done criterion, a criterion's status open or met (met with its evidence), and adding a repo when the mission level delegates scope-repo. Everything else — name, code, goal, nonGoals, budget, confirmCharter, close, removing a repo, rewording or dropping a criterion, adding a repo otherwise — opens one owner card (m:) with "apply" and "keep as is", which paseo-bm applies when the owner taps apply. transfer opens its own card to move requests to another mission (bm_ask_mission only asks; it moves nothing). Returns JSON { applied, decisionId, transferDecisionId? }. ${DELIVERED}`,
+    description: `Change your mission. Written at once: plan (the whole list of steps; refused while a line of steps is live), contracts (add one, or a new version of one by id), a new done criterion, a criterion's status open or met (met with its evidence), and adding a repo when the mission level delegates scope-repo. Everything else — name, code, goal, nonGoals, budget, confirmCharter, close, removing a repo, rewording or dropping a criterion, adding a repo otherwise, and steps — opens one owner card (m:) with "apply" and "keep as is", which paseo-bm applies when the owner taps apply. transfer opens its own card to move requests to another mission (bm_ask_mission only asks; it moves nothing). Returns JSON { applied, decisionId, transferDecisionId? }. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1855,7 +1918,31 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
           description: "The whole budget as it should be; a field left out has no limit, an empty object removes the budget.",
           properties: { requests: BUDGET_VALUE, workers: BUDGET_VALUE, reviewCalls: BUDGET_VALUE, days: BUDGET_VALUE },
         },
-        plan: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.plan, description: "The whole plan as it should be." },
+        plan: {
+          type: "array",
+          minItems: 1,
+          maxItems: MISSION_TOOL_LIMITS.planSteps,
+          description: "The whole plan as it should be: its steps only, one line each. A fact goes to bm_memory or a contract.",
+          items: { type: "string", minLength: 1, maxLength: MISSION_TOOL_LIMITS.planStep, pattern: "^[^\\r\\n]*$" },
+        },
+        steps: {
+          type: "array",
+          minItems: LINE_STEP_LIMITS.min,
+          maxItems: LINE_STEP_LIMITS.max,
+          description: "A larger ask as ordered steps, each fitting one Worker session. Nothing starts: the owner approves them on one card, then paseo-bm runs them one at a time and writes the plan from the titles. Cancel with bm_hold_cancel and propose again to change a live line.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["title", "request", "acceptance"],
+            properties: {
+              title: { type: "string", minLength: 1, maxLength: LINE_STEP_LIMITS.title, pattern: "^[^\\r\\n]*$" },
+              request: { type: "string", minLength: 1, maxLength: LINE_STEP_LIMITS.request, description: "What its Worker is to do, as bm_create_worker's request." },
+              acceptance: { type: "array", minItems: 1, maxItems: LINE_STEP_LIMITS.acceptance, items: { type: "string", minLength: 1, maxLength: LINE_STEP_LIMITS.criterion, pattern: "^[^\\r\\n]*$" }, description: "What shows the step is done, one line each; the owner reads them on the card." },
+              project: { type: "string", pattern: WORKSPACE_ID_SOURCE, description: "The mission's repo it works in. Required when the mission has more than one." },
+              context: { type: "array", maxItems: LINE_STEP_LIMITS.context, items: CONTEXT_ITEM, description: "Facts that bear on the step, each with its source." },
+            },
+          },
+        },
         contracts: {
           type: "array",
           minItems: 1,
@@ -1943,7 +2030,7 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
   {
     name: "bm_hold_cancel",
     role: "manager",
-    description: `Cancel a held request of your mission (one bm_create_worker held with after, listed by bm_mission under held): paseo-bm will not create its Worker. Its why goes to the mission's journal. Returns JSON { cancelled }. ${DELIVERED}`,
+    description: `Cancel a held request of your mission (one bm_create_worker held, listed by bm_mission under held), or a started step paseo-bm told you has stopped: paseo-bm will not create its Worker, and a started step's Worker is left alone. Its why goes to the mission's journal. Returns JSON { cancelled }. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1951,6 +2038,20 @@ export const MISSION_TOOL_FACES: readonly ToolFace[] = [
       properties: {
         holdId: { type: "string", pattern: "^hold-\\d{8}T\\d{6,9}Z$", description: "The held request, hold-…, as bm_mission lists it." },
         why: { type: "string", minLength: 1, maxLength: 300, description: "Why, in one line." },
+      },
+    },
+  },
+  {
+    name: "bm_hold_release",
+    role: "manager",
+    description: `Only on the owner's word: let a waiting-stopped held request of your mission start past what stopped it (a failed finish gate, a stalled or Worker-less request it follows, the sequential slot); the budget still holds. Refused for any other state, a started step included. Its why goes to the mission's journal. Returns JSON { released, note }. ${DELIVERED}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["holdId", "why"],
+      properties: {
+        holdId: { type: "string", pattern: "^hold-\\d{8}T\\d{6,9}Z$", description: "The held request, hold-…, as bm_mission lists it." },
+        why: { type: "string", minLength: 1, maxLength: 300, description: "The owner's word and why it goes on, in one line." },
       },
     },
   },
@@ -2044,7 +2145,7 @@ function memoryFace(role: "manager" | "worker"): ToolFace {
     role,
     description: main
       ? `Read or curate the project memory of a repo of your mission: what later Workers there must know. op read gives an index of the live entries (id, kind, scope, the first words); a query gives the matching entries in full, an id one entry; retired: true adds the entries paseo-bm retired (a closed mission's, a replaced subject's, an old mission fact). add stores one (kind, text, source; scope repo for what outlasts this mission, a subject when it replaces an entry on the same subject); remove (id, why) retires one, its why in the mission's journal. At most 300 live entries a repo. The owner's answers to your Workers' questions are added by paseo-bm. Returns JSON. ${DELIVERED}`
-      : `Read or add to the project memory of your own repo: what later Workers here must know. op read gives an index of the live entries; a query gives the matching entries in full, an id one entry. add stores one lasting fact, convention or contract (kind, text, source; scope repo when it outlasts this mission, a subject when it replaces an entry on the same subject). Returns JSON. ${DELIVERED}`,
+      : `Read or add to your own repo's project memory: what later Workers here must know. read gives an index; a query the matching entries in full, an id one entry. add stores one lasting fact, convention or contract (kind, text, source; scope repo when it outlasts this mission, a subject to replace an entry). Returns JSON. ${DELIVERED}`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -2061,7 +2162,7 @@ function memoryFace(role: "manager" | "worker"): ToolFace {
         kind: { type: "string", enum: main ? MEMORY_ADD_KINDS : WORKER_MEMORY_KINDS, description: "add: what the entry is." },
         text: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.text, description: "add: the entry, one self-contained statement." },
         source: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.source, description: "add: where it comes from: a request, a decision id, a document, a commit." },
-        subject: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.subject, description: "add: a short name of what the entry is about; a newer entry with the same subject retires the older one." },
+        subject: { type: "string", minLength: 1, maxLength: MEMORY_TOOL_LIMITS.subject, description: "add: what the entry is about; a newer one with the same subject retires it." },
         scope: { type: "string", enum: ["repo", "mission"], description: "add: repo for what every later mission needs; mission for what only this mission settled. Default: mission for a fact or a decision, repo otherwise." },
         id: { type: "string", pattern: "^mem-[0-9a-f]{10}$", description: main ? "read: that entry in full; remove: the entry to retire. mem-…, as read gave it." : "read: that entry in full, mem-…, as read gave it." },
         ...(main
@@ -2181,14 +2282,24 @@ export const BOUND_SERVER_TOOLS: readonly ToolFace[] = [
         lane: {
           type: "string",
           enum: ["new"],
-          description: "A Main only: \"new\" runs this independent work in a lane of its own in the repo (a worktree and branch made from the mission branch, or a free one reused), so it starts now beside the running work; up to 7 lanes a repo. Leave it out for work on the mission branch itself.",
+          description: "A Main only: replaced by parallel, and still accepted. \"new\" runs this work in a lane of its own in the repo (a worktree and branch made from the mission branch, or a free one reused); up to 7 lanes a repo. While a request runs it is refused without parallel. Leave it out for work on the mission branch itself.",
+        },
+        next: {
+          type: "boolean",
+          description: "A Main only: true for new work on no request's result while a request runs: held and started when it is done, ahead of the remaining steps. Not with after or parallel.",
+        },
+        parallel: {
+          type: "string",
+          minLength: 1,
+          maxLength: 300,
+          description: "A Main only: why this runs in a new lane beside the running request, quoting in double quotes the owner's explicit word for parallel work, in the owner's own language, as typed in your chat. Only on that word: an ordinary owner message is not it.",
         },
         after: {
           type: "array",
           minItems: 1,
           maxItems: 10,
-          items: REQUEST_ID,
-          description: "A Main only: requests of your mission this work depends on. paseo-bm holds it and creates its Worker by itself when every one of them finishes, and tells you; nothing starts now. Leave it out for work that can start now.",
+          items: { type: "string", pattern: "^(req-\\d{8}T\\d{6}Z|hold-\\d{8}T\\d{6,9}Z)$", description: "A request (req-…) or a held entry (hold-…) of your mission, as bm_mission lists them." },
+          description: "A Main only: requests or held entries of your mission this work depends on: held, and its Worker created by itself when the newest continuation of each finished and passed its finish gate. Leave it out for work that can start now.",
         },
       },
     },

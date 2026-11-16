@@ -4,7 +4,7 @@
  * `orchestrator`, from orchestrator design §3.1).
  *
  * Until 0.3.x only the installer wrote these entries, so a user who installed
- * straight from paseo.cafe got the screens and no roles at all: the Manager
+ * straight from npm got the screens and no roles at all: the Manager
  * could not create a Worker. ADR-012 lifts ADR-008 decision 2 — the plugin may
  * now create the three main roles — and this module holds the values it creates
  * them with, which are exactly the installer's defaults so a machine set up

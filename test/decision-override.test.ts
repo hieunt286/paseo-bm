@@ -1,7 +1,7 @@
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INBOX_DIR_NAME, createAlertStore } from "../plugin/server/alert-store";
 import { createAutonomyStore } from "../plugin/server/autonomy-store";
 import { createQuestionDecisionDelivery } from "../plugin/server/decision-delivery";
@@ -460,6 +460,20 @@ describe("the owner's answer to an override reaches the agent concerned", () => 
     expect(fake.sends).toEqual([]);
     expect(stored(override.id).delivery).toMatchObject({ kind: overrideKindOf(override.id), outcome: "failed" });
     expect(logs.join("\n")).toContain("has no single live Worker");
+  });
+
+  it("a corrected answer queued for a running Worker that fails at its turn end is recorded failed and raises the alert (ADR-042 decision 5)", async () => {
+    const delegated = storeAnswered(scopeQuestion(), BY_POLICY);
+    const { decision: override } = handleDecisionsOverride({ id: delegated.id }, deps());
+    const { fake, answer, queue } = world();
+    fake.byId(WORKER)!.status = "running";
+    await answer({ id: override.id, words: "ISO dates, always" });
+    expect(stored(override.id).delivery).toMatchObject({ outcome: "queued" });
+    fake.byId(WORKER)!.status = "idle";
+    fake.byId(WORKER)!.archivedAt = NOW.toISOString();
+    await queue.turnEnded({ agent: { id: WORKER } }, fake.paseo);
+    expect(stored(override.id).delivery).toMatchObject({ kind: overrideKindOf(override.id), outcome: "failed" });
+    await vi.waitFor(() => expect(createAlertStore(home).list({ open: true, kinds: ["delivery-dropped"] })).toHaveLength(1));
   });
 
   it("an Orchestrator decision: the new choice's prepared command goes on the override's authority", async () => {

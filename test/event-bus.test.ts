@@ -239,6 +239,18 @@ describe("the governor's wakes (missions design §9.7, §9.1)", () => {
     expect(wakes()).toEqual([]);
   });
 
+  it("reaches an Orchestrator Paseo closed after its idle hour: its events are all wakes (ADR-042)", async () => {
+    inScope();
+    const fake = daemon();
+    const orchestrator = fake.byId(ORCHESTRATOR)!;
+    orchestrator.status = "closed";
+    orchestrator["persistence"] = { sessionId: "session-1" };
+    const events = bus();
+    const first = danger(1);
+    expect(await events.publish([first], fake.paseo)).toEqual({ status: "done", published: [eventKeyOf(first)], skipped: [] });
+    expect(fake.sends).toHaveLength(1);
+  });
+
   it("a danger signal wakes it at once, for a project in the policy's scope, until its alert is cleared", async () => {
     inScope();
     const fake = daemon();

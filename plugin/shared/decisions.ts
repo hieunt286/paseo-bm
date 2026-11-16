@@ -19,6 +19,7 @@ import { coordinationChangeSchema } from "./coordination";
 import {
   arbitrationActionSchema,
   integrationGrantActionSchema,
+  integrationLocalMergeActionSchema,
   isMissionActionKind,
   missionChangeActionSchema,
   missionMergeActionSchema,
@@ -296,6 +297,8 @@ export const preparedActionSchema = z.discriminatedUnion("kind", [
   missionTransferActionSchema,
   /** The owner's one integration grant on the plugin's integration card (delivery line design §4.3), the same way. */
   integrationGrantActionSchema,
+  /** The owner's one local-merge grant on the plugin's local-merge card (ADR-045 decision 4), the same way. */
+  integrationLocalMergeActionSchema,
 ]);
 export type PreparedAction = z.infer<typeof preparedActionSchema>;
 

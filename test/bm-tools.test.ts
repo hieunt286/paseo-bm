@@ -10,6 +10,7 @@ import {
   TELL_WORKER_FACE,
   MESSAGE_ACTS,
   MISSION_LINK_FACES,
+  MISSION_TOOL_FACES,
   NO_TURN_ACTS,
   actHeaderOf,
   boundToolFacesFor,
@@ -628,6 +629,19 @@ describe("the tool list", () => {
     expect(schemaIssues({ type: "integer", minimum: 1, maximum: 50 }, 0)).toEqual(["input: must be at least 1"]);
     expect(schemaIssues({ type: "integer", minimum: 1, maximum: 50 }, 51)).toEqual(["input: must be at most 50"]);
     expect(schemaIssues({ type: "integer", minimum: 1, maximum: 50 }, 50)).toEqual([]);
+  });
+
+  it("bm_mission_update's plan is 1 to 30 one-line steps of at most 200 characters (ADR-045 decision 8)", () => {
+    const schema = MISSION_TOOL_FACES.find((face) => face.name === "bm_mission_update")!.inputSchema;
+    const issues = (plan: unknown) => schemaIssues(schema, { plan });
+    expect(issues(["API", "Web"])).toEqual([]);
+    expect(issues(Array.from({ length: 30 }, () => "x".repeat(200)))).toEqual([]);
+    expect(issues("1. API")).toEqual(["input.plan: must be an array"]);
+    expect(issues([])).toEqual(["input.plan: needs at least 1 item(s)"]);
+    expect(issues(Array.from({ length: 31 }, () => "x"))).toEqual(["input.plan: takes at most 30 items"]);
+    expect(issues(["x".repeat(201)])).toEqual(["input.plan[0]: must be at most 200 characters"]);
+    expect(issues(["a\nb"])).toHaveLength(1);
+    expect(issues(["a\r\nb"])).toHaveLength(1);
   });
 });
 

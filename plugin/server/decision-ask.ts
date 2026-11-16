@@ -164,6 +164,8 @@ export async function handleDecisionsAsk(input: DecisionsAskInput, paseo: unknow
     askKindOf(decision.id),
     askNoticeOf(decision, ownerText),
     isNoticePaseo(paseo) ? paseo : undefined,
+    undefined,
+    { wake: true },
   );
   if (outcome === "dropped" || outcome === "replaced") log(`[paseo-bm] the question about ${decision.id} is stored, but could not be delivered to ${target}.`);
   return { thread, delivery: outcome === "sent" ? "sent" : outcome === "queued" ? "queued" : "failed" };

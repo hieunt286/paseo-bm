@@ -80,6 +80,9 @@ function actionLineOf(action: PreparedAction | undefined): string | null {
     case "integration.grant":
       // Delivery line design §4.3: the owner's one grant per mission and repo.
       return `the plugin allows pushing mission ${action.missionId}'s branch of ${action.repo} and its merge request, only when the owner chooses it`;
+    case "integration.local-merge":
+      // ADR-045 decision 4: the owner's one grant per mission and repo.
+      return `the plugin fast-forwards the local integration branch of mission ${action.missionId}'s ${action.repo} when a request passes its checks, only when the owner chooses it`;
     default:
       // Autonomy design §G.4: a change of the owner's settings, applied only on the owner's own answer.
       return `${action.kind}: the plugin ${preparedChangeTextOf(action)}, only when the owner chooses it`;

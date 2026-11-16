@@ -33,6 +33,9 @@
  *     line. A `bm_govern` step on a family at step 1 or 2 restarts both
  *     (`governedLadderOf`, `command-authority.ts`). Steps 3 and 4 are the
  *     model's.
+ *   - A quiet family (`QUIET_FAMILIES`, ADR-045 decision 9) only records: it
+ *     never goes past step 1, and one stored above it stays until its figures
+ *     clear; it sends no nudge and is in no digest.
  *   - Any step → 0 *reset*: no figure of the family crossed for
  *     `governor.windowMinutes` (delivery line design §8.4: `underSince`, so a
  *     figure that flickers under and back keeps its step); a journal line.
@@ -64,7 +67,7 @@ import { GOVERNOR_POOLS } from "../shared/orchestrator";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { createJsonFileStore } from "./data-files";
 import { resolveDataHome, type DataHomeDeps } from "./data-home";
-import { GOVERNOR_FAMILIES, GOVERNOR_FIGURE_IDS, familyFiguresOf, figureText, storedFigureIdOf, type GovernorFamily, type GovernorFigure } from "../shared/governor-figures";
+import { GOVERNOR_FAMILIES, GOVERNOR_FIGURE_IDS, QUIET_FAMILIES, familyFiguresOf, figureText, storedFigureIdOf, type GovernorFamily, type GovernorFigure } from "../shared/governor-figures";
 
 import { governorFiguresOf, readGovernorSnapshot, type ListedAgent } from "./governor-figures";
 import { retryPendingMerges } from "./lane-merge";
@@ -264,6 +267,8 @@ export function ladderStepOf(current: FamilyState | null | undefined, figures: r
   }
   // Crossed again: the quiet, if any, is over.
   delete base.underSince;
+  // ADR-045 decision 9: a quiet family has recorded at step 1, and code takes it no further.
+  if (base.step >= 1 && QUIET_FAMILIES.includes(figures[0]!.family)) return { state: base, action: "none" };
   switch (base.step) {
     case 0:
       return { state: { ...base, step: 1, since: at, lastAction: { at, kind: "record", id: null }, mainTurnsAt: null }, action: "record" };
@@ -403,7 +408,8 @@ const journalText = {
  * command. Pure.
  */
 export function digestTextOf(mission: Pick<Mission, "code" | "charter">, ladder: MissionLadder): string | null {
-  const held = GOVERNOR_FAMILIES.filter((family) => ladder[family]?.held !== undefined);
+  // A family held before it went quiet keeps its stored hold, and the digest stops asking for a re-plan on it.
+  const held = GOVERNOR_FAMILIES.filter((family) => ladder[family]?.held !== undefined && !QUIET_FAMILIES.includes(family));
   if (held.length === 0) return null;
   const lines = held.flatMap((family) => {
     const state = ladder[family]!;

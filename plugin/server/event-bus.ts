@@ -896,7 +896,7 @@ export function createEventBus(deps: EventBusDeps = {}): EventBus {
           const workspaceId = workspaceOfEvent(event);
           if (workspaceId !== null) workspaceOfKey.set(key, workspaceId);
           eventOfKey.set(key, event);
-          const item: BatchItem = { key, line: eventLineOf(event), isCurrent: isCurrentOf(event, home), group: wakeGroupOf(event) };
+          const item: BatchItem = { key, line: eventLineOf(event), wake: true, isCurrent: isCurrentOf(event, home), group: wakeGroupOf(event) };
           if (event.type === "worker.signal" && event.signal === "danger") item.first = true;
           return item;
         });

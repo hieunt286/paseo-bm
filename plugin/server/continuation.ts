@@ -14,6 +14,14 @@
  * built from the stores with the handoff brief's helper
  * (`workerHandoverFacts`), masked and capped at the handoff brief's size.
  *
+ * The predecessor's review batches that did not pass are copied onto the new
+ * request (`openBatchesOf`, ADR-045 decision 10), so its Worker goes on with
+ * `bm_rereview` instead of a new batch. A batch still waiting for a verdict
+ * stays behind, unless a `BM-ROLLOVER now` ended the request: then it goes
+ * too, its newest call `awaited`, and the verdict is stored on the copy and
+ * reaches the continuation's Worker (`noteReviewResult`, `verdictTargetOf`;
+ * ADR-046).
+ *
  * Nothing here throws: a failure is one refusal line.
  */
 import { join } from "node:path";
@@ -44,13 +52,15 @@ import { createMissionStore } from "./mission-store";
 import { listedWorkspaces, titleIn, type DashboardPaseo } from "./paseo-directory";
 import { createPeerLinkStore, isLiveLink } from "./peer-links";
 import { repoKeyOf } from "./placements";
-import { createRequestRegistry, isBoundRequest, type RegisteredRequest } from "./request-registry";
+import { NO_VERDICT_RESULT, createRequestRegistry, isBoundRequest, newestCallOf, type RegisteredRequest, type ReviewBatch, type ReviewResult } from "./request-registry";
+import { isPassVerdict } from "./review-tools";
 import { reasonOf } from "./role-choices";
 import { refused } from "./tool-kit";
 import { chainOf, locateRequest, type LocatedRequest } from "./waits";
 import { decisionKindOf, isAnswerable } from "../shared/decisions";
 import { BRIEF_PROMPT_MARKER } from "../shared/notices";
 import { shorten } from "../shared/text";
+import { timeOrZero } from "../shared/time";
 
 export type ContinuationReason = NonNullable<RegisteredRequest["rollover"]>["reason"];
 
@@ -71,6 +81,35 @@ export function endedPhaseOf(home: string, request: Pick<RegisteredRequest, "req
   }
 }
 
+type CarriedBatch = { batch: ReviewBatch; verdict: ReviewResult | null };
+
+/**
+ * The batches a continuation inherits (ADR-045 decision 10), each with the
+ * verdict that keeps it open: its newest real one is no pass, and a result
+ * answers its newest call. A batch `inFlight` names whose newest call has no
+ * result yet goes too, with no verdict to name (ADR-046). Any other batch
+ * with no verdict, or one from an older build whose results live only in the
+ * trace, is left behind. Pure.
+ */
+function openBatchesOf(request: Pick<RegisteredRequest, "reviews">, inFlight: readonly string[] = []): CarriedBatch[] {
+  return request.reviews.batches.flatMap((batch): CarriedBatch[] => {
+    if (batch.results === undefined) return [];
+    const last = batch.results.at(-1);
+    const answered = last !== undefined && timeOrZero(last.at) >= timeOrZero(newestCallOf(batch)?.at ?? "");
+    if (!answered && inFlight.includes(batch.batchId)) return [{ batch, verdict: null }];
+    const verdict = batch.results.findLast((entry) => entry.verdict !== NO_VERDICT_RESULT);
+    if (verdict === undefined || isPassVerdict(verdict.verdict)) return [];
+    return answered ? [{ batch, verdict }] : [];
+  });
+}
+
+/** A batch as a continuation copies it: one with no verdict yet has its newest call marked `awaited` (ADR-046). Pure. */
+function carriedBatchOf({ batch, verdict }: CarriedBatch): ReviewBatch {
+  if (verdict !== null) return batch;
+  const newest = newestCallOf(batch);
+  return { ...batch, calls: batch.calls.map((call) => (call === newest ? { ...call, awaited: true as const } : call)) };
+}
+
 const list = (values: readonly string[] | null | undefined): string => (values === null || values === undefined || values.length === 0 ? "none" : [...new Set(values)].join(", "));
 
 /**
@@ -82,7 +121,7 @@ const list = (values: readonly string[] | null | undefined): string => (values =
 export async function continuationLinesOf(
   home: string,
   prev: LocatedRequest,
-  init: { reason: ContinuationReason; figure: string; cwd: string; report?: ParsedReport },
+  init: { reason: ContinuationReason; figure: string; cwd: string; report?: ParsedReport; inFlightBatches?: readonly string[] },
   paseo: unknown,
   log: (message: string) => void,
 ): Promise<string[]> {
@@ -126,6 +165,9 @@ export async function continuationLinesOf(
   } catch (error) {
     log(`[paseo-bm] could not read the links of the chain of ${request.requestId}: ${reasonOf(error)}`);
   }
+  const carried = openBatchesOf(request, init.inFlightBatches);
+  const open = carried.flatMap(({ batch, verdict }) => (verdict === null ? [] : [`${batch.batchId} (${verdict.verdict}${verdict.blocking === null ? "" : `, ${verdict.blocking} blocking`})`]));
+  const awaited = carried.filter(({ verdict }) => verdict === null).map(({ batch }) => batch.batchId);
   const lines = [
     `continues: ${request.requestId} (${init.reason}: ${init.figure})`,
     `chain: root ${request.chainRootId ?? request.requestId}, request ${chain.length + 1}`,
@@ -134,6 +176,8 @@ export async function continuationLinesOf(
     `beadsClosed: ${list(report?.beadsClosed)}`,
     `beadsReady: ${list(report?.beadsReady)}`,
     `reviewFindingsOpen: ${report?.reviewFindingsOpen ?? "none"}`,
+    ...(open.length === 0 ? [] : [`open review batches: ${open.join(", ")}: use bm_rereview`]),
+    ...(awaited.length === 0 ? [] : [`review batches with a verdict on its way: ${awaited.join(", ")}: it comes to you`]),
     `decided: ${list(report?.decided)}`,
     `suggestions: ${list(suggestions)}`,
     `buildAndTests: ${report?.buildAndTests ?? "unknown"}`,
@@ -184,6 +228,8 @@ export interface ContinuationInit {
   peerLink?: string;
   /** The predecessor's final report, when the trace does not hold it yet (a size finish, §2.6). */
   report?: ParsedReport;
+  /** The batches with no verdict delivered that a finish at `BM-ROLLOVER now` left: they are carried on too (ADR-046). */
+  inFlightBatches?: readonly string[];
 }
 
 export interface ContinuationDeps {
@@ -223,7 +269,7 @@ export async function openContinuation(
       if (cwd === null) return refused(`paseo-bm could not read the folder of request ${request.requestId} from Paseo; try again in a moment. Nothing was created.`);
     } else {
       const listed = await listedWorkspaces(paseo as DashboardPaseo);
-      const repo = missionRepoOf(home, mission, workspaceId, listed);
+      const repo = missionRepoOf(home, mission, workspaceId, listed, { continuing: true });
       const reasons = Array.isArray(repo) ? repo : await staffingReasons(home, paseo as DashboardPaseo, mission, workspaceId, listed);
       if (reasons.length > 0 || Array.isArray(repo)) return refused([...reasons, "Nothing was created."].join("\n"));
       cwd = repo.directory;
@@ -231,7 +277,7 @@ export async function openContinuation(
     }
     const peer = init.peerLink === undefined ? undefined : await peerLinesFor(home, paseo, init.peerLink, workspaceId, mission?.missionId ?? null, deps.binder ?? NO_BINDER);
     if (typeof peer === "string") return refused(`${peer} Nothing was created.`);
-    const lines = await continuationLinesOf(home, prev, { reason: init.reason, figure: init.figure, cwd, ...(init.report === undefined ? {} : { report: init.report }) }, paseo, log);
+    const lines = await continuationLinesOf(home, prev, { reason: init.reason, figure: init.figure, cwd, ...(init.report === undefined ? {} : { report: init.report }), ...(init.inFlightBatches === undefined ? {} : { inFlightBatches: init.inFlightBatches }) }, paseo, log);
     const context: ContextFact[] = init.source === undefined ? [] : [{ fact: "the words above", source: init.source }];
     const made = await createRequestWorker(
       home,
@@ -252,6 +298,14 @@ export async function openContinuation(
       { ...(deps.binder === undefined ? {} : { binder: deps.binder }), log },
     );
     if ("ok" in made) return made;
+    try {
+      // Read again: a verdict can have landed while the Worker was being created.
+      const registry = createRequestRegistry(home, { log });
+      const open = openBatchesOf(registry.get(workspaceId, request.requestId) ?? request, init.inFlightBatches).map(carriedBatchOf);
+      if (open.length > 0) registry.adoptReviewBatches(workspaceId, made.requestId, open, request.requestId);
+    } catch (error) {
+      log(`[paseo-bm] could not copy the review batches of ${request.requestId} onto ${made.requestId}: ${reasonOf(error)}`);
+    }
     try {
       const at = (deps.now?.() ?? new Date()).toISOString();
       createRequestRegistry(home, { log }).noteContinuedBy(workspaceId, request.requestId, made.requestId, { reason: init.reason, figure: init.figure, at });

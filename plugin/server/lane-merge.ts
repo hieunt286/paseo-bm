@@ -20,10 +20,19 @@
  * `retryPendingMerges` at most every `MERGE_RETRY_MS`; the Main is told by
  * the report line `laneMergeLineOf` returns. Nothing is pushed, no history is
  * rewritten, and nothing outside the two worktrees is written. Never throws.
+ *
+ * **The local merge** (ADR-045 decision 4, mission line plan §5.3) is the one
+ * write outside them: under the owner's grant, a request that passed the finish
+ * gate moves the local integration branch forward to the chain's newest
+ * reported commit (`localMergeRefusalOf`). Checked out in a worktree: `git merge
+ * --ff-only <sha>` there. Otherwise `git update-ref refs/heads/<target> <sha>
+ * <old>` after `merge-base --is-ancestor <old> <sha>`. Those are its only git
+ * writes: a fast-forward or nothing, no retry, and a refusal fails the gate.
  */
 import { execFile } from "node:child_process";
+import { localMergeHolds } from "./integration-grant";
 import { createMissionStore, journalQuietly, type Placement } from "./mission-store";
-import { laneOf, placementOf } from "./placements";
+import { laneOf, placementEntryOf, placementOf } from "./placements";
 import { gitEnv, type GitRunner } from "./repo-tool";
 
 /** How often a waiting merge is tried again. */
@@ -158,6 +167,84 @@ export async function mergeLane(home: string, missionId: string, lane: Placement
   );
   journalQuietly(createMissionStore(home), missionId, { kind: "note", by: "plugin", text: `Lane ${laneOf(lane)} (${lane.branch}) merged into ${lane.base} by fast-forward.`, ref: lane.workspaceId ?? lane.requestKey }, deps.log);
   return { merged: true, into: lane.base };
+}
+
+/** The worktree with `branch` checked out, from `git worktree list --porcelain`; null when none has. Pure. */
+export function worktreeOfBranch(porcelain: string, branch: string): string | null {
+  let path: string | null = null;
+  for (const line of porcelain.split("\n")) {
+    if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+    else if (line === `branch refs/heads/${branch}`) return path;
+  }
+  return null;
+}
+
+/** What the local merge did (ADR-045 decision 4). */
+export type LocalMergeOutcome = { merged: true } | { merged: false; reason: string };
+
+const firstLineOf = (error: unknown): string => stderrOf(error).split("\n")[0] ?? "";
+
+/**
+ * Moves the local branch `target` forward to `sha`, by fast-forward or not at
+ * all (see the module comment); `cwd` is any worktree of the repository. A
+ * target that already contains `sha` needs no write. Never throws.
+ */
+export async function fastForwardLocalTarget(target: string, sha: string, cwd: string, deps: Pick<LaneMergeDeps, "git"> = {}): Promise<LocalMergeOutcome> {
+  const git = deps.git ?? mergeGit;
+  const out = async (args: readonly string[], where = cwd): Promise<string> => (await git(args, { cwd: where, maxBytes: BYTES })).stdout.trim();
+  const isAncestor = async (older: string, newer: string): Promise<boolean> => out(["merge-base", "--is-ancestor", older, newer]).then(() => true, () => false);
+  let commit: string;
+  let old: string;
+  let worktree: string | null;
+  try {
+    commit = await out(["rev-parse", "--verify", `${sha}^{commit}`]);
+    old = await out(["rev-parse", "--verify", `refs/heads/${target}^{commit}`]);
+    worktree = worktreeOfBranch(await out(["worktree", "list", "--porcelain"]), target);
+  } catch (error) {
+    return { merged: false, reason: `git could not read ${target} and ${sha}: ${firstLineOf(error)}` };
+  }
+  if (await isAncestor(commit, old)) return { merged: true };
+  if (!(await isAncestor(old, commit))) return { merged: false, reason: `${target} and ${sha} have diverged, so it is not a fast-forward` };
+  try {
+    if (worktree !== null) await out(["merge", "--ff-only", commit], worktree);
+    else await out(["update-ref", `refs/heads/${target}`, commit, old]);
+    return { merged: true };
+  } catch (error) {
+    const files = overwrittenFilesOf(stderrOf(error));
+    if (files.length > 0) return { merged: false, reason: `uncommitted changes in ${target}'s worktree would be overwritten: ${files.slice(0, 10).join(", ")}${files.length > 10 ? ", …" : ""}` };
+    return { merged: false, reason: `git refused it: ${firstLineOf(error)}` };
+  }
+}
+
+/**
+ * The local merge after a passed finish gate (ADR-045 decision 4, plan §5.3):
+ * under the mission's grant for the repo, moves its integration branch to
+ * `sha` and journals the outcome. `laneMerged` is `mergeLane`'s outcome for a
+ * lane n ≥ 2, which goes only once merged. Null when there is no grant or it
+ * moved; otherwise the gate's new reason. Git is not touched without the
+ * grant. Never throws.
+ */
+export async function localMergeRefusalOf(home: string, placement: Placement, sha: string, laneMerged: boolean, deps: LaneMergeDeps): Promise<string | null> {
+  try {
+    const entry = placement.workspaceId === null ? null : placementEntryOf(home, placement.workspaceId);
+    const holder = entry === null ? null : placementOf(home, entry.missionId, entry.repo);
+    if (entry === null || holder === null || !localMergeHolds(holder)) return null;
+    const journal = (text: string): void => {
+      journalQuietly(createMissionStore(home, deps.now === undefined ? {} : { now: deps.now }), entry.missionId, { kind: "note", by: "plugin", text, ref: holder.workspaceId ?? holder.requestKey }, deps.log);
+    };
+    const refuse = (reason: string): string => {
+      journal(`The local merge of ${sha} into ${holder.target} changed nothing: ${reason}.`);
+      return `the local merge into ${holder.target} was refused: ${reason}`;
+    };
+    if (laneOf(placement) >= 2 && !laneMerged) return refuse(`lane ${laneOf(placement)} is not merged into ${placement.base} yet`);
+    if (placement.directory === null) return refuse("the worktree's folder is not known");
+    const outcome = await fastForwardLocalTarget(holder.target, sha, placement.directory, deps);
+    if (!outcome.merged) return refuse(outcome.reason);
+    journal(`${holder.target} moved forward to ${sha} by fast-forward.`);
+    return null;
+  } catch (error) {
+    return `the local merge was refused: ${stderrOf(error)}`;
+  }
 }
 
 /** The line the Main's delivery of a lane's `finished` gains (§19.2 step 2). Pure. */

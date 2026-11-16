@@ -989,6 +989,17 @@ describe("the pass: a Worker waiting by structure (delivery line design §6.5)",
     expect((await stalls.pass()).cleared).toEqual([alertOf()]);
   });
 
+  it("an awaited request whose Worker Paseo closed after its idle hour still holds the wait (ADR-042)", async () => {
+    const { fake, stalls, wake } = await waitingOn([{ kind: "request", id: REQUEST_2 }]);
+    clock = when(59);
+    await stalls.pass();
+    const worker = fake.byId(WORKER_2)!;
+    worker.status = "closed";
+    worker["persistence"] = { sessionId: "session-1" };
+    expect(await stalls.pass()).toEqual({ status: "done", raised: [], cleared: [], events: [] });
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("the awaited request loses its last live Worker: the item settles with its fact and wakes the Worker once", async () => {
     const { fake, stalls, wake } = await waitingOn([{ kind: "request", id: REQUEST_2 }]);
     clock = when(59);

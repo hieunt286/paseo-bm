@@ -218,7 +218,7 @@ const rolesToCreate = () =>
     ]),
   );
 
-/** A machine with no paseo-bm entries at all: a fresh paseo.cafe install. */
+/** A machine with no paseo-bm entries at all: a fresh install from npm. */
 const bare = () => ({ providers: { "room-lead": { extends: "codex" } }, agentProfiles: [ROOM] });
 
 describe("createRoleEntries", () => {

@@ -44,6 +44,13 @@ export const missionChangeSchema = z.object({
     .array(z.object({ id: z.string().regex(CRITERION_ID_PATTERN), text: z.string().min(1).max(500).optional(), status: z.enum(["open", "dropped"]).optional() }))
     .max(20)
     .optional(),
+  /** An ordered step list (ADR-045 decision 1): its entries wait `proposed` in the held queue until the owner's apply. */
+  line: z
+    .object({
+      lineId: z.string().min(1).max(64),
+      steps: z.array(z.object({ title: z.string().min(1).max(70), acceptance: z.array(z.string().min(1).max(200)).min(1).max(6) })).min(2).max(12),
+    })
+    .optional(),
 });
 export type MissionChange = z.infer<typeof missionChangeSchema>;
 
@@ -64,6 +71,13 @@ const quote = (text: string, limit: number): string => {
 /** What applying `change` does, one line per part, for the owner's card. Pure. */
 export function missionChangeLinesOf(change: MissionChange): string[] {
   const lines: string[] = [];
+  if (change.line !== undefined) {
+    const { steps } = change.line;
+    lines.push(`run these ${steps.length} steps in order, each after the previous one passes:`);
+    // Within the card's 1,000 characters every step keeps its line; the details on a tap hold its criteria.
+    const room = Math.min(70, Math.floor(720 / steps.length) - 6);
+    steps.forEach((step, index) => lines.push(`${index + 1}. ${step.title.length <= room ? step.title : `${step.title.slice(0, room - 1)}…`}`));
+  }
   if (change.name !== undefined) lines.push(`rename it ${quote(change.name, 80)}`);
   if (change.code !== undefined) lines.push(`set its code to ${change.code}`);
   if (change.goal !== undefined) lines.push(`set its goal to ${quote(change.goal, 300)}`);
@@ -83,6 +97,12 @@ export function missionChangeLinesOf(change: MissionChange): string[] {
   if (change.confirmCharter === true) lines.push("confirm the charter");
   if (change.close === true) lines.push("close the mission");
   return lines;
+}
+
+/** Each step's acceptance criteria, for a card's details on a tap; none for a card without a step list. Pure. */
+export function missionLineDetailsOf(options: ReadonlyArray<{ action?: unknown }>): string[] {
+  const parsed = options.map((option) => missionChangeActionSchema.safeParse(option.action)).find((result) => result.success && result.data.change.line !== undefined);
+  return (parsed?.data?.change.line?.steps ?? []).flatMap((step, index) => [`Step ${index + 1}: ${step.title}`, ...step.acceptance.map((line) => `- ${line}`)]);
 }
 
 /**
@@ -151,8 +171,16 @@ export type MissionTransferAction = z.infer<typeof missionTransferActionSchema>;
 export const integrationGrantActionSchema = z.object({ kind: z.literal("integration.grant"), missionId: missionIdSchema, repo: z.string().min(1) });
 export type IntegrationGrantAction = z.infer<typeof integrationGrantActionSchema>;
 
+/**
+ * The owner's one local-merge grant for a mission's repo (ADR-045 decision 4):
+ * option a of the plugin's local-merge card, applied like the integration
+ * grant, on the owner's tap only.
+ */
+export const integrationLocalMergeActionSchema = z.object({ kind: z.literal("integration.local-merge"), missionId: missionIdSchema, repo: z.string().min(1) });
+export type IntegrationLocalMergeAction = z.infer<typeof integrationLocalMergeActionSchema>;
+
 /** The prepared actions of `m:` cards: applied by the plugin on the owner's tap only, kept out of `PREPARED_CHANGE_KINDS` so `bm_ask_owner` cannot offer one. */
-export const MISSION_ACTION_KINDS = ["mission-change", "mission-split", "arbitration", "mission-merge", "mission-transfer", "integration.grant"] as const;
+export const MISSION_ACTION_KINDS = ["mission-change", "mission-split", "arbitration", "mission-merge", "mission-transfer", "integration.grant", "integration.local-merge"] as const;
 
 /** True for the kind of an `m:` card's prepared action. Pure. */
 export function isMissionActionKind(kind: string | undefined): boolean {

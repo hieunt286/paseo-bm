@@ -5,7 +5,7 @@
  *
  * | Tool | Caller | Does |
  * |---|---|---|
- * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker; any report on a finished bound request is refused, naming its continuation (delivery line design §2.3); `finished` is refused while a review call of the request has no verdict delivered (`batchesAwaitingVerdict`); `finished` expires the request's unsettled questions; `finished` with `remaining` after a `BM-ROLLOVER` opens a size continuation before the report goes, and at the `now` figure leaves its questions open and moves its live links to it (delivery line design §2.6); `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; a placement's `finished` that changed files is refused without its `integration` commit, and its delivery gains the line of what read-only git confirmed (`line-state.ts`, delivery line design §4.4, §4.6); the registry's `tier` and `finishedAt`, and a mission request's roster state (`noteRosterReport`), follow it |
+ * | `bm_report` | bound Worker | builds and checks the `BM-REPORT`, stores a `report` outbox record, delivers it to the Manager that created the Worker (`beads-done` is stored as a note and starts no turn, ADR-045 decision 14: delivery `no-turn`); any report on a finished bound request is refused, naming its continuation (delivery line design §2.3); `finished` is refused while a review call of the request has no verdict delivered (`batchesAwaitingVerdict`), but a `finished` with `remaining` after `BM-ROLLOVER now` is accepted and carries such a batch onto its continuation (ADR-046); `finished` expires the request's unsettled questions; `finished` with `remaining` after a `BM-ROLLOVER` opens a size continuation before the report goes, and at the `now` figure leaves its questions open and moves its live links to it (delivery line design §2.6); `finished` or `stopped` clears its `delivery-dropped` and `off-tool-reviewer` alerts; a placement's `finished` that changed files is refused without its `integration` commit, and its delivery gains the line of what read-only git confirmed (`line-state.ts`, delivery line design §4.4, §4.6); every `finished` records whether its chain passes the finish gate before its roster entry turns finished, and its delivery says when it failed (`finish-gate.ts`, ADR-045 decision 2); after a pass the owner's grant fast-forwards the local integration branch, and a refused merge fails the gate (`lane-merge.ts`, ADR-045 decision 4); the registry's `tier` and `finishedAt`, and a mission request's roster state (`noteRosterReport`), follow it; a step's `finished` with a next step starts no Main turn and the last step's delivery says the line is complete (`lineStepOf`, ADR-045 decision 2), and it carries `forNextStep`, stored beside the gate for the next step's brief (decision 3) |
  * | `bm_questions` | bound Worker | opens each question through the materialiser's shared open path (`openQuestions`), numbered after the request's highest `Qn` |
  * | `bm_review` | bound Reviewer | builds and checks the `BM-REVIEW`, stores a `review` record for its batch, delivers it to its Worker |
  * | `bm_answers` | bound Manager | checks each `Qn` is an open question of a request of its own and proposes the answers for its current turn (`proposed-answers.ts`); the materialiser settles them at the turn's end only with the owner's own message in it |
@@ -56,8 +56,9 @@
  * Nothing here throws into the endpoint: a failure is one refusal line.
  */
 import { PENDING_TTL_MS, createBindingStore, liveBindingOf, type AgentBinder, type ToolCaller } from "./agent-bindings";
+import { redactText } from "./collector";
 import { endedPhaseOf, openContinuation, rolloverTextOf } from "./continuation";
-import { openLinkOf, unboundPeerReason } from "./create-worker";
+import { openLinkOf, slotChoicesOf, unboundPeerReason } from "./create-worker";
 import { CUT_NOTE_LINE, followsPaseoCut } from "./interruption-watch";
 import { LIVE_PAGE_LIMIT, readTimelinePages, type LiveTimelinePaseo } from "./live-timeline";
 import { noteFollowUp, noteRosterReport, requestIndexOf } from "./mission-roster";
@@ -72,20 +73,23 @@ import type { NoticeQueue } from "./notice-queue";
 import { clearOffToolAlertsOfRequest } from "./off-tool-reviewer";
 import { clearTurnReplacedAlert } from "./owner-words";
 import { stopRunningReviewers, type StopPaseo } from "./stop-propagation";
-import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
+import { OUTBOX_SETTLED_MS, clearDroppedAlert, createOutbox, deliverRecord, isOpenRecord, mainTargetOf, storeAndDeliver, type OutboxDeps, type OutboxInit, type OutboxRecord } from "./outbox";
 import { listedWorkspaces, type DashboardPaseo } from "./paseo-directory";
 import { proposeAnswers } from "./proposed-answers";
 import { createRequestRegistry, finishedRequestRefusal, isBoundRequest, isEmptyCreateCall, newestCallOf, noteReviewResult, type RegisteredRequest, type ReviewCall } from "./request-registry";
 import { reasonOf } from "./role-choices";
 import { actingTools, answered, boundAs, deliveryOf, fixThese, outboxDepsOf, refused, withoutNulls, type DeliveryState } from "./tool-kit";
+import { DOC_PATH } from "./handoff";
 import { chainHeadOf, locateRequest, settleLinkWait, settleRequestWaits, waitingForReport, type SettledWait } from "./waits";
 import { gatedWaitOf, heldTellText, releaseHeldOf, releaseSettledWaits } from "./wake-gate";
-import { openIntegrationCardIfNeeded } from "./integration-grant";
-import { committedOf, finishedLineOf, liveChecksOf, verifiedOf, type TimelineEntries } from "./line-state";
-import { integrationCiOf } from "./coordination-store";
+import { openIntegrationCardIfNeeded, openLocalMergeCardIfNeeded } from "./integration-grant";
+import { committedOf, finishedLineOf, liveChecksOf, liveRecordOf, verifiedOf, type TimelineEntries } from "./line-state";
+import { finishGateLineOf, readFinishGate } from "./finish-gate";
+import { lineStepOf } from "./held-requests";
+import { integrationCiOf, lineSupervisedOf } from "./coordination-store";
 import { laneOf, placementEntryOf, placementOfWorkspace } from "./placements";
 import { turnStartOf, type WorkerSnapshot } from "./worker-watch";
-import { laneMergeIssueOf, laneMergeLineOf, mergeLane } from "./lane-merge";
+import { laneMergeIssueOf, laneMergeLineOf, localMergeRefusalOf, mergeLane } from "./lane-merge";
 import type { GitRunner } from "./repo-tool";
 import type { ReportCiState } from "../shared/contracts";
 import { timeOrZero } from "../shared/time";
@@ -188,7 +192,13 @@ function bindingMismatch(field: "requestId" | "batchId", given: string | null, b
  * settled, since its verdict can no longer be read; so does a create call
  * that got no Reviewer within `PENDING_TTL_MS` (Paseo failed the creation:
  * no Reviewer will ever answer it). Off-tool Reviewers are not registry calls:
- * the plugin cancels them at once (§16.8), so none of them owes a verdict.
+ * the plugin cancels them at once (§16.8), so none of them owes a verdict. A
+ * call an adopted batch inherited had its verdict before it was copied, on a
+ * request of the chain whose records name it (ADR-045 decision 10), so only a
+ * call of this request can be waited for, or one a `BM-ROLLOVER now` carried
+ * with its verdict still on its way (`awaited`): that verdict's record names
+ * the request that made the call, so it is matched by the batch's Reviewers
+ * (ADR-046).
  * Pure.
  */
 export function batchesAwaitingVerdict(request: RegisteredRequest | null, records: readonly OutboxRecord[], now: Date): string[] {
@@ -196,14 +206,14 @@ export function batchesAwaitingVerdict(request: RegisteredRequest | null, record
   const stale = (call: ReviewCall): boolean =>
     isEmptyCreateCall(call) && now.getTime() - timeOrZero(call.at) > PENDING_TTL_MS;
   return request.reviews.batches.flatMap((batch) => {
-    const call = newestCallOf(batch, (entry) => !stale(entry));
+    const call = newestCallOf(batch, (entry) => !stale(entry) && (entry.adopted !== true || entry.awaited === true));
     if (call === undefined) return [];
     const newest = timeOrZero(call.at);
     if (now.getTime() - newest > OUTBOX_SETTLED_MS) return [];
     const settled = records.some(
       (record) =>
         (record.kind === "review" || record.kind === "no-verdict") &&
-        record.requestId === request.requestId &&
+        (record.requestId === request.requestId || (call.awaited === true && (record.from === call.reviewerId || batch.reviewerIds.includes(record.from)))) &&
         record.batchId === batch.batchId &&
         timeOrZero(record.createdAt) >= newest &&
         !isOpenRecord(record),
@@ -220,7 +230,7 @@ export function newWorkRefusalOf(requestId: string, missionId: string | null): s
   const where =
     missionId === null
       ? `give it its own Worker with bm_create_worker (after: ["${requestId}"] if it needs this request first)`
-      : `give it its own Worker with bm_create_worker: lane: "new" when it can run now beside the others, after: ["${requestId}"] when it needs this request first`;
+      : `give it its own Worker with bm_create_worker: ${slotChoicesOf(requestId)}`;
   return `New work never goes into request ${requestId}, which is still at work: ${where}. Nothing was sent.`;
 }
 
@@ -245,15 +255,28 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     return paseo === null || paseo === undefined ? null : paseo;
   };
 
-  /** `storeAndDeliver` (§16.7) for a tool: a record that cannot be stored is the refusal. */
+  /**
+   * `storeAndDeliver` (§16.7) for a tool: a record that cannot be stored is the
+   * refusal. A `noTurn` record (ADR-045 decision 14) is only stored and never
+   * reaches `deliverRecord`; `before` runs all the same.
+   */
   const storeThenDeliver = async (
     home: string,
     workspaceId: string,
     init: OutboxInit,
     paseo: unknown,
-    before?: (record: OutboxRecord) => void,
+    before?: (record: OutboxRecord) => void | Promise<void>,
   ): Promise<ServerToolAnswer | { record: OutboxRecord; delivery: DeliveryState; turnReplaced?: true }> => {
     try {
+      if (init.noTurn === true) {
+        const record = createOutbox(home, { now, ...deps.outbox }).add(workspaceId, init);
+        try {
+          await before?.(record);
+        } catch (error) {
+          log(`[paseo-bm] after storing the ${init.kind} ${record.id}: ${reasonOf(error)}`);
+        }
+        return { record, delivery: "no-turn" };
+      }
       const { record, outcome } = await storeAndDeliver(workspaceId, init, outboxDepsOf(home, { ...deps, now, log }, paseo), before);
       // Delivery line design §19.5: Paseo replaced the Worker's running turn with the owner's words instead of steering them in.
       return { record, delivery: deliveryOf(outcome), ...(outcome === "turn-replaced" ? { turnReplaced: true as const } : {}) };
@@ -325,7 +348,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     if (paseo === null) return refused(NO_PASEO_DELIVERY_MESSAGE);
     if (worker.parentId === null) return refused("paseo-bm does not know the Manager that created you, so it cannot deliver your report; tell the owner in one line and stop. Nothing was stored or sent.");
     const managerId = worker.parentId;
-    const { phase, tier, waitingOn, waitingOnPeers = [], waitingOnRequests = [], waitingOnBatches = [], waitingFor, wakeOn, forPeer, buildAndTests, filesChanged, blockers, remaining = [], integration } = withoutNulls(input) as {
+    const { phase, tier, waitingOn, waitingOnPeers = [], waitingOnRequests = [], waitingOnBatches = [], waitingFor, wakeOn, forPeer, buildAndTests, filesChanged, blockers, remaining = [], integration, forNextStep, runtimeProof, goal, acceptance = [] } = withoutNulls(input) as {
       phase: string;
       tier: { level: "Small" | "Medium" | "Large" };
       waitingOn?: string[];
@@ -340,6 +363,10 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       blockers?: string;
       remaining?: string[];
       integration?: { branch: string; commit: string; pushed: boolean; mr?: string; ci?: ReportCiState };
+      forNextStep?: { summary: string; contract?: string; remaining?: string };
+      runtimeProof?: { kind: "ran" | "could-not-run"; what: string; showed?: string };
+      goal?: string;
+      acceptance?: string[];
     };
     const requestId = worker.requestId;
     const registered = createRequestRegistry(home, { log }).get(worker.workspaceId, requestId);
@@ -349,19 +376,29 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     // continuation; at the hard figure (`now`) the request's questions and links carry over to it.
     const sized = phase === "finished" && remaining.length > 0 && isBoundRequest(registered) ? registered.rolloverAsked : undefined;
     const carry = sized?.level === "now";
-    if (phase === "finished") {
-      // A review the request has running ends before `finished` (F3); `stopped` and `blocked` are never held for it.
-      const waiting = batchesAwaitingVerdict(registered, createOutbox(home, { now }).list(worker.workspaceId), now());
-      if (waiting.length > 0) {
-        return refused(
-          [...waiting.map((batchId) => `a review of batch ${batchId} has no verdict yet: wait for its delivery, then report finished`), "Nothing was stored or sent."].join("\n"),
-        );
-      }
+    // A review the request has running ends before `finished` (F3); `stopped` and `blocked` are never held for it.
+    // ADR-046: a size finish at `BM-ROLLOVER now` is not held either: such a batch goes onto its continuation.
+    const inFlightBatches = phase === "finished" ? batchesAwaitingVerdict(registered, createOutbox(home, { now }).list(worker.workspaceId), now()) : [];
+    if (inFlightBatches.length > 0 && !carry) {
+      return refused(
+        [...inFlightBatches.map((batchId) => `a review of batch ${batchId} has no verdict yet: wait for its delivery, then report finished`), "Nothing was stored or sent."].join("\n"),
+      );
     }
     // Delivery line design §4.4: a placement's request finishes with the commit of the files it changed.
     const place = phase === "finished" ? placementOfWorkspace(home, worker.workspaceId) : null;
     if (place !== null && (filesChanged ?? []).length > 0 && integration === undefined) {
       return fixThese("bm_report", [`input.integration.commit: commit on ${place.branch} and report its sha`]);
+    }
+    // ADR-045 decisions 2 and 3: a step with a next step passes on what that step needs; a size finish's continuation still owes it.
+    const line = phase === "finished" || phase === "received" ? lineStepOf(home, requestId, worker.workspaceId) : null;
+    if (phase === "finished" && line?.hasNext === true && sized === undefined && forNextStep === undefined) return fixThese("bm_report", [`input.forNextStep: step ${line.step.n} of ${line.step.of} has a next step: write what its Worker needs (summary, and contract or remaining when there are any)`]);
+    // ADR-045 decision 7: outside a step, a Medium or Large Worker restates the goal once, before the work starts; a Small report and a step's cost no turn.
+    if (phase === "received" && tier.level !== "Small" && line === null && (goal === undefined || acceptance.length === 0)) {
+      return fixThese("bm_report", ["input.goal: a Medium or Large received outside a step restates the goal and its acceptance (goal and acceptance), so your Main can compare them with what the owner asked"]);
+    }
+    // ADR-045 decision 6: a Medium or Large finish that changed code says what ran for real, or why it could not; a size finish's continuation still owes it.
+    if (phase === "finished" && tier.level !== "Small" && sized === undefined && runtimeProof === undefined && (filesChanged ?? []).some((path) => !DOC_PATH.test(path))) {
+      return fixThese("bm_report", ["input.runtimeProof: a Medium or Large finished that changed code says what you ran for real and what it showed, or kind could-not-run and why"]);
     }
     // Delivery line design §19.2 step 1: a lane finishes with the mission branch merged into it.
     const laneIssue = place !== null && laneOf(place) >= 2 ? await laneMergeIssueOf(place, deps.git === undefined ? {} : { git: deps.git }) : null;
@@ -416,10 +453,12 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
       text = `${text}\n\n${finishedLineOf(committed, place.branch, verified)}`;
     }
     // Delivery line design §19.2 step 2: the mission branch moves forward to a finished lane; the Main reads the outcome.
+    let laneMerged = false;
     if (place !== null && laneOf(place) >= 2) {
       const mission = placementEntryOf(home, worker.workspaceId);
       if (mission !== null) {
         const outcome = await mergeLane(home, mission.missionId, place, { log, now, ...(deps.git === undefined ? {} : { git: deps.git }) });
+        laneMerged = outcome.merged;
         text = `${text}\n${laneMergeLineOf(place, outcome)}`;
       }
     }
@@ -429,12 +468,63 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
     const replies: OutboxRecord[] = [];
     const settledWaits: SettledWait[] = [];
     const at = now().toISOString();
+    // ADR-045 decision 2: every `finished` records whether its chain passes the finish gate; the delivery says so when it does not.
+    const gate =
+      phase === "finished"
+        ? await readFinishGate(
+            home,
+            { workspaceId: worker.workspaceId, requestId, report: parseReports(text, { agentId: worker.agentId, at })[0] ?? null, place, live: liveRecordOf(await timelinePagesOf(paseo, worker.agentId), worker.agentId), paseo },
+            { log, ...(deps.git === undefined ? {} : { git: deps.git }) },
+          )
+        : null;
+    // ADR-045 decision 4: after a pass, under the owner's grant, the local integration branch moves to the chain's newest commit; a refusal is the gate's failure, stored with it.
+    const mergeRefusal = gate?.passed === true && gate.commit !== null && place !== null ? await localMergeRefusalOf(home, place, gate.commit, laneMerged, { log, now, ...(deps.git === undefined ? {} : { git: deps.git }) }) : null;
+    const finishGate = gate === null ? null : { ...gate, ...(mergeRefusal === null ? {} : { passed: false, reasons: [mergeRefusal] }), at };
+    if (finishGate !== null && !finishGate.passed) text = `${text}\n\n${finishGateLineOf(finishGate.reasons)}`;
+    // ADR-045 decision 2: a step with a next step costs no Main turn, whatever its gate says: the pass starts that step or tells the one stop.
+    if (line?.lastOfLine === true && finishGate?.passed === true && sized === undefined) text = `${text}\n\nline complete: step ${line.step.n} of ${line.step.of}`;
+    // ADR-045 decisions 7 and 14: `beads-done`, and a Small or a step's `received`, start no Main turn; the note waits for the next delivery to the mission's Main now. The owner's switch off delivers all but `beads-done` normally.
+    const silentOnLine = line?.hasNext === true || (phase === "received" && (tier.level === "Small" || line !== null));
+    const reportInit: OutboxInit =
+      phase === "beads-done" || (silentOnLine && lineSupervisedOf(home))
+        ? { kind: "report", requestId, from: worker.agentId, to: mainTargetOf(home, worker.workspaceId, { requestId, to: managerId })?.to ?? managerId, text, noTurn: true }
+        : { kind: "report", requestId, from: worker.agentId, to: managerId, text };
     const stored = await storeThenDeliver(
       home,
       worker.workspaceId,
-      { kind: "report", requestId, from: worker.agentId, to: worker.parentId, text },
+      reportInit,
       paseo,
       async (record) => {
+        // ADR-045 decision 2: first, so a pass that sees `finished` sees the final result; a failed write leaves none, which reads as failed.
+        if (finishGate !== null) {
+          try {
+            createRequestRegistry(home, { log }).noteFinishGate(worker.workspaceId, requestId, finishGate);
+          } catch (error) {
+            log(`[paseo-bm] could not note the finish gate of request ${requestId} in the registry: ${reasonOf(error)}`);
+          }
+        }
+        // ADR-045 decision 3: beside the gate; the next step's brief reads it when that step starts.
+        if (phase === "finished" && forNextStep !== undefined) {
+          const branch = integration?.branch ?? place?.branch;
+          try {
+            createRequestRegistry(home, { log }).noteForNextStep(worker.workspaceId, requestId, {
+              summary: redactText(forNextStep.summary),
+              ...(forNextStep.contract === undefined ? {} : { contract: redactText(forNextStep.contract) }),
+              ...(forNextStep.remaining === undefined ? {} : { remaining: redactText(forNextStep.remaining) }),
+              ...(branch === undefined ? {} : { branch }),
+            });
+          } catch (error) {
+            log(`[paseo-bm] could not note what request ${requestId} left for the next step: ${reasonOf(error)}`);
+          }
+        }
+        // ADR-045 decision 6: masked, as the report's own line is when it is stored.
+        if (phase === "finished" && runtimeProof !== undefined) {
+          try {
+            createRequestRegistry(home, { log }).noteProof(worker.workspaceId, requestId, { kind: runtimeProof.kind, what: redactText(runtimeProof.what), ...(runtimeProof.showed === undefined ? {} : { showed: redactText(runtimeProof.showed) }), at });
+          } catch (error) {
+            log(`[paseo-bm] could not note the runtime proof of request ${requestId}: ${reasonOf(error)}`);
+          }
+        }
         try {
           links.clearWaiting(worker.workspaceId, requestId);
           if (phase === "blocked" && waitingOnPeers.length > 0) links.setWaiting(worker.workspaceId, requestId, waitingOnPeers, at);
@@ -485,6 +575,11 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
           const entry = placementEntryOf(home, worker.workspaceId);
           if (entry !== null) openIntegrationCardIfNeeded(home, entry.missionId, entry.repo, { now: now(), log, requestId });
         }
+        // ADR-045 decision 4: the first `finished` that passes its gate with a commit asks the owner, once, for the local merge.
+        if (finishGate?.passed === true && finishGate.commit !== null) {
+          const entry = placementEntryOf(home, worker.workspaceId);
+          if (entry !== null) openLocalMergeCardIfNeeded(home, entry.missionId, entry.repo, { now: now(), log, requestId });
+        }
         if (phase === "finished" || phase === "stopped") {
           try {
             clearDroppedAlert(home, worker.workspaceId, requestId, null, { now });
@@ -503,7 +598,7 @@ export function createDeliveringTools(deps: DeliveringToolDeps): DeliveringTools
         const opened = await openContinuation(
           home,
           prev,
-          { reason: "size", text: await rolloverTextOf(home, prev, remaining, paseo), figure: sized.figure, managerId: prev.request.managerId ?? managerId, ...(final === undefined ? {} : { report: final }) },
+          { reason: "size", text: await rolloverTextOf(home, prev, remaining, paseo), figure: sized.figure, managerId: prev.request.managerId ?? managerId, ...(final === undefined ? {} : { report: final }), ...(carry ? { inFlightBatches } : {}) },
           { paseo, ...(deps.binder === undefined ? {} : { binder: deps.binder() }), log, now },
         );
         if ("ok" in opened) log(`[paseo-bm] could not open the size continuation of request ${requestId}: ${opened.text}`);

@@ -15,20 +15,24 @@
  *   still open in the outbox (waiting for its turn's end, or held by the wake
  *   gate), or steered into a turn within the last `STEERED_SHOWN_MS` (§19.5).
  *   The newest `MISSION_WAITING_SHOWN`, oldest first.
+ * - **The line** (`lineOf`, ADR-045 decision 5): the step the newest approved
+ *   line is at, what it waits for or why it stopped; a `started` step's stop
+ *   reads from its `stopNote`.
  *
  * Reads only, and runs no git: the git state is the cached line the
  * Repositories row already reads. Never throws.
  */
-import type { MissionLane, MissionOverlap, MissionWaiting } from "../shared/contracts";
-import { heldRequestsOf } from "./held-requests";
+import type { MissionGetOutput, MissionLane, MissionLine, MissionOverlap, MissionWaiting } from "../shared/contracts";
+import { afterStateOf, heldRequestsOf, stopNoteOf, type HeldRequest } from "./held-requests";
 import { lanesInUseOf } from "./lane-overlap";
 import type { RosterEntry } from "./mission-roster";
 import type { Mission, Placement } from "./mission-store";
 import { createOutbox, isOpenRecord } from "./outbox";
 import type { ListedWorkspace } from "./paseo-directory";
 import { lanesOf } from "./placement-create";
-import { laneOf, repoKeyOf } from "./placements";
+import { charterKeysOf, laneOf, repoKeyOf } from "./placements";
 import { firstLine } from "./request-trace";
+import { chainHeadOf } from "./waits";
 
 /** The Waiting lines `mission.get` carries, the newest. */
 export const MISSION_WAITING_SHOWN = 10;
@@ -95,12 +99,15 @@ function tellTextOf(text: string): string {
 
 /** In flight's Waiting part (see the module comment). `repoName` names a repo key. Never throws. */
 export function waitingOf(home: string, mission: Pick<Mission, "missionId" | "charter">, roster: readonly RosterEntry[], repoName: (workspaceId: string) => string, now: Date): MissionWaiting[] {
-  const topicOf = new Map(roster.map((entry) => [entry.requestId, oneLine(entry.topic)]));
+  const heldEntries = heldRequestsOf(home, mission.missionId);
+  // An `after` names a request or a held entry that has no request id yet.
+  const topicOf = new Map([...roster.map((entry) => [entry.requestId, oneLine(entry.topic)] as const), ...heldEntries.map((entry) => [entry.holdId, oneLine(entry.topic)] as const)]);
   const lines: MissionWaiting[] = [];
-  for (const entry of heldRequestsOf(home, mission.missionId)) {
+  const keys = charterKeysOf(home, mission);
+  for (const entry of heldEntries) {
     if (entry.state !== "held" && entry.state !== "waiting-stopped") continue;
     const project = entry.input["project"];
-    const repo = typeof project === "string" && project !== "" ? repoName(repoKeyOf(home, project)) : mission.charter.repos.length === 1 ? repoName(mission.charter.repos[0]!) : null;
+    const repo = typeof project === "string" && project !== "" ? repoName(repoKeyOf(home, project)) : keys.length === 1 ? repoName(keys[0]!) : null;
     lines.push({
       kind: "held",
       id: entry.holdId,
@@ -110,6 +117,8 @@ export function waitingOf(home: string, mission: Pick<Mission, "missionId" | "ch
       since: entry.at,
       repo,
       newLane: entry.input["lane"] === "new",
+      ...(entry.step === undefined ? {} : { step: { n: entry.step.n, of: entry.step.of, title: oneLine(entry.step.title) } }),
+      ...(entry.state === "waiting-stopped" && entry.note !== undefined ? { why: oneLine(entry.note) } : {}),
     });
   }
   const active = roster.filter((entry) => entry.state === "active");
@@ -133,4 +142,51 @@ export function waitingOf(home: string, mission: Pick<Mission, "missionId" | "ch
     // An outbox that cannot be read shows no tells; the held requests stay.
   }
   return lines.sort((a, b) => (Date.parse(a.since) || 0) - (Date.parse(b.since) || 0)).slice(-MISSION_WAITING_SHOWN);
+}
+
+type InFlightRequest = NonNullable<MissionGetOutput["inFlight"]>["requests"][number];
+
+/** What a started step's request waits for, when it is not simply at work; null when it is. Pure. */
+function blockedWhyOf(request: InFlightRequest | undefined): string | null {
+  switch (request?.state) {
+    case "waiting-owner":
+      return "waiting for you";
+    case "waiting-main":
+      return "waiting for the Main";
+    case "waiting-other":
+      return `waiting for ${request.waitingOn ?? "other work"}`;
+    case "undelivered":
+      return "a delivery failed";
+    default:
+      return null;
+  }
+}
+
+/** The step the mission's newest approved line is at (see the module comment); null with no line. `requests` are In flight's. Never throws. */
+export function lineOf(home: string, missionId: string, requests: readonly InFlightRequest[]): MissionLine | null {
+  try {
+    const approved = heldRequestsOf(home, missionId).filter((entry) => entry.step !== undefined && entry.state !== "proposed");
+    const lineId = approved.filter((entry) => entry.state !== "cancelled").at(-1)?.step!.lineId;
+    if (lineId === undefined) return null;
+    const lineAt = (entry: HeldRequest, state: MissionLine["state"], requestId: string | null, why: string | null): MissionLine => ({ n: entry.step!.n, of: entry.step!.of, title: oneLine(entry.step!.title), state, requestId, why });
+    const steps = approved.filter((entry) => entry.state !== "cancelled" && entry.step!.lineId === lineId).sort((a, b) => a.step!.n - b.step!.n);
+    // Steps run in order, so the newest started one is where the line is; one before it was passed or released past.
+    const started = steps.filter((entry) => entry.state === "started").at(-1);
+    let head: string | null = null;
+    if (started !== undefined) {
+      head = started.startedAs === undefined ? null : (chainHeadOf(home, started.startedAs)?.request.requestId ?? started.startedAs);
+      if (started.stopNote !== undefined) return lineAt(started, "stopped", head, oneLine(started.stopNote));
+      const state = afterStateOf(home, missionId, started.holdId);
+      if (state.kind === "waiting") {
+        const why = blockedWhyOf(requests.find((request) => request.requestId === head));
+        return lineAt(started, why === null ? "running" : "blocked", head, why);
+      }
+      if (state.kind !== "passed") return lineAt(started, "stopped", head, oneLine(stopNoteOf(state)));
+    }
+    const next = steps.find((entry) => entry.state !== "started" && entry.step!.n > (started?.step!.n ?? 0));
+    if (next === undefined) return started === undefined ? null : lineAt(started, "done", head, null);
+    return next.state === "waiting-stopped" ? lineAt(next, "stopped", null, oneLine(next.note ?? "stopped")) : lineAt(next, "blocked", null, "starts when the request running now ends");
+  } catch {
+    return null;
+  }
 }

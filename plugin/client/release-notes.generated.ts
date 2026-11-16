@@ -4,7 +4,7 @@
 /** One version: its summary paragraph and section headings; the prereleases folded into it, oldest first. */
 export interface ReleaseNote { version: string; summary: string; sections: readonly string[]; prereleases: readonly string[]; gitUrl: string }
 
-export const RELEASE_NOTES: readonly ReleaseNote[] = [
+const NOTES: readonly Omit<ReleaseNote, "gitUrl">[] = [
   {
     "version": "0.7.0",
     "summary": "Missions can run independent work in parallel lanes, keep their context bounded, and recover delegated provider failures through their Main without another owner confirmation.",
@@ -19,8 +19,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.7.0/docs/releases/paseo-bm-release-notes-0.7.0.md"
+    "prereleases": []
   },
   {
     "version": "0.6.0",
@@ -41,8 +40,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.6.0/docs/releases/paseo-bm-release-notes-0.6.0.md"
+    "prereleases": []
   },
   {
     "version": "0.5.6",
@@ -59,8 +57,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.5.6/docs/releases/paseo-bm-release-notes-0.5.6.md"
+    "prereleases": []
   },
   {
     "version": "0.5.5",
@@ -72,8 +69,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.5.5/docs/releases/paseo-bm-release-notes-0.5.5.md"
+    "prereleases": []
   },
   {
     "version": "0.5.3",
@@ -85,8 +81,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.5.3/docs/releases/paseo-bm-release-notes-0.5.3.md"
+    "prereleases": []
   },
   {
     "version": "0.5.2",
@@ -98,8 +93,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.5.2/docs/releases/paseo-bm-release-notes-0.5.2.md"
+    "prereleases": []
   },
   {
     "version": "0.5.1",
@@ -111,8 +105,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.5.1/docs/releases/paseo-bm-release-notes-0.5.1.md"
+    "prereleases": []
   },
   {
     "version": "0.5.0",
@@ -132,8 +125,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.5.0/docs/releases/paseo-bm-release-notes-0.5.0.md"
+    "prereleases": []
   },
   {
     "version": "0.4.1",
@@ -145,8 +137,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.4.1/docs/releases/paseo-bm-release-notes-0.4.1.md"
+    "prereleases": []
   },
   {
     "version": "0.4.0",
@@ -164,8 +155,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
     ],
     "prereleases": [
       "0.4.0-alpha.0"
-    ],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.4.0/docs/releases/paseo-bm-release-notes-0.4.0.md"
+    ]
   },
   {
     "version": "0.3.1",
@@ -179,8 +169,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Evidence",
       "Sources"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.3.1/docs/releases/paseo-bm-release-notes-0.3.1.md"
+    "prereleases": []
   },
   {
     "version": "0.3.0",
@@ -203,8 +192,7 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "0.3.0-alpha.5",
       "0.3.0-alpha.6",
       "0.3.0-alpha.7"
-    ],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.3.0/docs/releases/paseo-bm-release-notes-0.3.0.md"
+    ]
   },
   {
     "version": "0.2.0-alpha.2",
@@ -214,7 +202,9 @@ export const RELEASE_NOTES: readonly ReleaseNote[] = [
       "Compatibility",
       "Rollback"
     ],
-    "prereleases": [],
-    "gitUrl": "https://github.com/hieunt286/paseo-bm/blob/v0.2.0-alpha.2/docs/releases/paseo-bm-release-notes-0.2.0-alpha.2.md"
+    "prereleases": []
   }
 ];
+
+/** Each version with its full note on GitHub, at its tag. */
+export const RELEASE_NOTES: readonly ReleaseNote[] = NOTES.map((note) => ({ ...note, gitUrl: `https://github.com/hieunt286/paseo-bm/blob/v${note.version}/docs/releases/paseo-bm-release-notes-${note.version}.md` }));

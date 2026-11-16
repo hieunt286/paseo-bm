@@ -13,6 +13,9 @@ const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const releasesDir = join(repoRoot, "docs", "releases");
 const target = join(repoRoot, "plugin", "client", "release-notes.generated.ts");
 const FILE = /^paseo-bm-release-notes-(.+)\.md$/;
+// Each note's full text on GitHub, at its tag. The catalog derives it from the
+// version at run time rather than storing it per entry (bundle size, ADR-026).
+const GIT_BLOB = "https://github.com/hieunt286/paseo-bm/blob/v";
 const SEMVER = /^(?:v)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function semver(value) {
@@ -114,7 +117,7 @@ export function parseReleaseNote(version, markdown) {
     summary,
     sections: blocks.filter((block) => block.kind === "heading").map((block) => block.text),
     prereleases: [],
-    gitUrl: `https://github.com/hieunt286/paseo-bm/blob/v${version}/docs/releases/paseo-bm-release-notes-${version}.md`,
+    gitUrl: `${GIT_BLOB}${version}/docs/releases/paseo-bm-release-notes-${version}.md`,
   };
 }
 
@@ -136,7 +139,8 @@ export function generateCatalog(entries) {
     if (folded === undefined) notes.push(note);
     else folded.prereleases.unshift(note.version);
   }
-  return `// GENERATED FILE — do not edit.\n// Source: docs/releases/*.md via scripts/generate-release-notes.mjs.\n\n/** One version: its summary paragraph and section headings; the prereleases folded into it, oldest first. */\nexport interface ReleaseNote { version: string; summary: string; sections: readonly string[]; prereleases: readonly string[]; gitUrl: string }\n\nexport const RELEASE_NOTES: readonly ReleaseNote[] = ${JSON.stringify(notes, null, 2)};\n`;
+  const stored = notes.map((note) => Object.fromEntries(Object.entries(note).filter(([key]) => key !== "gitUrl")));
+  return `// GENERATED FILE — do not edit.\n// Source: docs/releases/*.md via scripts/generate-release-notes.mjs.\n\n/** One version: its summary paragraph and section headings; the prereleases folded into it, oldest first. */\nexport interface ReleaseNote { version: string; summary: string; sections: readonly string[]; prereleases: readonly string[]; gitUrl: string }\n\nconst NOTES: readonly Omit<ReleaseNote, "gitUrl">[] = ${JSON.stringify(stored, null, 2)};\n\n/** Each version with its full note on GitHub, at its tag. */\nexport const RELEASE_NOTES: readonly ReleaseNote[] = NOTES.map((note) => ({ ...note, gitUrl: \`${GIT_BLOB}\${note.version}/docs/releases/paseo-bm-release-notes-\${note.version}.md\` }));\n`;
 }
 
 export function catalogFromDirectory(dir = releasesDir) {

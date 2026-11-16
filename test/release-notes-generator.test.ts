@@ -38,7 +38,7 @@ describe("release-note catalog generator", () => {
   it("folds a prerelease into its stable version and keeps one without a stable", () => {
     const note = (version: string) => ({ version, markdown: `# paseo-bm ${version}\n\nNote ${version}.\n` });
     const source = generateCatalog(["0.3.0-alpha.1", "0.3.0", "0.3.0-alpha.0", "0.4.0-alpha.0", "0.2.0"].map(note));
-    const notes = JSON.parse(source.slice(source.indexOf("= [") + 2).replace(/;\s*$/, "")) as Note[];
+    const notes = JSON.parse(source.slice(source.indexOf("= [") + 2, source.indexOf("];\n") + 1)) as Note[];
     expect(notes.map((entry) => [entry.version, entry.prereleases])).toEqual([
       ["0.4.0-alpha.0", []],
       ["0.3.0", ["0.3.0-alpha.0", "0.3.0-alpha.1"]],
@@ -74,5 +74,15 @@ describe("release-note catalog generator", () => {
     expect(generated).toContain('"version": "0.5.3"');
     expect(generated).not.toContain('"version": "0.3.0-alpha.7"');
     expect(generated).toContain('"0.3.0-alpha.7"');
+    expect(generated).not.toContain('"gitUrl":');
+  });
+
+  it("gives each version of the checked-in catalog its full note at its tag", async () => {
+    const { RELEASE_NOTES } = await import("../plugin/client/release-notes.generated");
+    expect(RELEASE_NOTES.length).toBeGreaterThan(1);
+    for (const note of RELEASE_NOTES) {
+      expect(note.gitUrl).toBe(parseReleaseNote(note.version, `# paseo-bm ${note.version}\n`).gitUrl);
+      expect(note.gitUrl).toBe(`https://github.com/hieunt286/paseo-bm/blob/v${note.version}/docs/releases/paseo-bm-release-notes-${note.version}.md`);
+    }
   });
 });

@@ -2,16 +2,13 @@
 // Generates plugin-package/, the published form of the plugin (ADR-026), from
 // plugin/, the source.
 //
-// paseo.cafe's security scan reads the listed plugin's executable graph, both
-// in Git (the registry entry's `path`) and in the npm tarball, and refuses one
-// over 200 files or 2,000,000 bytes (`scripts/plugin-security/static-scan.ts`
-// in paseo-cafe/paseo-cafe). plugin/ is 250 files and about 3.5 MB of
-// TypeScript, so the listing points at plugin-package/ instead, and npm
-// publishes it: the two entries, each bundled into one file by esbuild, with
-// the manifest, package.json, README.md and LICENSE.
+// npm publishes plugin-package/, one self-contained loadable plugin with no
+// dependencies: the two entries, each bundled into one file by esbuild, with
+// the manifest, package.json, README.md and LICENSE. Its size has no limit
+// (ADR-048): the build reports it and never refuses it.
 //
 // The bundles keep every module outside Paseo's host-provided set inside them,
-// and leave the host-provided set as imports (the same set the scan accepts):
+// and leave the host-provided set as imports:
 // the SDK, zod, react, react-native, @tanstack/react-query and Node built-ins.
 // Whitespace, syntax and local identifiers are minified, and every function
 // and class keeps its name (`keepNames`), so a stack trace still names the
@@ -36,10 +33,6 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const source = join(repoRoot, "plugin");
 const target = join(repoRoot, "plugin-package");
-
-/** paseo.cafe's scan limits on the reachable graph, as of paseo-cafe 4608732. */
-export const SCAN_MAX_BYTES = 2_000_000;
-export const SCAN_MAX_FILES = 200;
 
 /** Modules Paseo provides to a plugin at run time; never bundled. */
 export const HOST_PROVIDED = [
@@ -138,9 +131,6 @@ async function main() {
   const check = process.argv.includes("--check");
   const files = await generatedFiles();
   const code = ENTRIES.reduce((sum, { file }) => sum + files.get(file).length, 0);
-  if (code > SCAN_MAX_BYTES) {
-    throw new Error(`the bundled entries are ${code} bytes, over paseo.cafe's scan limit of ${SCAN_MAX_BYTES}`);
-  }
   const stale = [];
   for (const [name, content] of files) {
     const path = join(target, name);
@@ -162,7 +152,7 @@ async function main() {
     console.error(`plugin-package/ is out of date (run \`npm run build\`): ${stale.join(", ")}`);
     process.exit(1);
   }
-  console.log(`plugin-package: entries ${code} bytes of ${SCAN_MAX_BYTES}`);
+  console.log(`plugin-package: entries ${code} bytes`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
