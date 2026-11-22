@@ -6,6 +6,22 @@ export interface ReleaseNote { version: string; summary: string; sections: reado
 
 const NOTES: readonly Omit<ReleaseNote, "gitUrl">[] = [
   {
+    "version": "0.9.0",
+    "summary": "Finished Workers and Reviewers leave the agent list on their own, a rollover that waits too long is asked again, and a replaced Main always learns who holds its mission.",
+    "sections": [
+      "What this version brings",
+      "Finished agents are archived",
+      "Rollover and replaced Mains",
+      "Fixes",
+      "Agent roles",
+      "What to know when upgrading",
+      "Rollback",
+      "Evidence",
+      "Sources"
+    ],
+    "prereleases": []
+  },
+  {
     "version": "0.8.0",
     "summary": "A mission runs as a supervised line of approved steps, one request at a time, and agents that rest, repositories that move and failed deliveries no longer stop work silently.",
     "sections": [
