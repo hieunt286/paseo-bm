@@ -2,13 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Status | Active |
+| Status | Completed. Archived 2026-11-16: its epic `bm-attention-updates-1s36` and all three tasks are closed (REQ-173 shipped) |
 | Plan-ready | PASS — 2026-10-05 — Codex under owner hieu.nt10's approved Q1–Q2 decisions |
 | Owner | hieu.nt10 |
-| Routing decision | [Autonomy PRD §0](../product/paseo-bm-autonomy-prd.md#0-routing-decision), extended by the owner's request `req-20261005T013533Z` |
-| Requirements | [Autonomy PRD REQ-173](../product/paseo-bm-autonomy-prd.md) and [Dashboard PRD D-7](../product/paseo-bm-dashboard-prd.md) |
-| Technical Design | [Autonomy design §A.12](../design/paseo-bm-autonomy.md) and [Dashboard design §11.3–11.4, §19](../design/paseo-bm-dashboard.md) |
-| ADRs | [ADR-001](../adr/ADR-001-plugin-distribution.md) — the npm package remains bundled and registered as a directory; the update check therefore reads npm metadata directly rather than relying on Paseo's directory-plugin updater |
+| Routing decision | [Autonomy PRD §0](../../product/paseo-bm-autonomy-prd.md#0-routing-decision), extended by the owner's request `req-20261005T013533Z` |
+| Requirements | [Autonomy PRD REQ-173](../../product/paseo-bm-autonomy-prd.md) and [Dashboard PRD D-7](../../product/paseo-bm-dashboard-prd.md) |
+| Technical Design | [Autonomy design §A.12](../../design/paseo-bm-autonomy.md) and [Dashboard design §11.3–11.4, §19](../../design/paseo-bm-dashboard.md) |
+| ADRs | [ADR-001](../../adr/ADR-001-plugin-distribution.md) — the npm package remains bundled and registered as a directory; the update check therefore reads npm metadata directly rather than relying on Paseo's directory-plugin updater |
 
 ## 1. MVP-Lock
 

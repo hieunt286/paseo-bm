@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-01) — approved by the owner |
+| Status | **Accepted** (2026-10-01) — approved by the owner; for bound agents, decision 4's `BM-QUESTIONS` line superseded and decision 1's third signal amended by [ADR-027](ADR-027-agents-write-content-code-carries-it.md); decision 3 amended by [ADR-028](ADR-028-projects-ask-each-other-through-the-plugin.md) (a wait on a peer link is structural) |
 | Date | 2026-10-01 |
 | Owner | hieu.nt10 |
 | Related | [Base design](../design/paseo-bm.md) §7.5 · [Orchestrator design](../design/paseo-bm-orchestrator.md) §6 · [Autonomy design](../design/paseo-bm-autonomy.md) §A.8 · `plugin/server/interruption-watch.ts`, `plugin/server/stall-watcher.ts` |

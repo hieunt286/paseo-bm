@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-28) — approved by the owner together with the Orchestrator PRD and design; decisions 4 and 5 **superseded** by [ADR-015](ADR-015-orchestrator-autopilot-per-project.md) (2026-09-29) |
+| Status | **Accepted** (2026-09-28) — approved by the owner together with the Orchestrator PRD and design; decisions 4 and 5 **superseded** by [ADR-015](ADR-015-orchestrator-autopilot-per-project.md) (2026-09-29); decisions 3 and 4 superseded by [ADR-017](ADR-017-decisions-are-stored-objects.md); decision 6 by [ADR-021](ADR-021-orchestrator-measured-coordination-controller.md) |
 | Date | 2026-09-28 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-013](ADR-013-orchestrator-assess-and-nudge.md) (assessment agent per click, `BM-NUDGE` sent by the plugin) — built, tested, rejected by the owner before any release |

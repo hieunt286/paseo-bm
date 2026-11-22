@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; decision 2 amended by [ADR-044](ADR-044-a-restart-does-not-revive-dormant-missions.md) (records resent at a plugin start); decisions 2, 5 and 6 by [ADR-045](ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) |
 | Date | 2026-11-06 |
 | Owner | hieu.nt10 |
 | Clarifies | [ADR-005](ADR-005-manager-as-agent.md) decision 5: the lifecycle stays the owner's; a runtime the daemon collected is not a lifecycle decision |

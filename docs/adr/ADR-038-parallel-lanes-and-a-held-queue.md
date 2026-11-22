@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-25) — the owner's answers: "at most 7 independent pieces of work, as many Workers each as the work needs; the Main steps in when Workers mix up or edit each other's files", "steer into the turn", "the plugin holds and starts it"; mockup Q, R approved as is; "steer with guards" after the spike |
+| Status | **Accepted** (2026-10-25) — the owner's answers: "at most 7 independent pieces of work, as many Workers each as the work needs; the Main steps in when Workers mix up or edit each other's files", "steer into the turn", "the plugin holds and starts it"; mockup Q, R approved as is; "steer with guards" after the spike; decisions 3 and 4 amended by [ADR-039](ADR-039-new-work-never-into-a-busy-worker.md); decisions 3 and 5 by [ADR-045](ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md); decision 5's storage of a held request recorded by [ADR-050](ADR-050-decisions-the-code-took-without-an-adr.md) |
 | Date | 2026-10-25 |
 | Owner | hieu.nt10 |
 | Supersedes | ADR-035 decision 2's one worktree per mission and repository as the only place a mission writes in that repository; the delivery line design §3.7 rule "one live Worker per placement"; `manager.md`'s "a follow-up goes to its request's Worker while it runs" as the default for new work |

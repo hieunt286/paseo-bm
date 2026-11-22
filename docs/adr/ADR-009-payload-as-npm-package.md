@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted; decisions 4 and 5 **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)**: `paseo-bm-plugin` is the only supported install path, on Paseo 0.9+ |
+| Status | Accepted; decisions 4 and 5 **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)**: `paseo-bm-plugin` is the only supported install path, on Paseo 0.9+; the published form superseded by [ADR-026](ADR-026-published-plugin-is-bundled.md); the paseo.cafe listing requirement amended by [ADR-048](ADR-048-no-dependency-on-paseo-cafe-and-no-bundle-size-limit.md) |
 | Date | 2026-09-23 |
 | Owner | hieu.nt10 |
 | Related | Amends [ADR-001](ADR-001-plugin-distribution.md) decision 1 and its "Alternatives considered" section; [the paseo.cafe listing record](../operations/paseo-bm-cafe-listing-20260923.md) §4 and §10 |

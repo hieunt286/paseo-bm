@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended by [ADR-017](ADR-017-decisions-are-stored-objects.md) (the plugin acts on typed blocks); for bound agents, decisions 3 and 5 superseded by [ADR-027](ADR-027-agents-write-content-code-carries-it.md) |
 | Date | 2026-09-24 |
 | Owner | hieu.nt10 |
 | Related | [design-delta-20260924b-agent-tools](../archive/design/paseo-bm-delta-20260924b-agent-tools.md); [ADR-004](ADR-004-paseo-config-mutation.md) (the plugin does not edit the Paseo config); [ADR-006](ADR-006-role-registration.md) (roles registered through provider aliases) |

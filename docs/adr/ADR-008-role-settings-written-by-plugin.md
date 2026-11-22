@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-22). The owner chose direction R1 on 2026-09-21 (Q3 a of `req-20260921T111242Z`) and approved [PRD delta 20260921](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) §9 on 2026-09-22 (Q10 a) — the condition this ADR set for becoming Accepted. In effect from phase 2a-15, when the plugin starts writing role settings (`plugin/server/config-writer.ts`) |
+| Status | **Accepted** (2026-09-22). The owner chose direction R1 on 2026-09-21 (Q3 a of `req-20260921T111242Z`) and approved [PRD delta 20260921](../archive/product/paseo-bm-prd-delta-20260921-worker-fallback-and-role-settings.md) §9 on 2026-09-22 (Q10 a) — the condition this ADR set for becoming Accepted. In effect from phase 2a-15, when the plugin starts writing role settings (`plugin/server/config-writer.ts`); decision 2 amended by [ADR-012](ADR-012-plugin-is-the-product.md) |
 | Date | 2026-09-21 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-004](ADR-004-paseo-config-mutation.md) decision 1; [ADR-006](ADR-006-role-registration.md) decisions 1 and 5 |

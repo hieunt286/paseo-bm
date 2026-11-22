@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-30) — decided by the owner |
+| Status | **Accepted** (2026-09-30) — decided by the owner; the ladder step "correct the Worker" and the model-decided compaction and handoff superseded by [ADR-029](ADR-029-missions-mains-and-a-process-governor.md); the replaced Worker's "never archived" amended by [ADR-049](ADR-049-finished-sub-agents-are-archived.md) (archived once its request is finished for good) |
 | Date | 2026-09-30 |
 | Owner | hieu.nt10 |
 | Supersedes | The workflow assessment of ADR-014/ADR-016 as a way to change the process (its suggestions appended to instructions); Appendix B of the autonomy PRD already retires it |

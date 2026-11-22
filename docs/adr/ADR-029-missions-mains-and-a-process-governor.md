@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-09) — the owner's decisions of the discussion of 2026-10-09; technical choices by Claude under the owner's delegation |
+| Status | **Accepted** (2026-10-09) — the owner's decisions of the discussion of 2026-10-09; technical choices by Claude under the owner's delegation; decision 9's wake delivery amended by [ADR-032](ADR-032-one-governor-a-mission-per-wake.md); decision 1's successor assumption and decision 9's code-run compaction and handoff for Mains superseded by [ADR-033](ADR-033-the-mission-is-the-system-of-record.md); decision 2 by [ADR-034](ADR-034-each-mission-has-its-own-workspace.md); decision 4's Worker `cwd` by [ADR-035](ADR-035-a-delivery-line.md) |
 | Date | 2026-10-09 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-005](ADR-005-manager-as-agent.md) decision "one Manager per workspace" (REQ-020 b); [ADR-011](ADR-011-manager-coordinates-workers.md) "the Manager coordinates the Workers of its workspace" (a Main coordinates the Workers of its mission, in any repo of it); [ADR-016](ADR-016-orchestrator-coordinates-workers-live.md) decision 2 (the Orchestrator corrects and answers Workers directly) — it may only stop one; [ADR-021](ADR-021-orchestrator-measured-coordination-controller.md)'s ladder step "correct the Worker" and its model-decided compaction and handoff — they run in code; [ADR-025](ADR-025-autonomy-levels.md) decision 5 ("the Orchestrator is the only predictor") — a Main decides its Workers' questions; [ADR-028](ADR-028-projects-ask-each-other-through-the-plugin.md) decision 3 (another project's Manager receives an ask) — the asker's own Main routes it |

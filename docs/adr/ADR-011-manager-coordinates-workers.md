@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended by [ADR-016](ADR-016-orchestrator-coordinates-workers-live.md) (Autopilot projects), [ADR-017](ADR-017-decisions-are-stored-objects.md) (the Manager relays nothing) and [ADR-028](ADR-028-projects-ask-each-other-through-the-plugin.md) (peer asks); its workspace scope superseded by [ADR-029](ADR-029-missions-mains-and-a-process-governor.md); decision 6's no-archive line amended by [ADR-049](ADR-049-finished-sub-agents-are-archived.md) |
 | Date | 2026-09-25 |
 | Owner | hieu.nt10 |
 | Related | [PRD REQ-021, REQ-025, REQ-026](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-005](ADR-005-manager-as-agent.md) (extends decisions 3 and 5) · [Technical Design §10](../design/paseo-bm.md) · `plugin/roles/manager.md` |

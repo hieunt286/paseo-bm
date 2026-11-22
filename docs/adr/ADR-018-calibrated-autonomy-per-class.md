@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-29) — approved by the owner with the autonomy design |
+| Status | **Accepted** (2026-09-29) — approved by the owner with the autonomy design; decision 4's promotion rule and decision 5's "the predictor that earned it" superseded by [ADR-023](ADR-023-delegation-without-eligibility.md); decision 2's owner-only classes (cited there as decision 3), automatic demotion and the predictor choice superseded by [ADR-025](ADR-025-autonomy-levels.md); decision 3's Orchestrator prediction retired by [ADR-050](ADR-050-decisions-the-code-took-without-an-adr.md) |
 | Date | 2026-09-29 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-015](ADR-015-orchestrator-autopilot-per-project.md) decisions 1–2 (Autopilot, one switch per project); [ADR-016](ADR-016-orchestrator-coordinates-workers-live.md) decision 3's "Allow…" categories |

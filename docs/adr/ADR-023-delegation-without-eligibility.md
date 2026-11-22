@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-01) — decided by the owner |
+| Status | **Accepted** (2026-10-01) — decided by the owner; decision 1's predictor choice and decision 6's automatic demotion superseded by [ADR-025](ADR-025-autonomy-levels.md) |
 | Date | 2026-10-01 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-018](ADR-018-calibrated-autonomy-per-class.md) decision 4's promotion rule — "proposed by evidence", and a cell may become `delegate` only at ≥ 90 % agreement over ≥ 20 decisions across two weeks with no reversal; its decision 5's "the predictor that earned it"; and its consequence "two weeks of data is the minimum before any cell can be delegated". Every other part of ADR-018 stands: the classes, the matrix, shadow and the agreement ledger, automatic demotion, the four hard-owner classes, precedents |

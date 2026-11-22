@@ -2,13 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Status | Completed |
+| Status | Completed. Archived 2026-11-16: its epic `bm-xeho` and all four tasks are closed (REQ-174 shipped) |
 | Plan-ready | PASS — 2026-10-05 — Codex after amended PRD acceptance under owner request `req-20261005T035730Z` |
 | Owner | hieu.nt10 |
 | Routing decision | Brownfield / Designed: consumed RPCs, an external update process and the published-package content change require PRD + design + plan → Beads |
-| Requirements | [Autonomy PRD REQ-174](../product/paseo-bm-autonomy-prd.md) |
-| Technical Design | [Dashboard design §11.4](../design/paseo-bm-dashboard.md) |
-| ADRs | [ADR-001](../adr/ADR-001-plugin-distribution.md), [ADR-012](../adr/ADR-012-plugin-is-the-product.md), [ADR-026](../adr/ADR-026-published-plugin-is-bundled.md) |
+| Requirements | [Autonomy PRD REQ-174](../../product/paseo-bm-autonomy-prd.md) |
+| Technical Design | [Dashboard design §11.4](../../design/paseo-bm-dashboard.md) |
+| ADRs | [ADR-001](../../adr/ADR-001-plugin-distribution.md), [ADR-012](../../adr/ADR-012-plugin-is-the-product.md), [ADR-026](../../adr/ADR-026-published-plugin-is-bundled.md) |
 
 ## 1. MVP-Lock
 

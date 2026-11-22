@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-23) — the owner's three answers after a day of use: "turn CI off entirely", "a fresh Reviewer that checks only the diff", "a new Worker at about 250k context". Technical choices by Claude under the owner's delegation |
+| Status | **Accepted** (2026-10-23) — the owner's three answers after a day of use: "turn CI off entirely", "a fresh Reviewer that checks only the diff", "a new Worker at about 250k context". Technical choices by Claude under the owner's delegation; decision 2 amended by [ADR-041](ADR-041-incremental-review-and-affected-checks.md); decision 3's context default by [ADR-045](ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) |
 | Date | 2026-10-23 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-035](ADR-035-a-delivery-line.md) decision 3's "the CI pipeline of the merge request is the check of record" (CI is not evidence); decision 4's re-review by the same Reviewer conversation (a fresh Reviewer with the fix diff); decision 1's size figures, which gain a context figure |

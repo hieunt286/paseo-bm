@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; decision 4's last sentence amended by [ADR-045](ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) |
 | Date | 2026-11-05 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-036](ADR-036-no-agent-waits-on-machines.md) decision 2: review baselines and the full-suite finish requirement |

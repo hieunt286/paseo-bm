@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-09) — approved by Claude under the owner's delegation, on the owner's request of 2026-10-09 ("soạn prd, design và sau đó hoàn thiện tất cả công việc theo đề xuất") |
+| Status | **Accepted** (2026-10-09) — approved by Claude under the owner's delegation, on the owner's request of 2026-10-09 ("soạn prd, design và sau đó hoàn thiện tất cả công việc theo đề xuất"); decision 3 superseded by [ADR-029](ADR-029-missions-mains-and-a-process-governor.md); decision 2's `bm_ask_project` for a Manager retired by [ADR-050](ADR-050-decisions-the-code-took-without-an-adr.md) |
 | Date | 2026-10-09 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-011](ADR-011-manager-coordinates-workers.md) (the Manager coordinates Workers of **its** workspace: it now also takes requests from another project's agents, and asks other projects for its own requests); [ADR-024](ADR-024-structure-tells-stops-and-waits.md) decision 3 ("a Worker that waits on another agent … therefore stalls": a wait on a peer link is now a structural wait); [ADR-027](ADR-027-agents-write-content-code-carries-it.md) decision 1 extended to traffic between projects |

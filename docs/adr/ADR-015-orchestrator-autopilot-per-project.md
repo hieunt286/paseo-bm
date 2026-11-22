@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-29) — owner decisions of the same day; decision 4's "commands go to Managers only" and its limit sentence **amended** by [ADR-016](ADR-016-orchestrator-coordinates-workers-live.md) |
+| Status | **Accepted** (2026-09-29) — owner decisions of the same day; decision 4's "commands go to Managers only" and its limit sentence **amended** by [ADR-016](ADR-016-orchestrator-coordinates-workers-live.md); decisions 1–2 superseded by [ADR-018](ADR-018-calibrated-autonomy-per-class.md); decisions 3 and 4 by [ADR-017](ADR-017-decisions-are-stored-objects.md) |
 | Date | 2026-09-29 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-014](ADR-014-orchestrator-agent-proposes-owner-approves.md) decisions 4 ("only the owner's click sends") and 5 (wake only on stalls); ADR-014's other decisions stand |

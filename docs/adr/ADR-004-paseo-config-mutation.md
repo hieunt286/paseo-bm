@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; decision 7 replaced by [ADR-006](ADR-006-role-registration.md); decision 1 amended by [ADR-008](ADR-008-role-settings-written-by-plugin.md); amended by [ADR-012](ADR-012-plugin-is-the-product.md) (decisions 4 and 6–8 no longer apply) |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Related | [PRD REQ-005, REQ-006, REQ-010d](../product/paseo-bm-prd.md#6-functional-requirements), [ADR-001](ADR-001-plugin-distribution.md), [ADR-002](ADR-002-install-ownership-model.md), [Technical Design](../design/paseo-bm.md) |
-| Amended by | [ADR-008](ADR-008-role-settings-written-by-plugin.md), decision 1 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): the plugin edits the config through `config.patch`, not through the file. Decisions 4, 6, 7, 8 (turning on `pluginsEnabled`, recording who turned it on, the minimal file edit, detecting concurrent writes) no longer apply from 0.4.0; decision 2 changes the minimum to Paseo 0.9.0; decisions 1, 3, 5 now apply only to the 0.4.0 migration CLI |
+| Amended by | [ADR-006](ADR-006-role-registration.md), decision 7 (2026-09-15) · [ADR-008](ADR-008-role-settings-written-by-plugin.md), decision 1 (Accepted 2026-09-22) · [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): the plugin edits the config through `config.patch`, not through the file. Decisions 4, 6, 7, 8 (turning on `pluginsEnabled`, recording who turned it on, the minimal file edit, detecting concurrent writes) no longer apply from 0.4.0; decision 2 changes the minimum to Paseo 0.9.0; decisions 1, 3, 5 now apply only to the 0.4.0 migration CLI |
 
 ## Context
 

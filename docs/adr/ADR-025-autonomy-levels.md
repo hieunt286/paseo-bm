@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-01) — decided by the owner |
+| Status | **Accepted** (2026-10-01) — decided by the owner; decision 5 superseded by [ADR-029](ADR-029-missions-mains-and-a-process-governor.md) (a Main decides its Workers' questions) |
 | Date | 2026-10-01 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-018](ADR-018-calibrated-autonomy-per-class.md) decision 3, that release, data, security and cost are never delegable. Also its automatic demotion on reversal, which [ADR-023](ADR-023-delegation-without-eligibility.md) decision 6 kept. And the predictor choice in ADR-018 decision 5 and ADR-023 decision 1. ADR-018's classes, the decision store, shadow, the agreement ledger and precedents stand. |

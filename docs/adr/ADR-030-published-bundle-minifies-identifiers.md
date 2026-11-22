@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-09) — Claude under the owner's delegation (a packaging choice ADR-026 decision 6 left open); reversible by one build option |
+| Status | **Accepted** (2026-10-09) — Claude under the owner's delegation (a packaging choice ADR-026 decision 6 left open); reversible by one build option; decision 2's 2,000,000-byte check amended by [ADR-048](ADR-048-no-dependency-on-paseo-cafe-and-no-bundle-size-limit.md) |
 | Date | 2026-10-09 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-026](ADR-026-published-plugin-is-bundled.md) decision 2 ("identifiers kept") and decision 6 (the budget's open choice) |

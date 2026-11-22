@@ -23,7 +23,7 @@ Section numbers are cited by code; they are never renumbered. Where this design 
 
 ### 2.1 What it holds
 
-`missionStateOf(home, missionId, deps) → MissionState` (`server/mission-state.ts`; types and the pure renderer in `shared/mission-state.ts`). Reads only; never throws (a store it cannot read leaves its part empty and adds a line to `unknown`).
+`missionStateOf(home, missionId, deps) → MissionState | null` (`server/mission-state.ts`; types and the pure renderer in `shared/mission-state.ts`). Reads only; null for an unknown mission; never throws (a store it cannot read leaves its part empty and adds a line to `unknown`). Its texts are masked as they are read.
 
 ```ts
 interface MissionState {
@@ -31,15 +31,21 @@ interface MissionState {
   mission: { missionId; code; name; state: "open" | "closed"; goal; charterConfirmed: boolean;
              repos: Array<{ workspaceId; name | null }>; mainId: string | null;
              mainHistory: Array<{ agentId; from; to: string | null; reason }> };
-  requests: Array<{ requestId; workspaceId; topic; workerId: string | null;
+  criteria: { met; total; open: Array<{ id; text }> };       // the charter's done criteria
+  requests: Array<{ requestId; workspaceId; repo: string | null; topic; workerId: string | null;
                     state: "working" | "undelivered" | "waiting-owner" | "waiting-main" | "waiting-other" | "finished" | "stopped";
                     lastReport: { phase; at; line } | null;   // line: the report's first summary line, ≤ 200
                     followUpAt: string | null;                // a follow-up told after the newest report
-                    waitingOn: string | null }>;              // the blocked report's "waiting for …", ≤ 200
+                    waitingOn: string | null;                 // the blocked report's "waiting for …", ≤ 200
+                    continuationOf?; continuedBy?; chainPosition?;     // delivery line design §2.7
+                    committed?; verified?; commit?; couldNotRun? }>;   // delivery line design §4.4, §4.6
+  placements?: MissionStatePlacement[];                        // delivery line design §4.9
+  contracts?: MissionStateContract[];                          // delivery line design §9.3
   questions: Array<{ id; requestId: string | null; qn: string | null; class; subject: string | null;
-                     decider: "code" | "main" | "orchestrator" | "owner"; askedAt; question; recommended: string | null }>;
-  asks: Array<{ id; askedAt; question; options: string[] }>;   // the Main's open m: questions (§4.6) and open m: cards
-  links: Array<{ linkId; route; kind; direction: "out" | "in"; partner; state; waitingSince: string | null; gist }>;
+                     decider: "code" | "main" | "orchestrator" | "owner"; recommend: boolean;
+                     askedAt; question; recommended: string | null }>;
+  asks: Array<{ id; askedAt; question; options: string[]; recommended?; byMain? }>;   // the mission's open m: cards (§4.6, §7)
+  links: Array<{ linkId; route; kind; direction: "out" | "in"; partner; state; waitingSince: string | null; gist; last? }>;
   owner: Array<{ at; from: "owner" | "main"; text }>;          // the newest 6 entries of the owner's exchange with the Main
   governor: Array<{ family; step; since; crossed: string[] }>; // families above step 0
   journal: Array<{ at; kind; by; text }>;                      // the newest 10 lines
@@ -47,13 +53,15 @@ interface MissionState {
 }
 ```
 
+The `code` decider is kept only so stored states still parse; no rule names it (delivery line design §5.6).
+
 **Sources.**
 
 | Part | Read from |
 |---|---|
 | `mission` | `missions/<id>.json` |
-| `requests` | the roster (every entry not `finished`/`stopped`, plus those finished in the last 24 h), the registry (`workerIds`, `finishedAt`), the outbox's newest `report` record of the request (`newestReportRecordOf`), the roster's `followUpAt` (§2.3) |
-| `questions` | the unsettled `q:` and `f:` decisions of the roster's requests in their repos, and the unsettled `m:` decisions of the mission; `decider` from `deciderOf` (§4.1) |
+| `requests` | the roster (every entry not `finished`/`stopped`, plus those whose newest report — else their creation — is less than 24 h old, or that were followed up since), the registry (`workerIds`), the outbox's newest `report` record of the request, the roster's `followUpAt` (§2.3), and the open `delivery-dropped` alerts |
+| `questions` | the unsettled `q:` and `f:` decisions of the roster's requests in their repos; `decider` and `recommend` from `deciderOf` (§4.1) |
 | `asks` | the unsettled `m:` decisions of the mission |
 | `links` | the peer-link store: live links whose `from.requestId` or `to.requestId` is on the roster, or whose `missionId` is this mission |
 | `owner` | the trace records of the mission's Main agents (`mainHistory` ids) in the Missions home (or `legacyWorkspaceId`): each turn's owner-origin `sent` message and the first paragraph of its `received` reply, ≤ 300 characters each, newest last |
@@ -61,7 +69,7 @@ interface MissionState {
 | `journal` | `missions/<id>.journal.jsonl` |
 
 **A request's `state`.** Read in order, the first that holds:
-1. `finished` or `stopped`: the roster state, unless `followUpAt` is later than the newest report, which reads `working`.
+1. `finished` or `stopped`: the roster state. A request that is not bound reads `working` instead when `followUpAt` is later than its newest report; a bound one is final (delivery line design §2.3).
 2. `waiting-owner`: an open question whose decider is the owner, who is the one holding the request (ADR-045 decision 14).
 3. `undelivered`: an open `delivery-dropped` alert of the request (ADR-042).
 4. `waiting-main`: an open question whose decider is the Main.
@@ -70,35 +78,30 @@ interface MissionState {
 
 ### 2.2 The rendering
 
-`renderMissionState(state, { maxChars })` (pure) writes sections in this order, each line cut and masked with `redactText`:
-1. a header line;
-2. **In flight**: one line per request: repo, request, Worker, state, newest report and its age, follow-up;
-3. **Waiting on you**: owner questions and the Main's asks;
-4. **Yours to decide**: questions whose decider is the Main;
-5. **Links**;
-6. **The owner said lately**;
-7. **Governor**;
-8. **Recently**: the journal.
+`renderMissionState(state, { maxChars })` (pure) writes, in this order:
+1. a header line, then a "Done criteria:" line;
+2. **In flight**: one line per request: repo, request, state (a continued one "finished → `<id>`", with committed, verified or "could not run"), Worker, newest report and its age, follow-up, what it waits on, its topic;
+3. **Lines**: one line per repository with a placement (delivery line design §4.9), only when the mission has one;
+4. **Contracts**: the live contracts, proposed first, at most 10 (delivery line design §9.3);
+5. **Waiting on the owner**: owner questions and the mission's open `m:` cards;
+6. **Yours to decide**: questions whose decider is the Main;
+7. **Links**: each with its latest message and refs; links closed in the last 24 hours are listed too;
+8. **The owner said lately**;
+9. **Governor**;
+10. **Recently**: the journal.
 
-It closes with "Read the whole mission with bm_mission." The cap is `MISSION_STATE_MAX_CHARS` = 6,000. Sections are dropped from the end, and lines from the oldest, until it fits.
+It closes with "Read the whole mission with bm_mission." An empty section reads "`<title>`: none". The default cap is `MISSION_STATE_MAX_CHARS` = 6,000. Until the text fits, lines go from the oldest end of each section in this order: Recently, Governor, The owner said lately, Contracts (from its end: agreed after proposed), Links, Yours to decide, Waiting on the owner, Lines, In flight. A text still too long is cut with "…". The renderer masks nothing: the state was masked when read.
 
 **Consumers.** The rendering replaces these, which are retired:
 
 | Consumer | Uses | Replaces |
 |---|---|---|
-| A Main's first prompt at creation and replacement (`mainBriefOf`) | the header, the charter lines kept, then the rendering | the roster-only "Open requests" list and the journal tail |
-| The Main's `BM-STATE` after compaction (`compaction.ts` `managerBrief` for a Main) | the rendering | `missionRequestLines` and the owner's last 3 messages |
-| The governor's wake brief (`governor-brief.ts` `missionBriefOf`) | `governor`, `requests`, `questions`, `journal` of the same state | the brief's own reads (ADR-032 §20.1) |
+| A Main's first prompt at creation and replacement (`missions-home.ts` `mainBriefOf`) | the header, the charter lines kept, then the rendering | the roster-only "Open requests" list and the journal tail |
+| The Main's `BM-STATE` after compaction (`compaction.ts` `mainStateLines`, capped at `STATE_BRIEF_MAX_CHARS` − 600) | the rendering | `missionRequestLines` and the owner's last 3 messages |
+| The governor's wake brief (`governor-brief.ts` `missionBriefOf`, at most 3,000 characters with the governor's newest notes) | the rendering | the brief's own reads (ADR-032 §20.1) |
 | `mission.get` (Missions screen, §7) | the structured `MissionState` (`inFlight`, `mainHistory`) | — |
 
-
-*Since 2026-10-21* (delivery line design §4.9, §9.3), the rendering gains two sections after In flight:
-- **Lines:** one line per repository with a placement.
-- **Contracts:** the open contracts, proposed first, at most 10.
-
-Each link shows its latest message with its refs, and links closed in the last 24 hours are listed. When the text must shrink, the sections drop in this order: Recently, Governor, the owner's recent words, Contracts, Links.
-
-A Worker's compaction brief carries its request's links and the contracts touching its repository, within a 2,400-character block.
+A Worker's compaction brief carries its request's links and the contracts touching its repository, within a 2,400-character block (delivery line design §9.3).
 
 ### 2.3 Writes that make it complete
 
@@ -106,10 +109,9 @@ Each write is code, at the event, through `journalQuietly` (a failed line is one
 
 | Event | Where | Writes |
 |---|---|---|
-| A follow-up to a Worker (`bm_tell_worker`) | `deliver-tools.ts` | roster `state: active`, `followUpAt = now`; journal `worker` "Follow-up to <request>: <first line, ≤ 160>" |
-| A Worker's `blocked`, `finished`, `stopped` report | `deliver-tools.ts`, `unbound-relay.ts` | journal `worker` "<request> <phase>: <summary, ≤ 160>" (the roster as today) |
-| A mission link asked (`bm_ask_mission`) | `peer-tools.ts` | journal `link` on the asker's mission "Asked mission <code> (<kind>): <gist>" |
-| A link taken (`bm_create_worker`/`bm_tell_worker` with `peerLink`), answered, or closed | `create-worker.ts`, `deliver-tools.ts`, `peer-tools.ts` | journal `link` on each mission concerned |
+| A follow-up to a Worker (`bm_tell_worker`) | `deliver-tools.ts` → `mission-roster.ts` `noteFollowUp` | roster `state: active`, `followUpAt = now`; journal `worker` "Follow-up to <request>: <first line, ≤ 160>". Not for a bound request that is finished or stopped: its work goes on as a continuation (delivery line design §2.4) |
+| A Worker's `blocked`, `finished`, `stopped` report | `deliver-tools.ts`, `unbound-relay.ts` → `noteRosterReport` | the roster state; journal `worker` "<request> <phase>: <summary, ≤ 160>" |
+| A link asked, taken, answered or closed | `peer-links.ts` → `mission-events.ts` `journalLinkEvent` | journal `link` on each mission concerned, such as "Link <id> asked <workspace> (<kind>): <gist>" |
 | A Main's question to the owner, and its answer | §4.6 | journal `decision` (as `m:` cards today) |
 | Requests moved between missions | §5.1 | journal `charter` on both missions |
 | A Main replaced | §3.4 | one journal `main` line (exactly one) |
@@ -120,9 +122,9 @@ The missions design §2.2 rule "the journal is not the source of any state" is r
 
 ### 3.1 The figure
 
-`mainContextOf(record) → { used: number; max: number | null } | null`:
-- `used` is the turn's `usage.contextUsed`. When that is absent, it is the estimate `tokensRead / (toolCalls + 1)` on Claude, or `tokensRead` on a last-call provider. Without either it is null.
-- `max` is `usage.contextMax` when reported.
+A turn's context is read by `turnTokensOf` (`shared/eval-metrics/tokens.ts`) as `{ context: { tokens, basis } | null, contextShare }`:
+- `tokens` is the turn's `usage.contextUsed` (basis `reported`). When that is absent it is an estimate (`estimated`): the tokens read on a last-call provider, or `tokensRead / (toolCalls + 1)` when the turn's tool calls are known. Without either it is null.
+- `contextShare` is `tokens / usage.contextMax` when Paseo reports the window, else null.
 - The per-turn token sum is **never** a Main's figure.
 
 ### 3.2 The settings
@@ -135,7 +137,7 @@ Coordination gains the group `main = { compact: true, contextShare: 0.6, context
 | `main.contextTokens` | 50,000–2,000,000 |
 | `main.hardShare` | 0.35–0.95; the hard figure is never read below `contextShare` + 0.05 |
 
-The figure crosses when `used / max ≥ contextShare` or `used ≥ contextTokens`, whichever comes first; with no `max`, only the second applies. The hard figure is `used / max ≥ hardShare` or `used ≥ contextTokens / contextShare × hardShare` (212,500 at the defaults). *Since 2026-10-25* ([ADR-037](../adr/ADR-037-agents-are-given-a-bounded-context.md), delivery line design §18.4): before, `contextTokens` applied only with no `max`, so a Codex Main of a 475,000-token window crossed at 285,000.
+The figure crosses (`mainContextCrossingOf`) when the window share reaches `main.contextShare` or the context reaches `main.contextTokens`, whichever comes first; with no window reported, only the second applies. The hard figure (`mainContextHardOf`) is the share at `main.hardShare`, or the context at `contextTokens / contextShare × hardShare` (212,500 at the defaults), never below `MAIN_HARD_TOKENS_FLOOR` (1.25) × `contextTokens` (delivery line design §18.4).
 
 `main.compact` is separate from `compact.enabled`, `compact.maxPerAgent` and the A-12 guard. A Main's compaction is maintenance, not a coordination intervention, so it records no intervention entry and the guard never counts it.
 
@@ -158,68 +160,62 @@ The agent id and the owner's chat do not change.
 - **Steps:** `setMain`; one journal `main` line; the roster's requests reassigned in the registry; Worker bindings re-pointed and their `paseo.parent-agent-id` labels set; the old Main labelled `bm.replacedBy` and retitled; the notice queue retargeted; open outbox records redelivered.
 - **No notice to any Worker**, and none to the old Main.
 
-**`createMain`** creates the agent only: labels, binding, first prompt. It neither sets `mainId` nor writes the journal. Every caller follows it with `replaceMain`:
-- `mission.ensure`
-- `handOverMain`
-- the successor claim
-- the composer adoption
-- the fallback
-- the split's new mission
+**`createMain`** creates the agent only: labels, binding, first prompt. It neither sets `mainId` nor writes the journal. Every path that gives a mission its Main ends in `replaceMain`:
+- `mission.ensure` (`missions-home.ts`, which the split's new mission goes through too) and `handOverMain` create the agent with `createMain`;
+- the successor claim, the composer adoption and the legacy migration (`mission-legacy.ts`) adopt an agent that already exists;
+- the fallback creates its Main with `createManager` (`fallback-manager.ts`).
 
-**`mission.ensure` while a Main is being created.** It joins the in-flight creation for that mission (`creatingMain: Map<missionId, Promise<agentId>>`) instead of adopting the half-made agent. `findMain` skips an agent that an in-flight creation holds.
+**`mission.ensure` while a Main is being created.** It joins the in-flight creation for that mission (`creatingMain: Map<missionId, Promise<agentId>>`) instead of adopting the half-made agent: it checks `creatingMain` before it looks for a Main with `findMain`.
 
 ### 3.5 When a new Main is still created
 
-Through `handOverMain` → `createMain` → `replaceMain(…, "handoff", { expectedOld })`, only in these cases:
-1. The Main's provider cannot compact (not in `COMPACTION_PROVIDERS`) and §3.1 crosses.
+Through `handOverMain` → `createMain` → `replaceMain(…, "handoff", { expectedOld })`, only in these cases (`mainHandoffReasonOf`, `handoff.ts`):
+1. The Main's provider cannot compact (not in `COMPACTION_PROVIDERS`: Claude, Codex, OpenCode) or `main.compact` is off, and §3.1 crosses.
 2. Two compactions of this Main in a row ended `no-compaction`.
 3. The first recorded turn after a completed compaction still reaches the hard figure.
 
-The successor's first prompt is the brief of §2.2, plus the line: "You take over mission <code> from Main <old> (<reason>). In your first reply tell the owner in one line that you took over and what is in flight, from the state above."
+The successor's first prompt is the brief of §2.2, plus `mainHandoffLineOf`: "You take this mission over from Main <old>: <why>, so paseo-bm handed the mission over to you in a fresh context. Its chat keeps the earlier conversation; start from the mission state above. In your first reply tell the owner in one line that you took over and what is in flight, from that state."
 
 Settings → Coordination's `handoff.enabled` still governs this path.
 
 ### 3.6 A replaced Main
 
-Every bound Main tool resolves its caller's mission (`mainOf`). When the caller is not the mission's current `mainId`:
-- a tool that writes or sends is refused with "You were replaced by Main <id> of mission <code>; tell the owner to continue in that Main's chat (the Missions screen opens it)";
-- reads (`bm_mission`, `bm_decisions`, `bm_repo`, `bm_memory` read) still answer.
+Every Manager tool is refused when its caller is a Main whose binding names an open mission whose current `mainId` is another agent (`replacedMainRefusalOf`, `mission-replace.ts`, checked in `agent-tools.ts`; [ADR-051](../adr/ADR-051-three-owner-decisions-from-the-documentation-review.md) decision 3). The refusal names the current Main: "You were replaced by Main <id> of mission <code>; tell the owner to continue in that Main's chat (the Missions screen opens it)." It ends "Nothing was read." for a reading tool (`MAIN_READ_TOOLS`: `bm_mission`, `bm_decisions`, `bm_repo`, `bm_peers`, and `bm_memory` with `op: read`) and "Nothing was done." for any other, which writes or sends (`MAIN_WRITE_TOOLS`, the rest of the Manager's tools).
+
+A Main of no mission, the mission's current Main, and a caller whose mission cannot be read are not refused by this rule; a Manager of no mission still gets `NOT_A_MAIN_MESSAGE` from the tools that serve only a mission's Main (`missionOfMain`).
 
 ## 4. One authority (ADR-033 decision 3, REQ-204, REQ-205)
 
 ### 4.1 The resolver
 
-`deciderOf(decision, facts) → { decider: "code" | "main" | "orchestrator" | "owner"; rule; why }` (`shared/authority.ts`, pure). `facts` holds:
-- `policy` (the repo cells);
+`deciderOf(decision, facts) → { decider; rule; recommend; why; withoutEffects? }` (`shared/authority.ts`, pure). `facts` holds:
+- `modeOf(workspaceId, class)`: the repo cell of a class, over the owner's policy;
 - `missionOf(requestId)`;
-- `missionDelegates(missionId, cell)`;
-- `finishedUnverified?(requestId)` (optional; the `f:` rule below). Review figures left the resolver on 2026-10-20 (delivery line design §5).
+- `missionDelegates(missionId, cell)`.
 
-Rules, the first that holds:
+The `finishedUnverified` fact left the resolver with the unverified-finish guard (ADR-051 decision 1), and review figures on 2026-10-20 (delivery line design §5).
+
+Rules, the first that holds (the code's comments number rows 4–6 as its rules 3–5):
 
 | # | Decision | Decider |
 |---|---|---|
-| 1 | `ownerOnly`; `o:`; `r:`; `h:`; an option carrying a prepared change | owner |
-| 2 | `f:` unless every acting option is refused for an unverified finish (then the owner): of a mission request, its class delegated by the repo or `answer-effects` by the mission (the latter permits only options without effects) | main; otherwise a repo-delegated incident stays orchestrator, else owner |
+| 1 | `ownerOnly`; `o:`; `r:`; `h:`; an `m:` decision; an unknown kind; an option carrying a prepared change | owner |
+| 2 | `f:` of a mission request, its class delegated by the repo or `answer-effects` by the mission (the latter permits only options without effects) | main; otherwise a repo-delegated incident stays orchestrator, else owner |
 | 3 | retired on 2026-10-20 (review budgets): reviews past a request's cap are one owner-only `review-cap` question, rule 1 (delivery line design §5.4) | — |
-| 4 | `q:` of a request of a mission, its class delegated by the repo cell or the mission cell (`answer-technical` / `answer-effects`). When only the mission cell delegates it, the Main is named only if an option leaves no effect (rule `mission-effects`), and `bm_answer_worker` refuses an option with effects (delivery line design §7.1) | main |
-| 5 | `q:` of a request of a mission, repo cell `shadow` | owner, the Main recommending |
+| 4 | `q:` of a request of a mission, its class delegated by the repo cell or the mission cell (`answer-technical` / `answer-effects`). When only the mission cell delegates it, the Main decides only when an option leaves no effect (`withoutEffects`), and `bm_answer_worker` refuses an option with effects; when every option has one, the owner decides with the Main recommending (rule `mission-effects`) (delivery line design §7.1) | main (rule `delegated-main`) |
+| 5 | `q:` of a request of a mission, repo cell `shadow` | owner, the Main recommending (rule `shadow-main`) |
 | 6 | anything else | owner |
 
 A precedent (`resolveAtOpen`) still answers first, at open, wherever it applies today. It is code acting on the owner's own earlier words, so it is not a row of the table.
 
 The resolver is the only place these rules live. Its callers:
 - the materialiser at open;
-- `bm_answer_worker` (it answers only where the decider is the Main, or records a recommendation at rule 5);
-- `bm_decide` (rule 2);
+- `bm_answer_worker` (it answers only where the decider is the Main, or records a recommendation where the Main recommends);
+- `bm_decide` (rule 2; it keeps its own equivalent refusal, `decideRefusalOf`);
 - `missionStateOf` (§2);
 - the owner's views, which name "Main" or "paseo-bm" where they decide.
 
-These are retired:
-- `mainAnswerRuleOf`'s inline checks;
-- the Main's ten-minute window (`MAIN_ANSWER_MINUTES`);
-- the "carries a grant: only the owner" refusal for review grants;
-- the unused `missionQuestionRefusalOf`.
+The earlier inline checks, the Main's ten-minute answer window and the review-grant refusal are retired.
 
 ### 4.2 The owner always may
 
@@ -236,9 +232,10 @@ A request's reviews converge by themselves under a computed cap, and past the ca
 
 ### 4.4 The Main is told at once
 
-When a question opens whose decider is the Main, the Main gets one channel item (§6.2):
-- `BM-DELIVERY message` from `plugin`: "Q<n> of <request> (<class>, <subject>) is yours to answer within the mission's delegation: <question, ≤ 300>; options <key — label, recommended marked>. Answer with bm_answer_worker; the owner sees your answer and may override it."
-- A rule-5 question gets the same item, ending "Recommend with bm_answer_worker; the owner decides."
+When a question opens whose decider is the Main, or one the Main recommends on, `tellMainOfQuestions` sends the Main one channel item (§6.2), a `BM-DELIVERY message` from `plugin`:
+- "Q<n> of <request> (<class>, <subject>) is yours to answer within the mission's delegation: <question, ≤ 300>; options <key — label, recommended marked>. Answer with bm_answer_worker; the owner sees your answer and may override it."
+- A question the Main recommends on (rules 4 `mission-effects` and 5) reads "… is yours to recommend on: …; options …. Recommend an option with bm_answer_worker; the owner decides."
+- Every item ends "bm_mission shows the mission as it stands." (`tellMain`). An `f:` decision for the Main is §4.5.1's.
 
 ### 4.5 `bm_answer_worker`
 
@@ -254,34 +251,17 @@ Under the mission-only delegation it also refuses an option with effects (delive
 
 ### 4.5.1 The Main resolves fallback (ADR-040)
 
-The canonical Routing Decision is in bead `bm-fuud`; requirements are REQ-204 e and
-[ADR-040](../adr/ADR-040-the-main-resolves-its-requests-fallback.md). This extension owns request
-fallback authority, notification and answer delivery; provider choice stays in the configured chain.
+Requirements: REQ-204 e and [ADR-040](../adr/ADR-040-the-main-resolves-its-requests-fallback.md). This extension covers request fallback authority, notification and answer delivery; provider choice stays in the configured chain.
 
-`bm_answer_fallback { decisionId: f:<incidentId>, option: switch | wait | dismiss, why: 1–300 chars }`
-is Main-only. It checks the caller is the current Main, the request belongs to its mission, the
-resolver names the Main, the decision is open and the option exists, again in the synchronous store
-transition. It records `by: main`, `via: main`, no grant, and invokes the same settlement as the owner's
-answer. The result reports the stored delivery, including failure. Other missions, replaced Mains,
-owner-only/prepared changes, missing delegation, invalid options and settled decisions write nothing.
+`bm_answer_fallback { decisionId: f:<incidentId>, option: switch | wait | dismiss, why: 1–300 chars }` is Main-only. It checks that the caller is the current Main, the request belongs to its mission, the resolver names the Main, the decision is open and the option exists, again in the synchronous store transition. It records `by: main`, `via: main`, no grant, and runs the same settlement as the owner's answer; its result reports the stored delivery, a failure included. Other missions, replaced Mains, owner-only or prepared changes, missing delegation, invalid options and settled decisions write nothing.
 
-New fallback decisions reach the Main through `tellMainOfQuestions` as a durable `message` identified by
-the full decision id in its text, retaining the original request id for Main retargeting. The notice names the available options and `bm_answer_fallback`, instructing it
-to recover without another owner confirmation. On the first Paseo handle after reload, open pending
-incidents are reconciled; a non-dropped outbox message for that decision is not duplicated. Pending
-outbox delivery follows the current Main and is resent by the existing outbox recovery. Duplicate
-notices are harmless: the first answer and switch locks still stand. Unresolved fallback blocks the
-mission row even before a Worker can report. The Main's own fallback retains its existing authority.
+A new fallback decision reaches the Main through `tellMainOfQuestions` as a durable `message` that names the full decision id, keeps the original request id for retargeting, and ends: "Resolve this fallback now with bm_answer_fallback using this decisionId, an offered option and your reason. Normally switch to the configured candidate; do not ask the owner to confirm again or create a replacement yourself. Check the tool's delivery result and keep following the replacement." On the first Paseo handle after a reload, open pending incidents are reconciled, and a non-dropped outbox message for that decision is not sent twice. Pending outbox delivery follows the current Main. The first answer and the switch locks stand against duplicates. An unresolved fallback blocks the mission row even before a Worker can report. The Main's own fallback keeps its existing authority, and the Orchestrator, through the same resolver, refuses a Main's incident.
 
-The tool and accepted Main answer kind are additive; there is no stored-format migration. The
-Orchestrator uses the same resolver and refuses a Main's incident. Restore the previous plugin bundle
-for containment. Proof covers the entire detection → durable notice → Main answer → existing switch
-path, duplicate attempts, negative authority, reload reconciliation and blocked mission rows, then
-product tests/type checks/lint/build. No blocking open questions; the owner selected this authority.
+The tool and the Main's answer kind are additive; no stored format changes.
 
 ### 4.6 The Main asks the owner with a stored decision
 
-A new Main tool, `bm_owner_question { question ≤ 1,000, options: [{ label ≤ 200, recommended? }] (2–5, exactly one recommended), class, subject?, ownerOnly? }`. It opens an `m:` decision on the Main's mission:
+A Main tool, `bm_owner_question { question ≤ 1,000, options: [{ label ≤ 200, recommended? }] (2–5, exactly one recommended), class, subject? (≤ 60), ownerOnly?, about? }` (`about`: delivery line design §7.2). It opens an `m:` decision on the Main's mission:
 - `askedBy` is the Main;
 - the options carry no action;
 - the class is the Main's.
@@ -298,7 +278,7 @@ A new Main tool, `bm_owner_question { question ≤ 1,000, options: [{ label ≤ 
 
 ### 5.1 One transfer function
 
-`transferRequests(home, { from, to, requestIds, reason, by }, deps)` (`server/mission-transfer.ts`):
+`transferRequests(input, deps)` (`server/mission-transfer.ts`), with `input` = `{ from, to, requestIds, reason, by, ref, journal?, tell? }` and the data folder in `deps.home`:
 1. `roster.move`;
 2. the registry's `managerId` set to the target's Main and `missionId` to the target;
 3. the Workers' bindings re-pointed and their parent labels set;
@@ -317,7 +297,7 @@ The split (`executeSplit`) calls it instead of its own `roster.move` and `reassi
 
 ### 5.2 Merging a legacy one-repo mission
 
-A legacy mission is `createdBy: "legacy"`, with goal `""` and exactly one repo (`isLegacyMission`, `server/mission-ownership.ts`). When an owner-created or split mission holds that repo — at creation, when `bm_mission_start` settles, when a repo is added, and once per plugin run for every open mission (`createLegacyMigration`, so missions that already overlap get their card) — the plugin opens one `m:` card on the holding mission (`offerMerges`): "Merge mission <legacy code> (<repo>) into <code>". Its "apply" option carries the new prepared change `mission-merge { from }`. A pair is asked once: an open card waits, and the owner's "keep as is" stands.
+A legacy mission is `createdBy: "legacy"`, with goal `""` and exactly one repo (`isLegacyMission`, `server/mission-ownership.ts`). When an owner-created or split mission holds that repo — at creation, when `bm_mission_start` settles, when a repo is added, and once per plugin run for every open mission (`createLegacyMigration`, so missions that already overlap get their card) — the plugin opens one `m:` card on the holding mission (`offerMerges`): "Merge mission <legacy code> (<repo>) into <code>". Its "apply" option carries the new prepared change `mission-merge { missionId, from }`. A pair is asked once: an open card waits, and the owner's "keep as is" stands.
 
 Applying it:
 1. transfers every roster request of the legacy mission;
@@ -330,7 +310,7 @@ Refused when a Worker of the legacy mission is running a turn (`busyRequestsOf`,
 
 Moving requests to another mission needs the owner's yes:
 1. The source Main records it with `bm_mission_update { transfer: { to: <code>, requestIds, reason } }`; the tool checks it as §5.1 refuses and answers `transferDecisionId`.
-2. That opens an `m:` card with the prepared change `mission-transfer { to, requestIds, reason }` (`offerTransfer`); the same move asked twice is refused while its card is open.
+2. That opens an `m:` card with the prepared change `mission-transfer { missionId, to, requestIds, reason }` (`offerTransfer`; `missionId` is the source); the same move asked twice is refused while its card is open.
 3. The owner's tap runs §5.1, checked again first.
 
 `bm_ask_mission` stays for asking another mission a question or for work. It moves nothing.
@@ -359,8 +339,8 @@ A close (and a merge) waits only for `busyRequestsOf`: a roster request whose Wo
 | `BM-COMMAND` (governor, prepared commands, handoff info) | Main | re-plan, act or note | keep, through the channel |
 | `BM-SIGNAL danger` | Main | stop the Worker unless the owner asked for it | keep, through the channel, `first` |
 | `BM-STATE` | Main, Worker | take the state after a compaction | keep |
-| `BM-SETTINGS` "the Manager you report to was replaced" | Workers | none | **removed** (§3.4) |
-| `BM-BUDGET` | Main | none ("for your information") | **removed** (§4.3) |
+| `BM-SETTINGS` "the Manager you report to was replaced" | Workers | none | **removed** for a mission's Main: `replaceMain` tells no Worker (§3.4). The Workers of an unbound Manager replaced by fallback still get it (`fallback-manager.ts`) |
+| `BM-BUDGET` | Main | none ("for your information") | **removed** for a mission's Main (§4.3, §6.4); a Manager that is no mission's Main is told as before |
 | `BM-SETTINGS` mode changes | unbound Managers, Workers | update the child mode | keep |
 | `BM-INTERRUPTED`, `BM-TOOLS`, `BM-RESUME`, `BM-FORMAT`, `BM-STOP`, `BM-REPLACED`, `BM-HANDOFF`, `BM-FALLBACK`, `BM-ASK`, `BM-ANSWER`, `BM-EVENTS` | as today | as today | keep |
 | `BM-DELIVERY message`, `answers`, review, override | a Worker waiting by structure | settles an item it waits on, or nothing | **held** while it settles none (delivery line design §6.4); released with the wait |
@@ -410,32 +390,26 @@ The owner's Inbox stall alert is unchanged.
 
 ## 7. The Missions screen (REQ-208)
 
-The mission page gains two parts. The owner approved the mockup on 2026-10-10 ([`mockups/mission-runtime.html`](mockups/mission-runtime.html), artboards G and H); it is the contract. Built in `client/missions.tsx` (`MainsCard`, `InFlightCard`) from `client/missions-model.ts` (`mainHistoryOf`, `inFlightOf`); checked by a static render of the real components (react-native-web, headless Chrome) against both artboards.
-- **In flight**, between "Workers by repository" and the Contracts/Journal grid. It shows, from `mission.get`'s `inFlight` (the structured `MissionState`):
-  - each request with its state words ("working", "waiting for you", "waiting for the Main", "waiting for <other>", "finished");
+The mission page has two parts from this design, built to the owner's approved mockup ([`mockups/mission-runtime.html`](mockups/mission-runtime.html), artboards G and H, 2026-10-10), which is the contract. They are in `client/missions.tsx` (`MainsCard`, `InFlightCard`), from `client/missions-model.ts` (`mainHistoryOf`, `inFlightOf`).
+- **Main history**, right under the title row, before the stats (desktop and phone): each Main of `mainHistory` with when and why it changed — "created with the mission", "replaced", "handoff — its context was full; this Main carries on", "fallback — its provider plan stopped it", "you asked" (the phone: the one word) — and "Open" on a previous one (`openAgent`).
+- **In flight**, between "Workers by repository" and the Contracts/Journal grid on a desktop, after the stats on a phone. It shows, from `mission.get`'s `inFlight` (the structured `MissionState`):
+  - each request with its state words: "working", "waiting for you · Q1", "waiting for the Main · Q2", "waiting for <other work>" (a request id shortened; on a phone, that request's topic), "undelivered", "finished", "stopped";
   - the questions grouped by who decides;
-  - the Main's asks;
+  - "The Main asked you": only the Main's own open `m:` cards (`asks[].byMain`, `recommended`). paseo-bm's cards (governor, merge) stay in the Inbox, and the rendered state names them "paseo-bm's card";
   - live links with how long they have waited.
-- **Main history** in the page header: each Main of `mainHistory` with when and why it changed, and "Open" on a previous one (`openAgent`).
-
-`mission.get`'s output gains `inFlight: MissionState` and `mainHistory`, both optional for an older reader; neither card shows without them.
-
-As built:
-- **Placement:** the Main card right under the title row, before the stats (desktop and phone); In flight between "Workers by repository" and the Contracts/Journal grid (desktop), after the stats on a phone.
-- **Words:** request states "working", "waiting for you · Q1", "waiting for the Main · Q2", "waiting for <other work>" (a request id shortened; on a phone, that request's topic), "finished", "stopped"; why a Main changed: "created with the mission", "replaced", "handoff — its context was full; this Main carries on", "fallback — its provider plan stopped it", "you asked" (the phone: the one word).
-- **"The Main asked you"** lists only the Main's own open `m:` cards: `MissionState.asks` gains `byMain` and `recommended` (optional); paseo-bm's cards (governor, merge) stay in the Inbox. The rendered state names them "paseo-bm's card".
 - **"Answer"** opens the Inbox (`onOpenInbox`), where the card is answered; it is offered for the owner's questions and the Main's asks only.
+
+`mission.get`'s output gains `inFlight: MissionState` and `mainHistory`, both optional for an older reader; neither card shows without them. The lanes, the Waiting part and the repository lines are the delivery line design's (§2.7, §4.9, §19.8).
 
 ## 8. Role files
 
 - **`manager.md`:**
-  - ask the owner with `bm_owner_question`;
-  - answer the questions the plugin names as yours with `bm_answer_worker`, no time window;
-  - `BM-UPDATES` holds several known blocks;
-  - after `BM-STATE`, carry on from it;
-  - a successor's first reply says it took over and what is in flight.
+  - ask the owner with `bm_owner_question`, and record an answer the owner gives in the Main's chat with its `answered`, not `bm_answers`;
+  - answer the questions the plugin names as yours with `bm_answer_worker`, with no time window;
+  - a `BM-UPDATES` message holds several known blocks: act on each;
+  - the plugin's `BM-` notices each say what to do; a `copy: yes` block is context only: one line at most.
 
-  The file stays within its 100 lines and five limits. As built: rule 4's list no longer names `BM-SIGNAL` (the general rule "the plugin's `BM-` notices each say what to do" covers it, and the notice says to stop the Worker); a `copy: yes` block is "context only: one line at most"; the owner's answer to the Main's own question is recorded with `bm_owner_question`'s `answered`, not `bm_answers`. The handoff instruction for the first reply is in the successor's brief (`mainHandoffLineOf`), not the role file.
+  The file stays within its 100 lines and five limits. The successor's first reply is asked for in its brief (`mainHandoffLineOf`, §3.5), not in the role file.
 - **`worker.md`:** no change. The replacement notice it never relied on is removed.
 - **`orchestrator.md`:** no change beyond the wake brief's source (§2.2).
 
@@ -481,14 +455,7 @@ The role-file changes flag running Mains outdated once.
 
 ## 11. Phases
 
-| Phase | Contents | Exit |
-|---|---|---|
-| P1 State | §2 (state, rendering, writes), consumers except the screen | unit tests; M-31 property test green |
-| P2 Long-lived Main | §3 | unit tests; M-32 in the tests |
-| P3 Authority | §4 | unit tests; M-34 scripted |
-| P4 Signal budget | §6 | unit tests; A-14 in the replay |
-| P5 One owner | §5 | unit tests; M-35 scripted |
-| P6 Screen and acceptance | §7 after the mockup; the isolated-daemon drill is the owner's | mockup approved; checks green |
+Built in Phases P1–P6 of the [mission runtime plan](../archive/plans/paseo-bm-plan-mission-runtime.md); the isolated-daemon drill is the owner's.
 
 ## 12. Revision History
 
@@ -507,3 +474,5 @@ The role-file changes flag running Mains outdated once.
 | 2026-10-26 | Codex (owner request, ADR-040) | §4.1/§4.5.1: the Main resolves delegated request fallback, receives durable notices and recovers pending incidents; additive tool with negative authority and delivery proof |
 | 2026-11-06 | Claude (owner request, ADR-042) | §2.1: the `undelivered` request state |
 | 2026-11-10 | Claude (as built, [ADR-045](../adr/ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) Phase 1) | §2.1: `undelivered` ranks below a question waiting for the owner |
+| 2026-11-16 | Claude (owner request: documentation review) | Checked against the code. §2.1: the state's real fields, `null` for an unknown mission, the 24-hour rule, `m:` cards only in `asks`, a bound request stays final; §2.2: the section titles and order, the drop order and caps, masking at read, `mainStateLines`; §2.3: where follow-up, report and link lines are written; §3.1: `turnTokensOf` replaces the retired `mainContextOf`; §3.2: the hard figure's floor; §3.4: the paths that end in `replaceMain`; §3.5: `main.compact` off and the real successor line; §3.6: `MAIN_WRITE_TOOLS`, and the read tools refuse a replaced Main; §4.1: the resolver's facts and rule names; §4.4: the recommend text; §4.5.1 condensed; §4.6, §5.1–§5.3: the real inputs; §6.1: two notices removed only for a mission's Main; §7, §8: as built, without history; §11 points to the plan |
+| 2026-11-17 | Claude (owner decision, ADR-051) | §3.6: every tool of a replaced Main refuses and names the current Main, a reading tool's refusal ending "Nothing was read."; §4.1: the `finishedUnverified` fact and rule 2's unverified-finish exception retired |

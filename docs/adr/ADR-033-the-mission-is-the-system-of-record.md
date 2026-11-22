@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-10) — the owner approved the five structural changes of the 2026-10-10 review of mission XAI ("Tôi đồng ý với tất cả các đề xuất"); technical choices by Claude under the owner's delegation |
+| Status | **Accepted** (2026-10-10) — the owner approved the five structural changes of the 2026-10-10 review of mission XAI ("Tôi đồng ý với tất cả các đề xuất"); technical choices by Claude under the owner's delegation; decision 3's review budget superseded by [ADR-035](ADR-035-a-delivery-line.md); decision 3 amended by [ADR-040](ADR-040-the-main-resolves-its-requests-fallback.md) (a mission request's delegated fallback belongs to its Main) |
 | Date | 2026-10-10 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-029](ADR-029-missions-mains-and-a-process-governor.md) decision 1's assumption that "a successor reads the mission and continues" holds with today's stores (made true here, decision 1); ADR-029 decision 9's "compaction and handoff run in code" for Mains (decision 2); the missions design §2.2 rule "the journal is not the source of any state" (decision 1); [ADR-032](ADR-032-one-governor-a-mission-per-wake.md) decision 4's separate `BM-SIGNAL` notice (it becomes an item of the Main's channel, decision 5) and decision 2's brief source (the mission state, decision 1) |

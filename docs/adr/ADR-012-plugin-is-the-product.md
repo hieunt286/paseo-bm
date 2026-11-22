@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-25) |
+| Status | **Accepted** (2026-09-25); the migration command's fix path and banner superseded by [ADR-022](ADR-022-retirements-after-code-review.md); the published form by [ADR-026](ADR-026-published-plugin-is-bundled.md); paseo.cafe as an install path amended by [ADR-048](ADR-048-no-dependency-on-paseo-cafe-and-no-bundle-size-limit.md) |
 | Date | 2026-09-25 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-001](ADR-001-plugin-distribution.md) (distribution through a payload shipped with the installer); [ADR-009](ADR-009-payload-as-npm-package.md) decisions 4 and 5 (the installer is the supported install path; the second package is not on the install path) |

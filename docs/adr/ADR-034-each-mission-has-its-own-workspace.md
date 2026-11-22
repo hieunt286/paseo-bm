@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-12) — the owner's request after using the mission runtime build ("tên của repo sẽ là Mission-List, và với mỗi một Mission thì sẽ là 1 workspace mới trong thư mục"); technical choices by Claude under the owner's delegation |
+| Status | **Accepted** (2026-10-12) — the owner's request after using the mission runtime build ("tên của repo sẽ là Mission-List, và với mỗi một Mission thì sẽ là 1 workspace mới trong thư mục"); technical choices by Claude under the owner's delegation; its silence on Workers superseded by [ADR-035](ADR-035-a-delivery-line.md); its keeping of ADR-005 amended by [ADR-049](ADR-049-finished-sub-agents-are-archived.md) |
 | Date | 2026-10-12 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-029](ADR-029-missions-mains-and-a-process-governor.md) decision 2 ("all Mains live in one shared home") — the home becomes a project with one workspace per mission |

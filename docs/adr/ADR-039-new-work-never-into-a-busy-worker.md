@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-25) — the owner's three answers after a field case: "enforce it in the tool", "steer only to correct or stop the current work", "replace the old Main when it is idle" |
+| Status | **Accepted** (2026-10-25) — the owner's three answers after a field case: "enforce it in the tool", "steer only to correct or stop the current work", "replace the old Main when it is idle"; decision 3 amended by [ADR-044](ADR-044-a-restart-does-not-revive-dormant-missions.md); decision 1's `lane: "new"` route by [ADR-045](ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) |
 | Date | 2026-10-25 |
 | Owner | hieu.nt10 |
 | Supersedes | ADR-038 decision 3's triage as a role rule only (now enforced by `bm_tell_worker`); ADR-038 decision 4's "a tell that carries the owner's words is steered" (now only words about the Worker's own work); for Mains, the autonomy design's "an outdated agent is offered its replacement" (a Main is now handed over by itself when idle) |

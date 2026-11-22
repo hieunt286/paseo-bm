@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-29) — approved by the owner with the autonomy design |
+| Status | **Accepted** (2026-09-29) — approved by the owner with the autonomy design; for bound agents, decision 2 superseded by [ADR-027](ADR-027-agents-write-content-code-carries-it.md); decision 4 amended by [ADR-031](ADR-031-orchestrator-decisions-grant-no-effects.md) for `o:` decisions |
 | Date | 2026-09-29 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-014](ADR-014-orchestrator-agent-proposes-owner-approves.md) decision 3 (a proposal as the Orchestrator's one action) and 4 (approval by a click on a proposal); [ADR-015](ADR-015-orchestrator-autopilot-per-project.md) decision 3 (a "send it" in chat as approval of a pending proposal) and 4 (a fixed limit line); [ADR-016](ADR-016-orchestrator-coordinates-workers-live.md) decision 3 (the regex gate as the authority) and 5 (`limits:` fixed on every Orchestrator command) |

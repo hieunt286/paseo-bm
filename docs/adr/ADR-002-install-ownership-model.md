@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (amended 2026-09-16 — see the last section) |
+| Status | Accepted (amended 2026-09-16 — see the last section); amended by [ADR-012](ADR-012-plugin-is-the-product.md) |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Amended by | [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): the install record now exists only for existing users. Decisions 1–7 apply only to installers up to 0.3.1 (from 0.4.0 Paseo holds the package, and there is no payload left to hash, back up or keep side by side); decision 9 is used to stop old installers: CLI 0.4.0 marks `install.json` as migrated with `schemaVersion: 2` |

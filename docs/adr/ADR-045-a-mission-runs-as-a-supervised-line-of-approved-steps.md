@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; decision 10 amended by [ADR-046](ADR-046-rollover-now-is-never-deferred-for-a-review.md); decision 1 by [ADR-047](ADR-047-a-repo-alias-reaches-later-missions-and-a-peer-answer-takes-no-slot.md) |
 | Date | 2026-11-10 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-035](ADR-035-a-delivery-line.md) decision 1 ("Review batches never cross a request": a continuation now inherits the batches that did not pass) and decision 3 (a local fast-forward is added, merging on the forge stays the owner's; its Evidence clause no longer decides the gate, which reads local checks); [ADR-036](ADR-036-no-agent-waits-on-machines.md) the default of `rollover.contextTokens`; [ADR-038](ADR-038-parallel-lanes-and-a-held-queue.md) decisions 3 and 5; [ADR-039](ADR-039-new-work-never-into-a-busy-worker.md) decision 1's `lane: "new"` route; [ADR-041](ADR-041-incremental-review-and-affected-checks.md) decision 4's last sentence; [ADR-042](ADR-042-a-collected-agent-rests-and-a-failed-delivery-is-told.md) decisions 2, 5 and 6; [ADR-044](ADR-044-a-restart-does-not-revive-dormant-missions.md) decision 1 |
-| Amended by | [ADR-046](ADR-046-rollover-now-is-never-deferred-for-a-review.md) (2026-11-10): decision 10's last sentence; `BM-ROLLOVER now` is never deferred for a review |
+| Amended by | [ADR-046](ADR-046-rollover-now-is-never-deferred-for-a-review.md) (2026-11-10): decision 10's last sentence; `BM-ROLLOVER now` is never deferred for a review · [ADR-047](ADR-047-a-repo-alias-reaches-later-missions-and-a-peer-answer-takes-no-slot.md) (2026-11-11): decision 1, for a peer ask of the running request |
 | Keeps | ADR-033's mission as the system of record; ADR-035's one push-and-merge-request yes; ADR-038's lanes, as the parallel path; ADR-039's `about` rule; ADR-041's incremental review; ADR-042's three presences; ADR-044 decision 3 |
 | Sources | Owner's chat of 2026-11-10 (no requestId; the owner agreed the recommendations); mission AIX's record since 2026-11-03 |
 | Plan | [Mission line](../plans/paseo-bm-mission-line.md) |

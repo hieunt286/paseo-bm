@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; decision 1 amended by [ADR-045](ADR-045-a-mission-runs-as-a-supervised-line-of-approved-steps.md) |
 | Date | 2026-11-10 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-042](ADR-042-a-collected-agent-rests-and-a-failed-delivery-is-told.md) decision 2, for records resent at a plugin start; [ADR-039](ADR-039-new-work-never-into-a-busy-worker.md), the handover of an outdated Main |

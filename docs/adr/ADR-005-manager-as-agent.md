@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; extended by [ADR-011](ADR-011-manager-coordinates-workers.md); decision 2's one Manager per workspace superseded by [ADR-029](ADR-029-missions-mains-and-a-process-governor.md); decision 5 clarified by [ADR-042](ADR-042-a-collected-agent-rests-and-a-failed-delivery-is-told.md) and amended by [ADR-049](ADR-049-finished-sub-agents-are-archived.md) |
 | Date | 2026-09-15 |
 | Owner | hieu.nt10 |
 | Related | [PRD REQ-020, REQ-021, REQ-026](../product/paseo-bm-prd.md#6-functional-requirements) · [ADR-006](ADR-006-role-registration.md) · [Technical Design](../design/paseo-bm.md) |

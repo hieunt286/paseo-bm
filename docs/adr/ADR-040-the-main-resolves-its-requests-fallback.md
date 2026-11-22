@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-26) — owner: “Tôi muốn Main tự nhận ra và thực hiện đồng ý fallback thay vì phải đợi confirm” |
+| Status | **Accepted** (2026-10-26) — owner: “Tôi muốn Main tự nhận ra và thực hiện đồng ý fallback thay vì phải đợi confirm”; the unverified-finish guard retired by ADR-051 |
 | Date | 2026-10-26 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-033](ADR-033-the-mission-is-the-system-of-record.md) decision 3: delegated request-scoped fallback belongs to the mission's Main |

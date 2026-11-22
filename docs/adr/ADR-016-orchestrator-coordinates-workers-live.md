@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-09-29) — owner decisions of the same day |
+| Status | **Accepted** (2026-09-29) — owner decisions of the same day; decisions 3 and 5 superseded by [ADR-017](ADR-017-decisions-are-stored-objects.md), decision 3's "Allow…" categories by [ADR-018](ADR-018-calibrated-autonomy-per-class.md); decision 1's `danger` and `outside` signals as the safety mechanism by [ADR-019](ADR-019-action-boundary-permission-events.md); decision 2 by [ADR-029](ADR-029-missions-mains-and-a-process-governor.md); who hears of `danger` first amended by [ADR-032](ADR-032-one-governor-a-mission-per-wake.md) |
 | Date | 2026-09-29 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-015](ADR-015-orchestrator-autopilot-per-project.md) decision 4 ("commands go to Managers only") and [ADR-011](ADR-011-manager-coordinates-workers.md) (the Manager is the Worker's only coordinator) for Autopilot projects; ADR-015's other decisions stand |

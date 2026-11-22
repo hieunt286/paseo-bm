@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted** (2026-10-01) — decided by the owner |
+| Status | **Accepted** (2026-10-01) — decided by the owner; decisions 2 and 6 amended by [ADR-030](ADR-030-published-bundle-minifies-identifiers.md); the scan budget as reason and limit amended by [ADR-048](ADR-048-no-dependency-on-paseo-cafe-and-no-bundle-size-limit.md) |
 | Date | 2026-10-01 |
 | Owner | hieu.nt10 |
 | Supersedes | [ADR-009](ADR-009-payload-as-npm-package.md) and [ADR-012](ADR-012-plugin-is-the-product.md) where they make `plugin/` itself the published package and the directory the paseo.cafe listing reads |

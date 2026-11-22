@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended by [ADR-047](ADR-047-a-repo-alias-reaches-later-missions-and-a-peer-answer-takes-no-slot.md) (a mission that names the live workspace) |
 | Date | 2026-11-06 |
 | Owner | hieu.nt10 |
 | Amends | [ADR-035](ADR-035-a-delivery-line.md) decision 2: a repo key is still a root workspace's id, and a live root may now answer for it |

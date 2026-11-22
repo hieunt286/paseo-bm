@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)** — the product is the plugin package `paseo-bm-plugin`, installed from paseo.cafe / npm; the installer no longer copies the payload or registers a directory |
+| Status | **Superseded by [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25)** — the product is the plugin package `paseo-bm-plugin`, installed from paseo.cafe / npm; the installer no longer copies the payload or registers a directory · decision 1 was earlier amended by [ADR-009](ADR-009-payload-as-npm-package.md) |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Related | [PRD §Q-004](../product/paseo-bm-prd.md#10-open-questions), [Technical Design](../design/paseo-bm.md) |

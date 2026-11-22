@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; decisions 3–5 amended by [ADR-012](ADR-012-plugin-is-the-product.md) |
 | Date | 2026-09-14 |
 | Owner | hieu.nt10 |
 | Amended by | [ADR-012](ADR-012-plugin-is-the-product.md) (2026-09-25): the **plugin**, not the installer, runs the `skills` CLI after the user clicks and confirms on Setup. Decision 3: there is no longer a non-interactive flag; decision 4: the target agents are fixed to Claude Code and Codex, `--skills-agents` is dropped; decision 5: a constant command string runs through a login shell (like installing `br`/`bv`) so that `npx` is on the PATH, instead of "argv array, no shell" — no part of the string comes from input; decisions 1, 2, 6–9 are unchanged |
