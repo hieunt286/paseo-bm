@@ -600,10 +600,9 @@ async function recordInterventionOf(of: Decision, context: ToolContext, deps: De
  * sends and logs nothing; a decision nobody decides stays open for the owner.
  */
 export async function bmDecide(input: DecideInput, context: ToolContext, deps: DecideToolDeps): Promise<ServerToolResult> {
-  // An incident's options allow no effect (`fallback-decisions.ts`): none acts on a request's finish or grants review calls.
   const { decision: answered, store } = transitionUnderPolicy(input, context, {
     refusalOf: notAQuestion((policy, decision) => {
-      const refusal = decideRefusalOf(policy, decision, { optionKey: input.optionKey });
+      const refusal = decideRefusalOf(policy, decision);
       if (refusal !== null) return refusal;
       const authority = deciderOf(decision, authorityFactsOf(context.home));
       return authority.decider === "orchestrator" ? null : `decision ${decision.id} belongs to ${authority.decider}: ${authority.why}`;

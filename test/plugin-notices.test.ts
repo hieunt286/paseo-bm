@@ -16,6 +16,9 @@ import {
 import { interruptedNoticeText } from "../plugin/server/interruption-watch";
 import { askNoticeOf } from "../plugin/server/decision-ask";
 import { rolloverNoticeOf } from "../plugin/server/rollover";
+import { failedDeliveryNoticeOf } from "../plugin/server/delivery-failure";
+import { DELIVERY_FAILED_NOTICE_MARKER } from "../plugin/shared/notices";
+import { originOf } from "../plugin/shared/message-origin";
 import { REVIEWER_STOP_NOTICE } from "../plugin/server/stop-propagation";
 import { NEW_REQUEST_MARKER, stripNewRequestMarker } from "../plugin/shared/new-request";
 
@@ -93,6 +96,15 @@ describe("isPluginNotice", () => {
     expect(noticeMarkerOf("BM-ASK\ndecisionId: x")).toBe(ASK_NOTICE_MARKER);
     expect(isPluginNotice("BM-ASKED x")).toBe(false);
     expect(isPluginNotice("BM-ASK-ME")).toBe(false);
+  });
+
+  it("knows BM-DELIVERY-FAILED as its own notice, so a failed delivery told to a Main is never the owner's words (ADR-042 decision 5)", () => {
+    const text = failedDeliveryNoticeOf({ workspaceId: "wks_a", requestId: "req-20261110T100000Z", what: "the answers q:req-20261110T100000Z:Q1", to: "worker-1", reason: "the agent is archived" });
+    expect(isPluginNotice(text)).toBe(true);
+    expect(noticeMarkerOf(text)).toBe(DELIVERY_FAILED_NOTICE_MARKER);
+    // Sent with a clientMessageId and no send log to find it in: still the plugin's.
+    expect(originOf({ text, clientMessageId: "m-1" })).toBe("plugin-notice");
+    expect(isPluginNotice("BM-DELIVERY-FAILEDX words")).toBe(false);
   });
 
   it("knows BM-ROLLOVER soft and now as a whole word, so a size rollover notice is never the owner's words (delivery line design §2.6)", () => {

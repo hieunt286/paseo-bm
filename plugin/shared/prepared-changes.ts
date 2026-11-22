@@ -143,6 +143,10 @@ function coordinationChangeText(change: StoredCoordinationChange): string {
       return `turns CI ${change.value} ${exact}`;
     case "line.supervised":
       return `turns the supervised line ${change.value ? "on" : "off"} ${exact}`;
+    case "cleanup.archive":
+      return `turns archiving finished agents ${change.value ? "on" : "off"} ${exact}`;
+    case "cleanup.idleDays":
+      return `archives a finished Worker or Reviewer left alone for ${change.value} day${change.value === 1 ? "" : "s"} ${exact}`;
     case "main.compact":
       return `turns a Main's in-place compaction ${change.value ? "on" : "off"} ${exact}`;
     case "main.contextShare":

@@ -53,17 +53,22 @@ export type ThresholdKey =
   | "rollover.tokens"
   | "rollover.contextTokens"
   | "rollover.ceilingFactor"
-  | "maintenance.ceilingFactor";
+  | "maintenance.ceilingFactor"
+  | "cleanup.idleDays";
 
 /** The cards drawn as a mechanism's: compaction, handoff, then rollover. */
 export type CoordinationCard = CoordinationMechanism | "rollover";
 export const COORDINATION_CARDS: readonly CoordinationCard[] = [...COORDINATION_MECHANISMS, "rollover"];
 
+/** The cards with thresholds: the mechanisms' and the archive card's (`cleanupCardView`, ADR-049). */
+export type ThresholdCard = CoordinationCard | "cleanup";
+
 /** Each card's thresholds, in the order it shows them. */
-export const MECHANISM_THRESHOLDS: Readonly<Record<CoordinationCard, readonly ThresholdKey[]>> = {
+export const MECHANISM_THRESHOLDS: Readonly<Record<ThresholdCard, readonly ThresholdKey[]>> = {
   compact: ["compact.managerTokensPerTurn", "compact.workerTokensPerTurn", "compact.contextShare", "main.contextTokens", "compact.maxPerAgent"],
   handoff: ["handoff.requestTokens", "handoff.maxPerRequest"],
   rollover: ["rollover.beads", "rollover.turns", "rollover.tokens", "rollover.contextTokens", "rollover.ceilingFactor", "maintenance.ceilingFactor"],
+  cleanup: ["cleanup.idleDays"],
 };
 
 /** The edited values not saved yet. */
@@ -112,6 +117,7 @@ const THRESHOLD_WORDS: Readonly<Record<ThresholdKey, { label: string; spoken: st
   "rollover.contextTokens": { label: "Or its context reaches", spoken: "Rollover context" },
   "rollover.ceilingFactor": { label: "Finish now at, × a figure", spoken: "Rollover now" },
   "maintenance.ceilingFactor": { label: "Skip the safe point at, × a threshold", spoken: "Maintenance ceiling" },
+  "cleanup.idleDays": { label: "Left alone for, days", spoken: "Archive after" },
 };
 
 const TOKEN_KEYS: ReadonlySet<ThresholdKey> = new Set([
@@ -139,7 +145,7 @@ export function tokenCountText(tokens: number): string {
   return String(tokens);
 }
 
-/** A threshold's value in words: "5.7M tokens read", "context 180k", "50% of the window", "2×", "15 beads", "at most 2". */
+/** A threshold's value in words: "5.7M tokens read", "context 180k", "50% of the window", "2×", "15 beads", "3 days", "at most 2". */
 export function thresholdValueText(key: ThresholdKey, value: number): string {
   if (CONTEXT_TOKEN_KEYS.has(key)) return `context ${tokenCountText(value)}`;
   if (TOKEN_KEYS.has(key)) return `${tokenCountText(value)} tokens read`;
@@ -147,6 +153,7 @@ export function thresholdValueText(key: ThresholdKey, value: number): string {
   if (FACTOR_KEYS.has(key)) return `${trimmed(value)}×`;
   if (key === "rollover.beads") return `${value} beads`;
   if (key === "rollover.turns") return `${value} turns`;
+  if (key === "cleanup.idleDays") return `${value} day${value === 1 ? "" : "s"}`;
   return `at most ${value}`;
 }
 
@@ -256,7 +263,7 @@ export function stepThreshold(key: ThresholdKey, value: number, step: -1 | 1): n
 
 /** The stored value of a threshold. */
 function storedValue(settings: CoordinationSettings, key: ThresholdKey): number {
-  const [group, field] = key.split(".") as ["compact" | "handoff" | "main" | "rollover" | "maintenance", string];
+  const [group, field] = key.split(".") as ["compact" | "handoff" | "main" | "rollover" | "maintenance" | "cleanup", string];
   return (settings[group] as unknown as Record<string, number>)[field]!;
 }
 
@@ -266,7 +273,7 @@ export function thresholdValueOf(settings: CoordinationSettings, draft: Threshol
 }
 
 /** The draft's changes of `mechanism`'s thresholds, in the card's order: what Save sends, one `coordination.set` each. */
-export function changedThresholds(mechanism: CoordinationCard, settings: CoordinationSettings, draft: ThresholdDraft): CoordinationChange[] {
+export function changedThresholds(mechanism: ThresholdCard, settings: CoordinationSettings, draft: ThresholdDraft): CoordinationChange[] {
   return MECHANISM_THRESHOLDS[mechanism].flatMap((key) => {
     const value = draft[key];
     return value === undefined || value === storedValue(settings, key) ? [] : [{ key, value } as CoordinationChange];
@@ -274,7 +281,7 @@ export function changedThresholds(mechanism: CoordinationCard, settings: Coordin
 }
 
 /** The draft that shows `mechanism`'s defaults (saved only by Save). */
-export function defaultsDraft(mechanism: CoordinationCard, defaults: CoordinationSettings): ThresholdDraft {
+export function defaultsDraft(mechanism: ThresholdCard, defaults: CoordinationSettings): ThresholdDraft {
   return Object.fromEntries(MECHANISM_THRESHOLDS[mechanism].map((key) => [key, storedValue(defaults, key)]));
 }
 
@@ -316,8 +323,12 @@ export interface ThresholdRowView {
 }
 
 export interface MechanismCardView {
-  /** The card; `integration` is the CI card (`ciCardView`) and `line` the supervised line's (`lineCardView`), drawn with the same controls. */
-  mechanism: CoordinationCard | "integration" | "line";
+  /**
+   * The card; `integration` is the CI card (`ciCardView`), `line` the
+   * supervised line's (`lineCardView`) and `cleanup` the archive card
+   * (`cleanupCardView`), drawn with the same controls.
+   */
+  mechanism: CoordinationCard | "integration" | "line" | "cleanup";
   title: string;
   /** "helped 6 of 10", "helped —"; null for rollover, which A-12 does not judge. */
   helped: string | null;
@@ -350,6 +361,23 @@ export function mechanismStatus(mechanism: CoordinationCard, settings: Coordinat
   };
 }
 
+/** One threshold's row of a card: the value shown (the draft's, else the stored one), its field's text and its − and + steps. */
+function thresholdRowOf(key: ThresholdKey, settings: CoordinationSettings, draft: ThresholdDraft, saving: boolean): ThresholdRowView {
+  const value = thresholdValueOf(settings, draft, key);
+  const lower = stepThreshold(key, value, -1);
+  const higher = stepThreshold(key, value, 1);
+  const spoken = THRESHOLD_WORDS[key].spoken;
+  return {
+    key,
+    label: THRESHOLD_WORDS[key].label,
+    valueText: thresholdValueText(key, value),
+    inputText: coordinationInputText(key, value),
+    accessibilityLabel: `${spoken}: ${thresholdValueText(key, value)}`,
+    decrease: { enabled: !saving && lower !== value, label: "−", accessibilityLabel: `${spoken}: lower to ${thresholdValueText(key, lower)}` },
+    increase: { enabled: !saving && higher !== value, label: "+", accessibilityLabel: `${spoken}: raise to ${thresholdValueText(key, higher)}` },
+  };
+}
+
 export function mechanismCardView(input: {
   mechanism: CoordinationCard;
   settings: CoordinationSettings;
@@ -361,21 +389,7 @@ export function mechanismCardView(input: {
   const { mechanism, settings, defaults, draft, saving, now } = input;
   const words = MECHANISM_WORDS[mechanism];
   const on = settings[mechanism].enabled;
-  const rows = MECHANISM_THRESHOLDS[mechanism].map((key): ThresholdRowView => {
-    const value = thresholdValueOf(settings, draft, key);
-    const lower = stepThreshold(key, value, -1);
-    const higher = stepThreshold(key, value, 1);
-    const spoken = THRESHOLD_WORDS[key].spoken;
-    return {
-      key,
-      label: THRESHOLD_WORDS[key].label,
-      valueText: thresholdValueText(key, value),
-      inputText: coordinationInputText(key, value),
-      accessibilityLabel: `${spoken}: ${thresholdValueText(key, value)}`,
-      decrease: { enabled: !saving && lower !== value, label: "−", accessibilityLabel: `${spoken}: lower to ${thresholdValueText(key, lower)}` },
-      increase: { enabled: !saving && higher !== value, label: "+", accessibilityLabel: `${spoken}: raise to ${thresholdValueText(key, higher)}` },
-    };
-  });
+  const rows = MECHANISM_THRESHOLDS[mechanism].map((key) => thresholdRowOf(key, settings, draft, saving));
   const changed = changedThresholds(mechanism, settings, draft).length > 0;
   const atDefaults = MECHANISM_THRESHOLDS[mechanism].every((key) => thresholdValueOf(settings, draft, key) === storedValue(defaults, key));
   return {
@@ -543,7 +557,7 @@ export function reviewCardView(input: {
 export const COORDINATION_MEANING =
   "When paseo-bm compacts an agent or hands a request to a fresh Worker, for every project. Each switches itself off if it stops helping.";
 
-/** The drafts of the whole group, every value at its default: the thresholds of both mechanisms and of rollover, the review settings. */
+/** The drafts of the whole group, every value at its default: the thresholds of both mechanisms and of rollover, the archive window, the review settings. */
 export interface CoordinationDefaultsDraft {
   thresholds: ThresholdDraft;
   review: ReviewDraft;
@@ -551,7 +565,7 @@ export interface CoordinationDefaultsDraft {
 
 export function coordinationDefaultsDraft(defaults: CoordinationSettings): CoordinationDefaultsDraft {
   return {
-    thresholds: Object.assign({}, ...COORDINATION_CARDS.map((mechanism) => defaultsDraft(mechanism, defaults))) as ThresholdDraft,
+    thresholds: Object.assign({}, ...[...COORDINATION_CARDS, "cleanup" as const].map((mechanism) => defaultsDraft(mechanism, defaults))) as ThresholdDraft,
     review: reviewDefaultsDraft(defaults),
   };
 }
@@ -615,4 +629,43 @@ export const lineCardView = (settings: CoordinationSettings, saving: boolean): M
 /** What the line card's switch saves: `line.supervised` the other way. */
 export function lineToggleChange(settings: CoordinationSettings): CoordinationChange {
   return { key: "line.supervised", value: !settings.line.supervised };
+}
+
+// ── The archive card (ADR-049, delivery line design §20.1) ──────────────────
+
+/** The archive card's words. */
+export const CLEANUP_CARD_WORDS = {
+  title: "Archive finished agents",
+  meaning: "Archive Workers and Reviewers whose work is done and that nobody touched for this many days. A message brings one back.",
+} as const;
+
+/**
+ * The archive card (`cleanup.archive`, `cleanup.idleDays`), drawn with a
+ * mechanism card's controls: its switch, saved at once both ways (it only
+ * archives, and an archived agent comes back), then the window in days as a
+ * field that stays a draft until Save.
+ */
+export function cleanupCardView(input: { settings: CoordinationSettings; defaults: CoordinationSettings; draft: ThresholdDraft; saving: boolean }): MechanismCardView {
+  const { settings, defaults, draft, saving } = input;
+  const on = settings.cleanup.archive;
+  const keys = MECHANISM_THRESHOLDS.cleanup;
+  const changed = changedThresholds("cleanup", settings, draft).length > 0;
+  const atDefaults = keys.every((key) => thresholdValueOf(settings, draft, key) === storedValue(defaults, key));
+  return {
+    mechanism: "cleanup",
+    title: CLEANUP_CARD_WORDS.title,
+    helped: null,
+    meaning: CLEANUP_CARD_WORDS.meaning,
+    note: null,
+    status: on ? { text: "On", tone: "success" } : { text: "Off", tone: "muted" },
+    toggle: { turnsOn: !on, enabled: !saving, label: on ? "Turn off" : "Turn on", accessibilityLabel: `Turn archiving finished agents ${on ? "off" : "on"} now` },
+    rows: keys.map((key) => thresholdRowOf(key, settings, draft, saving)),
+    save: { enabled: !saving && changed, label: saving ? "Saving…" : "Save", accessibilityLabel: "Save the archive window" },
+    reset: atDefaults ? null : { enabled: !saving, label: "Use the defaults", accessibilityLabel: "Set the archive window back to its default" },
+  };
+}
+
+/** What the archive card's switch saves: `cleanup.archive` the other way. */
+export function cleanupToggleChange(settings: CoordinationSettings): CoordinationChange {
+  return { key: "cleanup.archive", value: !settings.cleanup.archive };
 }

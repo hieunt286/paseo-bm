@@ -35,6 +35,7 @@ import { registerNoticeQueue, type NoticePaseo } from "./server/notice-queue";
 import { createWorkerCreationTools } from "./server/create-worker";
 import { startHeldRequests } from "./server/held-requests";
 import { replaceOutdatedMains } from "./server/main-upgrade";
+import { createAgentCleanup } from "./server/agent-cleanup";
 import { createOutboxResend } from "./server/outbox";
 import { dataHome } from "./server/rpc-kit";
 import { registerSetupRpcs } from "./server/setup-rpc";
@@ -199,6 +200,8 @@ export default function contribute(server: PluginServerContext): () => void {
   const governor = createGovernor();
   // Missions design §9.6, delivery line design §4.7: conflicts between missions (branches changing one area, links) wake the governor as mission.conflict.
   const conflicts = createConflictWatch();
+  // ADR-049, delivery line design §20.2: finished Workers and Reviewers left alone for the owner's window are archived, at most once an hour.
+  const agentCleanup = createAgentCleanup();
   // Design §7.17.7: each minute, before the stall pass, the hook bindings of Managers the owner opened are recovered.
   const stallWatcher = createStallWatcher({
     bus: eventBus,
@@ -214,6 +217,8 @@ export default function contribute(server: PluginServerContext): () => void {
           await startHeldRequests(home, { create: (input, caller) => creation.call("bm_create_worker", input, caller), paseo: handle as unknown as NoticePaseo, log: (message) => console.warn(message) });
           // Delivery line design §19.12: a Main on an older paseo-bm's instructions is handed over while idle.
           await replaceOutdatedMains(home, handle, { home, binder: () => agentTools.binder, bindings: () => agentTools.bindings, log: (message) => console.warn(message) });
+          // ADR-049: then the finished sub-agents nobody touched for the owner's window are archived.
+          await agentCleanup.pass(home, handle);
         }
         // Missions design §9.7: the governor's mission.signal, mission.review and mission.scope wake the Orchestrator.
         await eventBus.governed(await governor.pass(handle), handle);

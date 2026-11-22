@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { COORDINATION_DIR_NAME, COORDINATION_SETTINGS_FILE, createCoordinationStore, lineSupervisedOf } from "../plugin/server/coordination-store";
+import { COORDINATION_DIR_NAME, COORDINATION_SETTINGS_FILE, agentCleanupOf, createCoordinationStore, lineSupervisedOf } from "../plugin/server/coordination-store";
 import {
   handleCoordinationSet,
   handleCoordinationSettings,
@@ -19,6 +19,7 @@ import { AGENT_TOOLS, MANAGER_SERVER_TOOLS, ORCHESTRATOR_SERVER_TOOLS } from "..
 import { DASHBOARD_ERROR_CODES, DashboardError, coordinationSetRpc, coordinationSettingsRpc } from "../plugin/shared/contracts";
 import {
   ADVICE_EVERY_FINISHED,
+  CLEANUP_IDLE_DAYS,
   COMPACTION_PROVIDERS,
   COMPACT_CONTEXT_SHARE,
   COMPACT_MANAGER_TOKENS_PER_TURN,
@@ -51,6 +52,7 @@ import {
   liveCoordinationChangeSchema,
   type CoordinationSettings,
 } from "../plugin/shared/coordination";
+import { preparedChangeTextOf } from "../plugin/shared/prepared-changes";
 import { WORKER, at, turn } from "./fixtures/orchestrator-traces";
 
 /**
@@ -312,6 +314,9 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       "integration.ci",
       // ADR-045, The switch: the supervised line, on by default.
       "line.supervised",
+      // ADR-049: archiving finished Workers and Reviewers, on by default, and the days they are left alone first.
+      "cleanup.archive",
+      "cleanup.idleDays",
       // Missions Phase 2: the governor's thresholds and window (missions design §9.2, §9.3).
       ...GOVERNOR_SETTINGS.map((name) => `governor.${name}`),
     ]);
@@ -328,6 +333,7 @@ describe("the compaction and handoff settings: keys, defaults and bounds (§G.7 
       maintenance: { ceilingFactor: 2 },
       integration: { ci: "off" },
       line: { supervised: true },
+      cleanup: { archive: true, idleDays: 3 },
       governor: DEFAULT_COORDINATION_SETTINGS.governor,
       guard: { compact: { countsFrom: null, switchedOff: null }, handoff: { countsFrom: null, switchedOff: null } },
     });
@@ -523,6 +529,8 @@ describe("the compaction and handoff settings in the store and the owner's RPCs"
     "maintenance.ceilingFactor": { value: 3, read: (settings) => settings.maintenance.ceilingFactor },
     "integration.ci": { value: "on", read: (settings) => settings.integration.ci },
     "line.supervised": { value: false, read: (settings) => settings.line.supervised },
+    "cleanup.archive": { value: false, read: (settings) => settings.cleanup.archive },
+    "cleanup.idleDays": { value: 7, read: (settings) => settings.cleanup.idleDays },
     ...Object.fromEntries(
       GOVERNOR_SETTINGS.map((name) => [`governor.${name}`, { value: GOVERNOR_BOUNDS[name].default + 1, read: (settings: CoordinationSettings) => settings.governor[name] }]),
     ),
@@ -571,6 +579,80 @@ describe("the compaction and handoff settings in the store and the owner's RPCs"
       expect(() => handleCoordinationSet({ key: "line.supervised", value }, deps)).toThrow("line.supervised must be true (on) or false (off); nothing was saved");
     }
     expect(fileBytes()).toBe(before);
+  });
+
+  it("cleanup.archive and cleanup.idleDays (ADR-049): on after 3 days by default and in a file without them; a switch and a whole number of days from 1 to 30, refused otherwise with their rules", () => {
+    expect(CLEANUP_IDLE_DAYS).toEqual({ min: 1, max: 30, default: 3, whole: true });
+    expect(handleCoordinationSettings(deps).settings.cleanup).toEqual({ archive: true, idleDays: 3 });
+    expect(handleCoordinationSettings(deps).defaults.cleanup).toEqual({ archive: true, idleDays: 3 });
+    // A file an older build wrote has no cleanup group: both read at their defaults.
+    expect(coordinationSettingsOf({ version: 1, line: { supervised: false } }).cleanup).toEqual({ archive: true, idleDays: 3 });
+    // Each read on its own: one out of its bounds or of the wrong kind reads as its default and costs the other nothing.
+    expect(coordinationSettingsOf({ version: 1, cleanup: { archive: "off", idleDays: 9 } }).cleanup).toEqual({ archive: true, idleDays: 9 });
+    expect(coordinationSettingsOf({ version: 1, cleanup: { archive: false, idleDays: 31 } }).cleanup).toEqual({ archive: false, idleDays: 3 });
+    expect(coordinationSettingsOf({ version: 1, cleanup: { archive: false, idleDays: 2.5 } }).cleanup).toEqual({ archive: false, idleDays: 3 });
+    expect(coordinationSettingsOf({ version: 1, cleanup: { archive: false, idleDays: 0 } }).cleanup).toEqual({ archive: false, idleDays: 3 });
+    expect(coordinationSettingsOf({ version: 1, cleanup: "on" }).cleanup).toEqual({ archive: true, idleDays: 3 });
+    expect(coordinationRuleOf("cleanup.archive")).toBe("cleanup.archive must be true (on) or false (off)");
+    expect(coordinationRuleOf("cleanup.idleDays")).toBe("cleanup.idleDays must be a whole number from 1 to 30");
+    expect(agentCleanupOf(home)).toEqual({ archive: true, idleDays: 3 });
+    expect(handleCoordinationSet({ key: "cleanup.idleDays", value: 1 }, deps).settings.cleanup).toEqual({ archive: true, idleDays: 1 });
+    expect(handleCoordinationSet({ key: "cleanup.idleDays", value: 30 }, deps).settings.cleanup).toEqual({ archive: true, idleDays: 30 });
+    expect(handleCoordinationSet({ key: "cleanup.archive", value: false }, deps).settings.cleanup).toEqual({ archive: false, idleDays: 30 });
+    expect(agentCleanupOf(home)).toEqual({ archive: false, idleDays: 30 });
+    const before = fileBytes();
+    for (const value of ["off", 0, null]) {
+      expect(coordinationSetRpc.input.safeParse({ key: "cleanup.archive", value }).success, String(value)).toBe(false);
+      expect(() => handleCoordinationSet({ key: "cleanup.archive", value }, deps)).toThrow("cleanup.archive must be true (on) or false (off); nothing was saved");
+    }
+    for (const value of [0, 31, 2.5, "3", true]) {
+      expect(coordinationSetRpc.input.safeParse({ key: "cleanup.idleDays", value }).success, String(value)).toBe(false);
+      expect(() => handleCoordinationSet({ key: "cleanup.idleDays", value }, deps)).toThrow("cleanup.idleDays must be a whole number from 1 to 30; nothing was saved");
+    }
+    expect(fileBytes()).toBe(before);
+    // A decision's prepared change says what it does, not the governor's words.
+    expect(preparedChangeTextOf({ kind: "coordination.set", change: { key: "cleanup.archive", value: false } })).toBe("turns archiving finished agents off (cleanup.archive false)");
+    expect(preparedChangeTextOf({ kind: "coordination.set", change: { key: "cleanup.idleDays", value: 1 } })).toBe("archives a finished Worker or Reviewer left alone for 1 day (cleanup.idleDays 1)");
+    expect(preparedChangeTextOf({ kind: "coordination.set", change: { key: "cleanup.idleDays", value: 7 } })).toBe("archives a finished Worker or Reviewer left alone for 7 days (cleanup.idleDays 7)");
+  });
+
+  it("agentCleanupOf (ADR-049) reads null, never throwing, when the settings cannot be read, so the pass archives nothing", () => {
+    mkdirSync(home);
+    symlinkSync(join(root), join(home, COORDINATION_DIR_NAME));
+    expect(agentCleanupOf(home)).toBeNull();
+  });
+
+  it("agentCleanupOf (ADR-049) reads the file's own state; the other readers still read an unusable file as the defaults", () => {
+    const defaults = { archive: true, idleDays: 3 };
+    expect(agentCleanupOf(home)).toEqual(defaults);
+    const cases: Array<[unknown, { archive: boolean; idleDays: number } | null]> = [
+      ["{ not json", null],
+      ["[]", null],
+      [{ version: 2, cleanup: { archive: true, idleDays: 3 } }, null],
+      [{ cleanup: { archive: true, idleDays: 3 } }, null],
+      [{ version: 1 }, defaults],
+      [{ version: 1, line: { supervised: false } }, defaults],
+      [{ version: 1, cleanup: { archive: false, idleDays: 9 } }, { archive: false, idleDays: 9 }],
+      [{ version: 1, cleanup: { archive: true } }, defaults],
+      [{ version: 1, cleanup: { idleDays: 5 } }, { archive: true, idleDays: 5 }],
+      // A switch that is not true or false is off; a window out of bounds or a group that is no object is unreadable.
+      [{ version: 1, cleanup: { archive: "false", idleDays: 3 } }, { archive: false, idleDays: 3 }],
+      [{ version: 1, cleanup: { archive: 1, idleDays: 3 } }, { archive: false, idleDays: 3 }],
+      [{ version: 1, cleanup: { archive: true, idleDays: 0 } }, null],
+      [{ version: 1, cleanup: { archive: true, idleDays: 2.5 } }, null],
+      [{ version: 1, cleanup: { archive: true, idleDays: "3" } }, null],
+      [{ version: 1, cleanup: "on" }, null],
+      [{ version: 1, cleanup: null }, null],
+    ];
+    for (const [body, expected] of cases) {
+      writeFile(body);
+      expect(agentCleanupOf(home), JSON.stringify(body)).toEqual(expected);
+    }
+    // Every other reader is as it was: a corrupt or newer file reads as the defaults.
+    writeFile("{ not json");
+    expect(store().read().cleanup).toEqual(defaults);
+    writeFile({ version: 2, cleanup: { archive: false, idleDays: 9 } });
+    expect(store().read().cleanup).toEqual(defaults);
   });
 
   it("refuses each field out of its bounds with its rule and E_COORDINATION_INVALID, writing nothing", () => {

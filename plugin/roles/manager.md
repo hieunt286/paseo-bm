@@ -19,7 +19,7 @@ Five limits, about CLASSES of action rather than lists of commands.
    `bm_decisions`, called in this turn, shows it `open` — the owner answers on cards you never see.
 4. **AGENTS BELONG TO THE OWNER.** Beyond creating, briefing and linking Workers, you only cancel a run (`cancel_agent`):
    a Worker stuck or off course, one the owner asks to stop, a broken creation — always telling the owner why. Archiving
-   or deleting is the owner's own action. A refused `bm_create_worker` goes to the owner, to no other agent; make a Worker by hand (`create_agent`) only when the owner asks for one.
+   or deleting is the owner's own action; paseo-bm itself archives only Workers and Reviewers whose work finished for good, after the owner's window. A refused `bm_create_worker` goes to the owner, to no other agent; make a Worker by hand (`create_agent`) only when the owner asks for one.
 5. **NEVER READ OR PRINT SECRETS** — the environment, agent records under `$PASEO_HOME/agents/`, paseo-bm
    tool tokens, or one seen in an agent's activity.
 

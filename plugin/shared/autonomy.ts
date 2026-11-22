@@ -10,8 +10,6 @@ import {
   preparedChangeRefusalText,
   type Decision,
   type DecisionClass,
-  type DecisionOption,
-  type Effect,
 } from "./decisions";
 
 /**
@@ -46,9 +44,8 @@ import {
  *
  * Delegation (§B.5; PRD REQ-121, REQ-123): `decideRefusalOf` says whether the
  * Orchestrator may decide a decision for the owner (`bm_decide`, and the
- * event that asks it). While a request stands finished-unverified (Phase 3,
- * design §C.3, §C.6 change-008 C4), it chooses no option that acts on it as
- * done (`actsOnFinish`, `unverifiedFinishRefusalOf`).
+ * event that asks it). A request that finished unverified changes nothing
+ * here: the unverified-finish guard is retired (ADR-051).
  *
  * This module is `shared/`, so it stays free of Node and React Native imports.
  */
@@ -271,50 +268,6 @@ export function levelsOf(policy: AutonomyPolicy): Record<string, AutonomyLevelRe
 // ---------------------------------------------------------------------------
 
 /**
- * Whether choosing `option` acts on its request as done (design §C.6,
- * change-008 C4): it declares `commit`, or it carries a prepared command that
- * approves `commit` or has the intent `release`. Pure.
- */
-export function actsOnFinish(option: Pick<DecisionOption, "effects" | "action">): boolean {
-  if (option.effects.includes("commit")) return true;
-  const action = option.action;
-  return action?.kind === "command" && commandActsOnFinish({ approved: action.effects, intent: action.intent });
-}
-
-/**
- * Whether a command acts on its request as done (design §C.6, change-008 C4):
- * it approves `commit`, or its intent is `release`. Pure.
- */
-export function commandActsOnFinish(command: { approved: readonly Effect[]; intent: string | null }): boolean {
-  return command.approved.includes("commit") || command.intent === "release";
-}
-
-/**
- * The one reason every delegation refusal on an unverified finish gives (design
- * §C.6, change-008 C4), with what the delegate does instead.
- */
-export function unverifiedFinishText(requestId: string | null, instead: string): string {
-  const request = requestId === null ? "its request" : `request ${requestId}`;
-  return `${request} finished unverified: its code changed and not every check its report names was seen to pass after the last edit or reused from an earlier pass, so a commit or release on it is the owner's to decide; ${instead}`;
-}
-
-/**
- * Why the owner's policy may not answer `decision` with `optionKey` now
- * (design §C.6, change-008 C4), or null when it may: while the decision's
- * request stands finished-unverified — `finishedUnverified`, as the caller
- * read it — an option that acts on the finish (`actsOnFinish`) is left to the
- * owner: the Orchestrator's `bm_decide`
- * (`decideRefusalOf`). A precedent's answer and the owner's own are not
- * asked. Pure.
- */
-export function unverifiedFinishRefusalOf(decision: Pick<Decision, "id" | "requestId" | "options">, optionKey: string, finishedUnverified: boolean): string | null {
-  if (!finishedUnverified) return null;
-  const option = decision.options.find((entry) => entry.key === optionKey);
-  if (option === undefined || !actsOnFinish(option)) return null;
-  return unverifiedFinishText(decision.requestId, `leave decision ${decision.id} to the owner`);
-}
-
-/**
  * Why the Orchestrator may not decide `decision` for the owner now (§B.5,
  * §B.9; bead `t9lm.11`), or null when it may: a decision it did not ask — a
  * Worker's question (`q:`) or a fallback incident (`f:`); an `o:` decision is
@@ -322,15 +275,9 @@ export function unverifiedFinishRefusalOf(decision: Pick<Decision, "id" | "reque
  * confirmation, answered, superseded, withdrawn or expired), of a class that
  * is `delegate` in its project — any class (ADR-025). An `owner` or `shadow`
  * cell stays the owner's. Pure: the event bus asks by it (`decision.opened`,
- * `asks: "decision"`), and `bm_decide` answers by it — with `choice`, the
- * option it chose and whether the decision's request stands finished-unverified
- * (design §C.6, change-008 C4: `unverifiedFinishRefusalOf`).
+ * `asks: "decision"`), and `bm_decide` answers by it.
  */
-export function decideRefusalOf(
-  policy: AutonomyPolicy,
-  decision: Decision,
-  choice?: { optionKey: string; finishedUnverified?: boolean },
-): string | null {
+export function decideRefusalOf(policy: AutonomyPolicy, decision: Decision): string | null {
   // Autonomy design §B.7: an override is the owner's correction of an answer made for them.
   if (decisionKindOf(decision.id) === "override") return overrideIsTheOwners(decision.id);
   // Autonomy design §D.2 (change-009 C6): a held request is the owner's; bm_decide never answers it.
@@ -353,8 +300,7 @@ export function decideRefusalOf(
   if (modeOf(policy, decision.workspaceId, decisionClass) !== "delegate") {
     return `${decisionClass} is not delegated to you in project ${decision.workspaceId}; the owner decides it, so leave it to the owner`;
   }
-  if (choice === undefined) return null;
-  return unverifiedFinishRefusalOf(decision, choice.optionKey, choice.finishedUnverified === true);
+  return null;
 }
 
 /**

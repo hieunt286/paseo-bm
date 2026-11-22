@@ -15,16 +15,10 @@ import { createOrchestratorDecisionDelivery } from "../plugin/server/orchestrato
 import { createOrchestratorTools } from "../plugin/server/orchestrator-tools";
 import { createPrecedentStore } from "../plugin/server/precedent-store";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
-import {
-  actsOnFinish,
-  commandActsOnFinish,
-  decideRefusalOf,
-  unverifiedFinishRefusalOf,
-  type AutonomyPolicy,
-} from "../plugin/shared/autonomy";
+import { decideRefusalOf } from "../plugin/shared/autonomy";
 import { questionIsTheMainsText } from "../plugin/server/orchestrator-decide-tools";
 import type { FallbackIncident, TraceRecord } from "../plugin/shared/contracts";
-import { openingPrediction, type Decision, type DecisionClass } from "../plugin/shared/decisions";
+import type { DecisionClass } from "../plugin/shared/decisions";
 import { commandBlockOf } from "../plugin/shared/orchestrator-command";
 import { MANAGER, WORKER, WORKSPACE_ID, at, msg, report as reportOf, turn } from "./fixtures/orchestrator-traces";
 
@@ -157,35 +151,6 @@ afterEach(() => {
   clearTraceStoreCache();
   rmSync(root, { recursive: true, force: true });
 });
-
-/** An open scope question as the materialiser stores it, on another request (for the direct rule tests). */
-function scopeQuestion(): Decision {
-  const options = [
-    { key: "a", label: "dd/mm/yyyy", recommended: true, effects: [] },
-    { key: "b", label: "yyyy-mm-dd", recommended: false, effects: ["commit" as const] },
-  ];
-  return {
-    id: qid(1, "req-20260930T097000Z"),
-    workspaceId: WORKSPACE_ID,
-    requestId: "req-20260930T097000Z",
-    askedBy: { role: "worker", agentId: WORKER },
-    askedAt: at(2),
-    round: 1,
-    question: "Which date format?",
-    subject: null,
-    class: "scope",
-    options,
-    status: "open",
-    settledAt: null,
-    needsConfirmation: null,
-    answer: null,
-    grant: null,
-    delivery: null,
-    supersedes: null,
-    supersededBy: null,
-    prediction: openingPrediction(options),
-  };
-}
 
 // ---------------------------------------------------------------------------
 // An Orchestrator decision (o:), through bm_ask_owner.
@@ -402,12 +367,11 @@ describe("a decision opening in a class delegated to the Orchestrator (bm_decide
 });
 
 // ---------------------------------------------------------------------------
-// A finished-unverified request: no delegate acts on it (design §C.3, §C.6 change-008 C4; bead 7gxw.4).
+// A finished-unverified request: its decisions are answered as any other (the unverified-finish guard retired by ADR-051).
 // ---------------------------------------------------------------------------
 
-describe("a finished-unverified request: a delegate cannot act on it as done (design §C.6, change-008 C4)", () => {
+describe("a finished-unverified request: its decisions are answered as any other (ADR-051)", () => {
   const traces = () => ({ tracesDir: join(home, "traces") });
-  const UNVERIFIED = `request ${REQUEST} finished unverified: its code changed and not every check its report names was seen to pass after the last edit or reused from an earlier pass, so a commit or release on it is the owner's to decide`;
 
   /**
    * The request's Worker edited a file, then its Manager got a `finished`
@@ -470,31 +434,6 @@ describe("a finished-unverified request: a delegate cannot act on it as done (de
   }
   const ownerAnswers = (id: string, optionKey: string) =>
     handleDecisionsAnswer({ id, optionKey }, paseo, { env: { PASEO_BM_HOME: home }, homedir: () => root, now: () => NOW, onSettled: onSettledHook() });
-  it("the rule: an option acts on the finish when it declares commit, or its command approves commit or releases", () => {
-    const option = (effects: Decision["options"][number]["effects"], action?: Decision["options"][number]["action"]) => ({ effects, ...(action === undefined ? {} : { action }) });
-    const command = (intent: "continue" | "release", effects: Decision["options"][number]["effects"]) =>
-      ({ kind: "command", to: "manager", agentId: MANAGER, intent, body: "Do it.", effects }) as const;
-    expect(actsOnFinish(option(["commit"]))).toBe(true);
-    expect(actsOnFinish(option(["none"], command("continue", ["commit"])))).toBe(true);
-    expect(actsOnFinish(option(["none"], command("release", [])))).toBe(true);
-    expect(actsOnFinish(option(["none"], command("continue", ["none"])))).toBe(false);
-    expect(actsOnFinish(option(["dependency-install"]))).toBe(false);
-    expect(commandActsOnFinish({ approved: ["commit"], intent: "continue" })).toBe(true);
-    expect(commandActsOnFinish({ approved: [], intent: "release" })).toBe(true);
-    expect(commandActsOnFinish({ approved: ["network"], intent: "continue" })).toBe(false);
-
-    const decision = { id: qid(1), requestId: REQUEST, options: [{ key: "a", label: "Commit it", recommended: true, effects: ["commit" as const] }, { key: "b", label: "Hold", recommended: false, effects: [] }] };
-    expect(unverifiedFinishRefusalOf(decision, "a", true)).toBe(`${UNVERIFIED}; leave decision ${qid(1)} to the owner`);
-    expect(unverifiedFinishRefusalOf(decision, "b", true)).toBeNull();
-    expect(unverifiedFinishRefusalOf(decision, "a", false)).toBeNull();
-    // bm_decide's rule: the same refusal, after every other rule passed; without a choice (the event bus), none.
-    const delegated: AutonomyPolicy = { projects: { [WORKSPACE_ID]: { "reversible-technical": delegateCell() } } as AutonomyPolicy["projects"], challenger: {} };
-    const open: Decision = { ...scopeQuestion(), id: qid(1), requestId: REQUEST, class: "reversible-technical", options: decision.options, prediction: openingPrediction(decision.options) };
-    expect(decideRefusalOf(delegated, open)).toBeNull();
-    expect(decideRefusalOf(delegated, open, { optionKey: "a", finishedUnverified: true })).toBe(`${UNVERIFIED}; leave decision ${qid(1)} to the owner`);
-    expect(decideRefusalOf(delegated, open, { optionKey: "b", finishedUnverified: true })).toBeNull();
-  });
-
   it("(a) at open: a precedent's answer is the owner's standing word and is not refused", async () => {
     delegate("reversible-technical");
     await finish(false, 3);

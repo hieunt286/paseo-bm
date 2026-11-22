@@ -127,6 +127,15 @@ export const ROLLOVER_CEILING_FACTOR: CoordinationBounds = { min: 1.5, max: 5, d
  */
 export const MAINTENANCE_CEILING_FACTOR: CoordinationBounds = { min: 1.5, max: 5, default: 2, whole: false };
 
+// ── Archiving finished agents (ADR-049, delivery line design §20.1) ─────────
+
+/**
+ * `cleanup.idleDays`: the days a finished Worker or Reviewer must have been
+ * left alone — neither its activity nor the owner's last message to it newer —
+ * before paseo-bm archives it (`server/agent-cleanup.ts`).
+ */
+export const CLEANUP_IDLE_DAYS: CoordinationBounds = { min: 1, max: 30, default: 3, whole: true };
+
 // ── CI (ADR-036, delivery line design §17.1) ────────────────────────────────
 
 /**
@@ -286,6 +295,14 @@ const integrationSchema = z.object({ ci: z.enum(INTEGRATION_CI_MODES) });
 const lineSchema = z.object({ supervised: z.boolean() });
 
 /**
+ * `cleanup.archive` (ADR-049, delivery line design §20.1): on by default. On,
+ * at most once an hour, paseo-bm archives the Workers and Reviewers finished
+ * for good and left alone for `cleanup.idleDays`; off, it archives nothing.
+ * Nothing is ever deleted.
+ */
+const cleanupSchema = z.object({ archive: z.boolean(), idleDays: boundedSchema(CLEANUP_IDLE_DAYS) });
+
+/**
  * What the plugin keeps beside a mechanism's switch for the A-12 guard
  * (§G.3): `countsFrom` — A-12 counts only the entries recorded from this time,
  * when the owner last turned the mechanism on (null: every entry); and
@@ -316,6 +333,7 @@ export const coordinationSettingsSchema = z.object({
   maintenance: maintenanceSchema,
   integration: integrationSchema,
   line: lineSchema,
+  cleanup: cleanupSchema,
   governor: governorSchema,
   guard: z.object({ compact: switchGuardSchema, handoff: switchGuardSchema }),
 });
@@ -347,6 +365,7 @@ export const DEFAULT_COORDINATION_SETTINGS: CoordinationSettings = {
   maintenance: { ceilingFactor: MAINTENANCE_CEILING_FACTOR.default },
   integration: { ci: "off" },
   line: { supervised: true },
+  cleanup: { archive: true, idleDays: CLEANUP_IDLE_DAYS.default },
   governor: Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [name, GOVERNOR_BOUNDS[name].default])) as Record<GovernorSetting, number>,
   guard: { compact: NO_GUARD, handoff: NO_GUARD },
 };
@@ -390,6 +409,8 @@ const liveChangeMembers = [
   z.object({ key: z.literal("maintenance.ceilingFactor"), value: maintenanceSchema.shape.ceilingFactor }),
   z.object({ key: z.literal("integration.ci"), value: integrationSchema.shape.ci }),
   z.object({ key: z.literal("line.supervised"), value: lineSchema.shape.supervised }),
+  z.object({ key: z.literal("cleanup.archive"), value: cleanupSchema.shape.archive }),
+  z.object({ key: z.literal("cleanup.idleDays"), value: cleanupSchema.shape.idleDays }),
   ...GOVERNOR_SETTINGS.map((name) => z.object({ key: z.literal(`governor.${name}` as GovernorKey), value: boundedSchema(GOVERNOR_BOUNDS[name]) as z.ZodNumber })),
 ] as const;
 
@@ -446,6 +467,9 @@ export const COORDINATION_KEYS: readonly CoordinationKey[] = [
   "integration.ci",
   // ADR-045, The switch: the supervised line, on by default.
   "line.supervised",
+  // ADR-049: archiving finished Workers and Reviewers, on by default, and the days they are left alone first.
+  "cleanup.archive",
+  "cleanup.idleDays",
   // Missions Phase 2: the governor's thresholds come last (missions design §9.2).
   ...GOVERNOR_SETTINGS.map((name): GovernorKey => `governor.${name}`),
 ];
@@ -456,8 +480,9 @@ export function governorSettingOf(key: GovernorKey): GovernorSetting {
 }
 
 /** The keys whose value is true (on) or false (off). */
-type SwitchKey = "compact.enabled" | "handoff.enabled" | "main.compact" | "rollover.enabled" | "line.supervised";
-const isSwitchKey = (key: CoordinationKey): key is SwitchKey => key === "compact.enabled" || key === "handoff.enabled" || key === "main.compact" || key === "rollover.enabled" || key === "line.supervised";
+type SwitchKey = "compact.enabled" | "handoff.enabled" | "main.compact" | "rollover.enabled" | "line.supervised" | "cleanup.archive";
+const isSwitchKey = (key: CoordinationKey): key is SwitchKey =>
+  key === "compact.enabled" || key === "handoff.enabled" || key === "main.compact" || key === "rollover.enabled" || key === "line.supervised" || key === "cleanup.archive";
 
 /** The keys whose value is one of a few words. */
 type ChoiceKey = "integration.ci";
@@ -482,6 +507,7 @@ export const COORDINATION_BOUNDS: Readonly<Record<Exclude<CoordinationKey, Switc
   "rollover.contextTokens": ROLLOVER_CONTEXT_TOKENS,
   "rollover.ceilingFactor": ROLLOVER_CEILING_FACTOR,
   "maintenance.ceilingFactor": MAINTENANCE_CEILING_FACTOR,
+  "cleanup.idleDays": CLEANUP_IDLE_DAYS,
   ...(Object.fromEntries(GOVERNOR_SETTINGS.map((name) => [`governor.${name}`, GOVERNOR_BOUNDS[name]])) as Record<GovernorKey, CoordinationBounds>),
 };
 
@@ -547,6 +573,7 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
   const maintenance = objectOf(root?.["maintenance"]);
   const integration = objectOf(root?.["integration"]);
   const line = objectOf(root?.["line"]);
+  const cleanup = objectOf(root?.["cleanup"]);
   const governor = objectOf(root?.["governor"]);
   const guard = objectOf(root?.["guard"]);
   const shape = { compact: compactSchema.shape, handoff: handoffSchema.shape, review: reviewSchema.shape };
@@ -587,6 +614,11 @@ export function coordinationSettingsOf(body: unknown): CoordinationSettings {
     integration: { ci: valueOr(integrationSchema.shape.ci, integration?.["ci"], defaults.integration.ci) },
     // ADR-045, The switch: absent from a file an older build wrote, so on.
     line: { supervised: valueOr(lineSchema.shape.supervised, line?.["supervised"], defaults.line.supervised) },
+    // ADR-049: absent from a file an older build wrote, so on, after 3 days.
+    cleanup: {
+      archive: valueOr(cleanupSchema.shape.archive, cleanup?.["archive"], defaults.cleanup.archive),
+      idleDays: valueOr(cleanupSchema.shape.idleDays, cleanup?.["idleDays"], defaults.cleanup.idleDays),
+    },
     governor: Object.fromEntries(
       GOVERNOR_SETTINGS.map((name) => [name, valueOr(governorSchema.shape[name], governor?.[name], defaults.governor[name])]),
     ) as Record<GovernorSetting, number>,
@@ -648,6 +680,10 @@ export function applyCoordinationChange(settings: CoordinationSettings, change: 
       return { ...settings, integration: { ci: change.value } };
     case "line.supervised":
       return { ...settings, line: { supervised: change.value } };
+    case "cleanup.archive":
+      return { ...settings, cleanup: { ...settings.cleanup, archive: change.value } };
+    case "cleanup.idleDays":
+      return { ...settings, cleanup: { ...settings.cleanup, idleDays: change.value } };
     case "main.contextShare":
       return { ...settings, main: { ...settings.main, contextShare: change.value } };
     case "main.contextTokens":

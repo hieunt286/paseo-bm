@@ -8,12 +8,13 @@
  * `dropped` figure still stand. Never rejects.
  */
 import { createAlertStore } from "./alert-store";
+import { DELIVERY_FAILED_NOTICE_MARKER } from "../shared/notices";
 import { enqueueNotice, type ChannelQueue } from "./main-channel";
 import type { NoticePaseo } from "./notice-queue";
 import { createRequestRegistry } from "./request-registry";
 import { errorText } from "./rpc-kit";
 
-export const DELIVERY_FAILED_MARKER = "BM-DELIVERY-FAILED";
+export const DELIVERY_FAILED_MARKER = DELIVERY_FAILED_NOTICE_MARKER;
 
 export interface FailedDelivery {
   workspaceId: string;

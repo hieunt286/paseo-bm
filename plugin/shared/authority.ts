@@ -10,7 +10,6 @@
  *    prepared change → the owner.
  * 2. `f:` of a mission request delegated by repo or mission → its Main
  *    (ADR-040); otherwise a repo-delegated incident → the Orchestrator.
- *    `unverifiedFinishRefusalOf` refusing every acting option → the owner.
  * 3. `q:` of a request of a mission, its class delegated by the repo cell →
  *    the Main; delegated by the mission cell only → the Main when one option
  *    settles it with no effect, else the owner, the Main recommending
@@ -32,7 +31,7 @@
  *
  * This module is `shared/`: no Node and no React Native imports.
  */
-import { missionAnswerCellOf, unverifiedFinishRefusalOf, type AutonomyMode, type MissionClass } from "./autonomy";
+import { missionAnswerCellOf, type AutonomyMode, type MissionClass } from "./autonomy";
 import { carriesPreparedChange, decisionClassOf, decisionKindOf, type Decision, type DecisionClass, type DecisionOption } from "./decisions";
 
 /** `code` is no rule's any more (delivery line design §5.6); kept so stored mission states still parse. */
@@ -47,8 +46,6 @@ export interface AuthorityFacts {
   missionOf(requestId: string | null): string | null;
   /** Whether a mission's level delegates a cell. */
   missionDelegates(missionId: string, cell: MissionClass): boolean;
-  /** Whether a request stands finished-unverified (autonomy design §C.6); absent reads as not. */
-  finishedUnverified?(requestId: string | null): boolean;
 }
 
 export type AuthorityRule = "owner-only" | "owner-kind" | "prepared-change" | "orchestrator-incident" | "delegated-main" | "mission-effects" | "shadow-main" | "owner";
@@ -88,13 +85,6 @@ export function heldEffectsOf(option: Pick<DecisionOption, "effects" | "action">
   return [...new Set([...option.effects, ...approved])].filter((effect) => effect !== "none");
 }
 
-/** True when the decision has an acting option and the unverified-finish rule refuses every one (§7.1, case 2). */
-function everyActingOptionRefused(decision: AuthorityDecision, facts: AuthorityFacts): boolean {
-  if (facts.finishedUnverified?.(decision.requestId) !== true) return false;
-  const acting = decision.options.filter((option) => option.action !== undefined || !option.effects.every((effect) => effect === "none"));
-  return acting.length > 0 && acting.every((option) => unverifiedFinishRefusalOf(decision, option.key, true) !== null);
-}
-
 /** Who decides `decision` (design §4.1). Pure. */
 export function deciderOf(decision: AuthorityDecision, facts: AuthorityFacts): DeciderOf {
   if (decision.ownerOnly === true) return owner("owner-only", "a fact only the owner knows");
@@ -105,8 +95,6 @@ export function deciderOf(decision: AuthorityDecision, facts: AuthorityFacts): D
   const decisionClass = decisionClassOf(decision);
   const repoMode = facts.modeOf(decision.workspaceId, decisionClass);
   if (kind === "fallback") {
-    // Delivery line design §7.1, case 2: no option the Orchestrator may choose would act.
-    if (everyActingOptionRefused(decision, facts)) return owner("owner", "its request finished unverified: every acting option is the owner's");
     const missionId = facts.missionOf(decision.requestId);
     if (missionId !== null) {
       if (repoMode === "delegate") return { decider: "main", rule: "delegated-main", recommend: false, why: `${decisionClass} is delegated: the mission's Main resolves its request's fallback` };

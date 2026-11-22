@@ -12,13 +12,12 @@ import { makeDecision } from "./helpers/decisions";
 const MISSION = "mis-0123456789";
 const REQ = "req-20260929T073348Z";
 
-function facts(over: Partial<{ repo: Record<string, string>; mission: string[]; inMission: boolean; unverified: boolean }> = {}): AuthorityFacts {
+function facts(over: Partial<{ repo: Record<string, string>; mission: string[]; inMission: boolean }> = {}): AuthorityFacts {
   const repo = over.repo ?? {};
   return {
     modeOf: (_workspaceId, decisionClass) => (repo[decisionClass] ?? repo["*"] ?? "owner") as never,
     missionOf: (requestId) => (over.inMission === false || requestId === null ? null : MISSION),
     missionDelegates: (_missionId, cell) => (over.mission ?? []).includes(cell),
-    ...(over.unverified === undefined ? {} : { finishedUnverified: () => over.unverified! }),
   };
 }
 
@@ -49,18 +48,6 @@ describe("deciderOf (design §4.1)", () => {
     expect(deciderOf(incident, facts({ mission: ["answer-technical"] })).decider).toBe("owner");
     expect(deciderOf(incident, facts({ repo: { environment: "delegate" }, inMission: false })).decider).toBe("orchestrator");
     expect(deciderOf({ ...incident, requestId: null }, facts({ repo: { environment: "delegate" } })).decider).toBe("orchestrator");
-  });
-
-  it("rule 2 (delivery line design §7.1, case 2): an f: incident whose every acting option the unverified-finish rule refuses is the owner's", () => {
-    const commit = { kind: "command", to: "worker", agentId: "w-1", intent: "continue", body: "commit it", effects: ["commit"] } as never;
-    const resend = { kind: "fallback", action: "resend", target: "fallback-1" } as never;
-    const finishing = question({ id: "f:fallback-1", class: "environment", options: [{ key: "a", label: "Commit", recommended: true, effects: ["none"], action: commit }, { key: "b", label: "Wait", recommended: false, effects: ["none"] }] });
-    expect(deciderOf(finishing, facts({ repo: { environment: "delegate" }, unverified: true }))).toMatchObject({ decider: "owner", rule: "owner" });
-    // In a mission, a verified finish or an allowed recovery option belongs to its Main.
-    expect(deciderOf(finishing, facts({ repo: { environment: "delegate" }, unverified: false })).decider).toBe("main");
-    expect(deciderOf(finishing, facts({ repo: { environment: "delegate" } })).decider).toBe("main");
-    const mixed = question({ id: "f:fallback-1", class: "environment", options: [{ key: "a", label: "Commit", recommended: true, effects: ["none"], action: commit }, { key: "b", label: "Resend", recommended: false, effects: ["none"], action: resend }] });
-    expect(deciderOf(mixed, facts({ repo: { environment: "delegate" }, unverified: true })).decider).toBe("main");
   });
 
   it("no review rule (delivery line design §5.6): a legacy review-budget question is decided as any question of its class", () => {

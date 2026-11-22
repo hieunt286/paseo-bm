@@ -90,11 +90,14 @@ export const INTERVENTION_WINDOW_MS: Readonly<Record<InterventionKind, number>> 
 /**
  * Delivery line design §6.6: a pending compaction or handoff that has waited
  * this long — half its window, 30 minutes — runs at its target's next turn
- * end without the safe-point and quiet-queue checks.
+ * end without the safe-point and quiet-queue checks. A `BM-ROLLOVER soft`
+ * that has waited `rollover` (30 minutes) without the request rolling over
+ * becomes `BM-ROLLOVER now` (§2.6, ADR-051 decision 2).
  */
-export const MAINTENANCE_WAIT_MS: Readonly<Record<"compact" | "handoff", number>> = {
+export const MAINTENANCE_WAIT_MS: Readonly<Record<"compact" | "handoff" | "rollover", number>> = {
   compact: INTERVENTION_WINDOW_MS.compact / 2,
   handoff: INTERVENTION_WINDOW_MS.handoff / 2,
+  rollover: 30 * MINUTE_MS,
 };
 
 /**

@@ -38,6 +38,7 @@
  */
 import { PARENT_AGENT_LABEL, listAllAgents, parentOf, roleOfAgent } from "./agent-role";
 import { createBindingStore, type BindingStore } from "./agent-bindings";
+import { BM_TOOL_NAMES } from "../shared/bm-tool-names";
 import { createMissionRoster } from "./mission-roster";
 import { REPLACED_BY_LABEL } from "./fallback-detect";
 import { createMissionStore, journalQuietly, type Mission } from "./mission-store";
@@ -276,35 +277,31 @@ export async function reassignRequests(
 }
 
 /**
- * The tools a replaced Main may no longer call (mission runtime design §3.6):
- * every bound Manager tool that writes or sends. Reads (`bm_mission`,
- * `bm_decisions`, `bm_repo`, `bm_peers`, `bm_memory`) still answer.
+ * The Manager tools that only read (mission runtime design §3.6): `bm_memory`
+ * reads with `op: read` only. A replaced Main's call of one is refused, and
+ * nothing was read (ADR-051 decision 3).
  */
-export const MAIN_WRITE_TOOLS: ReadonlySet<string> = new Set([
-  "bm_create_worker",
-  "bm_tell_worker",
-  "bm_answers",
-  "bm_answer_worker",
-  "bm_mission_update",
-  "bm_split_mission",
-  "bm_link_workers",
-  "bm_ask_mission",
-  "bm_peer_reply",
-  "bm_owner_question",
-]);
+export const MAIN_READ_TOOLS: ReadonlySet<string> = new Set(["bm_mission", "bm_decisions", "bm_repo", "bm_peers", "bm_memory"]);
+
+/** Every other Manager tool writes or sends: a replaced Main's call of one is refused, and nothing was done (§3.6). */
+export const MAIN_WRITE_TOOLS: ReadonlySet<string> = new Set(BM_TOOL_NAMES.manager.filter((tool) => !MAIN_READ_TOOLS.has(tool)));
 
 /**
  * Why a Manager's tool call is refused because another Main holds its mission
- * (mission runtime design §3.6), or null: the caller's binding names an open
- * mission whose `mainId` is another agent, and the tool writes or sends.
- * Never throws: a mission that cannot be read refuses nothing.
+ * (mission runtime design §3.6, ADR-033 decision 2, ADR-051 decision 3), or
+ * null: the caller's binding names an open mission whose `mainId` is another
+ * agent. Every tool is refused, naming the current Main; a reading tool's
+ * refusal (`MAIN_READ_TOOLS`, `bm_memory` with `op: read`) ends "Nothing was
+ * read.", any other's "Nothing was done.". Never throws: a mission that
+ * cannot be read refuses nothing.
  */
-export function replacedMainRefusalOf(home: string, caller: { agentId: string | null; missionId?: string | null } | null, tool: string): string | null {
-  if (caller === null || caller.agentId === null || (caller.missionId ?? null) === null || !MAIN_WRITE_TOOLS.has(tool)) return null;
+export function replacedMainRefusalOf(home: string, caller: { agentId: string | null; missionId?: string | null } | null, tool: string, input?: unknown): string | null {
+  if (caller === null || caller.agentId === null || (caller.missionId ?? null) === null) return null;
   try {
     const mission = createMissionStore(home).get(caller.missionId!);
     if (mission === null || mission.state !== "open" || mission.mainId === null || mission.mainId === caller.agentId) return null;
-    return `You were replaced by Main ${mission.mainId} of mission ${mission.code}; tell the owner to continue in that Main's chat (the Missions screen opens it). Nothing was done.`;
+    const reads = MAIN_READ_TOOLS.has(tool) && (tool !== "bm_memory" || (input as { op?: unknown } | null | undefined)?.op === "read");
+    return `You were replaced by Main ${mission.mainId} of mission ${mission.code}; tell the owner to continue in that Main's chat (the Missions screen opens it). ${reads ? "Nothing was read." : "Nothing was done."}`;
   } catch {
     return null;
   }

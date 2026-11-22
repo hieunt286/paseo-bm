@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearBindingCache } from "../plugin/server/agent-bindings";
 import { clearJsonFileCache } from "../plugin/server/data-files";
 import { createMissionStore } from "../plugin/server/mission-store";
 import { handOverMain, handleMissionEnsure, type MissionsPaseo } from "../plugin/server/missions-home";
-import { MAIN_WRITE_TOOLS, replaceMain, replacedMainRefusalOf } from "../plugin/server/mission-replace";
+import { MAIN_READ_TOOLS, MAIN_WRITE_TOOLS, replaceMain, replacedMainRefusalOf } from "../plugin/server/mission-replace";
+import { BM_TOOL_NAMES } from "../plugin/shared/bm-tool-names";
 import { DEFAULT_COORDINATION_SETTINGS, mainContextCrossingOf, mainContextHardOf } from "../plugin/shared/coordination";
 import { fakePaseo, type FakeAgent } from "./helpers/fake-paseo";
 import { fakeCli } from "./helpers/fake-cli";
@@ -17,7 +18,7 @@ import { roleAliases, roleProfiles } from "./helpers/roles";
  * REQ-203): the Main's figure is its real context, never the per-turn sum;
  * one replacement path — single flight, idempotent, compare-and-set; a
  * `mission.ensure` during a handoff joins it (the XAI race); a replaced Main
- * writes nothing. A fake Paseo and a temporary data folder; no daemon.
+ * is refused every tool, naming the current Main (ADR-051 decision 3). A fake Paseo and a temporary data folder; no daemon.
  */
 
 const MISSION = "mis-0123456789";
@@ -124,12 +125,42 @@ describe("one replacement path (design §3.4)", () => {
 });
 
 describe("a replaced Main (design §3.6)", () => {
-  it("is refused every write or send tool, naming the current Main; reads still answer", async () => {
+  const NAMED = "You were replaced by Main new-1 of mission XAI; tell the owner to continue in that Main's chat (the Missions screen opens it).";
+
+  it("is refused every write or send tool, naming the current Main", async () => {
     await replaceMain(MISSION, "new-1", "owner", { home, log: () => {} });
     const old = { agentId: MAIN, missionId: MISSION };
     for (const tool of MAIN_WRITE_TOOLS) expect(replacedMainRefusalOf(home, old, tool), tool).toContain("You were replaced by Main new-1 of mission XAI");
-    for (const tool of ["bm_mission", "bm_decisions", "bm_repo", "bm_memory", "bm_peers"]) expect(replacedMainRefusalOf(home, old, tool), tool).toBeNull();
+    for (const tool of MAIN_WRITE_TOOLS) expect(replacedMainRefusalOf(home, old, tool), tool).toBe(`${NAMED} Nothing was done.`);
     expect(replacedMainRefusalOf(home, { agentId: "new-1", missionId: MISSION }, "bm_tell_worker")).toBeNull();
     expect(replacedMainRefusalOf(home, { agentId: MAIN, missionId: null }, "bm_tell_worker")).toBeNull();
+  });
+
+  it("ADR-051 decision 3: each reading tool refuses the same way, naming the current Main; nothing was read", async () => {
+    await replaceMain(MISSION, "new-1", "owner", { home, log: () => {} });
+    const old = { agentId: MAIN, missionId: MISSION };
+    expect([...MAIN_READ_TOOLS].sort()).toEqual(["bm_decisions", "bm_memory", "bm_mission", "bm_peers", "bm_repo"]);
+    const inputs: Record<string, unknown> = { bm_mission: {}, bm_decisions: { status: "unsettled" }, bm_repo: { workspaceId: "wks-a", action: "status" }, bm_peers: {}, bm_memory: { project: "wks-a", op: "read" } };
+    for (const tool of MAIN_READ_TOOLS) expect(replacedMainRefusalOf(home, old, tool, inputs[tool]), tool).toBe(`${NAMED} Nothing was read.`);
+    // bm_memory reads with op read only; its add and remove write.
+    expect(replacedMainRefusalOf(home, old, "bm_memory", { project: "wks-a", op: "add", kind: "fact", text: "x", source: "y" })).toBe(`${NAMED} Nothing was done.`);
+    // Every Manager tool is a reading or a writing one: none answers a replaced Main.
+    expect([...MAIN_READ_TOOLS, ...MAIN_WRITE_TOOLS].sort()).toEqual([...BM_TOOL_NAMES.manager].sort());
+  });
+
+  it("a Main of no mission, the current Main, and a mission that cannot be read are unaffected, reading or writing", async () => {
+    await replaceMain(MISSION, "new-1", "owner", { home, log: () => {} });
+    const unreadable = join(root, "unreadable");
+    mkdirSync(join(unreadable, "missions"), { recursive: true });
+    writeFileSync(join(unreadable, "missions", `${MISSION}.json`), "{ not json");
+    for (const tool of ["bm_mission", "bm_memory", "bm_tell_worker"]) {
+      expect(replacedMainRefusalOf(home, { agentId: MAIN, missionId: null }, tool, { op: "read" }), tool).toBeNull();
+      expect(replacedMainRefusalOf(home, { agentId: MAIN }, tool, { op: "read" }), tool).toBeNull();
+      expect(replacedMainRefusalOf(home, { agentId: "new-1", missionId: MISSION }, tool, { op: "read" }), tool).toBeNull();
+      expect(replacedMainRefusalOf(home, { agentId: MAIN, missionId: "mis-ffffffffff" }, tool, { op: "read" }), tool).toBeNull();
+      expect(replacedMainRefusalOf(join(root, "missing"), { agentId: MAIN, missionId: MISSION }, tool, { op: "read" }), tool).toBeNull();
+      expect(replacedMainRefusalOf(unreadable, { agentId: MAIN, missionId: MISSION }, tool, { op: "read" }), tool).toBeNull();
+    }
+    expect(replacedMainRefusalOf(home, null, "bm_mission")).toBeNull();
   });
 });

@@ -7,7 +7,8 @@
  *   `settings-autonomy.tsx`).
  * - **Coordination**, open — compaction, handoff and rollover (delivery line
  *   design §2.6, §6.6: with the maintenance ceiling), each switched on its
- *   own with its thresholds as number fields, CI's switch (ADR-036), the review settings with the
+ *   own with its thresholds as number fields, CI's switch (ADR-036), the supervised line's
+ *   (ADR-045), archiving finished agents with its window (ADR-049), the review settings with the
  *   cap per request they make (delivery line design §5.6; autonomy design §G.7;
  *   `settings-coordination.tsx`), then one reset to the defaults. A field
  *   saves with its card's Save, which shows once something changed.
@@ -72,6 +73,8 @@ import {
   changedThresholds,
   ciCardView,
   ciToggleChange,
+  cleanupCardView,
+  cleanupToggleChange,
   lineCardView,
   lineToggleChange,
   mechanismCardView,
@@ -491,6 +494,71 @@ function SwitchGroup({ viewOf, changeOf, data, narrow, onSaved, styles, theme }:
 }
 
 /**
+ * Archiving finished agents (ADR-049, delivery line design §20.1), drawn as a
+ * mechanism card: its switch (`cleanup.archive`) saves at once both ways, its
+ * window (`cleanup.idleDays`) stays a draft (held by the group, so its reset
+ * can fill it) until Save.
+ */
+function CleanupGroup({ data, draft, inputs, onInput, clearInputs, narrow, setDraft, onSaved, styles, theme }: {
+  data: CoordinationSettingsOutput;
+  draft: ThresholdDraft;
+  inputs: CoordinationInputs;
+  onInput: (key: CoordinationNumberKey, text: string) => void;
+  clearInputs: (keys: readonly CoordinationNumberKey[]) => void;
+  narrow: boolean;
+  setDraft: (change: (current: ThresholdDraft) => ThresholdDraft) => void;
+  onSaved: (settings: CoordinationSettingsOutput["settings"]) => void;
+  styles: Styles;
+  theme: Theme;
+}) {
+  const save = useRpc(coordinationSetRpc);
+  const { busy, run } = useBusyAction();
+  const [error, setError] = useState<string | null>(null);
+  const settings = data.settings;
+  return (
+    <MechanismCard
+      view={cleanupCardView({ settings, defaults: data.defaults, draft, saving: busy })}
+      inputs={inputs}
+      dialog={null}
+      busy={busy}
+      error={error}
+      narrow={narrow}
+      onToggle={() =>
+        run(
+          async () => {
+            setError(null);
+            onSaved((await save(cleanupToggleChange(settings))).settings);
+          },
+          (failure) => setError(errorMessageOf(failure)),
+        )
+      }
+      onConfirm={() => {}}
+      onCancel={() => {}}
+      onInput={(key, text) => {
+        setError(null);
+        onInput(key, text);
+      }}
+      onSave={() =>
+        run(
+          async () => {
+            setError(null);
+            for (const change of changedThresholds("cleanup", settings, draft)) {
+              const output = await save(change);
+              onSaved(output.settings);
+              setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== change.key)) as ThresholdDraft);
+            }
+            clearInputs(MECHANISM_THRESHOLDS.cleanup);
+          },
+          (failure) => setError(errorMessageOf(failure)),
+        )
+      }
+      styles={styles}
+      theme={theme}
+    />
+  );
+}
+
+/**
  * The review settings (delivery line design §5.6): `review.maxRereviews` and
  * `review.callsPerBatch` stay a draft (held by the group) until Save, which
  * sends one `coordination.set` per changed setting; the cap per request they
@@ -546,7 +614,8 @@ function ReviewGroup({ data, draft, inputs, onInput, clearInputs, narrow, setDra
 /**
  * Settings → Coordination (autonomy design §G.7; change-014 outcome 5),
  * open on the screen: compaction, handoff and rollover, each a card of its
- * own, CI (ADR-036), the review settings, then **Reset coordination to defaults**, which fills every
+ * own, CI (ADR-036), the supervised line (ADR-045), archiving finished agents
+ * (ADR-049), the review settings, then **Reset coordination to defaults**, which fills every
  * card's draft with the defaults. An edit stays a draft until its card's Save.
  * The advice cadence's card is retired (ADR-029 decision 9).
  */
@@ -591,6 +660,18 @@ function CoordinationGroup({ data, narrow, onSaved, styles, theme }: {
       ))}
       <SwitchGroup viewOf={ciCardView} changeOf={ciToggleChange} data={data} narrow={narrow} onSaved={onSaved} styles={styles} theme={theme} />
       <SwitchGroup viewOf={lineCardView} changeOf={lineToggleChange} data={data} narrow={narrow} onSaved={onSaved} styles={styles} theme={theme} />
+      <CleanupGroup
+        data={data}
+        draft={thresholds}
+        inputs={inputs}
+        onInput={onInput}
+        clearInputs={clearInputs}
+        narrow={narrow}
+        setDraft={setThresholds}
+        onSaved={onSaved}
+        styles={styles}
+        theme={theme}
+      />
       {/* The review settings alone in their row, as wide as the mechanism cards above (the wide card is `flex: 1`). */}
       <View style={{ flexDirection: narrow ? "column" : "row", alignItems: "stretch" }}>
         <ReviewGroup

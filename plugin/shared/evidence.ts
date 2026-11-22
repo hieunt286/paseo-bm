@@ -48,8 +48,8 @@
  *   same `&&` rule as checks, at any time.
  * - **Finished-unverified** (§C.3, `requestFinishOf`): a request whose latest
  *   report is `finished`, whose code changed and whose named checks are not
- *   all detected or reused. Work, the finished card, `request.finished` and
- *   the delegation refusal (§C.6, change-008 C4) all read it from here.
+ *   all detected or reused. Work, the finished card and `request.finished`
+ *   all read it from here.
  *
  * `shared/`, pure: no Node and no React Native imports, so the client can
  * read it too.

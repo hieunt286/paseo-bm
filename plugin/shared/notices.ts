@@ -103,6 +103,8 @@ export const ANSWER_NOTICE_MARKER = "BM-ANSWER";
  * marks the message as the plugin's, so the trace never counts it as typed by the owner.
  */
 export const DELIVERY_NOTICE_MARKER = "BM-DELIVERY";
+/** A delivery that reached nobody, told to the request's Main (ADR-042 decision 5). Its own marker: `BM-DELIVERY` counts only as a whole word. */
+export const DELIVERY_FAILED_NOTICE_MARKER = "BM-DELIVERY-FAILED";
 
 /**
  * The kinds of a delivery between projects (design §7.17.4): an ask, a
@@ -356,6 +358,7 @@ const PREFIXES: readonly string[] = [
   COMMAND_NOTICE_MARKER,
   ANSWER_NOTICE_MARKER,
   DELIVERY_NOTICE_MARKER,
+  DELIVERY_FAILED_NOTICE_MARKER,
   STATE_NOTICE_MARKER,
   HANDOFF_NOTICE_MARKER,
   REPLACED_NOTICE_MARKER,
@@ -367,7 +370,7 @@ const PREFIXES: readonly string[] = [
 ];
 
 /** Markers that count only as a whole word: followed by whitespace or nothing. */
-const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER, ASK_NOTICE_MARKER, SIGNAL_NOTICE_MARKER, UPDATES_NOTICE_MARKER, ROLLOVER_NOTICE_MARKER]);
+const WHOLE_WORD_MARKERS: ReadonlySet<string> = new Set([ANSWER_NOTICE_MARKER, DELIVERY_NOTICE_MARKER, DELIVERY_FAILED_NOTICE_MARKER, STATE_NOTICE_MARKER, HANDOFF_NOTICE_MARKER, REPLACED_NOTICE_MARKER, INTERRUPTED_NOTICE_MARKER, ASK_NOTICE_MARKER, SIGNAL_NOTICE_MARKER, UPDATES_NOTICE_MARKER, ROLLOVER_NOTICE_MARKER]);
 
 function startsWithMarker(text: string, prefix: string): boolean {
   if (!text.startsWith(prefix)) return false;

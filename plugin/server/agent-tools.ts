@@ -258,8 +258,8 @@ async function serve(
   // A builder's name (bm_report, bm_review, bm_answers) delivers only for a bound caller (design §16.6);
   // every other caller gets the builder, as before.
   if (!bound && role !== "orchestrator" && toolNamed(call.name)?.role === role) return built();
-  // Mission runtime design §3.6: a replaced Main writes and sends nothing; it names the current Main.
-  const replaced = role === "manager" && home !== null ? replacedMainRefusalOf(home, caller, call.name) : null;
+  // Mission runtime design §3.6 (ADR-051 decision 3): every tool of a replaced Main refuses and names the current Main.
+  const replaced = role === "manager" && home !== null ? replacedMainRefusalOf(home, caller, call.name, call.arguments) : null;
   if (replaced !== null) return { reply: reply(id, { content: [{ type: "text", text: replaced }], isError: true }), served: true };
   const result = await tools.call(call.name, call.arguments ?? {}, caller);
   const content = [{ type: "text", text: result.text }];

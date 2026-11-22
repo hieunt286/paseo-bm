@@ -18,10 +18,11 @@ import { createPeerLinkStore } from "../plugin/server/peer-links";
 import { clearRequestRegistryCache, createRequestRegistry, noteReviewResult } from "../plugin/server/request-registry";
 import { applyAgentTools, type AgentCreateRequest } from "../plugin/server/role-hook";
 import { forgetModes } from "../plugin/server/role-mode";
-import { rolloverCrossingOf, rolloverFiguresOf, rolloverTurnRecorded } from "../plugin/server/rollover";
+import { rolloverCrossingOf, rolloverFiguresOf, rolloverTurnRecorded, rolloverWaitedOf } from "../plugin/server/rollover";
 import { appendRecord, clearTraceStoreCache } from "../plugin/server/trace-store";
 import { DEFAULT_COORDINATION_SETTINGS } from "../plugin/shared/coordination";
 import { answerDecision } from "../plugin/shared/decisions";
+import { MAINTENANCE_WAIT_MS } from "../plugin/shared/interventions";
 import { report, turn } from "./fixtures/orchestrator-traces";
 import { dataFolder, removeDataFolders } from "./helpers/data-folder";
 import { WORKER_CALLER } from "./helpers/bindings";
@@ -283,16 +284,18 @@ describe("the rollover figures and notices (delivery line design §2.6)", () => 
       expect((await finish()).text).toContain("a review of batch b1 has no verdict yet");
     });
 
-    it("is asked once per Worker: a later Worker of the request hears it too, and a soft figure never takes it back", async () => {
+    it("is asked once per Worker: a later Worker of the request hears it too, though context is measured per turn and its own is low", async () => {
       const { home } = setup();
       const { sent, turnAt } = running(home);
       expect(await turnAt(400_000)).toBe("now");
       expect(await turnAt(400_000)).toBeNull();
       createRequestRegistry(home).addWorker(WS, REQ, SUCCESSOR);
-      expect(await turnAt(190_000, SUCCESSOR)).toBeNull();
-      expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked?.workerId).toBe(WORKER);
-      expect(await turnAt(400_000, SUCCESSOR)).toBe("now");
+      // The successor's own context is below even the soft figure: the request was asked `now`, so it is asked again, in the stored words.
+      expect(await turnAt(50_000, SUCCESSOR)).toBe("now");
+      expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toEqual({ level: "now", figure: "context 400k", at: T0.toISOString(), workerId: SUCCESSOR });
       expect(await turnAt(400_000, SUCCESSOR)).toBeNull();
+      expect(await turnAt(50_000, SUCCESSOR)).toBeNull();
+      expect(await turnAt(400_000)).toBeNull();
       expect(sent).toEqual([[WORKER, "BM-ROLLOVER now"], [SUCCESSOR, "BM-ROLLOVER now"]]);
     });
 
@@ -357,6 +360,113 @@ describe("the rollover figures and notices (delivery line design §2.6)", () => 
     expect(createRequestRegistry(home).get(WS, REQ)?.rolloverAsked).toEqual({ level: "now", figure: "20 turns", at: T0.toISOString(), workerId: WORKER });
     // A Reviewer's turn, and an older Worker of the request, are never asked.
     expect(await rolloverTurnRecorded(home, turn({ workspaceId: WS, agentId: "agent-reviewer", role: "reviewer", requestId: REQ }), null, { queue })).toBeNull();
+  });
+});
+
+describe("the time ceiling: a soft notice that waited 30 minutes becomes BM-ROLLOVER now (delivery line design §6.6, ADR-051 decision 2)", () => {
+  const MIN = 60_000;
+  const SUCCESSOR = "agent-successor";
+  const WAITED = `From the paseo-bm plugin, not the owner: request ${REQ} reached 10 turns, then 30 minutes without rolling over.`;
+  const after = (minutes: number) => new Date(T0.getTime() + minutes * MIN);
+
+  /** The request was asked `BM-ROLLOVER soft` at T0 (`asked("soft")`, 10 turns); each turn is the Worker's, below every figure unless `contextUsed` says otherwise. */
+  const waiting = () => {
+    const context = setup();
+    context.asked("soft");
+    const sent: Array<{ to: string; text: string; first: boolean }> = [];
+    const queue = {
+      enqueue: async (to: string, _kind: string, text: string, _paseo?: unknown, _callbacks?: unknown, options?: { first?: boolean }) => (
+        sent.push({ to, text, first: options?.first === true }), "sent" as const
+      ),
+    };
+    const location = { tracesDir: join(context.home, "traces") };
+    let i = 0;
+    const turnAt = async (minutes: number, agentId = WORKER, contextUsed?: number) => {
+      i += 1;
+      const record = turn({
+        workspaceId: WS,
+        agentId,
+        role: "worker",
+        requestId: REQ,
+        turnId: `t${i}`,
+        at: after(minutes).toISOString(),
+        ...(contextUsed === undefined ? {} : { usage: { inputTokens: 10, cachedInputTokens: contextUsed, outputTokens: 10, costUsd: null, costBasis: "unavailable" as const, model: "claude-opus-5", pricesUpdatedAt: null, contextUsed } }),
+      });
+      await appendRecord(location, record);
+      return rolloverTurnRecorded(context.home, record, null, { queue, now: () => after(minutes) });
+    };
+    const askedNow = () => createRequestRegistry(context.home).get(WS, REQ)?.rolloverAsked;
+    return { ...context, sent, turnAt, askedNow };
+  };
+
+  it("waits 30 minutes: a soft asked 29 minutes ago stays soft; at 30 one BM-ROLLOVER now goes first to the current Worker, once", async () => {
+    expect(MAINTENANCE_WAIT_MS.rollover).toBe(30 * MIN);
+    const { sent, turnAt, askedNow } = waiting();
+    expect(await turnAt(29)).toBeNull();
+    expect(askedNow()).toEqual({ level: "soft", figure: "10 turns", at: T0.toISOString() });
+    expect(await turnAt(30)).toBe("now");
+    expect(await turnAt(31)).toBeNull();
+    expect(await turnAt(90)).toBeNull();
+    expect(sent.map((entry) => [entry.to, entry.first, ...entry.text.split("\n").slice(0, 2)])).toEqual([[WORKER, true, "BM-ROLLOVER now", WAITED]]);
+    expect(askedNow()).toEqual({ level: "now", figure: "10 turns, then 30 minutes without rolling over", at: after(30).toISOString(), workerId: WORKER });
+  });
+
+  it("a later Worker of the request is asked again, once, in the same words; the Worker already asked and an older Worker never", async () => {
+    const { home, sent, turnAt, askedNow } = waiting();
+    expect(await turnAt(30)).toBe("now");
+    expect(await turnAt(35)).toBeNull();
+    createRequestRegistry(home).addWorker(WS, REQ, SUCCESSOR);
+    expect(await turnAt(40)).toBeNull();
+    expect(await turnAt(41, SUCCESSOR)).toBe("now");
+    expect(await turnAt(42, SUCCESSOR)).toBeNull();
+    expect(sent.map((entry) => [entry.to, entry.first, entry.text.split("\n")[1]])).toEqual([[WORKER, true, WAITED], [SUCCESSOR, true, WAITED]]);
+    expect(askedNow()).toEqual({ level: "now", figure: "10 turns, then 30 minutes without rolling over", at: after(41).toISOString(), workerId: SUCCESSOR });
+  });
+
+  it("the figure ceiling still works, in its own words, before the wait or after it", async () => {
+    const early = waiting();
+    expect(await early.turnAt(10, WORKER, 400_000)).toBe("now");
+    expect(early.sent.map((entry) => entry.text.split("\n")[1])).toEqual([`From the paseo-bm plugin, not the owner: request ${REQ} reached context 400k.`]);
+    const late = waiting();
+    expect(await late.turnAt(45, WORKER, 400_000)).toBe("now");
+    expect(late.askedNow()).toMatchObject({ level: "now", figure: "context 400k", workerId: WORKER });
+    expect(late.sent).toHaveLength(1);
+  });
+
+  it("a finished request, a continued one, a Worker whose handoff is under way, and rollover turned off get none", async () => {
+    const finished = waiting();
+    createRequestRegistry(finished.home).noteReport(WS, REQ, { tier: "Medium", phase: "finished", at: after(20).toISOString() });
+    expect(await finished.turnAt(30)).toBeNull();
+
+    const continued = waiting();
+    createRequestRegistry(continued.home).noteContinuedBy(WS, REQ, "req-20261003T130000Z", { reason: "size", figure: "10 turns", at: after(20).toISOString() });
+    expect(await continued.turnAt(30)).toBeNull();
+
+    const handingOff = waiting();
+    const store = createHandoffStore(handingOff.home);
+    const entry = store.add({ workspaceId: WS, requestId: REQ, workerId: WORKER, managerId: MANAGER, interventionId: null, reason: "It grew past the threshold." });
+    store.update(entry.id, (current) => ({ ...current, state: "noting", noteAskedAt: after(25).toISOString() }));
+    expect(await handingOff.turnAt(30)).toBeNull();
+    expect(handingOff.askedNow()?.level).toBe("soft");
+
+    const off = waiting();
+    createCoordinationStore(off.home).set({ key: "rollover.enabled", value: false });
+    expect(await off.turnAt(30)).toBeNull();
+
+    for (const context of [finished, continued, handingOff, off]) expect(context.sent).toEqual([]);
+  });
+
+  it("rolloverWaitedOf is the rule, pure", () => {
+    const soft = { level: "soft" as const, figure: "15 beads closed", at: T0.toISOString() };
+    const open = { finishedAt: null, rolloverAsked: soft };
+    expect(rolloverWaitedOf(open, after(29))).toBeNull();
+    expect(rolloverWaitedOf(open, after(30))).toEqual({ level: "now", figure: "15 beads closed, then 30 minutes without rolling over" });
+    expect(rolloverWaitedOf({ finishedAt: null }, after(90))).toBeNull();
+    expect(rolloverWaitedOf({ ...open, finishedAt: after(10).toISOString() }, after(90))).toBeNull();
+    expect(rolloverWaitedOf({ ...open, continuedBy: "req-20261003T130000Z" }, after(90))).toBeNull();
+    // A `now` already asked is not the time ceiling's: the turn's pass asks it again of a later Worker itself (ADR-046).
+    expect(rolloverWaitedOf({ finishedAt: null, rolloverAsked: { level: "now", figure: "20 turns", at: T0.toISOString(), workerId: WORKER } }, after(90))).toBeNull();
+    expect(rolloverWaitedOf({ finishedAt: null, rolloverAsked: { level: "now", figure: "15 beads closed, then 30 minutes without rolling over", at: T0.toISOString(), workerId: WORKER } }, after(90))).toBeNull();
   });
 });
 

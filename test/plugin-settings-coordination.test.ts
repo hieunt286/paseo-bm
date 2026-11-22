@@ -6,11 +6,14 @@ import {
   REVIEW_KEYS,
   REVIEW_WORDS,
   CI_CARD_WORDS,
+  CLEANUP_CARD_WORDS,
   LINE_CARD_WORDS,
   changedReview,
   changedThresholds,
   ciCardView,
   ciToggleChange,
+  cleanupCardView,
+  cleanupToggleChange,
   lineCardView,
   lineToggleChange,
   coordinationDefaultsDraft,
@@ -234,12 +237,13 @@ describe("the Coordination group's line", () => {
 });
 
 describe("Reset coordination to defaults (change-014 outcome 5)", () => {
-  it("fills every card's draft with the defaults — both mechanisms' thresholds, rollover's, the review settings — and saves nothing itself", () => {
+  it("fills every card's draft with the defaults — both mechanisms' thresholds, rollover's, the archive window, the review settings — and saves nothing itself", () => {
     const changed: CoordinationSettings = { ...D, advice: { everyFinished: 9 } };
     const drafts = coordinationDefaultsDraft(D);
     expect(Object.keys(drafts).sort()).toEqual(["review", "thresholds"]);
-    expect(drafts.thresholds).toEqual({ ...defaultsDraft("compact", D), ...defaultsDraft("handoff", D), ...defaultsDraft("rollover", D) });
-    expect(Object.keys(drafts.thresholds).sort()).toEqual([...MECHANISM_THRESHOLDS.compact, ...MECHANISM_THRESHOLDS.handoff, ...MECHANISM_THRESHOLDS.rollover].sort());
+    expect(drafts.thresholds).toEqual({ ...defaultsDraft("compact", D), ...defaultsDraft("handoff", D), ...defaultsDraft("rollover", D), ...defaultsDraft("cleanup", D) });
+    expect(Object.keys(drafts.thresholds).sort()).toEqual([...MECHANISM_THRESHOLDS.compact, ...MECHANISM_THRESHOLDS.handoff, ...MECHANISM_THRESHOLDS.rollover, ...MECHANISM_THRESHOLDS.cleanup].sort());
+    expect(drafts.thresholds["cleanup.idleDays"]).toBe(3);
     expect(drafts.review).toEqual(reviewDefaultsDraft(D));
     // Against stored defaults the drafts change nothing; a card's Save sends only what differs.
     expect(changedThresholds("compact", D, drafts.thresholds)).toEqual([]);
@@ -374,6 +378,97 @@ describe("the supervised line's card (ADR-045, The switch)", () => {
     expect(toggle).toBeDefined();
     (toggle!.props["onPress"] as () => void)();
     expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the archive card (ADR-049, delivery line design §20.1)", () => {
+  const off: CoordinationSettings = { ...D, cleanup: { ...D.cleanup, archive: false } };
+  const card = (over: Partial<Parameters<typeof cleanupCardView>[0]> = {}) => cleanupCardView({ settings: D, defaults: D, draft: {}, saving: false, ...over });
+
+  it("is on by default, after 3 days: On, Turn off at once; off: Off, Turn on at once, no confirmation; the window as a field, nothing to save, no defaults to restore", () => {
+    expect(MECHANISM_THRESHOLDS.cleanup).toEqual(["cleanup.idleDays"]);
+    // Not a mechanism: rollover's card list is unchanged.
+    expect(COORDINATION_CARDS).toEqual(["compact", "handoff", "rollover"]);
+    expect(card()).toEqual({
+      mechanism: "cleanup",
+      title: "Archive finished agents",
+      helped: null,
+      meaning: CLEANUP_CARD_WORDS.meaning,
+      note: null,
+      status: { text: "On", tone: "success" },
+      toggle: { turnsOn: false, enabled: true, label: "Turn off", accessibilityLabel: "Turn archiving finished agents off now" },
+      rows: [
+        {
+          key: "cleanup.idleDays",
+          label: "Left alone for, days",
+          valueText: "3 days",
+          inputText: "3",
+          accessibilityLabel: "Archive after: 3 days",
+          decrease: { enabled: true, label: "−", accessibilityLabel: "Archive after: lower to 2 days" },
+          increase: { enabled: true, label: "+", accessibilityLabel: "Archive after: raise to 4 days" },
+        },
+      ],
+      save: { enabled: false, label: "Save", accessibilityLabel: "Save the archive window" },
+      reset: null,
+    });
+    expect(card({ settings: off })).toMatchObject({ status: { text: "Off", tone: "muted" }, toggle: { turnsOn: true, enabled: true, label: "Turn on", accessibilityLabel: "Turn archiving finished agents on now" } });
+    expect(card({ saving: true }).toggle.enabled).toBe(false);
+    expect(CLEANUP_CARD_WORDS.meaning.split("\n")).toHaveLength(1);
+  });
+
+  it("its switch saves cleanup.archive the other way", () => {
+    expect(cleanupToggleChange(D)).toEqual({ key: "cleanup.archive", value: false });
+    expect(cleanupToggleChange(off)).toEqual({ key: "cleanup.archive", value: true });
+  });
+
+  it("reads, steps and refuses the window as whole days from 1 to 30; Save sends its one change; the defaults are offered away from them", () => {
+    expect(thresholdValueText("cleanup.idleDays", 1)).toBe("1 day");
+    expect(thresholdValueText("cleanup.idleDays", 7)).toBe("7 days");
+    expect(coordinationInputText("cleanup.idleDays", 7)).toBe("7");
+    expect(parseCoordinationInput("cleanup.idleDays", " 7 ")).toEqual({ value: 7, error: null });
+    for (const text of ["0", "31", "2.5", "a week", ""]) {
+      expect(parseCoordinationInput("cleanup.idleDays", text), text).toEqual({ value: null, error: "Left alone for, days: a number from 1 to 30." });
+    }
+    expect([stepThreshold("cleanup.idleDays", 1, -1), stepThreshold("cleanup.idleDays", 30, 1), stepThreshold("cleanup.idleDays", 3, 1)]).toEqual([1, 30, 4]);
+    const draft = { "cleanup.idleDays": 7 };
+    expect(changedThresholds("cleanup", D, draft)).toEqual([{ key: "cleanup.idleDays", value: 7 }]);
+    expect(changedThresholds("cleanup", D, { "cleanup.idleDays": 3 })).toEqual([]);
+    const edited = card({ draft });
+    expect(edited.rows[0]).toMatchObject({ valueText: "7 days", inputText: "7" });
+    expect(edited.save).toEqual({ enabled: true, label: "Save", accessibilityLabel: "Save the archive window" });
+    expect(edited.reset).toEqual({ enabled: true, label: "Use the defaults", accessibilityLabel: "Set the archive window back to its default" });
+    expect(card({ draft, saving: true }).save).toMatchObject({ enabled: false, label: "Saving…" });
+    // A stored window away from the default, shown as stored, offers the defaults with nothing to save.
+    const stored = card({ settings: { ...D, cleanup: { archive: true, idleDays: 10 } } });
+    expect(stored.rows[0]!.valueText).toBe("10 days");
+    expect(stored.save.enabled).toBe(false);
+    expect(stored.reset).not.toBeNull();
+  });
+
+  it("MechanismCard draws its title, what it means, its switch and the window field; Save once the window changed", () => {
+    const onToggle = vi.fn();
+    const onSave = vi.fn();
+    const onInput = vi.fn();
+    const atRest = renderTree(MechanismCard({ view: card(), inputs: {}, dialog: null, busy: false, error: null, onToggle, onConfirm: noop, onCancel: noop, onInput, onSave: noop, styles, theme }));
+    expect(texts(atRest)).toEqual(["Archive finished agents", CLEANUP_CARD_WORDS.meaning, "Left alone for, days"]);
+    const field = allNodes(atRest).find((node) => node.type === "TextInput")!;
+    expect(field.props).toMatchObject({ value: "3", accessibilityLabel: "Archive after: 3 days" });
+    (field.props.onChangeText as (text: string) => void)("7");
+    expect(onInput.mock.calls).toEqual([["cleanup.idleDays", "7"]]);
+    const [toggle] = pressables(atRest);
+    expect(toggle!.props).toMatchObject({ accessibilityRole: "switch", accessibilityLabel: "Turn archiving finished agents off now", accessibilityState: { checked: true, disabled: false } });
+    (toggle!.props.onPress as () => void)();
+    expect(onToggle).toHaveBeenCalledOnce();
+    expect(pressables(atRest)).toHaveLength(1);
+
+    const edited = renderTree(
+      MechanismCard({ view: card({ draft: { "cleanup.idleDays": 7 } }), inputs: { "cleanup.idleDays": "7" }, dialog: null, busy: false, error: null, onToggle: noop, onConfirm: noop, onCancel: noop, onInput: noop, onSave, styles, theme }),
+    );
+    const save = pressables(edited).find((button) => button.props.accessibilityLabel === "Save the archive window")!;
+    (save.props.onPress as () => void)();
+    expect(onSave).toHaveBeenCalledOnce();
+    const refused = renderTree(MechanismCard({ view: card(), inputs: { "cleanup.idleDays": "40" }, dialog: null, busy: false, error: null, onToggle: noop, onConfirm: noop, onCancel: noop, onInput: noop, onSave: noop, styles, theme }));
+    expect(texts(refused)).toContain("Left alone for, days: a number from 1 to 30.");
   });
 });
 

@@ -137,3 +137,47 @@ export function lineSupervisedOf(home: string): boolean {
     return DEFAULT_COORDINATION_SETTINGS.line.supervised;
   }
 }
+
+/**
+ * The owner's `cleanup.archive` and `cleanup.idleDays` (ADR-049, delivery line
+ * design §20.1), read from the file's own state so that archiving never runs
+ * against the owner's switch — unlike `read()`, which reads a file it cannot
+ * use as the defaults (and stays so for every other reader):
+ *
+ * - no file → the defaults;
+ * - a usable file → its values, each absent one at its default (a file an
+ *   older build wrote has no `cleanup`);
+ * - a file that is not usable, was written by a newer paseo-bm or lies behind
+ *   a symlink → null;
+ * - a stored `archive` that is not true or false → off; a stored `idleDays`
+ *   out of its bounds, or a `cleanup` that is not an object → null.
+ *
+ * Null archives nothing. Never throws.
+ */
+export function agentCleanupOf(home: string): CoordinationSettings["cleanup"] | null {
+  try {
+    const found = createJsonFileStore<Record<string, unknown>>({
+      home,
+      dir: COORDINATION_DIR_NAME,
+      file: COORDINATION_SETTINGS_FILE,
+      version: COORDINATION_FILE_VERSION,
+      parse: (body) => body,
+      empty: () => ({}),
+      codes: { unwritable: "E_TRACE_STORE_UNWRITABLE" },
+    }).inspect();
+    const defaults = DEFAULT_COORDINATION_SETTINGS.cleanup;
+    if (found.state === "missing") return defaults;
+    if (found.state !== "ok") return null;
+    const stored = found.value["cleanup"];
+    if (stored === undefined) return defaults;
+    if (stored === null || typeof stored !== "object" || Array.isArray(stored)) return null;
+    const { archive, idleDays } = stored as Record<string, unknown>;
+    if (idleDays !== undefined && !liveCoordinationChangeSchema.safeParse({ key: "cleanup.idleDays", value: idleDays }).success) return null;
+    return {
+      archive: archive === undefined ? defaults.archive : archive === true,
+      idleDays: idleDays === undefined ? defaults.idleDays : (idleDays as number),
+    };
+  } catch {
+    return null;
+  }
+}

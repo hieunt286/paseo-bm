@@ -12,13 +12,17 @@
  *   A Worker that waits by structure (§6.4) gets it at a turn end after its
  *   wake; one that reported `blocked` while it was queued has it held at the
  *   send (`holdsAtSend`), forgotten, and asked again at a later turn end.
- * - **Now**: `rollover.ceilingFactor` × one figure queues `BM-ROLLOVER now`,
+ * - **Now**: `rollover.ceilingFactor` × one figure, or a soft notice that has
+ *   waited `MAINTENANCE_WAIT_MS.rollover` (30 minutes) without the request
+ *   rolling over (the time ceiling, ADR-051 decision 2), queues `BM-ROLLOVER now`,
  *   once, at once (`rollover-now` is on the wake gate's always-at-once list),
  *   ahead of what is queued for the Worker (`first`, the maintenance
  *   ceiling's order, §6.6). It never waits for a review: `finished` with
  *   `remaining` is then accepted, and the batch goes onto the continuation
  *   (ADR-046). It is the current Worker's: a Worker whose handoff is under
- *   way is not asked, and a later Worker of the request is asked again.
+ *   way is not asked, and a later Worker of the request is asked again,
+ *   whatever its own figures (a stored `now` from an older build, which names
+ *   no Worker, is not).
  *
  * The request's registry entry keeps the newest notice (`rolloverAsked`).
  * `bm_report` reads it: a `finished` with `remaining` then opens the size
@@ -30,12 +34,13 @@ import { join } from "node:path";
 import type { TraceRecord } from "../shared/contracts";
 import type { CoordinationSettings } from "../shared/coordination";
 import { requestTokensReadOf } from "../shared/handoff";
+import { MAINTENANCE_WAIT_MS } from "../shared/interventions";
 import { ROLLOVER_NOTICE_MARKER } from "../shared/notices";
 import { readCoordinationSettings } from "./coordination-rpc";
 import { TRACES_DIR_NAME } from "./data-home";
 import { createHandoffStore, isPendingHandoffState } from "./handoff-store";
 import { noticeQueue, type NoticePaseo, type NoticeQueue } from "./notice-queue";
-import { createRequestRegistry, isBoundRequest } from "./request-registry";
+import { createRequestRegistry, isBoundRequest, type RegisteredRequest } from "./request-registry";
 import { errorText } from "./rpc-kit";
 import { readRecords } from "./trace-store";
 import { gatedWaitOf, holdsAtSend, wakeGate } from "./wake-gate";
@@ -91,6 +96,24 @@ export function rolloverCrossingOf(figures: RolloverFigures, settings: Pick<Coor
   return soft === undefined ? null : { level: "soft", figure: soft.words };
 }
 
+/** What a `now` of the time ceiling adds to the soft notice's figure (§6.6). */
+const WAITED_WORDS = `, then ${MAINTENANCE_WAIT_MS.rollover / 60_000} minutes without rolling over`;
+
+/**
+ * The time ceiling (§6.6, ADR-051 decision 2): a `soft` asked at least
+ * `MAINTENANCE_WAIT_MS.rollover` before `now` of a request that has not rolled
+ * over (not finished, no continuation) calls for `now`, its figure the soft
+ * one's and the wait. Null otherwise, a `now` already asked included: asking
+ * a stored `now` again of a later Worker is `rolloverTurnRecorded`'s (ADR-046).
+ * Pure.
+ */
+export function rolloverWaitedOf(request: Pick<RegisteredRequest, "finishedAt" | "continuedBy" | "rolloverAsked">, now: Date): { level: "now"; figure: string } | null {
+  const asked = request.rolloverAsked;
+  if (asked?.level !== "soft" || request.finishedAt !== null || request.continuedBy !== undefined) return null;
+  const at = Date.parse(asked.at);
+  return Number.isFinite(at) && now.getTime() - at >= MAINTENANCE_WAIT_MS.rollover ? { level: "now", figure: `${asked.figure}${WAITED_WORDS}` } : null;
+}
+
 /** The `BM-ROLLOVER` notice (§2.6). Pure. */
 export function rolloverNoticeOf(level: RolloverLevel, requestId: string, figure: string): string {
   return [
@@ -131,10 +154,15 @@ export async function rolloverTurnRecorded(home: string, record: TraceRecord | n
     const request = registry.get(workspaceId, requestId);
     if (!isBoundRequest(request) || request.finishedAt !== null || request.workerIds.at(-1) !== agentId || (request.rolloverAsked?.level === "now" && (request.rolloverAsked.workerId ?? agentId) === agentId)) return null;
     const records = readRecords({ tracesDir: join(home, TRACES_DIR_NAME) }, workspaceId).records;
-    const crossing = rolloverCrossingOf(rolloverFiguresOf(records, requestId, record), readCoordinationSettings({ home, log }));
-    // A `now` that reached an earlier Worker is asked again: that Worker was replaced before it could finish.
-    if (crossing === null || (crossing.level === "soft" && request.rolloverAsked !== undefined) || (crossing.level === "now" && handoffUnderWay(home, requestId, agentId))) return null;
+    const settings = readCoordinationSettings({ home, log });
     const now = deps.now?.() ?? new Date();
+    let crossing = rolloverCrossingOf(rolloverFiguresOf(records, requestId, record), settings);
+    // A figure at its ceiling says `now` in its own words. Else ADR-046: a `now` that reached an earlier Worker (the guard
+    // above excludes the one it reached) is asked again of this one, whatever its figures — that Worker was replaced before
+    // it could finish; else §6.6: a soft notice that waited the time ceiling says `now`.
+    const stored = request.rolloverAsked;
+    if (settings.rollover.enabled && crossing?.level !== "now") crossing = (stored?.level === "now" ? { level: "now" as const, figure: stored.figure } : null) ?? rolloverWaitedOf(request, now) ?? crossing;
+    if (crossing === null || (crossing.level === "soft" && request.rolloverAsked !== undefined) || (crossing.level === "now" && handoffUnderWay(home, requestId, agentId))) return null;
     const hint = { workspaceId, requestId };
     if (crossing.level === "soft" ? gatedWaitOf(home, agentId, hint) !== null : wakeGate(home, agentId, "rollover-now", [], hint).action === "hold") return null;
     const text = rolloverNoticeOf(crossing.level, requestId, crossing.figure);
